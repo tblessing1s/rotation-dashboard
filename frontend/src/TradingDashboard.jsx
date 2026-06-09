@@ -810,7 +810,7 @@ function IndicatorsView(props) {
 
       <Panel title="Macro inputs" eyebrow={`Level 1 · ${macroStatus === "ok" ? "auto-filled" : macroStatus === "partial" ? "partial auto-fill" : macroStatus === "loading" ? "fetching macro" : "manual fallback"}`}>
         <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
-          Auto-fill uses ^VIX quotes, Finviz stocks-above-SMA50 breadth, and FRED fed funds/CPI/GDP data. Fields remain editable for your override.
+          Auto-fill uses ^VIX quotes, FRED fed funds/CPI/GDP data, and ETF breadth above 50-day MA. Fields remain editable for your override.
           {macroComputed?.asOf && <span style={{ color: C.inkFaint }}> Updated {macroComputed.asOf}</span>}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px,1fr))", gap: 14 }}>
@@ -818,7 +818,7 @@ function IndicatorsView(props) {
             <NumIn value={macro.vix} onChange={(v) => setMacro({ ...macro, vix: v })} />
             <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.vix?.value} onApply={() => setMacro({ ...macro, vix: macroComputed.fields.vix.value })} /></div>
           </Field>
-          <Field label="Breadth %" hint={macroComputed?.fields?.breadth ? `${macroComputed.fields.breadth.above}/${macroComputed.fields.breadth.total} stocks above SMA50` : ">55 CFM / >60 APP"}>
+          <Field label="Breadth %" hint={macroComputed?.fields?.breadth ? `${macroComputed.fields.breadth.above}/${macroComputed.fields.breadth.total} above MA50` : ">55 CFM / >60 APP"}>
             <NumIn step="1" value={macro.breadth} onChange={(v) => setMacro({ ...macro, breadth: v })} />
             <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.breadth?.value} fmt={(v) => v.toFixed(0)} onApply={() => setMacro({ ...macro, breadth: macroComputed.fields.breadth.value })} /></div>
           </Field>
