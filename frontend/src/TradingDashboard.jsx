@@ -54,6 +54,20 @@ const C = {
 
 const SIG = { GREEN: C.green, YELLOW: C.yellow, RED: C.red };
 
+const SECTORS = [
+  { symbol: "XLK", name: "Technology", group: "growth" },
+  { symbol: "XLY", name: "Consumer Discretionary", group: "growth" },
+  { symbol: "XLC", name: "Communication Services", group: "growth" },
+  { symbol: "XLI", name: "Industrials", group: "cyclical" },
+  { symbol: "XLF", name: "Financials", group: "cyclical" },
+  { symbol: "XLE", name: "Energy", group: "inflation" },
+  { symbol: "XLB", name: "Materials", group: "inflation" },
+  { symbol: "XLV", name: "Health Care", group: "defensive" },
+  { symbol: "XLP", name: "Consumer Staples", group: "defensive" },
+  { symbol: "XLU", name: "Utilities", group: "defensive" },
+  { symbol: "XLRE", name: "Real Estate", group: "rates" },
+];
+
 // ============================================================================
 // DATA LAYER — all fetching + indicator math happens in the Python backend.
 // These just call the local API. No CORS, cached server-side.
@@ -67,6 +81,12 @@ async function apiQuotes() {
 async function apiIndicators() {
   const r = await fetch(`${API}/api/indicators`);
   if (!r.ok) throw new Error("indicators failed");
+  return r.json();
+}
+
+async function apiMacro() {
+  const r = await fetch(`${API}/api/macro`);
+  if (!r.ok) throw new Error("macro failed");
   return r.json();
 }
 
@@ -112,6 +132,136 @@ function macroSignal(m) {
   else if (riskOff >= 3) level = "RED";
 
   return { level, notes, riskOn, riskOff };
+}
+
+function sectorFocus(m) {
+  const sig = macroSignal(m);
+  const primary = [];
+  const secondary = [];
+  const avoid = [];
+  const rationale = [];
+  let regime = "Mixed / confirmation required";
+  let favoredStrategy = "Selective";
+  let entryPermission = sig.level === "RED" ? "Protect capital" : "Selective entries only";
+
+  if (m.vix > 30 || m.breadth < 45) {
+    regime = "Risk-off / capital protection";
+    favoredStrategy = "Defense / cash";
+    primary.push("XLV", "XLP", "XLU");
+    avoid.push("XLK", "XLY", "XLC", "XLI");
+    rationale.push("VIX/breadth conditions are hostile; prioritize exits and only monitor defensives.");
+  } else if (m.growth === "slowing" || m.fed === "hawkish") {
+    regime = "Defensive rotation";
+    favoredStrategy = "CFM";
+    primary.push("XLV", "XLP", "XLU");
+    secondary.push("XLRE");
+    avoid.push("XLY", "XLK");
+    entryPermission = "CFM sectors only after rotation confirms";
+    rationale.push("Growth is slowing and/or Fed is restrictive, so defensive sectors get first attention.");
+  } else if (m.inflation > 3.2) {
+    regime = "Inflation / commodity pressure";
+    favoredStrategy = "CFM / tactical";
+    primary.push("XLE", "XLB", "XLI");
+    secondary.push("XLF");
+    avoid.push("XLY", "XLRE");
+    entryPermission = "Tactical entries after flow confirms";
+    rationale.push("Hot inflation favors commodity/cyclical sectors over rate-sensitive groups.");
+  } else if (m.fed === "dovish" || (m.growth === "accelerating" && m.breadth >= 55)) {
+    regime = "Risk-on growth";
+    favoredStrategy = "APP";
+    primary.push("XLK", "XLY", "XLC", "XLI");
+    secondary.push("XLF");
+    avoid.push("XLU", "XLP");
+    entryPermission = "APP setups allowed with breakout confirmation";
+    rationale.push("Growth/breadth/Fed backdrop supports appreciation sectors first.");
+  } else {
+    primary.push("XLI", "XLF", "XLV");
+    secondary.push("XLK", "XLP");
+    entryPermission = "Wait for RS3M_MOM leadership";
+    rationale.push("Macro is mixed; only sectors with clear institutional confirmation should matter.");
+  }
+
+  return { ...sig, regime, favoredStrategy, entryPermission, primary, secondary, avoid, rationale };
+}
+
+function bucketsFromCalc(calc = {}) {
+  return {
+    inst: { rs3m: calc.rs3m ?? 0, rs3mMom: calc.rs3mMom ?? 0, rs3mTrend: calc.rs3mTrend || "flat" },
+    flow: { mfi: calc.mfi ?? 0, rsi: calc.rsi ?? 0, obv: calc.obv || "flat", volRatio: calc.volRatio ?? 0 },
+    tech: { priceAboveMA21: !!calc.priceAboveMA21, bouncesConfirmed: false, supportDefined: true, breakoutConfirmed: false },
+  };
+}
+
+function sectorRotationStatus(calc, focusTier, macro) {
+  if (!calc) return { score: 0, total: 7, status: "No data", action: "Refresh / enter manually", color: C.inkFaint, exits: [] };
+  const { inst, flow, tech } = bucketsFromCalc(calc);
+  const checks = [
+    inst.rs3mMom > 0,
+    inst.rs3mTrend === "up",
+    inst.rs3m > -15,
+    flow.mfi >= 50,
+    flow.obv !== "falling",
+    flow.volRatio >= 70,
+    tech.priceAboveMA21,
+  ];
+  const score = checks.filter(Boolean).length;
+  const exits = exitTriggers(inst, flow, macro, tech).filter((t) => t[1]);
+  let status = "Ignore";
+  let action = focusTier === "Ignored" ? "De-emphasize until Level 1 changes" : "Watch";
+  let color = C.inkDim;
+
+  if (exits.length >= 2) { status = "Exiting"; action = "Reduce / avoid new entries"; color = C.red; }
+  else if (score >= 6 && focusTier !== "Ignored") { status = "Confirmed"; action = "Entry allowed after support/breakout"; color = C.green; }
+  else if (inst.rs3mMom > 0 && inst.rs3mTrend === "up" && focusTier !== "Ignored") { status = "Rotating in"; action = "Track for confirmation"; color = C.blue; }
+  else if (score >= 6) { status = "Exceptional"; action = "Monitor despite macro mismatch"; color = C.amber; }
+  else if (score >= 4 && focusTier !== "Ignored") { status = "Watch"; action = "Needs stronger flow/technical proof"; color = C.yellow; }
+
+  return { score, total: checks.length, status, action, color, exits };
+}
+
+function positionGuidance(position, computed, macro, focus) {
+  const symbol = (position.symbol || "").toUpperCase();
+  const calc = computed?.[symbol];
+  const focusTier = focus.primary.includes(symbol) ? "Primary" : focus.secondary.includes(symbol) ? "Secondary" : focus.avoid.includes(symbol) ? "Ignored" : "Neutral";
+  if (!calc) return { action: "Manual", color: C.inkDim, note: "No live indicator set for this symbol yet." };
+  const rotation = sectorRotationStatus(calc, focusTier, macro);
+  const isCFM = position.strategy === "CFM";
+  const isAPP = position.strategy === "APP";
+
+  if (rotation.exits.length >= 2) return { action: "Exit / reduce", color: C.red, note: rotation.exits.map((e) => e[0]).join(" · ") };
+  if (focusTier === "Ignored" && isAPP) return { action: "Tighten", color: C.amber, note: "Position sector is not favored by Level 1; require leadership to stay." };
+  if (focusTier === "Ignored" && isCFM) return { action: "Review", color: C.amber, note: "CFM sector no longer fits the current macro focus." };
+  if (rotation.status === "Confirmed") return { action: isAPP ? "Hold winner" : "Hold", color: C.green, note: "Institutional rotation, flow, and MA21 remain supportive." };
+  if (rotation.status === "Rotating in") return { action: "Hold / monitor", color: C.blue, note: "Rotation is improving but still needs daily confirmation." };
+  return { action: "Tighten", color: C.yellow, note: "Not enough confirmation; watch RS3M_MOM, OBV, and MA21." };
+}
+
+function mergeTosOverrides(calc, override) {
+  if (!override) return calc || null;
+  return { ...(calc || {}), ...override, source: "thinkorswim", override: true };
+}
+
+function parseTosSectorRows(text) {
+  const out = {};
+  for (const raw of text.split(/\n+/)) {
+    const line = raw.trim();
+    if (!line || /^symbol\b/i.test(line)) continue;
+    const symbol = (line.match(/\b(XL[KYCVIFEBPUR]|XLRE)\b/i) || [])[1]?.toUpperCase();
+    if (!symbol) continue;
+    const nums = line.match(/[-+]?\d*\.?\d+/g)?.map(Number) || [];
+    if (nums.length < 2) continue;
+
+    const row = { rs3m: nums[0], rs3mMom: nums[1], asOf: "TOS override" };
+    if (nums.length >= 3) row.mfi = nums[2];
+    if (nums.length >= 5) row.volRatio = nums[4];
+    if (nums.length >= 7) row.rsi = nums[6];
+    out[symbol] = row;
+  }
+  return out;
+}
+
+function formatOverrideValue(v, digits = 2) {
+  return typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—";
 }
 
 // CFM entry checklist
@@ -267,7 +417,7 @@ function CheckRow({ label, ok }) {
 // ============================================================================
 // MAIN APP
 // ============================================================================
-const TABS = ["Command", "Checklists", "Positions", "Indicators"];
+const TABS = ["Command", "Rotation", "Checklists", "Positions", "Indicators"];
 
 // Hydration gate: load persisted state from the backend before the dashboard
 // mounts, so saved positions and manual inputs initialize correctly.
@@ -300,10 +450,12 @@ function TradingDashboard({ backendOffline }) {
   const [fetchStatus, setFetchStatus] = useState("idle");
   const [lastFetch, setLastFetch] = useState(store.get("lastFetch", null));
 
-  // ---- State: macro (Level 1). VIX auto-fills from quote when available ----
+  // ---- State: macro (Level 1). Auto-fills from /api/macro when available. ----
   const [macro, setMacro] = useState(store.get("macro", {
     vix: 21.51, breadth: 47, fed: "hawkish", growth: "slowing", inflation: 3.0,
   }));
+  const [macroComputed, setMacroComputed] = useState(store.get("macroComputed", null));
+  const [macroStatus, setMacroStatus] = useState("idle");
 
   // ---- State: institutional (Level 2) per instrument ----
   const [instXLV, setInstXLV] = useState(store.get("instXLV", {
@@ -332,21 +484,24 @@ function TradingDashboard({ backendOffline }) {
   // ---- State: positions ----
   const [positions, setPositions] = useState(store.get("positions", []));
 
+  // ---- State: auto-computed indicators per symbol + TOS sector overrides ----
+  const [computed, setComputed] = useState(store.get("computed", {}));
+  const [sectorOverrides, setSectorOverrides] = useState(store.get("sectorOverrides", {}));
+  const [calcStatus, setCalcStatus] = useState("idle");
+
   // Persist on change
   useEffect(() => { store.set("macro", macro); }, [macro]);
   useEffect(() => { store.set("instXLV", instXLV); store.set("instILMN", instILMN); }, [instXLV, instILMN]);
   useEffect(() => { store.set("flowXLV", flowXLV); store.set("flowILMN", flowILMN); }, [flowXLV, flowILMN]);
   useEffect(() => { store.set("techXLV", techXLV); store.set("techILMN", techILMN); }, [techXLV, techILMN]);
   useEffect(() => { store.set("positions", positions); }, [positions]);
-
-  // ---- State: auto-computed indicators per symbol ----
-  const [computed, setComputed] = useState(store.get("computed", {}));
-  const [calcStatus, setCalcStatus] = useState("idle");
+  useEffect(() => { store.set("sectorOverrides", sectorOverrides); }, [sectorOverrides]);
 
   // ---- Pull quotes + backend-computed indicators ----
   const refreshQuotes = useCallback(async () => {
     setFetchStatus("loading");
     setCalcStatus("loading");
+    setMacroStatus("loading");
 
     // Quotes (backend returns keys XLV, ILMN, ^VIX, SPY)
     try {
@@ -361,10 +516,21 @@ function TradingDashboard({ backendOffline }) {
       store.set("quotes", out);
       const ts = new Date().toLocaleTimeString();
       setLastFetch(ts); store.set("lastFetch", ts);
-      if (out.VIX && !out.VIX.error) setMacro((m) => ({ ...m, vix: out.VIX.close }));
       setFetchStatus(Object.values(out).some((q) => q.error) ? "partial" : "ok");
     } catch (e) {
       setFetchStatus("partial");
+    }
+
+    // Level 1 macro snapshot (best-effort server-side calculations)
+    try {
+      const snap = await apiMacro();
+      const vals = snap?.values || {};
+      setMacro((m) => ({ ...m, ...vals }));
+      setMacroComputed(snap);
+      store.set("macroComputed", snap);
+      setMacroStatus(Object.keys(vals).length ? (Object.keys(snap?.errors || {}).length ? "partial" : "ok") : "fail");
+    } catch (e) {
+      setMacroStatus("fail");
     }
 
     // Indicators (already computed server-side)
@@ -386,6 +552,21 @@ function TradingDashboard({ backendOffline }) {
 
   // ---- Derived signals ----
   const sig = useMemo(() => macroSignal(macro), [macro]);
+  const focus = useMemo(() => sectorFocus(macro), [macro]);
+  const sectorRows = useMemo(() => SECTORS.map((sector) => {
+    const tier = focus.primary.includes(sector.symbol) ? "Primary" : focus.secondary.includes(sector.symbol) ? "Secondary" : focus.avoid.includes(sector.symbol) ? "Ignored" : "Neutral";
+    const calc = mergeTosOverrides(computed?.[sector.symbol] || null, sectorOverrides?.[sector.symbol]);
+    return { ...sector, tier, calc, rotation: sectorRotationStatus(calc, tier, macro) };
+  }).sort((a, b) => {
+    const tierRank = { Primary: 0, Secondary: 1, Neutral: 2, Ignored: 3 };
+    return (tierRank[a.tier] - tierRank[b.tier]) || (b.rotation.score - a.rotation.score);
+  }), [computed, focus, macro]);
+  const effectiveComputed = useMemo(() => {
+    const merged = { ...computed };
+    for (const [sym, override] of Object.entries(sectorOverrides || {})) merged[sym] = mergeTosOverrides(merged[sym], override);
+    return merged;
+  }, [computed, sectorOverrides]);
+  const positionGuide = useMemo(() => Object.fromEntries(positions.map((p) => [p.id, positionGuidance(p, effectiveComputed, macro, focus)])), [positions, effectiveComputed, macro, focus]);
   const cfm = useMemo(() => cfmChecklist(macro, instXLV, flowXLV, techXLV), [macro, instXLV, flowXLV, techXLV]);
   const app = useMemo(() => appChecklist(macro, instILMN, flowILMN, techILMN), [macro, instILMN, flowILMN, techILMN]);
   const exitsXLV = useMemo(() => exitTriggers(instXLV, flowXLV, macro, techXLV), [instXLV, flowXLV, macro, techXLV]);
@@ -422,20 +603,24 @@ function TradingDashboard({ backendOffline }) {
         </nav>
 
         {tab === "Command" && (
-          <CommandView sig={sig} cfm={cfm} app={app} macro={macro} setMacro={setMacro}
+          <CommandView sig={sig} focus={focus} sectorRows={sectorRows} positionGuide={positionGuide} cfm={cfm} app={app} macro={macro} setMacro={setMacro}
             quotes={quotes} exitsXLV={exitsXLV} exitsILMN={exitsILMN}
             deployed={deployed} reserve={reserve} capital={capital} openPL={openPL} positions={positions} />
+        )}
+        {tab === "Rotation" && (
+          <RotationView focus={focus} rows={sectorRows} overrides={sectorOverrides} setOverrides={setSectorOverrides} />
         )}
         {tab === "Checklists" && (
           <ChecklistView cfm={cfm} app={app} />
         )}
         {tab === "Positions" && (
           <PositionsView positions={positions} setPositions={setPositions}
-            quotes={quotes} capital={capital} reserve={reserve} deployed={deployed} openPL={openPL} />
+            guidance={positionGuide} quotes={quotes} capital={capital} reserve={reserve} deployed={deployed} openPL={openPL} />
         )}
         {tab === "Indicators" && (
           <IndicatorsView
             macro={macro} setMacro={setMacro}
+            macroComputed={macroComputed} macroStatus={macroStatus}
             computed={computed} calcStatus={calcStatus} onRefresh={refreshQuotes}
             instXLV={instXLV} setInstXLV={setInstXLV} flowXLV={flowXLV} setFlowXLV={setFlowXLV} techXLV={techXLV} setTechXLV={setTechXLV}
             instILMN={instILMN} setInstILMN={setInstILMN} flowILMN={flowILMN} setFlowILMN={setFlowILMN} techILMN={techILMN} setTechILMN={setTechILMN}
@@ -520,7 +705,7 @@ function Header({ sig, lastFetch, status, onRefresh, quotes }) {
 // ============================================================================
 // COMMAND VIEW — everything at a glance
 // ============================================================================
-function CommandView({ sig, cfm, app, macro, setMacro, quotes, exitsXLV, exitsILMN, deployed, reserve, capital, openPL, positions }) {
+function CommandView({ sig, focus, sectorRows, positionGuide, cfm, app, macro, setMacro, quotes, exitsXLV, exitsILMN, deployed, reserve, capital, openPL, positions }) {
   const macroFavorsCFM = macro.growth === "slowing";
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -535,6 +720,10 @@ function CommandView({ sig, cfm, app, macro, setMacro, quotes, exitsXLV, exitsIL
           ))}
         </div>
       </Panel>
+
+      <SectorFocusPanel focus={focus} />
+      <SectorRotationTable rows={sectorRows.filter((r) => r.tier !== "Ignored").slice(0, 6)} compact />
+      {positions.length > 0 && <PositionGuidancePanel positions={positions} guidance={positionGuide} />}
 
       {/* Two strategy cards */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
@@ -559,6 +748,132 @@ function CommandView({ sig, cfm, app, macro, setMacro, quotes, exitsXLV, exitsIL
         <CapitalBar capital={capital} deployed={deployed} reserve={reserve} openPL={openPL} positions={positions} />
       </Panel>
     </div>
+  );
+}
+
+function SectorFocusPanel({ focus }) {
+  return (
+    <Panel title="Level 1 sector focus" eyebrow={focus.regime} accent={SIG[focus.level]}
+      right={<span style={{ font: `700 12px ${C.mono}`, color: focus.favoredStrategy === "APP" ? C.amber : focus.favoredStrategy === "CFM" ? C.blue : C.ink }}>{focus.favoredStrategy}</span>}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px,1fr))", gap: 12 }}>
+        <FocusList title="Primary focus" symbols={focus.primary} color={C.green} />
+        <FocusList title="Secondary" symbols={focus.secondary} color={C.yellow} />
+        <FocusList title="De-emphasize" symbols={focus.avoid} color={C.inkFaint} />
+      </div>
+      <div style={{ marginTop: 12, font: `400 12px/1.45 ${C.sans}`, color: C.inkDim }}>
+        <b style={{ color: C.ink }}>Entry permission:</b> {focus.entryPermission}. {focus.rationale[0]}
+      </div>
+    </Panel>
+  );
+}
+
+function FocusList({ title, symbols, color }) {
+  return (
+    <div style={{ background: C.panel2, border: `1px solid ${C.lineSoft}`, borderRadius: 8, padding: "12px 13px" }}>
+      <div style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, marginBottom: 8 }}>{title}</div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {symbols.length ? symbols.map((sym) => <span key={sym} style={{ font: `700 12px ${C.mono}`, color, background: C.bg, border: `1px solid ${C.line}`, borderRadius: 5, padding: "5px 8px" }}>{sym}</span>) : <span style={{ color: C.inkFaint }}>—</span>}
+      </div>
+    </div>
+  );
+}
+
+function SectorRotationTable({ rows, compact = false }) {
+  return (
+    <Panel title={compact ? "Focused institutional rotation" : "Sector rotation monitor"} eyebrow="Level 2/3/4 · sectors ranked by Level 1 focus">
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: compact ? 760 : 900 }}>
+          <thead>
+            <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
+              {["Focus", "Sector", "RS3M", "MOM", "MFI", "Vol", "RSI", "Source", "Score", "Status", "Action"].map((h) =>
+                <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const c = r.calc || {};
+              return (
+                <tr key={r.symbol} style={{ font: `400 12px ${C.sans}` }}>
+                  <td style={td}><span style={{ color: r.tier === "Primary" ? C.green : r.tier === "Secondary" ? C.yellow : r.tier === "Ignored" ? C.inkFaint : C.inkDim, font: `700 10px ${C.mono}` }}>{r.tier}</span></td>
+                  <td style={td}><b>{r.symbol}</b><div style={{ color: C.inkFaint, fontSize: 10 }}>{r.name}</div></td>
+                  <td style={{ ...td, color: (c.rs3m ?? 0) >= 0 ? C.green : C.red }}>{c.rs3m != null ? c.rs3m.toFixed(2) : "—"}</td>
+                  <td style={{ ...td, color: (c.rs3mMom ?? 0) >= 0 ? C.green : C.red }}>{c.rs3mMom != null ? c.rs3mMom.toFixed(0) : "—"}</td>
+                  <td style={td}>{c.mfi != null ? c.mfi.toFixed(1) : "—"}</td>
+                  <td style={td}>{c.volRatio != null ? c.volRatio.toFixed(0) : "—"}</td>
+                  <td style={td}>{c.rsi != null ? c.rsi.toFixed(1) : "—"}</td>
+                  <td style={{ ...td, color: c.override ? C.green : C.inkFaint, font: `700 10px ${C.mono}` }}>{c.override ? "TOS" : "AUTO"}</td>
+                  <td style={td}>{r.rotation.score}/{r.rotation.total}</td>
+                  <td style={{ ...td, color: r.rotation.color, fontWeight: 700 }}>{r.rotation.status}</td>
+                  <td style={{ ...td, color: C.inkDim }}>{r.rotation.action}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Panel>
+  );
+}
+
+function PositionGuidancePanel({ positions, guidance }) {
+  return (
+    <Panel title="Position management" eyebrow="Hold / tighten / reduce by strategy">
+      <div style={{ display: "grid", gap: 8 }}>
+        {positions.slice(0, 4).map((p) => {
+          const g = guidance[p.id] || {};
+          return (
+            <div key={p.id} style={{ display: "grid", gridTemplateColumns: "80px 100px 130px 1fr", gap: 10, alignItems: "center", background: C.panel2, border: `1px solid ${C.lineSoft}`, borderRadius: 8, padding: "10px 12px" }}>
+              <span style={{ font: `700 11px ${C.mono}`, color: p.strategy === "CFM" ? C.blue : C.amber }}>{p.strategy}</span>
+              <span style={{ font: `700 12px ${C.mono}`, color: C.ink }}>{p.symbol}</span>
+              <span style={{ font: `700 12px ${C.mono}`, color: g.color || C.ink }}>{g.action || "Monitor"}</span>
+              <span style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>{g.note || "No guidance yet."}</span>
+            </div>
+          );
+        })}
+      </div>
+    </Panel>
+  );
+}
+
+function RotationView({ focus, rows, overrides, setOverrides }) {
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <SectorFocusPanel focus={focus} />
+      <TosOverridePanel overrides={overrides} setOverrides={setOverrides} />
+      <SectorRotationTable rows={rows} />
+    </div>
+  );
+}
+
+function TosOverridePanel({ overrides, setOverrides }) {
+  const [text, setText] = useState("");
+  const count = Object.keys(overrides || {}).length;
+  const apply = () => {
+    const parsed = parseTosSectorRows(text);
+    if (Object.keys(parsed).length) setOverrides({ ...(overrides || {}), ...parsed });
+  };
+  const clear = () => setOverrides({});
+  return (
+    <Panel title="Thinkorswim sector overrides" eyebrow="Use TOS as source of truth for sector metrics"
+      right={<span style={{ font: `700 12px ${C.mono}`, color: count ? C.green : C.inkFaint }}>{count} active</span>}>
+      <div style={{ font: `400 12px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 10 }}>
+        Paste copied TOS watchlist rows with Symbol, RS3M, RS3M_MOM, MoneyFlow/MFI, VolumeRatio, and RSI. These values override backend calculations for the sector table and position guidance.
+      </div>
+      <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="XLK 18.86 -640.72 55.64 2.29 200.29 129.25 52.11" style={{ ...inputStyle, minHeight: 76, width: "100%", font: `500 11px/1.35 ${C.mono}`, resize: "vertical" }} />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+        <button onClick={apply} style={{ background: C.blue, border: "none", borderRadius: 6, color: "#fff", font: `700 12px ${C.sans}`, padding: "8px 12px", cursor: "pointer" }}>Apply TOS rows</button>
+        <button onClick={clear} style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.inkDim, font: `600 12px ${C.sans}`, padding: "8px 12px", cursor: "pointer" }}>Clear overrides</button>
+      </div>
+      {count > 0 && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px,1fr))", gap: 8, marginTop: 12 }}>
+          {Object.entries(overrides).map(([sym, o]) => (
+            <div key={sym} style={{ background: C.panel2, border: `1px solid ${C.lineSoft}`, borderRadius: 7, padding: "8px 10px", font: `500 11px ${C.mono}`, color: C.inkDim }}>
+              <b style={{ color: C.ink }}>{sym}</b> RS3M {formatOverrideValue(o.rs3m)} · MOM {formatOverrideValue(o.rs3mMom)} · MFI {formatOverrideValue(o.mfi, 1)}
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
   );
 }
 
@@ -680,7 +995,7 @@ function FullChecklist({ tag, name, color, data }) {
 // ============================================================================
 // POSITIONS VIEW
 // ============================================================================
-function PositionsView({ positions, setPositions, capital, reserve, deployed, openPL }) {
+function PositionsView({ positions, setPositions, guidance = {}, capital, reserve, deployed, openPL }) {
   const blank = { id: Date.now(), strategy: "CFM", symbol: "XLV", desc: "", cost: "", current: "", opened: new Date().toISOString().slice(0, 10) };
   const [draft, setDraft] = useState(blank);
 
@@ -700,10 +1015,10 @@ function PositionsView({ positions, setPositions, capital, reserve, deployed, op
           <div style={{ font: `400 13px ${C.sans}`, color: C.inkDim, padding: "10px 0" }}>No open positions. Add one below to start tracking cost basis and P&L.</div>
         ) : (
           <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
               <thead>
                 <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
-                  {["Strat", "Symbol", "Description", "Cost basis", "Current value", "P&L", "Opened", ""].map((h) =>
+                  {["Strat", "Symbol", "Description", "Cost basis", "Current value", "P&L", "Guidance", "Opened", ""].map((h) =>
                     <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
                 </tr>
               </thead>
@@ -711,6 +1026,7 @@ function PositionsView({ positions, setPositions, capital, reserve, deployed, op
                 {positions.map((p) => {
                   const pl = (parseFloat(p.current) || 0) - (parseFloat(p.cost) || 0);
                   const pct = p.cost ? (pl / parseFloat(p.cost)) * 100 : 0;
+                  const guide = guidance[p.id] || {};
                   return (
                     <tr key={p.id} style={{ font: `400 12px ${C.sans}` }}>
                       <td style={td}><span style={{ font: `700 11px ${C.mono}`, color: p.strategy === "CFM" ? C.blue : C.amber }}>{p.strategy}</span></td>
@@ -724,6 +1040,7 @@ function PositionsView({ positions, setPositions, capital, reserve, deployed, op
                       <td style={{ ...td, color: pl >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>
                         {pl >= 0 ? "+" : ""}${pl.toLocaleString()} <span style={{ color: C.inkFaint, fontSize: 10 }}>({pct.toFixed(0)}%)</span>
                       </td>
+                      <td style={{ ...td, color: guide.color || C.inkDim, font: `700 11px ${C.mono}` }} title={guide.note || ""}>{guide.action || "Monitor"}</td>
                       <td style={{ ...td, font: `400 11px ${C.mono}`, color: C.inkDim }}>{p.opened}</td>
                       <td style={td}><button onClick={() => remove(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", font: `400 16px ${C.sans}` }}>×</button></td>
                     </tr>
@@ -755,7 +1072,7 @@ const td = { padding: "10px", borderBottom: `1px solid ${C.lineSoft}`, color: C.
 // INDICATORS VIEW — manual inputs for thinkorswim studies + macro
 // ============================================================================
 function IndicatorsView(props) {
-  const { macro, setMacro, computed, calcStatus, onRefresh } = props;
+  const { macro, setMacro, macroComputed, macroStatus, computed, calcStatus, onRefresh } = props;
   const cx = computed?.XLV, ci = computed?.ILMN;
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -770,7 +1087,7 @@ function IndicatorsView(props) {
             Auto-calc {calcStatus === "ok" ? "ready" : calcStatus === "loading" ? "computing…" : calcStatus === "fail" ? "unavailable" : "idle"}
           </div>
           <div style={{ font: `400 11px/1.4 ${C.sans}`, color: C.inkDim, maxWidth: 620 }}>
-            Computed from daily Stooq history: RSI, OBV trend, volume ratio, MFI, RS3M, RS3M_MOM, MA21.
+            Computed from daily Yahoo/FRED history: Level 1 macro, RSI, OBV trend, volume ratio, MFI, RS3M, RS3M_MOM, MA21.
             Each shows next to your manual field — tap <b style={{ color: C.blue }}>use</b> to apply.
             {calcStatus === "fail" && " History blocked (often CORS in preview) — keep entering manually."}
           </div>
@@ -783,18 +1100,42 @@ function IndicatorsView(props) {
 
       {(cx || ci) && (
         <div style={{ font: `400 10px ${C.mono}`, color: C.amber, padding: "0 2px" }}>
-          ⚠ Scale note: computed RS3M / RS3M_MOM use a generic % formula and won't match thinkorswim's EMA-tuned values numerically — trust the direction, recalibrate thresholds to taste. As of: {cx?.asOf || ci?.asOf || "—"}.
+          ⚠ Scale note: backend RS3M uses an EMA-smoothed sector-vs-SPY approximation and may still not exactly match thinkorswim until the EMA/span/scale match your study. Use the Rotation tab’s TOS override importer when TOS should be the source of truth. As of: {cx?.asOf || ci?.asOf || "—"}.
         </div>
       )}
 
-      <Panel title="Macro inputs" eyebrow="Level 1 · VIX auto-fills from live quote">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px,1fr))", gap: 14 }}>
-          <Field label="VIX" hint="auto"><NumIn value={macro.vix} onChange={(v) => setMacro({ ...macro, vix: v })} /></Field>
-          <Field label="Breadth %" hint=">55 CFM / >60 APP"><NumIn step="1" value={macro.breadth} onChange={(v) => setMacro({ ...macro, breadth: v })} /></Field>
-          <Field label="Fed policy"><Sel value={macro.fed} onChange={(v) => setMacro({ ...macro, fed: v })} options={[["dovish", "Dovish"], ["holding", "Holding"], ["hawkish", "Hawkish"]]} /></Field>
-          <Field label="Growth"><Sel value={macro.growth} onChange={(v) => setMacro({ ...macro, growth: v })} options={[["accelerating", "Accelerating"], ["stable", "Stable"], ["slowing", "Slowing"]]} /></Field>
-          <Field label="Inflation %"><NumIn step="0.1" value={macro.inflation} onChange={(v) => setMacro({ ...macro, inflation: v })} /></Field>
+      <Panel title="Macro inputs" eyebrow={`Level 1 · ${macroStatus === "ok" ? "auto-filled" : macroStatus === "partial" ? "partial auto-fill" : macroStatus === "loading" ? "fetching macro" : "manual fallback"}`}>
+        <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
+          Auto-fill uses ^VIX quotes, Finviz stocks-above-SMA50 breadth, and FRED fed funds/CPI/GDP data. Fields remain editable for your override.
+          {macroComputed?.asOf && <span style={{ color: C.inkFaint }}> Updated {macroComputed.asOf}</span>}
         </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px,1fr))", gap: 14 }}>
+          <Field label="VIX" hint={macroComputed?.fields?.vix?.asOf || "auto"}>
+            <NumIn value={macro.vix} onChange={(v) => setMacro({ ...macro, vix: v })} />
+            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.vix?.value} onApply={() => setMacro({ ...macro, vix: macroComputed.fields.vix.value })} /></div>
+          </Field>
+          <Field label="Breadth %" hint={macroComputed?.fields?.breadth ? `${macroComputed.fields.breadth.above}/${macroComputed.fields.breadth.total} stocks above SMA50` : ">55 CFM / >60 APP"}>
+            <NumIn step="1" value={macro.breadth} onChange={(v) => setMacro({ ...macro, breadth: v })} />
+            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.breadth?.value} fmt={(v) => v.toFixed(0)} onApply={() => setMacro({ ...macro, breadth: macroComputed.fields.breadth.value })} /></div>
+          </Field>
+          <Field label="Fed policy" hint={macroComputed?.fields?.fed ? `${macroComputed.fields.fed.rate}% / ${macroComputed.fields.fed.change63d}` : "FRED DFF"}>
+            <Sel value={macro.fed} onChange={(v) => setMacro({ ...macro, fed: v })} options={[["dovish", "Dovish"], ["holding", "Holding"], ["hawkish", "Hawkish"]]} />
+            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.fed?.value} onApply={() => setMacro({ ...macro, fed: macroComputed.fields.fed.value })} /></div>
+          </Field>
+          <Field label="Growth" hint={macroComputed?.fields?.growth ? `${macroComputed.fields.growth.qoqAnnualized}% GDP` : "FRED GDP"}>
+            <Sel value={macro.growth} onChange={(v) => setMacro({ ...macro, growth: v })} options={[["accelerating", "Accelerating"], ["stable", "Stable"], ["slowing", "Slowing"]]} />
+            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.growth?.value} onApply={() => setMacro({ ...macro, growth: macroComputed.fields.growth.value })} /></div>
+          </Field>
+          <Field label="Inflation %" hint={macroComputed?.fields?.inflation?.asOf || "FRED CPI YoY"}>
+            <NumIn step="0.1" value={macro.inflation} onChange={(v) => setMacro({ ...macro, inflation: v })} />
+            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.inflation?.value} fmt={(v) => v.toFixed(1)} onApply={() => setMacro({ ...macro, inflation: macroComputed.fields.inflation.value })} /></div>
+          </Field>
+        </div>
+        {macroComputed?.errors && Object.keys(macroComputed.errors).length > 0 && (
+          <div style={{ font: `400 10px ${C.mono}`, color: C.amber, marginTop: 10 }}>
+            Partial macro data: {Object.entries(macroComputed.errors).map(([k, v]) => `${k}: ${v}`).join(" · ")}
+          </div>
+        )}
       </Panel>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px,1fr))", gap: 16 }}>

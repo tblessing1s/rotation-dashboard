@@ -5,13 +5,13 @@ All functions take plain Python lists / pandas Series and return scalars or
 short series. Formulas verified against reference values (RSI matches Wilder).
 
 Notes on RS3M calibration:
-- RS3M here is (symbol N-day return - SPY N-day return) * 100.
-- The thinkorswim study you use is EMA-based and scaled differently, so the
-  raw RS3M_MOM number will NOT equal your thinkorswim value. Two knobs let you
-  calibrate: RS3M_LOOKBACK (trading days for the relative-strength window) and
-  MOM_SMOOTH (EMA span applied to RS3M before taking momentum). Adjust these in
-  config.py until the *direction and turning points* line up with thinkorswim;
-  the absolute scale can then be matched with MOM_SCALE.
+- RS3M can use EMA-smoothed prices before measuring the symbol-vs-SPY
+  relative-strength return spread. This better mirrors EMA-based watchlist
+  studies than a raw close-to-close return spread.
+- The exact thinkorswim value can still differ if your ThinkScript uses a
+  different EMA length, scaling, or formula. Tune RS3M_METHOD, RS3M_EMA_SPAN,
+  RS3M_LOOKBACK, MOM_SMOOTH, and MOM_SCALE in config.py until direction, turning
+  points, and magnitude line up with your TOS watchlist.
 """
 from __future__ import annotations
 import numpy as np
@@ -83,15 +83,28 @@ def ema(series: pd.Series, span: int) -> pd.Series:
 
 
 def rs3m_series(sym_close: pd.Series, spy_close: pd.Series, lookback: int = 63,
-                smooth: int = 1) -> pd.Series:
+                smooth: int = 1, method: str = "ema", ema_span: int = 21) -> pd.Series:
     """Relative strength of symbol vs SPY over `lookback` trading days, in %.
 
-    Optionally EMA-smoothed by `smooth` to better track a thinkorswim study.
-    Index is aligned on the intersection of the two series.
+    ``method="ema"`` first smooths both close series with an EMA, then compares
+    their lookback returns. ``method="return_spread"`` keeps the legacy raw
+    close-to-close return spread. ``smooth`` optionally applies a second EMA to
+    the RS3M series before RS3M_MOM is derived from it. Index is aligned on the
+    intersection of the two series.
     """
     df = pd.DataFrame({"s": sym_close, "p": spy_close}).dropna()
-    sym_ret = df["s"] / df["s"].shift(lookback) - 1
-    spy_ret = df["p"] / df["p"].shift(lookback) - 1
+    rs_method = (method or "return_spread").lower()
+    span = max(int(ema_span or 1), 1)
+
+    if rs_method == "ema":
+        sym_base = ema(df["s"], span)
+        spy_base = ema(df["p"], span)
+    else:
+        sym_base = df["s"]
+        spy_base = df["p"]
+
+    sym_ret = sym_base / sym_base.shift(lookback) - 1
+    spy_ret = spy_base / spy_base.shift(lookback) - 1
     rs = (sym_ret - spy_ret) * 100
     if smooth and smooth > 1:
         rs = rs.ewm(span=smooth, adjust=False).mean()
@@ -114,7 +127,9 @@ def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
     rs3m_trend = None
     if spy_bars is not None and len(spy_bars) >= 64:
         series = rs3m_series(close, spy_bars["Close"],
-                             lookback=cfg.RS3M_LOOKBACK, smooth=cfg.MOM_SMOOTH)
+                             lookback=cfg.RS3M_LOOKBACK, smooth=cfg.MOM_SMOOTH,
+                             method=getattr(cfg, "RS3M_METHOD", "ema"),
+                             ema_span=getattr(cfg, "RS3M_EMA_SPAN", 21))
         if len(series) > 11:
             rs3m_val = float(series.iloc[-1])
             mom = (series.iloc[-1] - series.iloc[-6]) * cfg.MOM_SCALE
@@ -137,6 +152,8 @@ def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
         "rs3m": _round(rs3m_val, 2),
         "rs3mMom": _round(rs3m_mom, 2),
         "rs3mTrend": rs3m_trend,
+        "rs3mMethod": getattr(cfg, "RS3M_METHOD", "ema"),
+        "rs3mEmaSpan": getattr(cfg, "RS3M_EMA_SPAN", 21),
     }
 
 
