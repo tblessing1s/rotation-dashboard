@@ -171,5 +171,6 @@ def serve(path="index.html"):
 
 
 if __name__ == "__main__":
-    print("Rotation Dashboard backend  ->  http://localhost:5179")
-    app.run(host="127.0.0.1", port=5179, debug=False)
+    port = int(os.environ.get("PORT", "5179"))
+    print(f"Rotation Dashboard backend  ->  http://0.0.0.0:{port}")
+    app.run(host="0.0.0.0", port=port, debug=False)
