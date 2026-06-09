@@ -25,6 +25,19 @@ HISTORY_DAYS = 320          # ~10 months of daily bars (enough for 63d RS3M + EM
 CACHE_TTL_MINUTES = 15      # re-fetch history at most this often
 CACHE_DIR = ".cache"
 
+
+# ---- Macro automation -------------------------------------------------------
+# Level 1 inputs are derived from public, no-key sources where possible.
+# Finviz publishes market breadth as the percent/count of stocks above SMA50.
+FINVIZ_MARKET_URL = "https://finviz.com/index.ashx"
+PUBLIC_DATA_USER_AGENT = "Mozilla/5.0 (compatible; RotationDashboard/1.0)"
+MACRO_CACHE_TTL_MINUTES = 60
+
+# FRED graph CSV downloads do not require an API key.
+FRED_DFF_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFF"
+FRED_CPI_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
+FRED_GDPC1_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=GDPC1"
+
 # ---- Portfolio defaults (mirrors your framework) ----------------------------
 CAPITAL = 35000
 RESERVE = 13000

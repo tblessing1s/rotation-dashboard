@@ -70,6 +70,12 @@ async function apiIndicators() {
   return r.json();
 }
 
+async function apiMacro() {
+  const r = await fetch(`${API}/api/macro`);
+  if (!r.ok) throw new Error("macro failed");
+  return r.json();
+}
+
 // ============================================================================
 // SIGNAL ENGINE — pure functions translating inputs into framework verdicts
 // ============================================================================
@@ -300,10 +306,12 @@ function TradingDashboard({ backendOffline }) {
   const [fetchStatus, setFetchStatus] = useState("idle");
   const [lastFetch, setLastFetch] = useState(store.get("lastFetch", null));
 
-  // ---- State: macro (Level 1). VIX auto-fills from quote when available ----
+  // ---- State: macro (Level 1). Auto-fills from /api/macro when available. ----
   const [macro, setMacro] = useState(store.get("macro", {
     vix: 21.51, breadth: 47, fed: "hawkish", growth: "slowing", inflation: 3.0,
   }));
+  const [macroComputed, setMacroComputed] = useState(store.get("macroComputed", null));
+  const [macroStatus, setMacroStatus] = useState("idle");
 
   // ---- State: institutional (Level 2) per instrument ----
   const [instXLV, setInstXLV] = useState(store.get("instXLV", {
@@ -347,6 +355,7 @@ function TradingDashboard({ backendOffline }) {
   const refreshQuotes = useCallback(async () => {
     setFetchStatus("loading");
     setCalcStatus("loading");
+    setMacroStatus("loading");
 
     // Quotes (backend returns keys XLV, ILMN, ^VIX, SPY)
     try {
@@ -361,10 +370,21 @@ function TradingDashboard({ backendOffline }) {
       store.set("quotes", out);
       const ts = new Date().toLocaleTimeString();
       setLastFetch(ts); store.set("lastFetch", ts);
-      if (out.VIX && !out.VIX.error) setMacro((m) => ({ ...m, vix: out.VIX.close }));
       setFetchStatus(Object.values(out).some((q) => q.error) ? "partial" : "ok");
     } catch (e) {
       setFetchStatus("partial");
+    }
+
+    // Level 1 macro snapshot (best-effort server-side calculations)
+    try {
+      const snap = await apiMacro();
+      const vals = snap?.values || {};
+      setMacro((m) => ({ ...m, ...vals }));
+      setMacroComputed(snap);
+      store.set("macroComputed", snap);
+      setMacroStatus(Object.keys(vals).length ? (Object.keys(snap?.errors || {}).length ? "partial" : "ok") : "fail");
+    } catch (e) {
+      setMacroStatus("fail");
     }
 
     // Indicators (already computed server-side)
@@ -436,6 +456,7 @@ function TradingDashboard({ backendOffline }) {
         {tab === "Indicators" && (
           <IndicatorsView
             macro={macro} setMacro={setMacro}
+            macroComputed={macroComputed} macroStatus={macroStatus}
             computed={computed} calcStatus={calcStatus} onRefresh={refreshQuotes}
             instXLV={instXLV} setInstXLV={setInstXLV} flowXLV={flowXLV} setFlowXLV={setFlowXLV} techXLV={techXLV} setTechXLV={setTechXLV}
             instILMN={instILMN} setInstILMN={setInstILMN} flowILMN={flowILMN} setFlowILMN={setFlowILMN} techILMN={techILMN} setTechILMN={setTechILMN}
@@ -755,7 +776,7 @@ const td = { padding: "10px", borderBottom: `1px solid ${C.lineSoft}`, color: C.
 // INDICATORS VIEW — manual inputs for thinkorswim studies + macro
 // ============================================================================
 function IndicatorsView(props) {
-  const { macro, setMacro, computed, calcStatus, onRefresh } = props;
+  const { macro, setMacro, macroComputed, macroStatus, computed, calcStatus, onRefresh } = props;
   const cx = computed?.XLV, ci = computed?.ILMN;
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -770,7 +791,7 @@ function IndicatorsView(props) {
             Auto-calc {calcStatus === "ok" ? "ready" : calcStatus === "loading" ? "computing…" : calcStatus === "fail" ? "unavailable" : "idle"}
           </div>
           <div style={{ font: `400 11px/1.4 ${C.sans}`, color: C.inkDim, maxWidth: 620 }}>
-            Computed from daily Stooq history: RSI, OBV trend, volume ratio, MFI, RS3M, RS3M_MOM, MA21.
+            Computed from daily Yahoo/FRED history: Level 1 macro, RSI, OBV trend, volume ratio, MFI, RS3M, RS3M_MOM, MA21.
             Each shows next to your manual field — tap <b style={{ color: C.blue }}>use</b> to apply.
             {calcStatus === "fail" && " History blocked (often CORS in preview) — keep entering manually."}
           </div>
@@ -787,14 +808,38 @@ function IndicatorsView(props) {
         </div>
       )}
 
-      <Panel title="Macro inputs" eyebrow="Level 1 · VIX auto-fills from live quote">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px,1fr))", gap: 14 }}>
-          <Field label="VIX" hint="auto"><NumIn value={macro.vix} onChange={(v) => setMacro({ ...macro, vix: v })} /></Field>
-          <Field label="Breadth %" hint=">55 CFM / >60 APP"><NumIn step="1" value={macro.breadth} onChange={(v) => setMacro({ ...macro, breadth: v })} /></Field>
-          <Field label="Fed policy"><Sel value={macro.fed} onChange={(v) => setMacro({ ...macro, fed: v })} options={[["dovish", "Dovish"], ["holding", "Holding"], ["hawkish", "Hawkish"]]} /></Field>
-          <Field label="Growth"><Sel value={macro.growth} onChange={(v) => setMacro({ ...macro, growth: v })} options={[["accelerating", "Accelerating"], ["stable", "Stable"], ["slowing", "Slowing"]]} /></Field>
-          <Field label="Inflation %"><NumIn step="0.1" value={macro.inflation} onChange={(v) => setMacro({ ...macro, inflation: v })} /></Field>
+      <Panel title="Macro inputs" eyebrow={`Level 1 · ${macroStatus === "ok" ? "auto-filled" : macroStatus === "partial" ? "partial auto-fill" : macroStatus === "loading" ? "fetching macro" : "manual fallback"}`}>
+        <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
+          Auto-fill uses ^VIX quotes, Finviz stocks-above-SMA50 breadth, and FRED fed funds/CPI/GDP data. Fields remain editable for your override.
+          {macroComputed?.asOf && <span style={{ color: C.inkFaint }}> Updated {macroComputed.asOf}</span>}
         </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px,1fr))", gap: 14 }}>
+          <Field label="VIX" hint={macroComputed?.fields?.vix?.asOf || "auto"}>
+            <NumIn value={macro.vix} onChange={(v) => setMacro({ ...macro, vix: v })} />
+            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.vix?.value} onApply={() => setMacro({ ...macro, vix: macroComputed.fields.vix.value })} /></div>
+          </Field>
+          <Field label="Breadth %" hint={macroComputed?.fields?.breadth ? `${macroComputed.fields.breadth.above}/${macroComputed.fields.breadth.total} stocks above SMA50` : ">55 CFM / >60 APP"}>
+            <NumIn step="1" value={macro.breadth} onChange={(v) => setMacro({ ...macro, breadth: v })} />
+            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.breadth?.value} fmt={(v) => v.toFixed(0)} onApply={() => setMacro({ ...macro, breadth: macroComputed.fields.breadth.value })} /></div>
+          </Field>
+          <Field label="Fed policy" hint={macroComputed?.fields?.fed ? `${macroComputed.fields.fed.rate}% / ${macroComputed.fields.fed.change63d}` : "FRED DFF"}>
+            <Sel value={macro.fed} onChange={(v) => setMacro({ ...macro, fed: v })} options={[["dovish", "Dovish"], ["holding", "Holding"], ["hawkish", "Hawkish"]]} />
+            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.fed?.value} onApply={() => setMacro({ ...macro, fed: macroComputed.fields.fed.value })} /></div>
+          </Field>
+          <Field label="Growth" hint={macroComputed?.fields?.growth ? `${macroComputed.fields.growth.qoqAnnualized}% GDP` : "FRED GDP"}>
+            <Sel value={macro.growth} onChange={(v) => setMacro({ ...macro, growth: v })} options={[["accelerating", "Accelerating"], ["stable", "Stable"], ["slowing", "Slowing"]]} />
+            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.growth?.value} onApply={() => setMacro({ ...macro, growth: macroComputed.fields.growth.value })} /></div>
+          </Field>
+          <Field label="Inflation %" hint={macroComputed?.fields?.inflation?.asOf || "FRED CPI YoY"}>
+            <NumIn step="0.1" value={macro.inflation} onChange={(v) => setMacro({ ...macro, inflation: v })} />
+            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.inflation?.value} fmt={(v) => v.toFixed(1)} onApply={() => setMacro({ ...macro, inflation: macroComputed.fields.inflation.value })} /></div>
+          </Field>
+        </div>
+        {macroComputed?.errors && Object.keys(macroComputed.errors).length > 0 && (
+          <div style={{ font: `400 10px ${C.mono}`, color: C.amber, marginTop: 10 }}>
+            Partial macro data: {Object.entries(macroComputed.errors).map(([k, v]) => `${k}: ${v}`).join(" · ")}
+          </div>
+        )}
       </Panel>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px,1fr))", gap: 16 }}>
