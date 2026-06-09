@@ -5,9 +5,23 @@ Edit these to match your thinkorswim studies, then restart the backend.
 """
 
 # Symbols the dashboard tracks. SPY is the RS3M benchmark (always needed).
-TRACKED = ["XLV", "ILMN"]
+SECTOR_UNIVERSE = [
+    {"symbol": "XLK", "name": "Technology", "group": "growth"},
+    {"symbol": "XLY", "name": "Consumer Discretionary", "group": "growth"},
+    {"symbol": "XLC", "name": "Communication Services", "group": "growth"},
+    {"symbol": "XLI", "name": "Industrials", "group": "cyclical"},
+    {"symbol": "XLF", "name": "Financials", "group": "cyclical"},
+    {"symbol": "XLE", "name": "Energy", "group": "inflation"},
+    {"symbol": "XLB", "name": "Materials", "group": "inflation"},
+    {"symbol": "XLV", "name": "Health Care", "group": "defensive"},
+    {"symbol": "XLP", "name": "Consumer Staples", "group": "defensive"},
+    {"symbol": "XLU", "name": "Utilities", "group": "defensive"},
+    {"symbol": "XLRE", "name": "Real Estate", "group": "rates"},
+]
+SECTOR_SYMBOLS = [s["symbol"] for s in SECTOR_UNIVERSE]
 BENCHMARK = "SPY"
-QUOTE_SYMBOLS = ["XLV", "ILMN", "^VIX", "SPY"]  # for the live ticker strip
+TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # ILMN remains as the default APP stock candidate.
+QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", "^VIX", "SPY"]  # for the live ticker strip/API
 
 # ---- RS3M calibration -------------------------------------------------------
 # RS3M_LOOKBACK: trading days in the relative-strength window. 63 ~ 3 months.
@@ -31,7 +45,7 @@ CACHE_DIR = ".cache"
 # Breadth is approximated as the percent of this broad ETF universe trading above
 # its 50-day moving average. Adjust the universe if you prefer a different lens.
 BREADTH_SYMBOLS = [
-    "SPY", "QQQ", "IWM",
+    "SPY", "QQQ", "IWM", "NYA",
     "XLK", "XLV", "XLF", "XLY", "XLC", "XLI", "XLP", "XLE", "XLU", "XLB", "XLRE",
 ]
 BREADTH_MA_WINDOW = 50

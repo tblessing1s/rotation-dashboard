@@ -278,9 +278,11 @@ def api_quotes():
 
 @app.route("/api/indicators")
 def api_indicators():
+    requested = request.args.get("symbols", "")
+    symbols = [s.strip().upper() for s in requested.split(",") if s.strip()] or cfg.TRACKED
     spy = get_history(cfg.BENCHMARK)
     out = {}
-    for sym in cfg.TRACKED:
+    for sym in dict.fromkeys(symbols):
         bars = get_history(sym)
         out[sym] = ind.compute_all(bars, spy, cfg) if bars is not None else {"error": "no data"}
     return jsonify(out)
@@ -303,6 +305,7 @@ def api_state():
 def api_config():
     return jsonify({
         "tracked": cfg.TRACKED, "benchmark": cfg.BENCHMARK,
+        "sectors": cfg.SECTOR_UNIVERSE,
         "capital": cfg.CAPITAL, "reserve": cfg.RESERVE,
         "rs3m": {"lookback": cfg.RS3M_LOOKBACK, "smooth": cfg.MOM_SMOOTH, "scale": cfg.MOM_SCALE},
     })
