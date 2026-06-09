@@ -23,6 +23,7 @@ from flask_cors import CORS
 
 import config as cfg
 import indicators as ind
+import macro as macro_data
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CACHE = os.path.join(HERE, cfg.CACHE_DIR)
