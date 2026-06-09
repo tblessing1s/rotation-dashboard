@@ -23,26 +23,23 @@ BENCHMARK = "SPY"
 TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # ILMN remains as the default APP stock candidate.
 QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", "^VIX", "SPY"]  # for the live ticker strip/API
 
-# ---- RS3M calibration -------------------------------------------------------
-# RS3M_METHOD:   "ema" smooths each price series before calculating relative
-#                strength; "return_spread" uses the legacy raw close-to-close
-#                return spread. Use "ema" when comparing against EMA-based TOS
-#                watchlist studies.
-# RS3M_EMA_SPAN: EMA span applied to symbol and SPY closes before the lookback
-#                return spread when RS3M_METHOD = "ema".
-# RS3M_LOOKBACK: trading days in the relative-strength window. 63 ~ 3 months.
-# MOM_SMOOTH:    EMA span applied to the RS3M series before momentum (1 = none).
-# MOM_SCALE:     multiplier on the 5-day RS3M change. Tune so the magnitude lines
-#                up with your thinkorswim RS3M_MOM (you reference +500/+884/+1128).
-#                Start at 100 and adjust after comparing a few readings.
-RS3M_METHOD = "ema"
-RS3M_EMA_SPAN = 21
-RS3M_LOOKBACK = 63
-MOM_SMOOTH = 5
-MOM_SCALE = 100.0
+# ---- 5 key indicator settings ----------------------------------------------
+# RS3M uses the supplied raw close formula:
+#   (symbol % change over 90 rows) - (SPY % change over 90 rows)
+# RS3M_MOM uses the supplied acceleration formula:
+#   ((current RS3M - average RS3M over latest 10 readings) / abs(average)) * 100
+# VolumeRatio uses latest volume / prior 20-day average volume * 100.
+# VolumeAccel uses latest 5-day average volume / previous 5-day average * 100.
+# RSI uses a simple 14-period average gain/loss calculation.
+RS3M_METHOD = "return_spread"
+RS3M_EMA_SPAN = 1
+RS3M_LOOKBACK = 90
+RS3M_MOM_WINDOW = 10
+MOM_SMOOTH = 1
+MOM_SCALE = 1.0
 
 # ---- Data / cache -----------------------------------------------------------
-HISTORY_DAYS = 320          # ~10 months of daily bars (enough for 63d RS3M + EMAs)
+HISTORY_DAYS = 320          # ~10 months of daily bars (enough for 90d RS3M + momentum)
 CACHE_TTL_MINUTES = 15      # re-fetch history at most this often
 CACHE_DIR = ".cache"
 
