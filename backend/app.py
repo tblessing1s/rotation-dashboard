@@ -307,7 +307,10 @@ def api_config():
         "tracked": cfg.TRACKED, "benchmark": cfg.BENCHMARK,
         "sectors": cfg.SECTOR_UNIVERSE,
         "capital": cfg.CAPITAL, "reserve": cfg.RESERVE,
-        "rs3m": {"lookback": cfg.RS3M_LOOKBACK, "smooth": cfg.MOM_SMOOTH, "scale": cfg.MOM_SCALE},
+        "rs3m": {
+            "method": cfg.RS3M_METHOD, "emaSpan": cfg.RS3M_EMA_SPAN,
+            "lookback": cfg.RS3M_LOOKBACK, "smooth": cfg.MOM_SMOOTH, "scale": cfg.MOM_SCALE,
+        },
     })
 
 

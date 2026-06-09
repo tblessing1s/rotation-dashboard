@@ -60,19 +60,25 @@ their field; you compare against thinkorswim and tap **use** to apply.
 ## Calibrating RS3M / RS3M_MOM to thinkorswim
 
 Your thinkorswim RS3M studies are EMA-based and scaled to the numbers you know
-(e.g. +500 / +884 / +1128). The backend's RS3M uses a transparent
-percentage-spread formula, so the **raw magnitude won't match** out of the box —
-but the direction and turning points will. Three knobs in
+(e.g. +500 / +884 / +1128). The backend now defaults to an EMA-smoothed
+relative-strength approximation: it smooths the sector ETF and SPY closes, then
+compares their 3-month returns. That should track EMA-based watchlists better
+than the old raw close-to-close spread, but the **exact magnitude may still
+differ** until the settings match your ThinkScript. These knobs in
 `backend/config.py` let you line it up:
 
+- `RS3M_METHOD` — `"ema"` for EMA-smoothed prices, or `"return_spread"` for the
+  legacy raw return-spread formula.
+- `RS3M_EMA_SPAN` — EMA length applied to both the sector ETF and SPY before the
+  lookback return is measured.
 - `RS3M_LOOKBACK` — trading days in the relative-strength window (63 ≈ 3 months).
-- `MOM_SMOOTH` — EMA span applied to RS3M before momentum (raise to smooth,
-  matching an EMA-based study).
+- `MOM_SMOOTH` — EMA span applied to the RS3M series before momentum is taken.
 - `MOM_SCALE` — multiplier on RS3M_MOM so its size matches your thinkorswim
   reading. Compare a few live values, then set this ratio.
 
-Edit, save, restart the backend. (Until calibrated, trust RS3M_MOM
-directionally, or keep entering those two fields manually.)
+Edit, save, restart the backend. Until calibrated, trust RS3M_MOM directionally
+or paste TOS watchlist rows in the Rotation tab when TOS should be the source of
+truth.
 
 ---
 
