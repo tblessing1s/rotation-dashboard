@@ -38,22 +38,19 @@ To stop: `Ctrl+C` in the terminal.
 ## What's automated vs. manual
 
 **Computed automatically** (backend, from public market/economic data):
-Level 1 macro inputs (VIX, breadth, Fed stance, growth, inflation), sector ETF
-rotation indicators, RSI, OBV trend, volume ratio, MFI, RS3M, RS3M_MOM, MA21,
-and price-vs-MA21. RSI is verified against Wilder's reference (70.46).
+Level 1 macro inputs (VIX, breadth, Fed stance, growth, inflation), RSI, OBV
+trend, volume ratio, MFI, RS3M, RS3M_MOM, MA21, and price-vs-MA21. RSI is
+verified against Wilder's reference (70.46).
 
-Level 1 uses `^VIX` from Yahoo Finance, breadth from Finviz's percent/count of
-stocks trading above their 50-day SMA, Fed stance from FRED DFF, inflation from
-FRED CPI YoY, and growth from FRED real-GDP momentum. The dashboard maps that
-macro regime into focused sector groups, then ranks those sectors by
-institutional rotation and money-flow confirmation.
+Level 1 uses `^VIX` from Yahoo Finance, breadth as the percent of a configured
+ETF universe trading above its 50-day moving average, Fed stance from FRED DFF,
+inflation from FRED CPI YoY, and growth from FRED real-GDP momentum. All of
+these fields remain editable so you can override the automatic readout.
 
 **Manual** (your judgment / non-price data, entered on the Indicators tab):
 Earnings revisions, valuation, credit, and the chart-reading toggles (bounces at
 support, breakout, support defined).
 
-On the Command and Rotation tabs, Level 1 narrows attention to favored sector
-ETFs before the app evaluates RS3M/RS3M_MOM, money flow, MA21, and exit warnings.
 On the Indicators tab, Level 1 macro values auto-fill on refresh and remain
 editable. Other computed values appear as a small `calc … use ↵` chip next to
 their field; you compare against thinkorswim and tap **use** to apply.
@@ -98,19 +95,18 @@ Fly's GitHub deployment will not see local-only files.
 
 ## Configuration
 
-`backend/config.py` also holds the sector ETF universe, extra tracked symbols
-(`ILMN` by default), the benchmark (`SPY`), the Finviz breadth URL, cache
-freshness (`CACHE_TTL_MINUTES`, default 15), and your capital / reserve figures.
-Change symbols there and restart.
+`backend/config.py` also holds the tracked symbols (`XLV`, `ILMN`), the
+benchmark (`SPY`), the Level 1 breadth universe, cache freshness
+(`CACHE_TTL_MINUTES`, default 15), and your capital / reserve figures. Change
+symbols there and restart.
 
 ## Data source
 
-Daily OHLCV via `yfinance` (no API key), Finviz market-breadth data for stocks
-above their 50-day SMA, plus FRED graph CSV downloads for Fed funds, CPI, and
-real GDP (also no API key). Price history is cached to `backend/.cache/` as
-parquet and refreshed at most every `CACHE_TTL_MINUTES`; the macro snapshot is
-cached in memory for `MACRO_CACHE_TTL_MINUTES`. If a price fetch fails, the last
-cached copy is used so the dashboard still loads.
+Daily OHLCV via `yfinance` (no API key), plus FRED graph CSV downloads for Fed
+funds, CPI, and real GDP (also no API key). Price history is cached to
+`backend/.cache/` as parquet and refreshed at most every `CACHE_TTL_MINUTES`; the
+macro snapshot is cached in memory for `MACRO_CACHE_TTL_MINUTES`. If a price
+fetch fails, the last cached copy is used so the dashboard still loads.
 
 ## Notes
 
