@@ -70,6 +70,23 @@ directionally, or keep entering those two fields manually.)
 
 ---
 
+
+## Deploy to Fly.io
+
+The repository includes a root-level `Dockerfile` so Fly can detect the app from
+the GitHub repository root. The Docker build compiles the Vite frontend and then
+runs the Flask backend with Gunicorn on Fly's `$PORT` (default `8080`).
+
+From the repository root, launch or deploy with:
+
+```bash
+fly launch
+fly deploy
+```
+
+Make sure `Dockerfile` and `.dockerignore` are committed and pushed to GitHub;
+Fly's GitHub deployment will not see local-only files.
+
 ## Configuration
 
 `backend/config.py` also holds the tracked symbols (`XLV`, `ILMN`), the
