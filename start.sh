@@ -12,9 +12,16 @@ source .venv/bin/activate
 pip install --quiet --upgrade pip
 pip install --quiet -r requirements.txt
 
-# Build the frontend once if it hasn't been built
-if [ ! -d "../frontend/dist" ]; then
-  echo "▸ Building frontend (first run)…"
+# Build the frontend if it hasn't been built, or if source changed after dist.
+needs_frontend_build=0
+if [ ! -f "../frontend/dist/index.html" ]; then
+  needs_frontend_build=1
+elif [ -n "$(find ../frontend/src ../frontend/package.json ../frontend/package-lock.json -newer ../frontend/dist/index.html -print -quit)" ]; then
+  needs_frontend_build=1
+fi
+
+if [ "$needs_frontend_build" -eq 1 ]; then
+  echo "▸ Building frontend…"
   cd ../frontend
   npm install --silent
   npm run build
