@@ -236,34 +236,6 @@ function positionGuidance(position, computed, macro, focus) {
   return { action: "Tighten", color: C.yellow, note: "Not enough confirmation; watch RS3M_MOM, OBV, and MA21." };
 }
 
-function mergeTosOverrides(calc, override) {
-  if (!override) return calc || null;
-  return { ...(calc || {}), ...override, source: "thinkorswim", override: true };
-}
-
-function parseTosSectorRows(text) {
-  const out = {};
-  for (const raw of text.split(/\n+/)) {
-    const line = raw.trim();
-    if (!line || /^symbol\b/i.test(line)) continue;
-    const symbol = (line.match(/\b(XL[KYCVIFEBPUR]|XLRE)\b/i) || [])[1]?.toUpperCase();
-    if (!symbol) continue;
-    const nums = line.match(/[-+]?\d*\.?\d+/g)?.map(Number) || [];
-    if (nums.length < 2) continue;
-
-    const row = { rs3m: nums[0], rs3mMom: nums[1], asOf: "TOS override" };
-    if (nums.length >= 3) row.mfi = nums[2];
-    if (nums.length >= 5) row.volRatio = nums[4];
-    if (nums.length >= 7) row.rsi = nums[6];
-    out[symbol] = row;
-  }
-  return out;
-}
-
-function formatOverrideValue(v, digits = 2) {
-  return typeof v === "number" && Number.isFinite(v) ? v.toFixed(digits) : "—";
-}
-
 // CFM entry checklist
 function cfmChecklist(m, inst, flow, tech) {
   const macro = macroSignal(m);
@@ -555,18 +527,13 @@ function TradingDashboard({ backendOffline }) {
   const focus = useMemo(() => sectorFocus(macro), [macro]);
   const sectorRows = useMemo(() => SECTORS.map((sector) => {
     const tier = focus.primary.includes(sector.symbol) ? "Primary" : focus.secondary.includes(sector.symbol) ? "Secondary" : focus.avoid.includes(sector.symbol) ? "Ignored" : "Neutral";
-    const calc = mergeTosOverrides(computed?.[sector.symbol] || null, sectorOverrides?.[sector.symbol]);
+    const calc = computed?.[sector.symbol] || null;
     return { ...sector, tier, calc, rotation: sectorRotationStatus(calc, tier, macro) };
   }).sort((a, b) => {
     const tierRank = { Primary: 0, Secondary: 1, Neutral: 2, Ignored: 3 };
     return (tierRank[a.tier] - tierRank[b.tier]) || (b.rotation.score - a.rotation.score);
   }), [computed, focus, macro]);
-  const effectiveComputed = useMemo(() => {
-    const merged = { ...computed };
-    for (const [sym, override] of Object.entries(sectorOverrides || {})) merged[sym] = mergeTosOverrides(merged[sym], override);
-    return merged;
-  }, [computed, sectorOverrides]);
-  const positionGuide = useMemo(() => Object.fromEntries(positions.map((p) => [p.id, positionGuidance(p, effectiveComputed, macro, focus)])), [positions, effectiveComputed, macro, focus]);
+  const positionGuide = useMemo(() => Object.fromEntries(positions.map((p) => [p.id, positionGuidance(p, computed, macro, focus)])), [positions, computed, macro, focus]);
   const cfm = useMemo(() => cfmChecklist(macro, instXLV, flowXLV, techXLV), [macro, instXLV, flowXLV, techXLV]);
   const app = useMemo(() => appChecklist(macro, instILMN, flowILMN, techILMN), [macro, instILMN, flowILMN, techILMN]);
   const exitsXLV = useMemo(() => exitTriggers(instXLV, flowXLV, macro, techXLV), [instXLV, flowXLV, macro, techXLV]);
@@ -608,7 +575,7 @@ function TradingDashboard({ backendOffline }) {
             deployed={deployed} reserve={reserve} capital={capital} openPL={openPL} positions={positions} />
         )}
         {tab === "Rotation" && (
-          <RotationView focus={focus} rows={sectorRows} overrides={sectorOverrides} setOverrides={setSectorOverrides} />
+          <RotationView focus={focus} rows={sectorRows} />
         )}
         {tab === "Checklists" && (
           <ChecklistView cfm={cfm} app={app} />
@@ -785,7 +752,7 @@ function SectorRotationTable({ rows, compact = false }) {
         <table style={{ width: "100%", borderCollapse: "collapse", minWidth: compact ? 760 : 900 }}>
           <thead>
             <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
-              {["Focus", "Sector", "RS3M", "MOM", "MFI", "Vol", "RSI", "Source", "Score", "Status", "Action"].map((h) =>
+              {["Focus", "Sector", "RS3M", "MOM", "MFI", "OBV", "MA21", "Score", "Status", "Action"].map((h) =>
                 <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
             </tr>
           </thead>
@@ -799,9 +766,8 @@ function SectorRotationTable({ rows, compact = false }) {
                   <td style={{ ...td, color: (c.rs3m ?? 0) >= 0 ? C.green : C.red }}>{c.rs3m != null ? c.rs3m.toFixed(2) : "—"}</td>
                   <td style={{ ...td, color: (c.rs3mMom ?? 0) >= 0 ? C.green : C.red }}>{c.rs3mMom != null ? c.rs3mMom.toFixed(0) : "—"}</td>
                   <td style={td}>{c.mfi != null ? c.mfi.toFixed(1) : "—"}</td>
-                  <td style={td}>{c.volRatio != null ? c.volRatio.toFixed(0) : "—"}</td>
-                  <td style={td}>{c.rsi != null ? c.rsi.toFixed(1) : "—"}</td>
-                  <td style={{ ...td, color: c.override ? C.green : C.inkFaint, font: `700 10px ${C.mono}` }}>{c.override ? "TOS" : "AUTO"}</td>
+                  <td style={td}>{c.obv || "—"}</td>
+                  <td style={{ ...td, color: c.priceAboveMA21 ? C.green : C.red }}>{c.priceAboveMA21 == null ? "—" : c.priceAboveMA21 ? "Above" : "Below"}</td>
                   <td style={td}>{r.rotation.score}/{r.rotation.total}</td>
                   <td style={{ ...td, color: r.rotation.color, fontWeight: 700 }}>{r.rotation.status}</td>
                   <td style={{ ...td, color: C.inkDim }}>{r.rotation.action}</td>
@@ -835,45 +801,12 @@ function PositionGuidancePanel({ positions, guidance }) {
   );
 }
 
-function RotationView({ focus, rows, overrides, setOverrides }) {
+function RotationView({ focus, rows }) {
   return (
     <div style={{ display: "grid", gap: 16 }}>
       <SectorFocusPanel focus={focus} />
-      <TosOverridePanel overrides={overrides} setOverrides={setOverrides} />
       <SectorRotationTable rows={rows} />
     </div>
-  );
-}
-
-function TosOverridePanel({ overrides, setOverrides }) {
-  const [text, setText] = useState("");
-  const count = Object.keys(overrides || {}).length;
-  const apply = () => {
-    const parsed = parseTosSectorRows(text);
-    if (Object.keys(parsed).length) setOverrides({ ...(overrides || {}), ...parsed });
-  };
-  const clear = () => setOverrides({});
-  return (
-    <Panel title="Thinkorswim sector overrides" eyebrow="Use TOS as source of truth for sector metrics"
-      right={<span style={{ font: `700 12px ${C.mono}`, color: count ? C.green : C.inkFaint }}>{count} active</span>}>
-      <div style={{ font: `400 12px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 10 }}>
-        Paste copied TOS watchlist rows with Symbol, RS3M, RS3M_MOM, MoneyFlow/MFI, VolumeRatio, and RSI. These values override backend calculations for the sector table and position guidance.
-      </div>
-      <textarea value={text} onChange={(e) => setText(e.target.value)} placeholder="XLK 18.86 -640.72 55.64 2.29 200.29 129.25 52.11" style={{ ...inputStyle, minHeight: 76, width: "100%", font: `500 11px/1.35 ${C.mono}`, resize: "vertical" }} />
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
-        <button onClick={apply} style={{ background: C.blue, border: "none", borderRadius: 6, color: "#fff", font: `700 12px ${C.sans}`, padding: "8px 12px", cursor: "pointer" }}>Apply TOS rows</button>
-        <button onClick={clear} style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.inkDim, font: `600 12px ${C.sans}`, padding: "8px 12px", cursor: "pointer" }}>Clear overrides</button>
-      </div>
-      {count > 0 && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px,1fr))", gap: 8, marginTop: 12 }}>
-          {Object.entries(overrides).map(([sym, o]) => (
-            <div key={sym} style={{ background: C.panel2, border: `1px solid ${C.lineSoft}`, borderRadius: 7, padding: "8px 10px", font: `500 11px ${C.mono}`, color: C.inkDim }}>
-              <b style={{ color: C.ink }}>{sym}</b> RS3M {formatOverrideValue(o.rs3m)} · MOM {formatOverrideValue(o.rs3mMom)} · MFI {formatOverrideValue(o.mfi, 1)}
-            </div>
-          ))}
-        </div>
-      )}
-    </Panel>
   );
 }
 
@@ -1100,13 +1033,13 @@ function IndicatorsView(props) {
 
       {(cx || ci) && (
         <div style={{ font: `400 10px ${C.mono}`, color: C.amber, padding: "0 2px" }}>
-          ⚠ Scale note: backend RS3M uses an EMA-smoothed sector-vs-SPY approximation and may still not exactly match thinkorswim until the EMA/span/scale match your study. Use the Rotation tab’s TOS override importer when TOS should be the source of truth. As of: {cx?.asOf || ci?.asOf || "—"}.
+          ⚠ Scale note: backend RS3M / RS3M_MOM use a generic % formula and may not match thinkorswim. Use the Rotation tab’s TOS override importer when TOS should be the source of truth. As of: {cx?.asOf || ci?.asOf || "—"}.
         </div>
       )}
 
       <Panel title="Macro inputs" eyebrow={`Level 1 · ${macroStatus === "ok" ? "auto-filled" : macroStatus === "partial" ? "partial auto-fill" : macroStatus === "loading" ? "fetching macro" : "manual fallback"}`}>
         <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
-          Auto-fill uses ^VIX quotes, Finviz stocks-above-SMA50 breadth, and FRED fed funds/CPI/GDP data. Fields remain editable for your override.
+          Auto-fill uses ^VIX quotes, FRED fed funds/CPI/GDP data, and ETF breadth above 50-day MA. Fields remain editable for your override.
           {macroComputed?.asOf && <span style={{ color: C.inkFaint }}> Updated {macroComputed.asOf}</span>}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px,1fr))", gap: 14 }}>
@@ -1114,7 +1047,7 @@ function IndicatorsView(props) {
             <NumIn value={macro.vix} onChange={(v) => setMacro({ ...macro, vix: v })} />
             <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.vix?.value} onApply={() => setMacro({ ...macro, vix: macroComputed.fields.vix.value })} /></div>
           </Field>
-          <Field label="Breadth %" hint={macroComputed?.fields?.breadth ? `${macroComputed.fields.breadth.above}/${macroComputed.fields.breadth.total} stocks above SMA50` : ">55 CFM / >60 APP"}>
+          <Field label="Breadth %" hint={macroComputed?.fields?.breadth ? `${macroComputed.fields.breadth.above}/${macroComputed.fields.breadth.total} above MA50` : ">55 CFM / >60 APP"}>
             <NumIn step="1" value={macro.breadth} onChange={(v) => setMacro({ ...macro, breadth: v })} />
             <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.breadth?.value} fmt={(v) => v.toFixed(0)} onApply={() => setMacro({ ...macro, breadth: macroComputed.fields.breadth.value })} /></div>
           </Field>

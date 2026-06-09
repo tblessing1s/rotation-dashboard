@@ -20,8 +20,8 @@ SECTOR_UNIVERSE = [
 ]
 SECTOR_SYMBOLS = [s["symbol"] for s in SECTOR_UNIVERSE]
 BENCHMARK = "SPY"
-TRACKED = SECTOR_SYMBOLS + ["ILMN"]  # ILMN remains as the default APP stock candidate.
-QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["ILMN", "^VIX", "SPY"]  # for the live ticker strip/API
+TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # ILMN remains as the default APP stock candidate.
+QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", "^VIX", "SPY"]  # for the live ticker strip/API
 
 # ---- RS3M calibration -------------------------------------------------------
 # RS3M_METHOD:   "ema" smooths each price series before calculating relative
@@ -49,9 +49,13 @@ CACHE_DIR = ".cache"
 
 # ---- Macro automation -------------------------------------------------------
 # Level 1 inputs are derived from public, no-key sources where possible.
-# Finviz publishes market breadth as the percent/count of stocks above SMA50.
-FINVIZ_MARKET_URL = "https://finviz.com/index.ashx"
-PUBLIC_DATA_USER_AGENT = "Mozilla/5.0 (compatible; RotationDashboard/1.0)"
+# Breadth is approximated as the percent of this broad ETF universe trading above
+# its 50-day moving average. Adjust the universe if you prefer a different lens.
+BREADTH_SYMBOLS = [
+    "SPY", "QQQ", "IWM", "NYA",
+    "XLK", "XLV", "XLF", "XLY", "XLC", "XLI", "XLP", "XLE", "XLU", "XLB", "XLRE",
+]
+BREADTH_MA_WINDOW = 50
 MACRO_CACHE_TTL_MINUTES = 60
 
 # FRED graph CSV downloads do not require an API key.
