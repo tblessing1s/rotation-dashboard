@@ -456,16 +456,18 @@ function TradingDashboard({ backendOffline }) {
   // ---- State: positions ----
   const [positions, setPositions] = useState(store.get("positions", []));
 
+  // ---- State: auto-computed indicators per symbol + TOS sector overrides ----
+  const [computed, setComputed] = useState(store.get("computed", {}));
+  const [sectorOverrides, setSectorOverrides] = useState(store.get("sectorOverrides", {}));
+  const [calcStatus, setCalcStatus] = useState("idle");
+
   // Persist on change
   useEffect(() => { store.set("macro", macro); }, [macro]);
   useEffect(() => { store.set("instXLV", instXLV); store.set("instILMN", instILMN); }, [instXLV, instILMN]);
   useEffect(() => { store.set("flowXLV", flowXLV); store.set("flowILMN", flowILMN); }, [flowXLV, flowILMN]);
   useEffect(() => { store.set("techXLV", techXLV); store.set("techILMN", techILMN); }, [techXLV, techILMN]);
   useEffect(() => { store.set("positions", positions); }, [positions]);
-
-  // ---- State: auto-computed indicators per symbol ----
-  const [computed, setComputed] = useState(store.get("computed", {}));
-  const [calcStatus, setCalcStatus] = useState("idle");
+  useEffect(() => { store.set("sectorOverrides", sectorOverrides); }, [sectorOverrides]);
 
   // ---- Pull quotes + backend-computed indicators ----
   const refreshQuotes = useCallback(async () => {
@@ -1031,7 +1033,7 @@ function IndicatorsView(props) {
 
       {(cx || ci) && (
         <div style={{ font: `400 10px ${C.mono}`, color: C.amber, padding: "0 2px" }}>
-          ⚠ Scale note: computed RS3M / RS3M_MOM use a generic % formula and won't match thinkorswim's EMA-tuned values numerically — trust the direction, recalibrate thresholds to taste. As of: {cx?.asOf || ci?.asOf || "—"}.
+          ⚠ Scale note: backend RS3M / RS3M_MOM use a generic % formula and may not match thinkorswim. Use the Rotation tab’s TOS override importer when TOS should be the source of truth. As of: {cx?.asOf || ci?.asOf || "—"}.
         </div>
       )}
 
