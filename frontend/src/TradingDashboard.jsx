@@ -187,7 +187,7 @@ function sectorFocus(m) {
 function bucketsFromCalc(calc = {}) {
   return {
     inst: { rs3m: calc.rs3m ?? 0, rs3mMom: calc.rs3mMom ?? 0, rs3mTrend: calc.rs3mTrend || "flat" },
-    flow: { mfi: calc.mfi ?? 0, rsi: calc.rsi ?? 0, obv: calc.obv || "flat", volRatio: calc.volRatio ?? 0 },
+    flow: { mfi: calc.mfi ?? 0, rsi: calc.rsi ?? 0, obv: calc.obv || "flat", volRatio: calc.volRatio ?? 0, volAccel: calc.volAccel ?? 0 },
     tech: { priceAboveMA21: !!calc.priceAboveMA21, bouncesConfirmed: false, supportDefined: true, breakoutConfirmed: false },
   };
 }
@@ -439,10 +439,10 @@ function TradingDashboard({ backendOffline }) {
 
   // ---- State: money flow (Level 3) per instrument ----
   const [flowXLV, setFlowXLV] = useState(store.get("flowXLV", {
-    mfi: 70.66, rsi: 58, obv: "rising", volRatio: 95,
+    mfi: 70.66, rsi: 58, obv: "rising", volRatio: 95, volAccel: 100,
   }));
   const [flowILMN, setFlowILMN] = useState(store.get("flowILMN", {
-    mfi: 71.95, rsi: 64, obv: "rising", volRatio: 110,
+    mfi: 71.95, rsi: 64, obv: "rising", volRatio: 110, volAccel: 100,
   }));
 
   // ---- State: technical (Level 4) per instrument ----
@@ -749,10 +749,10 @@ function SectorRotationTable({ rows, compact = false }) {
   return (
     <Panel title={compact ? "Focused institutional rotation" : "Sector rotation monitor"} eyebrow="Level 2/3/4 · sectors ranked by Level 1 focus">
       <div style={{ overflowX: "auto" }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: compact ? 760 : 900 }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: compact ? 860 : 980 }}>
           <thead>
             <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
-              {["Focus", "Sector", "RS3M", "MOM", "MFI", "OBV", "MA21", "Score", "Status", "Action"].map((h) =>
+              {["Focus", "Sector", "RS3M", "MOM", "Vol%", "VolAccel", "RSI", "MA21", "Score", "Status", "Action"].map((h) =>
                 <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
             </tr>
           </thead>
@@ -765,8 +765,9 @@ function SectorRotationTable({ rows, compact = false }) {
                   <td style={td}><b>{r.symbol}</b><div style={{ color: C.inkFaint, fontSize: 10 }}>{r.name}</div></td>
                   <td style={{ ...td, color: (c.rs3m ?? 0) >= 0 ? C.green : C.red }}>{c.rs3m != null ? c.rs3m.toFixed(2) : "—"}</td>
                   <td style={{ ...td, color: (c.rs3mMom ?? 0) >= 0 ? C.green : C.red }}>{c.rs3mMom != null ? c.rs3mMom.toFixed(0) : "—"}</td>
-                  <td style={td}>{c.mfi != null ? c.mfi.toFixed(1) : "—"}</td>
-                  <td style={td}>{c.obv || "—"}</td>
+                  <td style={td}>{c.volRatio != null ? c.volRatio.toFixed(0) : "—"}</td>
+                  <td style={td}>{c.volAccel != null ? c.volAccel.toFixed(0) : "—"}</td>
+                  <td style={td}>{c.rsi != null ? c.rsi.toFixed(1) : "—"}</td>
                   <td style={{ ...td, color: c.priceAboveMA21 ? C.green : C.red }}>{c.priceAboveMA21 == null ? "—" : c.priceAboveMA21 ? "Above" : "Below"}</td>
                   <td style={td}>{r.rotation.score}/{r.rotation.total}</td>
                   <td style={{ ...td, color: r.rotation.color, fontWeight: 700 }}>{r.rotation.status}</td>
@@ -1020,7 +1021,7 @@ function IndicatorsView(props) {
             Auto-calc {calcStatus === "ok" ? "ready" : calcStatus === "loading" ? "computing…" : calcStatus === "fail" ? "unavailable" : "idle"}
           </div>
           <div style={{ font: `400 11px/1.4 ${C.sans}`, color: C.inkDim, maxWidth: 620 }}>
-            Computed from daily Yahoo/FRED history: Level 1 macro, RSI, OBV trend, volume ratio, MFI, RS3M, RS3M_MOM, MA21.
+            Computed from daily Yahoo/FRED history: Level 1 macro, RS3M, RS3M_MOM, volume ratio, volume acceleration, RSI, OBV trend, MFI, and MA21.
             Each shows next to your manual field — tap <b style={{ color: C.blue }}>use</b> to apply.
             {calcStatus === "fail" && " History blocked (often CORS in preview) — keep entering manually."}
           </div>
@@ -1134,9 +1135,13 @@ function InstrumentInputs({ label, color, calc, inst, setInst, flow, setFlow, te
           <Sel value={flow.obv} onChange={(v) => setFlow({ ...flow, obv: v })} options={[["rising", "Rising"], ["flat", "Flat"], ["falling", "Falling"]]} />
           <div style={{ marginTop: 5 }}><CalcChip value={c.obv} onApply={() => setFlow({ ...flow, obv: c.obv })} /></div>
         </Field>
-        <Field label="Volume ratio %">
+        <Field label="Volume ratio %" hint="today / prior 20d avg">
           <NumIn step="1" value={flow.volRatio} onChange={(v) => setFlow({ ...flow, volRatio: v })} />
           <div style={{ marginTop: 5 }}><CalcChip value={c.volRatio} fmt={(v) => v.toFixed(0)} onApply={() => setFlow({ ...flow, volRatio: +c.volRatio.toFixed(0) })} /></div>
+        </Field>
+        <Field label="Volume accel %" hint="5d avg / prior 5d avg">
+          <NumIn step="1" value={flow.volAccel ?? 0} onChange={(v) => setFlow({ ...flow, volAccel: v })} />
+          <div style={{ marginTop: 5 }}><CalcChip value={c.volAccel} fmt={(v) => v.toFixed(0)} onApply={() => setFlow({ ...flow, volAccel: +c.volAccel.toFixed(0) })} /></div>
         </Field>
       </div>
 
