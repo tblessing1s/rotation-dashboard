@@ -83,8 +83,9 @@ async function apiQuotes() {
   return r.json();
 }
 
-async function apiIndicators() {
-  const r = await fetch(`${API}/api/indicators`);
+async function apiIndicators(symbols = []) {
+  const query = symbols.length ? `?symbols=${encodeURIComponent(symbols.join(","))}` : "";
+  const r = await fetch(`${API}/api/indicators${query}`);
   if (!r.ok) throw new Error("indicators failed");
   return r.json();
 }
@@ -461,6 +462,9 @@ function TradingDashboard({ backendOffline }) {
   // ---- State: positions ----
   const [positions, setPositions] = useState(store.get("positions", []));
 
+  // ---- State: entry watch list ----
+  const [entryWatchSymbols, setEntryWatchSymbols] = useState(store.get("entryWatchSymbols", ["XLV", "ILMN"]));
+
   // ---- State: auto-computed indicators per symbol + TOS sector overrides ----
   const [computed, setComputed] = useState(store.get("computed", {}));
   const [sectorOverrides, setSectorOverrides] = useState(store.get("sectorOverrides", {}));
@@ -472,6 +476,7 @@ function TradingDashboard({ backendOffline }) {
   useEffect(() => { store.set("flowXLV", flowXLV); store.set("flowILMN", flowILMN); }, [flowXLV, flowILMN]);
   useEffect(() => { store.set("techXLV", techXLV); store.set("techILMN", techILMN); }, [techXLV, techILMN]);
   useEffect(() => { store.set("positions", positions); }, [positions]);
+  useEffect(() => { store.set("entryWatchSymbols", entryWatchSymbols); }, [entryWatchSymbols]);
   useEffect(() => { store.set("sectorOverrides", sectorOverrides); }, [sectorOverrides]);
 
   // ---- Pull quotes + backend-computed indicators ----
@@ -512,7 +517,7 @@ function TradingDashboard({ backendOffline }) {
 
     // Indicators (already computed server-side)
     try {
-      const comp = await apiIndicators();
+      const comp = await apiIndicators([...SECTORS.map((s) => s.symbol), ...entryWatchSymbols]);
       const clean = {};
       for (const k of Object.keys(comp)) {
         clean[k] = comp[k] && !comp[k].error ? comp[k] : null;
@@ -523,9 +528,9 @@ function TradingDashboard({ backendOffline }) {
     } catch (e) {
       setCalcStatus("fail");
     }
-  }, []);
+  }, [entryWatchSymbols]);
 
-  useEffect(() => { refreshQuotes(); /* once on mount */ }, [refreshQuotes]);
+  useEffect(() => { refreshQuotes(); /* once on mount and watch-list changes */ }, [refreshQuotes]);
 
   // ---- Derived signals ----
   const sig = useMemo(() => macroSignal(macro), [macro]);
@@ -583,7 +588,7 @@ function TradingDashboard({ backendOffline }) {
           <RotationView focus={focus} rows={sectorRows} />
         )}
         {tab === "Entry Watch" && (
-          <EntryWatchView cfm={cfm} app={app} macro={macro} focus={focus} />
+          <EntryWatchView cfm={cfm} app={app} macro={macro} focus={focus} computed={computed} entryWatchSymbols={entryWatchSymbols} setEntryWatchSymbols={setEntryWatchSymbols} />
         )}
         {tab === "Positions" && (
           <PositionsView
@@ -926,29 +931,97 @@ function splitChecklistItems(items) {
   return { passed, missing };
 }
 
-function EntryWatchView({ cfm, app, macro, focus }) {
-  const candidates = [
-    {
+function normalizeWatchSymbol(value) {
+  return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9.^-]/g, "");
+}
+
+function genericWatchChecklist(symbol, calc, macro, focus) {
+  if (!calc) {
+    return {
+      items: [["Indicator data loaded", false]],
+      pass: 0,
+      total: 1,
+      verdict: "WAIT",
+      trigger: `Refresh indicators to load ${symbol} before making an entry decision.`,
+      setup: "Custom ticker monitor",
+      bestWhen: "Add tickers you want monitored against the current macro and rotation framework.",
+    };
+  }
+  const { inst, flow, tech } = bucketsFromCalc(calc);
+  const focusTier = focus.primary.includes(symbol) ? "Primary" : focus.secondary.includes(symbol) ? "Secondary" : focus.avoid.includes(symbol) ? "Ignored" : "Neutral";
+  const items = [
+    ["Macro is not risk-off", macroSignal(macro).level !== "RED"],
+    ["Ticker is not in avoided sector list", focusTier !== "Ignored"],
+    ["RS3M momentum positive", inst.rs3mMom > 0],
+    ["RS3M trend rising", inst.rs3mTrend === "up"],
+    ["MoneyFlow 50+", flow.mfi >= 50],
+    ["OBV not falling", flow.obv !== "falling"],
+    ["Volume at least 70% of normal", flow.volRatio >= 70],
+    ["Price above MA21", tech.priceAboveMA21],
+  ];
+  const pass = items.filter(([, ok]) => ok).length;
+  return {
+    items,
+    pass,
+    total: items.length,
+    verdict: pass === items.length ? "ENTER" : "WAIT",
+    trigger: `${symbol} needs positive RS3M momentum, constructive flow, and price above MA21 before entry.`,
+    setup: "Custom ticker monitor",
+    bestWhen: "Best when its indicators confirm the macro regime and money is rotating into the name.",
+  };
+}
+
+function EntryWatchView({ cfm, app, macro, focus, computed, entryWatchSymbols, setEntryWatchSymbols }) {
+  const [draftSymbol, setDraftSymbol] = useState("");
+  const normalizedWatch = Array.from(new Set((entryWatchSymbols || []).map(normalizeWatchSymbol).filter(Boolean)));
+  const defaultCandidateData = {
+    XLV: {
       tag: "CFM",
       name: "Cashflow Machine",
-      symbol: "XLV",
       color: C.blue,
       data: cfm,
       setup: "Defensive income / cashflow entry",
       trigger: "Enter only after the XLV checklist is complete and support has held with constructive money flow.",
       bestWhen: "Best when growth is slowing, inflation is sticky, and defensive sectors are gaining institutional sponsorship.",
     },
-    {
+    ILMN: {
       tag: "APP",
       name: "Appreciation",
-      symbol: "ILMN",
       color: C.amber,
       data: app,
       setup: "Growth appreciation / breakout entry",
       trigger: "Enter only after ILMN confirms a breakout above resistance with easy credit, strong breadth, and volume expansion.",
       bestWhen: "Best when breadth is strong, volatility is calm, and growth leadership is rotating back into the tape.",
     },
-  ].sort((a, b) => (b.data.pass / b.data.total) - (a.data.pass / a.data.total));
+  };
+
+  const candidates = normalizedWatch.map((symbol) => {
+    const preset = defaultCandidateData[symbol];
+    if (preset) return { ...preset, symbol };
+    const generic = genericWatchChecklist(symbol, computed?.[symbol], macro, focus);
+    return {
+      tag: "WATCH",
+      name: "Custom ticker",
+      symbol,
+      color: C.green,
+      data: generic,
+      setup: generic.setup,
+      trigger: generic.trigger,
+      bestWhen: generic.bestWhen,
+    };
+  }).sort((a, b) => (b.data.pass / b.data.total) - (a.data.pass / a.data.total));
+
+  const addSymbol = (event) => {
+    event.preventDefault();
+    const symbol = normalizeWatchSymbol(draftSymbol);
+    if (!symbol) return;
+    setEntryWatchSymbols(Array.from(new Set([...normalizedWatch, symbol])));
+    setDraftSymbol("");
+  };
+
+  const removeSymbol = (symbol) => {
+    setEntryWatchSymbols(normalizedWatch.filter((s) => s !== symbol));
+  };
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -957,21 +1030,29 @@ function EntryWatchView({ cfm, app, macro, focus }) {
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
           <Stat label="Macro permission" value={focus.entryPermission} color={SIG[focus.level]} />
           <Stat label="Favored strategy" value={focus.favoredStrategy} color={focus.favoredStrategy === "APP" ? C.amber : focus.favoredStrategy === "CFM" ? C.blue : C.ink} />
-          <Stat label="Risk state" value={macroSignal(macro).level === "RED" ? "Protect capital" : "Selective watch"} color={macroSignal(macro).level === "RED" ? C.red : C.green} />
+          <Stat label="Tickers monitored" value={normalizedWatch.length} color={C.blue} />
         </div>
         <div style={{ marginTop: 12, font: `400 12px/1.45 ${C.sans}`, color: C.inkDim }}>
-          This tab is now a watch list, not a passive checklist: use it to see which setup is closest, what is blocking entry, and the exact trigger that would move it from <b style={{ color: C.ink }}>watch</b> to <b style={{ color: C.green }}>enter</b>.
+          Add tickers you want monitored for entry readiness. Custom names are checked against the same rotation, money-flow, and MA21 framework; XLV and ILMN keep their specialized CFM/APP rule checks.
         </div>
+        <form onSubmit={addSymbol} style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
+          <input value={draftSymbol} onChange={(e) => setDraftSymbol(e.target.value)} placeholder="Add ticker (ex: MSFT)" style={{ ...inputStyle, flex: "1 1 180px", textTransform: "uppercase" }} />
+          <button type="submit" style={{ background: C.blue, color: "white", border: "none", borderRadius: 6, padding: "9px 14px", font: `700 12px ${C.sans}`, cursor: "pointer" }}>Add ticker</button>
+        </form>
       </Panel>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 16 }}>
-        {candidates.map((candidate) => <EntryWatchCard key={candidate.tag} {...candidate} />)}
+        {candidates.length ? candidates.map((candidate) => <EntryWatchCard key={candidate.symbol} {...candidate} onRemove={removeSymbol} />) : (
+          <Panel title="No tickers monitored" eyebrow="Entry watch" accent={C.inkFaint}>
+            <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>Add a ticker above to start monitoring entry readiness.</div>
+          </Panel>
+        )}
       </div>
     </div>
   );
 }
 
-function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWhen }) {
+function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWhen, onRemove }) {
   const go = data.verdict === "ENTER";
   const readiness = readinessFromChecklist(data);
   const { passed, missing } = splitChecklistItems(data.items);
@@ -980,7 +1061,7 @@ function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWh
 
   return (
     <Panel title={`${symbol} · ${name}`} eyebrow={`${tag} watch candidate`} accent={color}
-      right={<span style={{ font: `700 12px ${C.mono}`, padding: "5px 10px", borderRadius: 6, background: readiness.tone, color: readiness.color }}>{readiness.label}</span>}>
+      right={<div style={{ display: "flex", gap: 8, alignItems: "center" }}><span style={{ font: `700 12px ${C.mono}`, padding: "5px 10px", borderRadius: 6, background: readiness.tone, color: readiness.color }}>{readiness.label}</span><button onClick={() => onRemove(symbol)} title={`Remove ${symbol}`} style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.inkDim, cursor: "pointer", padding: "4px 8px", font: `700 12px ${C.mono}` }}>×</button></div>}>
       <div style={{ display: "grid", gap: 14 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 12, alignItems: "center" }}>
           <div>
