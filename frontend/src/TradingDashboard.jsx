@@ -1267,6 +1267,33 @@ function summarizeTransactions(rows, currentMarks = {}) {
   return { positions, openPositions: positions.filter((p) => !p.isClosed), closedPositions: positions.filter((p) => p.isClosed), totals };
 }
 
+
+function groupPositionsBySymbol(list) {
+  const grouped = new Map();
+  list.forEach((position) => {
+    const symbol = position.symbol || "—";
+    if (!grouped.has(symbol)) {
+      grouped.set(symbol, {
+        symbol,
+        positions: [],
+        cash: 0,
+        estimated: 0,
+        current: 0,
+        opened: "",
+        closed: "",
+      });
+    }
+    const group = grouped.get(symbol);
+    group.positions.push(position);
+    group.cash += position.cash;
+    group.estimated += position.estimated;
+    group.current += position.current;
+    group.opened = [group.opened, position.opened].filter(Boolean).sort()[0] || group.opened;
+    group.closed = [group.closed, position.closed].filter(Boolean).sort().slice(-1)[0] || group.closed;
+  });
+  return [...grouped.values()].sort((a, b) => a.symbol.localeCompare(b.symbol));
+}
+
 function toDashboardPosition(position) {
   const basis = Math.abs(position.cash);
   return {
@@ -1287,6 +1314,7 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
   const [transactions, setTransactions] = useState(store.get("positionTransactions", []));
   const [positionMarks, setPositionMarks] = useState(store.get("positionMarks", {}));
   const [expandedPositions, setExpandedPositions] = useState({});
+  const [collapsedSymbols, setCollapsedSymbols] = useState({});
   const [importMessage, setImportMessage] = useState("");
   const [saveStatus, setSaveStatus] = useState("");
 
@@ -1342,9 +1370,8 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
     return (
       <React.Fragment key={p.key}>
         <tr style={{ font: `400 12px ${C.sans}` }}>
-          <td style={td}><button onClick={() => setExpandedPositions({ ...expandedPositions, [p.key]: !expanded })} style={{ background: "none", border: "none", color: C.blue, cursor: "pointer", font: `700 13px ${C.mono}` }}>{expanded ? "−" : "+"}</button></td>
+          <td style={td}><button onClick={() => setExpandedPositions({ ...expandedPositions, [p.key]: !expanded })} style={{ background: "none", border: "none", color: C.blue, cursor: "pointer", font: `700 13px ${C.mono}` }} title="Expand open/close fills">{expanded ? "−" : "+"}</button></td>
           <td style={td}><span style={{ font: `700 11px ${C.mono}`, color: p.strategy === "CFM" ? C.blue : C.amber }}>{p.strategy}</span></td>
-          <td style={td}>{p.symbol}</td>
           <td style={td}>{p.positionId || <span style={{ color: C.inkFaint }}>Ungrouped</span>}</td>
           <td style={td}>{p.long.netQty || "—"}</td>
           <td style={td}>{p.short.netQty || "—"}</td>
@@ -1356,10 +1383,54 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
           <td style={{ ...td, font: `400 11px ${C.mono}`, color: C.inkDim }}>{p.opened || "—"}</td>
           <td style={{ ...td, font: `400 11px ${C.mono}`, color: C.inkDim }}>{p.closed || "—"}</td>
         </tr>
-        {expanded && <tr><td colSpan={closed ? 10 : 13} style={{ ...td, background: C.panel2, padding: 0 }}><PositionTransactionLog rows={p.rows} /></td></tr>}
+        {expanded && <tr><td colSpan={closed ? 9 : 12} style={{ ...td, background: C.panel2, padding: 0 }}><PositionTransactionLog rows={p.rows} /></td></tr>}
       </React.Fragment>
     );
   });
+
+  const renderPositionTable = (list, closed = false) => (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: closed ? 760 : 900 }}>
+        <thead><tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
+          {(closed
+            ? ["", "Strat", "Position", "Long qty", "Short qty", "Cash flow", "P/L", "Opened", "Closed"]
+            : ["", "Strat", "Position", "Long qty", "Short qty", "Cash flow", "Long MV", "Short close", "Est. P/L", "Guidance", "Opened", "Closed"]
+          ).map((h) => <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
+        </tr></thead>
+        <tbody>{renderPositionRows(list, closed)}</tbody>
+      </table>
+    </div>
+  );
+
+  const toggleSymbol = (status, symbol) => {
+    const key = `${status}:${symbol}`;
+    setCollapsedSymbols({ ...collapsedSymbols, [key]: !collapsedSymbols[key] });
+  };
+
+  const renderSymbolGroups = (list, status, closed = false) => (
+    <div style={{ display: "grid", gap: 10 }}>
+      {groupPositionsBySymbol(list).map((group) => {
+        const key = `${status}:${group.symbol}`;
+        const collapsed = !!collapsedSymbols[key];
+        return (
+          <div key={key} style={{ border: `1px solid ${C.line}`, borderRadius: 9, overflow: "hidden", background: C.panel2 }}>
+            <button onClick={() => toggleSymbol(status, group.symbol)} style={{ width: "100%", background: "transparent", border: 0, color: C.ink, cursor: "pointer", padding: "11px 13px", display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 12, alignItems: "center", textAlign: "left" }}>
+              <span style={{ color: C.blue, font: `800 13px ${C.mono}` }}>{collapsed ? "+" : "−"}</span>
+              <span>
+                <span style={{ font: `800 14px ${C.mono}`, color: C.ink }}>{group.symbol}</span>
+                <span style={{ marginLeft: 10, font: `500 11px ${C.sans}`, color: C.inkDim }}>{group.positions.length} position{group.positions.length === 1 ? "" : "s"} · {group.opened || "—"}{closed && group.closed ? ` → ${group.closed}` : ""}</span>
+              </span>
+              <span style={{ display: "flex", gap: 14, font: `700 11px ${C.mono}` }}>
+                <span style={{ color: group.cash >= 0 ? C.green : C.red }}>Cash {money(group.cash)}</span>
+                <span style={{ color: group.estimated >= 0 ? C.green : C.red }}>{closed ? "P/L" : "Est."} {money(group.estimated)}</span>
+              </span>
+            </button>
+            {!collapsed && <div style={{ borderTop: `1px solid ${C.line}` }}>{renderPositionTable(group.positions, closed)}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -1393,32 +1464,14 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
         right={<span style={{ font: `500 12px ${C.mono}`, color: transactionSummary.totals.open.estimated >= 0 ? C.green : C.red }}>Open est. {money(transactionSummary.totals.open.estimated)}</span>}>
         {transactionSummary.openPositions.length === 0 ? (
           <div style={{ font: `400 13px ${C.sans}`, color: C.inkDim, padding: "10px 0" }}>No open positions from imported CSV transactions.</div>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
-              <thead><tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
-                {["", "Strat", "Symbol", "Position", "Long qty", "Short qty", "Cash flow", "Long MV", "Short close", "Est. P/L", "Guidance", "Opened", "Closed"].map((h) => <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
-              </tr></thead>
-              <tbody>{renderPositionRows(transactionSummary.openPositions)}</tbody>
-            </table>
-          </div>
-        )}
+        ) : renderSymbolGroups(transactionSummary.openPositions, "open")}
       </Panel>
 
       <Panel title="Closed positions" eyebrow="Archive · expandable open/close detail"
         right={<span style={{ font: `500 12px ${C.mono}`, color: transactionSummary.totals.closed.estimated >= 0 ? C.green : C.red }}>Closed P/L {money(transactionSummary.totals.closed.estimated)}</span>}>
         {transactionSummary.closedPositions.length === 0 ? (
           <div style={{ font: `400 13px ${C.sans}`, color: C.inkDim, padding: "10px 0" }}>Closed positions will appear here automatically once every long and short leg in a CSV position nets to zero.</div>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
-              <thead><tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
-                {["", "Strat", "Symbol", "Position", "Long qty", "Short qty", "Cash flow", "P/L", "Opened", "Closed"].map((h) => <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
-              </tr></thead>
-              <tbody>{renderPositionRows(transactionSummary.closedPositions, true)}</tbody>
-            </table>
-          </div>
-        )}
+        ) : renderSymbolGroups(transactionSummary.closedPositions, "closed", true)}
       </Panel>
     </div>
   );
@@ -1426,27 +1479,46 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
 
 function PositionTransactionLog({ rows }) {
   const sorted = [...rows].sort((a, b) => String(a.date).localeCompare(String(b.date)) || a.order - b.order);
+  const sections = [
+    { title: "Open fills", rows: sorted.filter((row) => row.flowType === "open"), color: C.green },
+    { title: "Close fills", rows: sorted.filter((row) => row.flowType === "close"), color: C.red },
+    { title: "Other activity", rows: sorted.filter((row) => !["open", "close"].includes(row.flowType)), color: C.inkDim },
+  ].filter((section) => section.rows.length);
+
+  const renderRows = (sectionRows) => (
+    <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+      <thead><tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
+        {["Date", "Leg", "Action", "Qty", "Net qty", "Price", "Cash flow", "Note"].map((h) => <th key={h} style={{ textAlign: "left", padding: "7px 9px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
+      </tr></thead>
+      <tbody>{sectionRows.map((row) => (
+        <tr key={row.id} style={{ font: `400 12px ${C.sans}` }}>
+          <td style={td}>{row.date || "—"}</td>
+          <td style={td}><span style={{ color: row.leg === "short" ? C.amber : C.blue, font: `700 11px ${C.mono}` }}>{row.leg}</span></td>
+          <td style={td}>{row.action}</td>
+          <td style={td}>{row.qty || "—"}</td>
+          <td style={td}>{row.signedQty || "—"}</td>
+          <td style={td}>{row.price ? `$${row.price.toLocaleString()}` : "—"}</td>
+          <td style={{ ...td, color: row.amount >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>{money(row.amount)}</td>
+          <td style={{ ...td, color: C.inkDim }}>{row.note || "—"}</td>
+        </tr>
+      ))}</tbody>
+    </table>
+  );
+
   return (
-    <div style={{ padding: "10px 12px" }}>
-      <div style={{ font: `700 11px ${C.sans}`, color: C.ink, marginBottom: 8 }}>Open and close transaction log</div>
-      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
-        <thead><tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
-          {["Date", "Leg", "Open/Close", "Action", "Qty", "Net qty", "Price", "Cash flow", "Note"].map((h) => <th key={h} style={{ textAlign: "left", padding: "7px 9px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
-        </tr></thead>
-        <tbody>{sorted.map((row) => (
-          <tr key={row.id} style={{ font: `400 12px ${C.sans}` }}>
-            <td style={td}>{row.date || "—"}</td>
-            <td style={td}><span style={{ color: row.leg === "short" ? C.amber : C.blue, font: `700 11px ${C.mono}` }}>{row.leg}</span></td>
-            <td style={td}>{row.flowType}</td>
-            <td style={td}>{row.action}</td>
-            <td style={td}>{row.qty || "—"}</td>
-            <td style={td}>{row.signedQty || "—"}</td>
-            <td style={td}>{row.price ? `$${row.price.toLocaleString()}` : "—"}</td>
-            <td style={{ ...td, color: row.amount >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>{money(row.amount)}</td>
-            <td style={{ ...td, color: C.inkDim }}>{row.note || "—"}</td>
-          </tr>
-        ))}</tbody>
-      </table>
+    <div style={{ padding: "12px", display: "grid", gap: 10 }}>
+      <div style={{ font: `700 11px ${C.sans}`, color: C.ink }}>Open / close transaction detail</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 10 }}>
+        {sections.map((section) => (
+          <div key={section.title} style={{ border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden", background: C.panel }}>
+            <div style={{ padding: "8px 10px", borderBottom: `1px solid ${C.line}`, display: "flex", justifyContent: "space-between", gap: 10 }}>
+              <span style={{ font: `800 11px ${C.sans}`, color: section.color }}>{section.title}</span>
+              <span style={{ font: `600 10px ${C.mono}`, color: C.inkFaint }}>{section.rows.length} fill{section.rows.length === 1 ? "" : "s"}</span>
+            </div>
+            <div style={{ overflowX: "auto" }}>{renderRows(section.rows)}</div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
