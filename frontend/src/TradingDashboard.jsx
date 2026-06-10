@@ -1004,7 +1004,7 @@ function parseCsv(text) {
       positionId: explicitPosition || (rawPosition && !isLegLabel(rawPosition) ? rawPosition : ""),
       strategy: pick(obj, ["strategy", "setup", "system"]).toUpperCase() || "CSV",
       action: actionDisplay || "TRANSACTION",
-      flowType: inferOpenClose(actionText, legHint),
+      flowType: inferOpenClose(actionText, legHint, leg),
       leg, qty, price, amount,
       note: pick(obj, ["description", "memo", "notes", "activity"]),
     };
@@ -1062,14 +1062,21 @@ function signedTransactionQty(row) {
     if (/BUY TO CLOSE|BOUGHT TO CLOSE|\bBTC\b|COVER|CLOSE/.test(haystack)) return qty;
     return -qty;
   }
-  if (/SELL TO CLOSE|SOLD TO CLOSE|\bSTC\b|CLOSE/.test(haystack)) return -qty;
+  if (/SELL TO CLOSE|SOLD TO CLOSE|\bSTC\b|\bSELL\b|\bSOLD\b|CLOSE/.test(haystack)) return -qty;
   return qty;
 }
 
-function inferOpenClose(action, legHint) {
+function inferOpenClose(action, legHint, leg = "") {
   const haystack = `${action || ""} ${legHint || ""}`.toUpperCase();
   if (/BUY TO CLOSE|BOUGHT TO CLOSE|SELL TO CLOSE|SOLD TO CLOSE|\bBTC\b|\bSTC\b|COVER|CLOSE/.test(haystack)) return "close";
   if (/BUY TO OPEN|BOUGHT TO OPEN|SELL TO OPEN|SOLD TO OPEN|\bBTO\b|\bSTO\b|OPEN/.test(haystack)) return "open";
+  if (leg === "short") {
+    if (/\bBUY\b|\bBOT\b|\bBOUGHT\b/.test(haystack)) return "close";
+    if (/\bSELL\b|\bSOLD\b/.test(haystack)) return "open";
+  } else {
+    if (/\bSELL\b|\bSOLD\b/.test(haystack)) return "close";
+    if (/\bBUY\b|\bBOT\b|\bBOUGHT\b/.test(haystack)) return "open";
+  }
   return "activity";
 }
 
@@ -1102,7 +1109,8 @@ function summarizeTransactions(rows, currentMarks = {}) {
     }
     const group = groups.get(key);
     const bucket = row.leg === "short" ? "short" : "long";
-    const typed = { ...row, flowType: row.flowType || inferOpenClose(row.action, row.leg), signedQty: signedTransactionQty(row), order: idx };
+    const flowType = row.flowType && row.flowType !== "activity" ? row.flowType : inferOpenClose(row.action, row.leg, row.leg);
+    const typed = { ...row, flowType, signedQty: signedTransactionQty(row), order: idx };
     group.rows.push(typed);
     group.strategy = group.strategy === "CSV" && row.strategy ? row.strategy : group.strategy;
     group.firstDate = [group.firstDate, row.date].filter(Boolean).sort()[0] || group.firstDate;
