@@ -396,6 +396,7 @@ function CheckRow({ label, ok }) {
 // MAIN APP
 // ============================================================================
 const TABS = ["Command", "Rotation", "Entry Watch", "Positions", "Indicators"];
+const DEFAULT_ENTRY_WATCH_SYMBOLS = [];
 
 // Hydration gate: load persisted state from the backend before the dashboard
 // mounts, so saved positions and manual inputs initialize correctly.
@@ -463,12 +464,28 @@ function TradingDashboard({ backendOffline }) {
   const [positions, setPositions] = useState(store.get("positions", []));
 
   // ---- State: entry watch list ----
-  const [entryWatchSymbols, setEntryWatchSymbols] = useState(store.get("entryWatchSymbols", ["XLV", "ILMN"]));
+  const [entryWatchSymbols, setEntryWatchSymbols] = useState(store.get("entryWatchSymbols", DEFAULT_ENTRY_WATCH_SYMBOLS));
 
   // ---- State: auto-computed indicators per symbol + TOS sector overrides ----
   const [computed, setComputed] = useState(store.get("computed", {}));
   const [sectorOverrides, setSectorOverrides] = useState(store.get("sectorOverrides", {}));
   const [calcStatus, setCalcStatus] = useState("idle");
+
+  const normalizedEntryWatchSymbols = useMemo(() => (
+    Array.from(new Set((entryWatchSymbols || []).map(normalizeWatchSymbol).filter(Boolean)))
+  ), [entryWatchSymbols]);
+
+  const updateEntryWatchSymbols = useCallback((symbols) => {
+    const normalized = Array.from(new Set((symbols || []).map(normalizeWatchSymbol).filter(Boolean)));
+    setEntryWatchSymbols(normalized);
+    store.set("entryWatchSymbols", normalized, true).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (JSON.stringify(entryWatchSymbols || []) !== JSON.stringify(normalizedEntryWatchSymbols)) {
+      updateEntryWatchSymbols(normalizedEntryWatchSymbols);
+    }
+  }, [entryWatchSymbols, normalizedEntryWatchSymbols, updateEntryWatchSymbols]);
 
   // Persist on change
   useEffect(() => { store.set("macro", macro); }, [macro]);
@@ -476,7 +493,7 @@ function TradingDashboard({ backendOffline }) {
   useEffect(() => { store.set("flowXLV", flowXLV); store.set("flowILMN", flowILMN); }, [flowXLV, flowILMN]);
   useEffect(() => { store.set("techXLV", techXLV); store.set("techILMN", techILMN); }, [techXLV, techILMN]);
   useEffect(() => { store.set("positions", positions); }, [positions]);
-  useEffect(() => { store.set("entryWatchSymbols", entryWatchSymbols); }, [entryWatchSymbols]);
+  useEffect(() => { store.set("entryWatchSymbols", normalizedEntryWatchSymbols); }, [normalizedEntryWatchSymbols]);
   useEffect(() => { store.set("sectorOverrides", sectorOverrides); }, [sectorOverrides]);
 
   // ---- Pull quotes + backend-computed indicators ----
@@ -517,7 +534,7 @@ function TradingDashboard({ backendOffline }) {
 
     // Indicators (already computed server-side)
     try {
-      const comp = await apiIndicators([...SECTORS.map((s) => s.symbol), ...entryWatchSymbols]);
+      const comp = await apiIndicators([...SECTORS.map((s) => s.symbol), ...normalizedEntryWatchSymbols]);
       const clean = {};
       for (const k of Object.keys(comp)) {
         clean[k] = comp[k] && !comp[k].error ? comp[k] : null;
@@ -528,7 +545,7 @@ function TradingDashboard({ backendOffline }) {
     } catch (e) {
       setCalcStatus("fail");
     }
-  }, [entryWatchSymbols]);
+  }, [normalizedEntryWatchSymbols]);
 
   useEffect(() => { refreshQuotes(); /* once on mount and watch-list changes */ }, [refreshQuotes]);
 
@@ -588,7 +605,7 @@ function TradingDashboard({ backendOffline }) {
           <RotationView focus={focus} rows={sectorRows} />
         )}
         {tab === "Entry Watch" && (
-          <EntryWatchView cfm={cfm} app={app} macro={macro} focus={focus} computed={computed} entryWatchSymbols={entryWatchSymbols} setEntryWatchSymbols={setEntryWatchSymbols} />
+          <EntryWatchView cfm={cfm} app={app} macro={macro} focus={focus} computed={computed} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchSymbols} setEntryWatchSymbols={updateEntryWatchSymbols} />
         )}
         {tab === "Positions" && (
           <PositionsView
@@ -935,14 +952,17 @@ function normalizeWatchSymbol(value) {
   return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9.^-]/g, "");
 }
 
-function genericWatchChecklist(symbol, calc, macro, focus) {
+function genericWatchChecklist(symbol, calc, macro, focus, calcStatus) {
   if (!calc) {
+    const loading = calcStatus === "loading";
     return {
-      items: [["Indicator data loaded", false]],
+      items: [[loading ? "Looking up indicator data" : "Indicator data found", false]],
       pass: 0,
       total: 1,
       verdict: "WAIT",
-      trigger: `Refresh indicators to load ${symbol} before making an entry decision.`,
+      trigger: loading
+        ? `Looking up ${symbol} now. The checklist will evaluate as soon as indicators load.`
+        : `No indicator data was found for ${symbol}. Check the ticker symbol or refresh indicators before making an entry decision.`,
       setup: "Custom ticker monitor",
       bestWhen: "Add tickers you want monitored against the current macro and rotation framework.",
     };
@@ -971,7 +991,7 @@ function genericWatchChecklist(symbol, calc, macro, focus) {
   };
 }
 
-function EntryWatchView({ cfm, app, macro, focus, computed, entryWatchSymbols, setEntryWatchSymbols }) {
+function EntryWatchView({ cfm, app, macro, focus, computed, calcStatus, entryWatchSymbols, setEntryWatchSymbols }) {
   const [draftSymbol, setDraftSymbol] = useState("");
   const normalizedWatch = Array.from(new Set((entryWatchSymbols || []).map(normalizeWatchSymbol).filter(Boolean)));
   const defaultCandidateData = {
@@ -998,7 +1018,7 @@ function EntryWatchView({ cfm, app, macro, focus, computed, entryWatchSymbols, s
   const candidates = normalizedWatch.map((symbol) => {
     const preset = defaultCandidateData[symbol];
     if (preset) return { ...preset, symbol };
-    const generic = genericWatchChecklist(symbol, computed?.[symbol], macro, focus);
+    const generic = genericWatchChecklist(symbol, computed?.[symbol], macro, focus, calcStatus);
     return {
       tag: "WATCH",
       name: "Custom ticker",
