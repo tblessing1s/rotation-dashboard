@@ -1034,9 +1034,9 @@ function summarizeTransactions(rows, currentLongValue, currentShortCloseValue) {
 // ============================================================================
 // POSITIONS VIEW
 // ============================================================================
-// The Positions tab is intentionally scoped to the CSV transaction workflow;
-// the older manual open-position table/form was removed per user preference.
-function PositionsView() {
+function PositionsView({ positions, setPositions, guidance = {}, capital, reserve, deployed, openPL }) {
+  const blank = { id: Date.now(), strategy: "CFM", symbol: "XLV", desc: "", cost: "", current: "", opened: new Date().toISOString().slice(0, 10) };
+  const [draft, setDraft] = useState(blank);
   const [transactions, setTransactions] = useState(store.get("positionTransactions", []));
   const [currentLongValue, setCurrentLongValue] = useState(store.get("currentLongValue", ""));
   const [currentShortCloseValue, setCurrentShortCloseValue] = useState(store.get("currentShortCloseValue", ""));
@@ -1048,6 +1048,13 @@ function PositionsView() {
 
   const transactionSummary = useMemo(() => summarizeTransactions(transactions, currentLongValue, currentShortCloseValue), [transactions, currentLongValue, currentShortCloseValue]);
 
+  const add = () => {
+    if (!draft.cost) return;
+    setPositions([...positions, { ...draft, id: Date.now() }]);
+    setDraft({ ...blank, id: Date.now() });
+  };
+  const update = (id, field, val) => setPositions(positions.map((p) => p.id === id ? { ...p, [field]: val } : p));
+  const remove = (id) => setPositions(positions.filter((p) => p.id !== id));
   const handleCsv = (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -1117,9 +1124,89 @@ function PositionsView() {
           )}
         </div>
       </Panel>
+
+      <Panel title="Open positions" eyebrow="Tracking · synthetics & options"
+        right={<span style={{ font: `500 12px ${C.mono}`, color: openPL >= 0 ? C.green : C.red }}>Manual P&L {openPL >= 0 ? "+" : ""}${openPL.toLocaleString()}</span>}>
+        {positions.length === 0 ? (
+          <div style={{ font: `400 13px ${C.sans}`, color: C.inkDim, padding: "10px 0" }}>No open positions. Add one below to start tracking cost basis and P&L.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+              <thead>
+                <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
+                  {["Strat", "Symbol", "Description", "Cost basis", "Current value", "P&L", "Guidance", "Opened", ""].map((h) =>
+                    <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {positions.map((p) => {
+                  const pl = (parseFloat(p.current) || 0) - (parseFloat(p.cost) || 0);
+                  const pct = p.cost ? (pl / parseFloat(p.cost)) * 100 : 0;
+                  const guide = guidance[p.id] || {};
+                  return (
+                    <tr key={p.id} style={{ font: `400 12px ${C.sans}` }}>
+                      <td style={td}><span style={{ font: `700 11px ${C.mono}`, color: p.strategy === "CFM" ? C.blue : C.amber }}>{p.strategy}</span></td>
+                      <td style={td}>{p.symbol}</td>
+                      <td style={td}>{p.desc || "—"}</td>
+                      <td style={td}>${(parseFloat(p.cost) || 0).toLocaleString()}</td>
+                      <td style={td}>
+                        <input value={p.current} onChange={(e) => update(p.id, "current", e.target.value)}
+                          placeholder="—" style={{ ...inputStyle, padding: "5px 7px", width: 90, font: `500 12px ${C.mono}` }} />
+                      </td>
+                      <td style={{ ...td, color: pl >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>
+                        {pl >= 0 ? "+" : ""}${pl.toLocaleString()} <span style={{ color: C.inkFaint, fontSize: 10 }}>({pct.toFixed(0)}%)</span>
+                      </td>
+                      <td style={{ ...td, color: guide.color || C.inkDim, font: `700 11px ${C.mono}` }} title={guide.note || ""}>{guide.action || "Monitor"}</td>
+                      <td style={{ ...td, font: `400 11px ${C.mono}`, color: C.inkDim }}>{p.opened}</td>
+                      <td style={td}><button onClick={() => remove(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", font: `400 16px ${C.sans}` }}>×</button></td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim }}>
+            CSV columns are auto-detected when named like date, symbol, action/side/type, quantity/qty, price, amount/net amount, and leg/position. If no amount column exists, P/L uses quantity × price. Short estimated P/L treats the current short value as the cost to close.
+          </div>
+          {importMessage && <div style={{ font: `500 12px ${C.sans}`, color: importMessage.startsWith("Imported") ? C.green : C.amber }}>{importMessage}</div>}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px,1fr))", gap: 10 }}>
+            <PLCard title="Long position" count={transactionSummary.long.count} cash={transactionSummary.long.cash} current={transactionSummary.long.current} estimated={transactionSummary.long.estimated} currentLabel="Current value" />
+            <PLCard title="Short position" count={transactionSummary.short.count} cash={transactionSummary.short.cash} current={-transactionSummary.short.current} estimated={transactionSummary.short.estimated} currentLabel="Close value" />
+            <PLCard title="Entire position" count={transactionSummary.total.count} cash={transactionSummary.total.cash} current={transactionSummary.total.current} estimated={transactionSummary.total.estimated} currentLabel="Net current" />
+          </div>
+          {transactions.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+                <thead>
+                  <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
+                    {["Date", "Symbol", "Leg", "Action", "Qty", "Price", "Cash flow", "Note"].map((h) =>
+                      <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactions.slice(0, 80).map((row) => (
+                    <tr key={row.id} style={{ font: `400 12px ${C.sans}` }}>
+                      <td style={td}>{row.date || "—"}</td>
+                      <td style={td}>{row.symbol || "—"}</td>
+                      <td style={td}><span style={{ color: row.leg === "short" ? C.amber : C.blue, font: `700 11px ${C.mono}` }}>{row.leg}</span></td>
+                      <td style={td}>{row.action}</td>
+                      <td style={td}>{row.qty || "—"}</td>
+                      <td style={td}>{row.price ? `$${row.price.toLocaleString()}` : "—"}</td>
+                      <td style={{ ...td, color: row.amount >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>{money(row.amount)}</td>
+                      <td style={{ ...td, color: C.inkDim }}>{row.note || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {transactions.length > 80 && <div style={{ font: `400 11px ${C.sans}`, color: C.inkFaint, paddingTop: 8 }}>Showing first 80 of {transactions.length} imported rows.</div>}
+            </div>
+          )}
+        </div>
+      </Panel>
     </div>
   );
 }
+
 function PLCard({ title, count, cash, current, estimated, currentLabel }) {
   return (
     <div style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, padding: "12px 14px" }}>
