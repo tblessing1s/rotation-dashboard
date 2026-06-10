@@ -581,8 +581,7 @@ function TradingDashboard({ backendOffline }) {
           <ChecklistView cfm={cfm} app={app} />
         )}
         {tab === "Positions" && (
-          <PositionsView positions={positions} setPositions={setPositions}
-            guidance={positionGuide} quotes={quotes} capital={capital} reserve={reserve} deployed={deployed} openPL={openPL} />
+          <PositionsView />
         )}
         {tab === "Indicators" && (
           <IndicatorsView
@@ -1166,18 +1165,42 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
               </tbody>
             </table>
           </div>
-        )}
-      </Panel>
-
-      <Panel title="Add position" eyebrow="New entry">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 12, alignItems: "end" }}>
-          <Field label="Strategy"><Sel value={draft.strategy} onChange={(v) => setDraft({ ...draft, strategy: v })} options={[["CFM", "CFM"], ["APP", "APP"]]} /></Field>
-          <Field label="Symbol"><input value={draft.symbol} onChange={(e) => setDraft({ ...draft, symbol: e.target.value.toUpperCase() })} style={inputStyle} /></Field>
-          <Field label="Description"><input value={draft.desc} onChange={(e) => setDraft({ ...draft, desc: e.target.value })} placeholder="e.g. Jan 150C long" style={inputStyle} /></Field>
-          <Field label="Cost basis ($)"><input type="number" value={draft.cost} onChange={(e) => setDraft({ ...draft, cost: e.target.value })} style={inputStyle} /></Field>
-          <Field label="Current value ($)"><input type="number" value={draft.current} onChange={(e) => setDraft({ ...draft, current: e.target.value })} style={inputStyle} /></Field>
-          <Field label="Opened"><input type="date" value={draft.opened} onChange={(e) => setDraft({ ...draft, opened: e.target.value })} style={inputStyle} /></Field>
-          <button onClick={add} style={{ background: C.blue, border: "none", borderRadius: 6, color: "#fff", font: `600 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Add position</button>
+          <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim }}>
+            CSV columns are auto-detected when named like date, symbol, action/side/type, quantity/qty, price, amount/net amount, and leg/position. If no amount column exists, P/L uses quantity × price. Short estimated P/L treats the current short value as the cost to close.
+          </div>
+          {importMessage && <div style={{ font: `500 12px ${C.sans}`, color: importMessage.startsWith("Imported") ? C.green : C.amber }}>{importMessage}</div>}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px,1fr))", gap: 10 }}>
+            <PLCard title="Long position" count={transactionSummary.long.count} cash={transactionSummary.long.cash} current={transactionSummary.long.current} estimated={transactionSummary.long.estimated} currentLabel="Current value" />
+            <PLCard title="Short position" count={transactionSummary.short.count} cash={transactionSummary.short.cash} current={-transactionSummary.short.current} estimated={transactionSummary.short.estimated} currentLabel="Close value" />
+            <PLCard title="Entire position" count={transactionSummary.total.count} cash={transactionSummary.total.cash} current={transactionSummary.total.current} estimated={transactionSummary.total.estimated} currentLabel="Net current" />
+          </div>
+          {transactions.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+                <thead>
+                  <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
+                    {["Date", "Symbol", "Leg", "Action", "Qty", "Price", "Cash flow", "Note"].map((h) =>
+                      <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactions.slice(0, 80).map((row) => (
+                    <tr key={row.id} style={{ font: `400 12px ${C.sans}` }}>
+                      <td style={td}>{row.date || "—"}</td>
+                      <td style={td}>{row.symbol || "—"}</td>
+                      <td style={td}><span style={{ color: row.leg === "short" ? C.amber : C.blue, font: `700 11px ${C.mono}` }}>{row.leg}</span></td>
+                      <td style={td}>{row.action}</td>
+                      <td style={td}>{row.qty || "—"}</td>
+                      <td style={td}>{row.price ? `$${row.price.toLocaleString()}` : "—"}</td>
+                      <td style={{ ...td, color: row.amount >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>{money(row.amount)}</td>
+                      <td style={{ ...td, color: C.inkDim }}>{row.note || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {transactions.length > 80 && <div style={{ font: `400 11px ${C.sans}`, color: C.inkFaint, paddingTop: 8 }}>Showing first 80 of {transactions.length} imported rows.</div>}
+            </div>
+          )}
         </div>
       </Panel>
     </div>
