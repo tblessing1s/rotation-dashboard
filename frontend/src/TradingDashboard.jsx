@@ -73,6 +73,31 @@ const SECTORS = [
   { symbol: "XLRE", name: "Real Estate", group: "rates" },
 ];
 
+const SECTOR_BY_SYMBOL = Object.fromEntries(SECTORS.map((sector) => [sector.symbol, sector]));
+const DEFENSIVE_SECTORS = ["XLV", "XLP", "XLU", "XLRE"];
+const APP_SECTORS = ["XLK", "XLY", "XLC", "XLI"];
+const SECTOR_PROXY_BY_STOCK = {
+  AAPL: "XLK", MSFT: "XLK", NVDA: "XLK", AMD: "XLK", AVGO: "XLK", CRM: "XLK", NOW: "XLK",
+  META: "XLC", GOOGL: "XLC", GOOG: "XLC", NFLX: "XLC",
+  AMZN: "XLY", TSLA: "XLY", HD: "XLY", MCD: "XLY", NKE: "XLY",
+  JNJ: "XLV", MRK: "XLV", PFE: "XLV", ABBV: "XLV", LLY: "XLV", UNH: "XLV", ILMN: "XLV",
+  PG: "XLP", KO: "XLP", PEP: "XLP", COST: "XLP", WMT: "XLP",
+  JPM: "XLF", BAC: "XLF", GS: "XLF", MS: "XLF", BRK: "XLF",
+  XOM: "XLE", CVX: "XLE", COP: "XLE", SLB: "XLE",
+  CAT: "XLI", GE: "XLI", HON: "XLI", DE: "XLI", BA: "XLI",
+  LIN: "XLB", FCX: "XLB", NEM: "XLB",
+  NEE: "XLU", SO: "XLU", DUK: "XLU",
+  PLD: "XLRE", AMT: "XLRE",
+};
+
+const STRATEGY_META = {
+  AUTO: { label: "Auto", color: C.blue },
+  CFM: { label: "CFM", color: C.blue },
+  APP: { label: "APP", color: C.amber },
+  WAIT: { label: "No trade", color: C.inkDim },
+  MIXED: { label: "Mixed", color: C.yellow },
+};
+
 const SECTOR_WATCH_PROFILES = {
   XLK: {
     tag: "GROWTH",
@@ -617,21 +642,19 @@ function TradingDashboard({ backendOffline }) {
   const [sectorOverrides, setSectorOverrides] = useState(store.get("sectorOverrides", {}));
   const [calcStatus, setCalcStatus] = useState("idle");
 
-  const normalizedEntryWatchSymbols = useMemo(() => (
-    Array.from(new Set((entryWatchSymbols || []).map(normalizeWatchSymbol).filter(Boolean)))
-  ), [entryWatchSymbols]);
+  const normalizedEntryWatchItems = useMemo(() => normalizeWatchItems(entryWatchSymbols || []), [entryWatchSymbols]);
 
-  const updateEntryWatchSymbols = useCallback((symbols) => {
-    const normalized = Array.from(new Set((symbols || []).map(normalizeWatchSymbol).filter(Boolean)));
+  const updateEntryWatchSymbols = useCallback((items) => {
+    const normalized = normalizeWatchItems(items);
     setEntryWatchSymbols(normalized);
     store.set("entryWatchSymbols", normalized, true).catch(() => {});
   }, []);
 
   useEffect(() => {
-    if (JSON.stringify(entryWatchSymbols || []) !== JSON.stringify(normalizedEntryWatchSymbols)) {
-      updateEntryWatchSymbols(normalizedEntryWatchSymbols);
+    if (JSON.stringify(entryWatchSymbols || []) !== JSON.stringify(normalizedEntryWatchItems)) {
+      updateEntryWatchSymbols(normalizedEntryWatchItems);
     }
-  }, [entryWatchSymbols, normalizedEntryWatchSymbols, updateEntryWatchSymbols]);
+  }, [entryWatchSymbols, normalizedEntryWatchItems, updateEntryWatchSymbols]);
 
   // Persist on change
   useEffect(() => { store.set("macro", macro); }, [macro]);
@@ -639,7 +662,7 @@ function TradingDashboard({ backendOffline }) {
   useEffect(() => { store.set("flowXLV", flowXLV); store.set("flowILMN", flowILMN); }, [flowXLV, flowILMN]);
   useEffect(() => { store.set("techXLV", techXLV); store.set("techILMN", techILMN); }, [techXLV, techILMN]);
   useEffect(() => { store.set("positions", positions); }, [positions]);
-  useEffect(() => { store.set("entryWatchSymbols", normalizedEntryWatchSymbols); }, [normalizedEntryWatchSymbols]);
+  useEffect(() => { store.set("entryWatchSymbols", normalizedEntryWatchItems); }, [normalizedEntryWatchItems]);
   useEffect(() => { store.set("sectorOverrides", sectorOverrides); }, [sectorOverrides]);
 
   // ---- Pull quotes + backend-computed indicators ----
@@ -680,7 +703,8 @@ function TradingDashboard({ backendOffline }) {
 
     // Indicators (already computed server-side)
     try {
-      const comp = await apiIndicators([...SECTORS.map((s) => s.symbol), ...normalizedEntryWatchSymbols]);
+      const watchIndicatorSymbols = normalizedEntryWatchItems.flatMap((item) => [item.symbol, item.sectorProxy]).filter(Boolean);
+      const comp = await apiIndicators([...SECTORS.map((s) => s.symbol), ...watchIndicatorSymbols]);
       const clean = {};
       for (const k of Object.keys(comp)) {
         clean[k] = comp[k] && !comp[k].error ? comp[k] : null;
@@ -691,7 +715,7 @@ function TradingDashboard({ backendOffline }) {
     } catch (e) {
       setCalcStatus("fail");
     }
-  }, [normalizedEntryWatchSymbols]);
+  }, [normalizedEntryWatchItems]);
 
   useEffect(() => { refreshQuotes(); /* once on mount and watch-list changes */ }, [refreshQuotes]);
 
@@ -751,7 +775,7 @@ function TradingDashboard({ backendOffline }) {
           <RotationView focus={focus} rows={sectorRows} />
         )}
         {tab === "Entry Watch" && (
-          <EntryWatchView app={app} macro={macro} focus={focus} computed={computed} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchSymbols} setEntryWatchSymbols={updateEntryWatchSymbols} />
+          <EntryWatchView app={app} macro={macro} focus={focus} computed={computed} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchItems} setEntryWatchSymbols={updateEntryWatchSymbols} />
         )}
         {tab === "Positions" && (
           <PositionsView
@@ -1098,6 +1122,38 @@ function normalizeWatchSymbol(value) {
   return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9.^-]/g, "");
 }
 
+function inferSectorProxy(symbol) {
+  const clean = normalizeWatchSymbol(symbol);
+  if (SECTOR_BY_SYMBOL[clean]) return clean;
+  return SECTOR_PROXY_BY_STOCK[clean] || "";
+}
+
+function normalizeStrategyMode(value) {
+  const mode = String(value || "AUTO").toUpperCase();
+  return ["AUTO", "CFM", "APP"].includes(mode) ? mode : "AUTO";
+}
+
+function normalizeWatchItem(item) {
+  if (typeof item === "string") {
+    const symbol = normalizeWatchSymbol(item);
+    if (!symbol) return null;
+    return { symbol, strategyMode: "AUTO", sectorProxy: inferSectorProxy(symbol) };
+  }
+  const symbol = normalizeWatchSymbol(item?.symbol);
+  if (!symbol) return null;
+  const sectorProxy = normalizeWatchSymbol(item?.sectorProxy) || inferSectorProxy(symbol);
+  return { symbol, strategyMode: normalizeStrategyMode(item?.strategyMode), sectorProxy };
+}
+
+function normalizeWatchItems(items = []) {
+  const bySymbol = new Map();
+  for (const item of items) {
+    const normalized = normalizeWatchItem(item);
+    if (normalized) bySymbol.set(normalized.symbol, normalized);
+  }
+  return Array.from(bySymbol.values());
+}
+
 function missingIndicatorChecklist(symbol, calcStatus, setup, bestWhen) {
   const loading = calcStatus === "loading";
   return {
@@ -1159,6 +1215,145 @@ function sectorWatchChecklist(symbol, calc, macro, focus, calcStatus) {
   };
 }
 
+function watchResult(items, trigger, setup, bestWhen, extras = {}) {
+  const pass = items.filter(([, ok]) => ok).length;
+  const total = items.length;
+  return {
+    items,
+    pass,
+    total,
+    verdict: pass === total ? "ENTER" : "WAIT",
+    score: total ? pass / total : 0,
+    trigger,
+    setup,
+    bestWhen,
+    ...extras,
+  };
+}
+
+function sectorProxyLabel(sectorProxy) {
+  const sector = SECTOR_BY_SYMBOL[sectorProxy];
+  return sector ? `${sectorProxy} ${sector.name}` : "selected sector";
+}
+
+function sectorProxyRotationOk(sectorCalc, macro, focus, sectorProxy, preferredSectors) {
+  if (!sectorProxy) return false;
+  const tier = focusTierForSymbol(sectorProxy, focus);
+  if (tier === "Ignored") return false;
+  if (tier === "Primary" || tier === "Secondary") return true;
+  if (preferredSectors.includes(sectorProxy)) return true;
+  if (!sectorCalc) return false;
+  return sectorRotationStatus(sectorCalc, tier, macro).score >= 5;
+}
+
+function cfmStockWatchChecklist(symbol, calc, sectorCalc, macro, focus, calcStatus, sectorProxy = "") {
+  if (!calc) {
+    return missingIndicatorChecklist(
+      symbol,
+      calcStatus,
+      "Auto CFM candidate",
+      "Best when macro favors defensive cashflow, the sector proxy confirms rotation, and the stock is holding support with controlled accumulation."
+    );
+  }
+  const { inst, flow, tech } = bucketsFromCalc(calc);
+  const macroLevel = macroSignal(macro).level;
+  const proxy = sectorProxy || inferSectorProxy(symbol);
+  const proxyTier = proxy ? focusTierForSymbol(proxy, focus) : "Neutral";
+  const macroFavorsCFM = focus.favoredStrategy.includes("CFM") || focus.favoredStrategy.includes("Defense") || macro.growth === "slowing" || macro.fed === "hawkish";
+  const proxyIsDefensive = DEFENSIVE_SECTORS.includes(proxy);
+  const proxyOk = sectorProxyRotationOk(sectorCalc, macro, focus, proxy, DEFENSIVE_SECTORS);
+  const items = [
+    ["Macro is not risk-off", macroLevel !== "RED"],
+    ["Macro favors CFM / defensive cashflow", macroFavorsCFM],
+    ["Breadth stable enough for defensive entries", macro.breadth >= 45],
+    ["VIX below panic level 30", macro.vix < 30],
+    [proxy ? `${sectorProxyLabel(proxy)} is not avoided` : "Sector proxy selected", proxy ? proxyTier !== "Ignored" : false],
+    [proxy ? `${sectorProxyLabel(proxy)} fits CFM or confirms rotation` : "Sector proxy confirms rotation", proxyOk || proxyIsDefensive],
+    ["RS3M no worse than deep laggard", inst.rs3m > -25],
+    ["RS3M momentum improving", inst.rs3mMom > 0 || inst.rs3mTrend === "up"],
+    ["MoneyFlow 55–75 accumulation", flow.mfi >= 55 && flow.mfi <= 75],
+    ["OBV not falling", flow.obv !== "falling"],
+    ["Volume healthy 70–160%", flow.volRatio >= 70 && flow.volRatio <= 160],
+    ["RSI constructive 45–70", flow.rsi >= 45 && flow.rsi <= 70],
+    ["Price above MA21 / support reclaim", tech.priceAboveMA21],
+  ];
+  return watchResult(
+    items,
+    `${symbol} is a CFM candidate when macro favors cashflow/defense, ${proxy || "its sector proxy"} confirms, flow is controlled, and price holds above MA21/support.`,
+    "Auto-detected CFM / cashflow support entry",
+    "Best when the market rewards defensive cashflow and the stock shows accumulation without chase-volume risk.",
+    { strategy: "CFM", confidence: Math.round((items.filter(([, ok]) => ok).length / items.length) * 100), sectorProxy: proxy }
+  );
+}
+
+function appStockWatchChecklist(symbol, calc, sectorCalc, macro, focus, calcStatus, sectorProxy = "") {
+  if (!calc) {
+    return missingIndicatorChecklist(
+      symbol,
+      calcStatus,
+      "Auto APP candidate",
+      "Best when macro favors appreciation, the sector proxy leads, and the stock confirms with relative strength, volume expansion, and breakout behavior."
+    );
+  }
+  const { inst, flow, tech } = bucketsFromCalc(calc);
+  const macroLevel = macroSignal(macro).level;
+  const proxy = sectorProxy || inferSectorProxy(symbol);
+  const proxyTier = proxy ? focusTierForSymbol(proxy, focus) : "Neutral";
+  const macroFavorsAPP = focus.favoredStrategy === "APP" || macro.fed === "dovish" || (macro.growth === "accelerating" && macro.breadth >= 55);
+  const proxyIsApp = APP_SECTORS.includes(proxy);
+  const proxyOk = sectorProxyRotationOk(sectorCalc, macro, focus, proxy, APP_SECTORS);
+  const volumeBreakout = flow.volRatio >= 110 || flow.volAccel >= 110;
+  const items = [
+    ["Macro is not risk-off", macroLevel !== "RED"],
+    ["Macro favors APP / risk-on growth", macroFavorsAPP],
+    ["Breadth strong enough for APP entries", macro.breadth >= 55],
+    ["VIX below 22", macro.vix < 22],
+    [proxy ? `${sectorProxyLabel(proxy)} is not avoided` : "Sector proxy selected", proxy ? proxyTier !== "Ignored" : false],
+    [proxy ? `${sectorProxyLabel(proxy)} fits APP or confirms rotation` : "Sector proxy confirms rotation", proxyOk || proxyIsApp],
+    ["RS3M leadership positive", inst.rs3m > 0],
+    ["RS3M momentum positive", inst.rs3mMom > 0],
+    ["RS3M trend rising", inst.rs3mTrend === "up"],
+    ["MoneyFlow 50–75, not exhausted", flow.mfi >= 50 && flow.mfi <= 75],
+    ["OBV rising", flow.obv === "rising"],
+    ["Volume expansion / breakout participation", volumeBreakout],
+    ["RSI strength 50–70", flow.rsi >= 50 && flow.rsi <= 70],
+    ["Price above MA21", tech.priceAboveMA21],
+  ];
+  return watchResult(
+    items,
+    `${symbol} is an APP candidate when macro supports growth, ${proxy || "its sector proxy"} leads, RS/OBV improve, and volume confirms a breakout attempt.`,
+    "Auto-detected APP / appreciation breakout entry",
+    "Best when risk-on leadership is active and the stock shows relative strength plus expanding participation.",
+    { strategy: "APP", confidence: Math.round((items.filter(([, ok]) => ok).length / items.length) * 100), sectorProxy: proxy }
+  );
+}
+
+function autoStrategyWatchChecklist(symbol, calc, sectorCalc, macro, focus, calcStatus, strategyMode = "AUTO", sectorProxy = "") {
+  const cfm = cfmStockWatchChecklist(symbol, calc, sectorCalc, macro, focus, calcStatus, sectorProxy);
+  const app = appStockWatchChecklist(symbol, calc, sectorCalc, macro, focus, calcStatus, sectorProxy);
+  if (strategyMode === "CFM") return { ...cfm, strategy: "CFM", alternate: app, autoReason: "Manual CFM mode" };
+  if (strategyMode === "APP") return { ...app, strategy: "APP", alternate: cfm, autoReason: "Manual APP mode" };
+  if (!calc) return { ...cfm, strategy: "WAIT", alternate: app, autoReason: "Waiting for indicator data" };
+
+  const delta = Math.abs(cfm.score - app.score);
+  const selected = cfm.score >= app.score ? cfm : app;
+  const alternate = selected === cfm ? app : cfm;
+  const strategy = selected.score < 0.55 ? "WAIT" : delta < 0.08 ? "MIXED" : selected.strategy;
+  const autoReason = strategy === "MIXED"
+    ? `CFM ${Math.round(cfm.score * 100)}% vs APP ${Math.round(app.score * 100)}% — both need review.`
+    : strategy === "WAIT"
+      ? `Neither setup is strong yet: CFM ${Math.round(cfm.score * 100)}%, APP ${Math.round(app.score * 100)}%.`
+      : `${strategy} is the better current fit: CFM ${Math.round(cfm.score * 100)}%, APP ${Math.round(app.score * 100)}%.`;
+  return {
+    ...selected,
+    strategy,
+    alternate,
+    autoReason,
+    confidence: Math.round(selected.score * 100),
+    verdict: selected.verdict === "ENTER" && ["CFM", "APP"].includes(strategy) ? "ENTER" : "WAIT",
+  };
+}
+
 function genericWatchChecklist(symbol, calc, macro, focus, calcStatus) {
   if (!calc) {
     return missingIndicatorChecklist(
@@ -1196,28 +1391,25 @@ function genericWatchChecklist(symbol, calc, macro, focus, calcStatus) {
 
 function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSymbols, setEntryWatchSymbols }) {
   const [draftSymbol, setDraftSymbol] = useState("");
-  const normalizedWatch = Array.from(new Set((entryWatchSymbols || []).map(normalizeWatchSymbol).filter(Boolean)));
-  const defaultCandidateData = {
-    ILMN: {
-      tag: "APP",
-      name: "Appreciation",
-      color: C.amber,
-      data: app,
-      setup: "Growth appreciation / breakout entry",
-      trigger: "Enter only after ILMN confirms a breakout above resistance with easy credit, strong breadth, and volume expansion.",
-      bestWhen: "Best when breadth is strong, volatility is calm, and growth leadership is rotating back into the tape.",
-    },
-  };
+  const [draftStrategyMode, setDraftStrategyMode] = useState("AUTO");
+  const [draftSectorProxy, setDraftSectorProxy] = useState("");
+  const normalizedWatch = normalizeWatchItems(entryWatchSymbols || []);
 
-  const candidates = normalizedWatch.map((symbol) => {
+  const candidates = normalizedWatch.map((watch) => {
+    const { symbol, strategyMode, sectorProxy } = watch;
     const sectorProfile = SECTOR_WATCH_PROFILES[symbol];
-    if (sectorProfile) {
-      const data = sectorWatchChecklist(symbol, computed?.[symbol], macro, focus, calcStatus);
+    const effectiveProxy = sectorProxy || inferSectorProxy(symbol);
+    if (sectorProfile && strategyMode === "AUTO") {
+      const forcedMode = DEFENSIVE_SECTORS.includes(symbol) ? "CFM" : APP_SECTORS.includes(symbol) ? "APP" : "AUTO";
+      const autoData = autoStrategyWatchChecklist(symbol, computed?.[symbol], computed?.[symbol], macro, focus, calcStatus, forcedMode, symbol);
+      const data = { ...sectorWatchChecklist(symbol, computed?.[symbol], macro, focus, calcStatus), ...autoData };
       return {
-        tag: sectorProfile.tag,
+        tag: data.strategy || sectorProfile.tag,
         name: sectorProfile.name,
         symbol,
-        color: sectorProfile.color,
+        strategyMode,
+        sectorProxy: symbol,
+        color: STRATEGY_META[data.strategy]?.color || sectorProfile.color,
         data,
         setup: data.setup,
         trigger: data.trigger,
@@ -1225,18 +1417,18 @@ function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSym
       };
     }
 
-    const preset = defaultCandidateData[symbol];
-    if (preset) return { ...preset, symbol };
-    const generic = genericWatchChecklist(symbol, computed?.[symbol], macro, focus, calcStatus);
+    const data = autoStrategyWatchChecklist(symbol, computed?.[symbol], computed?.[effectiveProxy], macro, focus, calcStatus, strategyMode, effectiveProxy);
     return {
-      tag: "WATCH",
-      name: "Standard ticker",
+      tag: data.strategy || strategyMode,
+      name: STRATEGY_META[data.strategy]?.label || "Auto strategy",
       symbol,
-      color: C.green,
-      data: generic,
-      setup: generic.setup,
-      trigger: generic.trigger,
-      bestWhen: generic.bestWhen,
+      strategyMode,
+      sectorProxy: effectiveProxy,
+      color: STRATEGY_META[data.strategy]?.color || C.green,
+      data,
+      setup: data.setup,
+      trigger: data.trigger,
+      bestWhen: data.bestWhen,
     };
   }).sort((a, b) => (b.data.pass / b.data.total) - (a.data.pass / a.data.total));
 
@@ -1244,12 +1436,19 @@ function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSym
     event.preventDefault();
     const symbol = normalizeWatchSymbol(draftSymbol);
     if (!symbol) return;
-    setEntryWatchSymbols(Array.from(new Set([...normalizedWatch, symbol])));
+    const sectorProxy = normalizeWatchSymbol(draftSectorProxy) || inferSectorProxy(symbol);
+    setEntryWatchSymbols([...normalizedWatch.filter((item) => item.symbol !== symbol), { symbol, strategyMode: draftStrategyMode, sectorProxy }]);
     setDraftSymbol("");
+    setDraftStrategyMode("AUTO");
+    setDraftSectorProxy("");
   };
 
   const removeSymbol = (symbol) => {
-    setEntryWatchSymbols(normalizedWatch.filter((s) => s !== symbol));
+    setEntryWatchSymbols(normalizedWatch.filter((item) => item.symbol !== symbol));
+  };
+
+  const updateWatchItem = (symbol, patch) => {
+    setEntryWatchSymbols(normalizedWatch.map((item) => (item.symbol === symbol ? normalizeWatchItem({ ...item, ...patch }) : item)));
   };
 
   return (
@@ -1262,16 +1461,25 @@ function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSym
           <Stat label="Tickers monitored" value={normalizedWatch.length} color={C.blue} />
         </div>
         <div style={{ marginTop: 12, font: `400 12px/1.45 ${C.sans}`, color: C.inkDim }}>
-          Add tickers you want monitored for entry readiness. Sector ETFs use a consistent sector-specific checklist tuned to their macro role; non-sector tickers use the standardized rotation, money-flow, volume, and MA21 framework.
+          Add tickers and let Auto score both CFM and APP. The app selects the better fit for the current macro, sector proxy, rotation, flow, volume, and MA21 setup; use Force CFM/APP only when you have a specific thesis.
         </div>
-        <form onSubmit={addSymbol} style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
-          <input value={draftSymbol} onChange={(e) => setDraftSymbol(e.target.value)} placeholder="Add ticker (ex: MSFT)" style={{ ...inputStyle, flex: "1 1 180px", textTransform: "uppercase" }} />
+        <form onSubmit={addSymbol} style={{ display: "grid", gridTemplateColumns: "minmax(150px, 1fr) 150px 170px auto", gap: 8, marginTop: 14 }}>
+          <input value={draftSymbol} onChange={(e) => setDraftSymbol(e.target.value)} placeholder="Add ticker (ex: MSFT)" style={{ ...inputStyle, textTransform: "uppercase" }} />
+          <select value={draftStrategyMode} onChange={(e) => setDraftStrategyMode(e.target.value)} style={inputStyle}>
+            <option value="AUTO">Auto strategy</option>
+            <option value="CFM">Force CFM</option>
+            <option value="APP">Force APP</option>
+          </select>
+          <select value={draftSectorProxy} onChange={(e) => setDraftSectorProxy(e.target.value)} style={inputStyle}>
+            <option value="">Auto sector proxy</option>
+            {SECTORS.map((sector) => <option key={sector.symbol} value={sector.symbol}>{sector.symbol} · {sector.name}</option>)}
+          </select>
           <button type="submit" style={{ background: C.blue, color: "white", border: "none", borderRadius: 6, padding: "9px 14px", font: `700 12px ${C.sans}`, cursor: "pointer" }}>Add ticker</button>
         </form>
       </Panel>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 16 }}>
-        {candidates.length ? candidates.map((candidate) => <EntryWatchCard key={candidate.symbol} {...candidate} onRemove={removeSymbol} />) : (
+        {candidates.length ? candidates.map((candidate) => <EntryWatchCard key={candidate.symbol} {...candidate} onRemove={removeSymbol} onUpdate={updateWatchItem} />) : (
           <Panel title="No tickers monitored" eyebrow="Entry watch" accent={C.inkFaint}>
             <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>Add a ticker above to start monitoring entry readiness.</div>
           </Panel>
@@ -1281,7 +1489,7 @@ function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSym
   );
 }
 
-function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWhen, onRemove }) {
+function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWhen, strategyMode, sectorProxy, onRemove, onUpdate }) {
   const go = data.verdict === "ENTER";
   const readiness = readinessFromChecklist(data);
   const { passed, missing } = splitChecklistItems(data.items);
@@ -1294,13 +1502,37 @@ function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWh
       <div style={{ display: "grid", gap: 14 }}>
         <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 12, alignItems: "center" }}>
           <div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+              <span style={{ font: `800 11px ${C.mono}`, color, border: `1px solid ${color}`, borderRadius: 999, padding: "3px 8px" }}>{STRATEGY_META[data.strategy]?.label || tag}</span>
+              {data.confidence != null && <span style={{ font: `700 11px ${C.mono}`, color: C.inkDim }}>Confidence {data.confidence}%</span>}
+              {sectorProxy && <span style={{ font: `600 11px ${C.mono}`, color: C.inkFaint }}>Proxy {sectorProxy}</span>}
+            </div>
             <div style={{ font: `600 13px ${C.sans}`, color: C.ink }}>{setup}</div>
             <div style={{ font: `400 12px/1.4 ${C.sans}`, color: C.inkDim, marginTop: 4 }}>{bestWhen}</div>
+            {data.autoReason && <div style={{ font: `600 11px/1.35 ${C.sans}`, color: C.inkDim, marginTop: 8 }}>{data.autoReason}</div>}
           </div>
           <div style={{ textAlign: "right" }}>
             <div style={{ font: `800 24px/1 ${C.mono}`, color: go ? C.green : color }}>{data.pass}/{data.total}</div>
             <div style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, marginTop: 3 }}>READY</div>
           </div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(145px, 1fr))", gap: 8 }}>
+          <label style={{ display: "grid", gap: 4 }}>
+            <span style={{ font: `700 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1 }}>STRATEGY MODE</span>
+            <select value={strategyMode || "AUTO"} onChange={(e) => onUpdate(symbol, { strategyMode: e.target.value })} style={inputStyle}>
+              <option value="AUTO">Auto detect</option>
+              <option value="CFM">Force CFM</option>
+              <option value="APP">Force APP</option>
+            </select>
+          </label>
+          <label style={{ display: "grid", gap: 4 }}>
+            <span style={{ font: `700 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1 }}>SECTOR PROXY</span>
+            <select value={sectorProxy || ""} onChange={(e) => onUpdate(symbol, { sectorProxy: e.target.value })} style={inputStyle}>
+              <option value="">Auto / none</option>
+              {SECTORS.map((sector) => <option key={sector.symbol} value={sector.symbol}>{sector.symbol} · {sector.name}</option>)}
+            </select>
+          </label>
         </div>
 
         <div style={{ height: 7, background: C.panel2, borderRadius: 4, overflow: "hidden" }}>
@@ -1316,6 +1548,12 @@ function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWh
           <WatchList title="Blocking entry" items={nextBlockers} empty="No blockers — entry checklist complete." color={go ? C.green : C.red} />
           <WatchList title="Already confirmed" items={confirmations} empty="No confirmations yet." color={C.green} />
         </div>
+
+        {data.alternate && (
+          <div style={{ font: `600 11px/1.4 ${C.sans}`, color: C.inkFaint, borderTop: `1px solid ${C.lineSoft}`, paddingTop: 10 }}>
+            Alternate score: {data.alternate.strategy} {Math.round((data.alternate.score || 0) * 100)}% ({data.alternate.pass}/{data.alternate.total})
+          </div>
+        )}
 
         <details style={{ borderTop: `1px solid ${C.lineSoft}`, paddingTop: 10 }}>
           <summary style={{ cursor: "pointer", font: `700 11px ${C.mono}`, color: C.inkDim, letterSpacing: 1 }}>FULL RULE CHECK</summary>
