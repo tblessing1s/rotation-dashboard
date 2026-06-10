@@ -581,8 +581,7 @@ function TradingDashboard({ backendOffline }) {
           <ChecklistView cfm={cfm} app={app} />
         )}
         {tab === "Positions" && (
-          <PositionsView positions={positions} setPositions={setPositions}
-            guidance={positionGuide} quotes={quotes} capital={capital} reserve={reserve} deployed={deployed} openPL={openPL} />
+          <PositionsView />
         )}
         {tab === "Indicators" && (
           <IndicatorsView
@@ -926,77 +925,214 @@ function FullChecklist({ tag, name, color, data }) {
   );
 }
 
+
+function cleanCurrency(value) {
+  if (value === undefined || value === null) return 0;
+  const raw = String(value).trim();
+  if (!raw) return 0;
+  const negative = /^\(.*\)$/.test(raw);
+  const parsed = parseFloat(raw.replace(/[()$,]/g, ""));
+  if (Number.isNaN(parsed)) return 0;
+  return negative ? -Math.abs(parsed) : parsed;
+}
+
+function money(value) {
+  const num = Number(value) || 0;
+  const sign = num > 0 ? "+" : num < 0 ? "-" : "";
+  return `${sign}$${Math.abs(num).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let cell = "";
+  let row = [];
+  let quoted = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === '"') {
+      if (quoted && next === '"') { cell += '"'; i += 1; }
+      else quoted = !quoted;
+    } else if (ch === "," && !quoted) {
+      row.push(cell.trim());
+      cell = "";
+    } else if ((ch === "\n" || ch === "\r") && !quoted) {
+      if (ch === "\r" && next === "\n") i += 1;
+      row.push(cell.trim());
+      if (row.some(Boolean)) rows.push(row);
+      row = [];
+      cell = "";
+    } else cell += ch;
+  }
+  row.push(cell.trim());
+  if (row.some(Boolean)) rows.push(row);
+  if (rows.length < 2) return [];
+  const headers = rows[0].map((h) => h.toLowerCase().replace(/[^a-z0-9]/g, ""));
+  const pick = (obj, names) => {
+    for (const name of names) if (obj[name] !== undefined && obj[name] !== "") return obj[name];
+    return "";
+  };
+  return rows.slice(1).map((cells, idx) => {
+    const obj = Object.fromEntries(headers.map((h, i) => [h, cells[i] ?? ""]));
+    const actionDisplay = pick(obj, ["action", "side", "type", "transactiontype", "activity", "description"]);
+    const actionText = ["action", "side", "type", "transactiontype", "activity", "description"].map((key) => obj[key]).filter(Boolean).join(" ").toUpperCase();
+    const legHint = pick(obj, ["leg", "position", "positiontype", "strategy", "longshort"]).toUpperCase();
+    const qty = cleanCurrency(pick(obj, ["quantity", "qty", "shares", "contracts"]));
+    const price = cleanCurrency(pick(obj, ["price", "fillprice", "avgprice", "averageprice"]));
+    const amountRaw = pick(obj, ["amount", "netamount", "net", "proceeds", "value", "total"]);
+    const inferredAmount = inferTransactionAmount(actionText, legHint, qty, price);
+    const amount = amountRaw === "" ? inferredAmount : cleanCurrency(amountRaw);
+    const leg = inferTransactionLeg(actionText, legHint, qty);
+    return {
+      id: `${Date.now()}-${idx}`,
+      date: pick(obj, ["date", "transactiondate", "time", "datetime"]),
+      symbol: pick(obj, ["symbol", "ticker", "underlying", "instrument"]).toUpperCase(),
+      action: actionDisplay || "TRANSACTION",
+      leg, qty, price, amount,
+      note: pick(obj, ["description", "memo", "notes", "activity"]),
+    };
+  }).filter((row) => row.amount !== 0 || row.qty !== 0 || row.symbol || row.action);
+}
+
+function inferTransactionLeg(action, legHint, qty) {
+  const haystack = `${action} ${legHint}`;
+  if (/SHORT|\bSTO\b|SELL TO OPEN|SOLD TO OPEN|\bBTC\b|BUY TO CLOSE|COVER/.test(haystack)) return "short";
+  if (/LONG|\bBTO\b|BUY TO OPEN|BOUGHT TO OPEN|\bSTC\b|SELL TO CLOSE|SOLD TO CLOSE/.test(haystack)) return "long";
+  if (qty < 0) return "short";
+  return "long";
+}
+
+function inferTransactionAmount(action, legHint, qty, price) {
+  const gross = Math.abs(qty * price);
+  const haystack = `${action} ${legHint}`;
+  if (!gross) return 0;
+  if (/BUY|BOT|BOUGHT|DEBIT|COVER|\bBTC\b|BUY TO CLOSE|\bBTO\b|BUY TO OPEN/.test(haystack)) return -gross;
+  if (/SELL|SOLD|CREDIT|SHORT|\bSTO\b|SELL TO OPEN|\bSTC\b|SELL TO CLOSE/.test(haystack)) return gross;
+  return qty < 0 ? gross : -gross;
+}
+
+function summarizeTransactions(rows, currentLongValue, currentShortCloseValue) {
+  const summary = rows.reduce((acc, row) => {
+    const bucket = row.leg === "short" ? "short" : "long";
+    acc[bucket].cash += row.amount;
+    acc[bucket].count += 1;
+    return acc;
+  }, { long: { cash: 0, count: 0 }, short: { cash: 0, count: 0 } });
+  summary.long.current = cleanCurrency(currentLongValue);
+  summary.short.current = cleanCurrency(currentShortCloseValue);
+  summary.long.estimated = summary.long.cash + summary.long.current;
+  summary.short.estimated = summary.short.cash - summary.short.current;
+  summary.total = {
+    cash: summary.long.cash + summary.short.cash,
+    current: summary.long.current - summary.short.current,
+    estimated: summary.long.estimated + summary.short.estimated,
+    count: summary.long.count + summary.short.count,
+  };
+  return summary;
+}
+
 // ============================================================================
 // POSITIONS VIEW
 // ============================================================================
-function PositionsView({ positions, setPositions, guidance = {}, capital, reserve, deployed, openPL }) {
-  const blank = { id: Date.now(), strategy: "CFM", symbol: "XLV", desc: "", cost: "", current: "", opened: new Date().toISOString().slice(0, 10) };
-  const [draft, setDraft] = useState(blank);
+// The Positions tab is intentionally scoped to the CSV transaction workflow;
+// the older manual open-position table/form was removed per user preference.
+function PositionsView() {
+  const [transactions, setTransactions] = useState(store.get("positionTransactions", []));
+  const [currentLongValue, setCurrentLongValue] = useState(store.get("currentLongValue", ""));
+  const [currentShortCloseValue, setCurrentShortCloseValue] = useState(store.get("currentShortCloseValue", ""));
+  const [importMessage, setImportMessage] = useState("");
 
-  const add = () => {
-    if (!draft.cost) return;
-    setPositions([...positions, { ...draft, id: Date.now() }]);
-    setDraft({ ...blank, id: Date.now() });
+  useEffect(() => { store.set("positionTransactions", transactions); }, [transactions]);
+  useEffect(() => { store.set("currentLongValue", currentLongValue); }, [currentLongValue]);
+  useEffect(() => { store.set("currentShortCloseValue", currentShortCloseValue); }, [currentShortCloseValue]);
+
+  const transactionSummary = useMemo(() => summarizeTransactions(transactions, currentLongValue, currentShortCloseValue), [transactions, currentLongValue, currentShortCloseValue]);
+
+  const handleCsv = (event) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const parsed = parseCsv(String(reader.result || ""));
+      setTransactions(parsed);
+      setImportMessage(parsed.length ? `Imported ${parsed.length} transaction${parsed.length === 1 ? "" : "s"} from ${file.name}.` : `No transactions found in ${file.name}.`);
+    };
+    reader.onerror = () => setImportMessage(`Could not read ${file.name}.`);
+    reader.readAsText(file);
+    event.target.value = "";
   };
-  const update = (id, field, val) => setPositions(positions.map((p) => p.id === id ? { ...p, [field]: val } : p));
-  const remove = (id) => setPositions(positions.filter((p) => p.id !== id));
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      <Panel title="Open positions" eyebrow="Tracking · synthetics & options"
-        right={<span style={{ font: `500 12px ${C.mono}`, color: openPL >= 0 ? C.green : C.red }}>P&L {openPL >= 0 ? "+" : ""}${openPL.toLocaleString()}</span>}>
-        {positions.length === 0 ? (
-          <div style={{ font: `400 13px ${C.sans}`, color: C.inkDim, padding: "10px 0" }}>No open positions. Add one below to start tracking cost basis and P&L.</div>
-        ) : (
-          <div style={{ overflowX: "auto" }}>
-            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
-              <thead>
-                <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
-                  {["Strat", "Symbol", "Description", "Cost basis", "Current value", "P&L", "Guidance", "Opened", ""].map((h) =>
-                    <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
-                </tr>
-              </thead>
-              <tbody>
-                {positions.map((p) => {
-                  const pl = (parseFloat(p.current) || 0) - (parseFloat(p.cost) || 0);
-                  const pct = p.cost ? (pl / parseFloat(p.cost)) * 100 : 0;
-                  const guide = guidance[p.id] || {};
-                  return (
-                    <tr key={p.id} style={{ font: `400 12px ${C.sans}` }}>
-                      <td style={td}><span style={{ font: `700 11px ${C.mono}`, color: p.strategy === "CFM" ? C.blue : C.amber }}>{p.strategy}</span></td>
-                      <td style={td}>{p.symbol}</td>
-                      <td style={td}>{p.desc || "—"}</td>
-                      <td style={td}>${(parseFloat(p.cost) || 0).toLocaleString()}</td>
-                      <td style={td}>
-                        <input value={p.current} onChange={(e) => update(p.id, "current", e.target.value)}
-                          placeholder="—" style={{ ...inputStyle, padding: "5px 7px", width: 90, font: `500 12px ${C.mono}` }} />
-                      </td>
-                      <td style={{ ...td, color: pl >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>
-                        {pl >= 0 ? "+" : ""}${pl.toLocaleString()} <span style={{ color: C.inkFaint, fontSize: 10 }}>({pct.toFixed(0)}%)</span>
-                      </td>
-                      <td style={{ ...td, color: guide.color || C.inkDim, font: `700 11px ${C.mono}` }} title={guide.note || ""}>{guide.action || "Monitor"}</td>
-                      <td style={{ ...td, font: `400 11px ${C.mono}`, color: C.inkDim }}>{p.opened}</td>
-                      <td style={td}><button onClick={() => remove(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", font: `400 16px ${C.sans}` }}>×</button></td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
+      <Panel title="Transaction P/L" eyebrow="CSV import · long / short / total"
+        right={<span style={{ font: `700 12px ${C.mono}`, color: transactionSummary.total.estimated >= 0 ? C.green : C.red }}>Estimated {money(transactionSummary.total.estimated)}</span>}>
+        <div style={{ display: "grid", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px,1fr))", gap: 12, alignItems: "end" }}>
+            <Field label="Upload transaction CSV" hint="replaces imported history">
+              <input type="file" accept=".csv,text/csv" onChange={handleCsv} style={{ ...inputStyle, padding: "8px 10px" }} />
+            </Field>
+            <Field label="Current long value ($)" hint="market value">
+              <input type="number" value={currentLongValue} onChange={(e) => setCurrentLongValue(e.target.value)} placeholder="0.00" style={inputStyle} />
+            </Field>
+            <Field label="Current short close value ($)" hint="cost to close">
+              <input type="number" value={currentShortCloseValue} onChange={(e) => setCurrentShortCloseValue(e.target.value)} placeholder="0.00" style={inputStyle} />
+            </Field>
+            <button onClick={() => { setTransactions([]); setImportMessage("Transaction history cleared."); }} style={{ background: C.line, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `600 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Clear CSV</button>
           </div>
-        )}
-      </Panel>
-
-      <Panel title="Add position" eyebrow="New entry">
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px,1fr))", gap: 12, alignItems: "end" }}>
-          <Field label="Strategy"><Sel value={draft.strategy} onChange={(v) => setDraft({ ...draft, strategy: v })} options={[["CFM", "CFM"], ["APP", "APP"]]} /></Field>
-          <Field label="Symbol"><input value={draft.symbol} onChange={(e) => setDraft({ ...draft, symbol: e.target.value.toUpperCase() })} style={inputStyle} /></Field>
-          <Field label="Description"><input value={draft.desc} onChange={(e) => setDraft({ ...draft, desc: e.target.value })} placeholder="e.g. Jan 150C long" style={inputStyle} /></Field>
-          <Field label="Cost basis ($)"><input type="number" value={draft.cost} onChange={(e) => setDraft({ ...draft, cost: e.target.value })} style={inputStyle} /></Field>
-          <Field label="Current value ($)"><input type="number" value={draft.current} onChange={(e) => setDraft({ ...draft, current: e.target.value })} style={inputStyle} /></Field>
-          <Field label="Opened"><input type="date" value={draft.opened} onChange={(e) => setDraft({ ...draft, opened: e.target.value })} style={inputStyle} /></Field>
-          <button onClick={add} style={{ background: C.blue, border: "none", borderRadius: 6, color: "#fff", font: `600 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Add position</button>
+          <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim }}>
+            CSV columns are auto-detected when named like date, symbol, action/side/type, quantity/qty, price, amount/net amount, and leg/position. If no amount column exists, P/L uses quantity × price. Short estimated P/L treats the current short value as the cost to close.
+          </div>
+          {importMessage && <div style={{ font: `500 12px ${C.sans}`, color: importMessage.startsWith("Imported") ? C.green : C.amber }}>{importMessage}</div>}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px,1fr))", gap: 10 }}>
+            <PLCard title="Long position" count={transactionSummary.long.count} cash={transactionSummary.long.cash} current={transactionSummary.long.current} estimated={transactionSummary.long.estimated} currentLabel="Current value" />
+            <PLCard title="Short position" count={transactionSummary.short.count} cash={transactionSummary.short.cash} current={-transactionSummary.short.current} estimated={transactionSummary.short.estimated} currentLabel="Close value" />
+            <PLCard title="Entire position" count={transactionSummary.total.count} cash={transactionSummary.total.cash} current={transactionSummary.total.current} estimated={transactionSummary.total.estimated} currentLabel="Net current" />
+          </div>
+          {transactions.length > 0 && (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
+                <thead>
+                  <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
+                    {["Date", "Symbol", "Leg", "Action", "Qty", "Price", "Cash flow", "Note"].map((h) =>
+                      <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {transactions.slice(0, 80).map((row) => (
+                    <tr key={row.id} style={{ font: `400 12px ${C.sans}` }}>
+                      <td style={td}>{row.date || "—"}</td>
+                      <td style={td}>{row.symbol || "—"}</td>
+                      <td style={td}><span style={{ color: row.leg === "short" ? C.amber : C.blue, font: `700 11px ${C.mono}` }}>{row.leg}</span></td>
+                      <td style={td}>{row.action}</td>
+                      <td style={td}>{row.qty || "—"}</td>
+                      <td style={td}>{row.price ? `$${row.price.toLocaleString()}` : "—"}</td>
+                      <td style={{ ...td, color: row.amount >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>{money(row.amount)}</td>
+                      <td style={{ ...td, color: C.inkDim }}>{row.note || "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {transactions.length > 80 && <div style={{ font: `400 11px ${C.sans}`, color: C.inkFaint, paddingTop: 8 }}>Showing first 80 of {transactions.length} imported rows.</div>}
+            </div>
+          )}
         </div>
       </Panel>
+    </div>
+  );
+}
+function PLCard({ title, count, cash, current, estimated, currentLabel }) {
+  return (
+    <div style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, padding: "12px 14px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+        <div style={{ font: `700 12px ${C.sans}`, color: C.ink }}>{title}</div>
+        <div style={{ font: `500 10px ${C.mono}`, color: C.inkFaint }}>{count} rows</div>
+      </div>
+      <div style={{ display: "grid", gap: 5, font: `500 11px ${C.mono}` }}>
+        <div style={{ display: "flex", justifyContent: "space-between", color: C.inkDim }}><span>Closed cash flow</span><span style={{ color: cash >= 0 ? C.green : C.red }}>{money(cash)}</span></div>
+        <div style={{ display: "flex", justifyContent: "space-between", color: C.inkDim }}><span>{currentLabel}</span><span style={{ color: current >= 0 ? C.green : C.red }}>{money(current)}</span></div>
+        <div style={{ height: 1, background: C.lineSoft, margin: "3px 0" }} />
+        <div style={{ display: "flex", justifyContent: "space-between", color: C.ink }}><span>Estimated P/L</span><span style={{ color: estimated >= 0 ? C.green : C.red, fontWeight: 700 }}>{money(estimated)}</span></div>
+      </div>
     </div>
   );
 }
