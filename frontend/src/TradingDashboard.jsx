@@ -76,6 +76,19 @@ const SECTORS = [
 const SECTOR_BY_SYMBOL = Object.fromEntries(SECTORS.map((sector) => [sector.symbol, sector]));
 const DEFENSIVE_SECTORS = ["XLV", "XLP", "XLU", "XLRE"];
 const APP_SECTORS = ["XLK", "XLY", "XLC", "XLI"];
+const CFM_CANDIDATE_UNIVERSE = [
+  "XLV", "XLP", "XLU", "XLRE",
+  "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE",
+  "PG", "COST", "WMT", "PEP", "KO",
+  "NEE", "SO", "DUK", "PLD", "AMT",
+];
+const APP_CANDIDATE_UNIVERSE = [
+  "XLK", "XLY", "XLC", "XLI",
+  "NVDA", "MSFT", "AAPL", "AVGO", "AMD", "CRM", "NOW",
+  "META", "GOOGL", "NFLX", "AMZN", "TSLA",
+  "HD", "CAT", "GE", "HON", "DE",
+];
+const ENTRY_CANDIDATE_UNIVERSE = [...new Set([...CFM_CANDIDATE_UNIVERSE, ...APP_CANDIDATE_UNIVERSE])];
 const SECTOR_PROXY_BY_STOCK = {
   AAPL: "XLK", MSFT: "XLK", NVDA: "XLK", AMD: "XLK", AVGO: "XLK", CRM: "XLK", NOW: "XLK",
   META: "XLC", GOOGL: "XLC", GOOG: "XLC", NFLX: "XLC",
@@ -704,7 +717,7 @@ function TradingDashboard({ backendOffline }) {
     // Indicators (already computed server-side)
     try {
       const watchIndicatorSymbols = normalizedEntryWatchItems.flatMap((item) => [item.symbol, item.sectorProxy]).filter(Boolean);
-      const comp = await apiIndicators([...SECTORS.map((s) => s.symbol), ...watchIndicatorSymbols]);
+      const comp = await apiIndicators([...SECTORS.map((s) => s.symbol), ...ENTRY_CANDIDATE_UNIVERSE, ...watchIndicatorSymbols]);
       const clean = {};
       for (const k of Object.keys(comp)) {
         clean[k] = comp[k] && !comp[k].error ? comp[k] : null;
@@ -1354,6 +1367,59 @@ function autoStrategyWatchChecklist(symbol, calc, sectorCalc, macro, focus, calc
   };
 }
 
+function strategyCandidateRanking(symbols, strategy, computed, macro, focus, calcStatus) {
+  const checklistFn = strategy === "CFM" ? cfmStockWatchChecklist : appStockWatchChecklist;
+  return symbols.map((symbol) => {
+    const proxy = inferSectorProxy(symbol);
+    const data = checklistFn(symbol, computed?.[symbol], computed?.[proxy], macro, focus, calcStatus, proxy);
+    const score = data.total ? data.pass / data.total : 0;
+    const readiness = readinessFromChecklist(data);
+    const { missing } = splitChecklistItems(data.items || []);
+    return {
+      symbol,
+      strategy,
+      proxy,
+      data,
+      score,
+      readiness,
+      nextBlocker: missing[0] || "Entry checklist complete",
+    };
+  }).sort((a, b) => (b.score - a.score) || (b.data.pass - a.data.pass) || a.symbol.localeCompare(b.symbol));
+}
+
+function CandidateLeaderboard({ title, strategy, candidates, watchedSymbols, onAdd }) {
+  const color = STRATEGY_META[strategy]?.color || C.blue;
+  const visible = candidates.slice(0, 6);
+  return (
+    <Panel title={title} eyebrow={`${strategy} ranked candidates`} accent={color}
+      right={<span style={{ font: `800 11px ${C.mono}`, color }}>{visible.length ? `${Math.round(visible[0].score * 100)}% top` : "No data"}</span>}>
+      <div style={{ display: "grid", gap: 8 }}>
+        {visible.map((candidate, idx) => {
+          const watched = watchedSymbols.has(candidate.symbol);
+          return (
+            <div key={candidate.symbol} style={{ display: "grid", gridTemplateColumns: "28px 1fr auto", gap: 9, alignItems: "center", padding: "9px 0", borderBottom: idx === visible.length - 1 ? "none" : `1px solid ${C.lineSoft}` }}>
+              <div style={{ font: `800 12px ${C.mono}`, color: C.inkFaint }}>#{idx + 1}</div>
+              <div>
+                <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
+                  <span style={{ font: `800 13px ${C.mono}`, color: C.ink }}>{candidate.symbol}</span>
+                  <span style={{ font: `700 10px ${C.mono}`, color, border: `1px solid ${color}`, borderRadius: 999, padding: "2px 6px" }}>{candidate.data.pass}/{candidate.data.total}</span>
+                  {candidate.proxy && <span style={{ font: `600 10px ${C.mono}`, color: C.inkFaint }}>Proxy {candidate.proxy}</span>}
+                  <span style={{ font: `700 10px ${C.mono}`, color: candidate.readiness.color }}>{candidate.readiness.label}</span>
+                </div>
+                <div style={{ font: `400 11px/1.35 ${C.sans}`, color: C.inkDim, marginTop: 4 }}>{candidate.nextBlocker}</div>
+              </div>
+              <button onClick={() => onAdd(candidate)} disabled={watched} style={{ background: watched ? C.panel2 : color, color: watched ? C.inkFaint : "white", border: `1px solid ${watched ? C.line : color}`, borderRadius: 6, padding: "6px 9px", font: `700 11px ${C.sans}`, cursor: watched ? "default" : "pointer" }}>
+                {watched ? "Watched" : "Watch"}
+              </button>
+            </div>
+          );
+        })}
+        {!visible.length && <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No candidate data yet. Refresh indicators to rank this strategy.</div>}
+      </div>
+    </Panel>
+  );
+}
+
 function genericWatchChecklist(symbol, calc, macro, focus, calcStatus) {
   if (!calc) {
     return missingIndicatorChecklist(
@@ -1432,6 +1498,17 @@ function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSym
     };
   }).sort((a, b) => (b.data.pass / b.data.total) - (a.data.pass / a.data.total));
 
+  const watchedSymbolSet = new Set(normalizedWatch.map((item) => item.symbol));
+  const cfmTopCandidates = strategyCandidateRanking(CFM_CANDIDATE_UNIVERSE, "CFM", computed, macro, focus, calcStatus);
+  const appTopCandidates = strategyCandidateRanking(APP_CANDIDATE_UNIVERSE, "APP", computed, macro, focus, calcStatus);
+
+  const addRankedCandidate = (candidate) => {
+    setEntryWatchSymbols([
+      ...normalizedWatch.filter((item) => item.symbol !== candidate.symbol),
+      { symbol: candidate.symbol, strategyMode: candidate.strategy, sectorProxy: candidate.proxy },
+    ]);
+  };
+
   const addSymbol = (event) => {
     event.preventDefault();
     const symbol = normalizeWatchSymbol(draftSymbol);
@@ -1477,6 +1554,18 @@ function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSym
           <button type="submit" style={{ background: C.blue, color: "white", border: "none", borderRadius: 6, padding: "9px 14px", font: `700 12px ${C.sans}`, cursor: "pointer" }}>Add ticker</button>
         </form>
       </Panel>
+
+      <Panel title="How accurate is this?" eyebrow="Scoring transparency" accent={C.yellow}>
+        <div style={{ display: "grid", gap: 8, font: `400 12px/1.45 ${C.sans}`, color: C.inkDim }}>
+          <div>These rankings are rule-based watch-list screens, not predictions. They use the same live indicator inputs as the rest of the dashboard: macro regime, sector proxy fit, RS3M/RS3M_MOM, OBV, MFI, RSI, volume participation, and MA21 status.</div>
+          <div>Use the score to decide what deserves attention next; still confirm chart structure, news/earnings risk, liquidity, and actual execution levels before entering.</div>
+        </div>
+      </Panel>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 16 }}>
+        <CandidateLeaderboard title="Top CFM candidates" strategy="CFM" candidates={cfmTopCandidates} watchedSymbols={watchedSymbolSet} onAdd={addRankedCandidate} />
+        <CandidateLeaderboard title="Top APP candidates" strategy="APP" candidates={appTopCandidates} watchedSymbols={watchedSymbolSet} onAdd={addRankedCandidate} />
+      </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 16 }}>
         {candidates.length ? candidates.map((candidate) => <EntryWatchCard key={candidate.symbol} {...candidate} onRemove={removeSymbol} onUpdate={updateWatchItem} />) : (
