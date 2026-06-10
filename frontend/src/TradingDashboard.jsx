@@ -15,19 +15,24 @@ const store = (() => {
   let mem = {};
   let saveTimer = null;
   const flush = () => {
-    fetch(`${API}/api/state`, {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+    return fetch(`${API}/api/state`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify(mem),
-    }).catch(() => {});
+    });
   };
   return {
     hydrate: (obj) => { mem = { ...mem, ...obj }; },
     get: (k, fb) => (k in mem ? mem[k] : fb),
-    set: (k, v) => {
+    set: (k, v, immediate = false) => {
       mem[k] = v;
+      if (immediate) return flush();
       clearTimeout(saveTimer);
-      saveTimer = setTimeout(flush, 600); // debounce disk writes
+      saveTimer = setTimeout(() => { flush().catch(() => {}); }, 600); // debounce disk writes
+      return Promise.resolve();
     },
+    flush,
   };
 })();
 
@@ -991,15 +996,40 @@ function parseCsv(text) {
     const inferredAmount = inferTransactionAmount(actionText, legHint, qty, price);
     const amount = amountRaw === "" ? inferredAmount : cleanCurrency(amountRaw);
     const leg = inferTransactionLeg(actionText, legHint, qty);
-    return {
-      id: `${Date.now()}-${idx}`,
+    const rowOut = {
       date: pick(obj, ["date", "transactiondate", "time", "datetime"]),
       symbol: pick(obj, ["symbol", "ticker", "underlying", "instrument"]).toUpperCase(),
       action: actionDisplay || "TRANSACTION",
       leg, qty, price, amount,
       note: pick(obj, ["description", "memo", "notes", "activity"]),
     };
+    return { ...rowOut, id: transactionKey(rowOut, idx) };
   }).filter((row) => row.amount !== 0 || row.qty !== 0 || row.symbol || row.action);
+}
+
+function transactionKey(row, fallback = "") {
+  return [
+    row.date || "", row.symbol || "", row.leg || "", row.action || "",
+    row.qty || 0, row.price || 0, row.amount || 0, row.note || "", fallback,
+  ].map((v) => String(v).trim().toUpperCase()).join("|");
+}
+
+function mergeTransactions(existing, incoming) {
+  const seen = new Set(existing.map((row) => transactionKey(row)));
+  const additions = [];
+  incoming.forEach((row) => {
+    const key = transactionKey(row);
+    if (seen.has(key)) return;
+    seen.add(key);
+    additions.push({ ...row, id: row.id || `${Date.now()}-${additions.length}` });
+  });
+  return { rows: [...existing, ...additions], added: additions.length, skipped: incoming.length - additions.length };
+}
+
+function signedCostBasisDelta(value, side) {
+  const amount = cleanCurrency(value);
+  if (!amount) return 0;
+  return side === "credit" ? -Math.abs(amount) : Math.abs(amount);
 }
 
 function inferTransactionLeg(action, legHint, qty) {
@@ -1049,6 +1079,8 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
   const [currentLongValue, setCurrentLongValue] = useState(store.get("currentLongValue", ""));
   const [currentShortCloseValue, setCurrentShortCloseValue] = useState(store.get("currentShortCloseValue", ""));
   const [importMessage, setImportMessage] = useState("");
+  const [saveStatus, setSaveStatus] = useState("");
+  const [positionMoveDraft, setPositionMoveDraft] = useState({});
 
   useEffect(() => { store.set("positionTransactions", transactions); }, [transactions]);
   useEffect(() => { store.set("currentLongValue", currentLongValue); }, [currentLongValue]);
@@ -1057,20 +1089,52 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
   const transactionSummary = useMemo(() => summarizeTransactions(transactions, currentLongValue, currentShortCloseValue), [transactions, currentLongValue, currentShortCloseValue]);
 
   const add = () => {
-    if (!draft.cost) return;
+    if (!draft.cost && !draft.current) return;
     setPositions([...positions, { ...draft, id: Date.now() }]);
-    setDraft({ ...blank, id: Date.now() });
+    setDraft({ ...blank, id: Date.now(), opened: new Date().toISOString().slice(0, 10) });
   };
   const update = (id, field, val) => setPositions(positions.map((p) => p.id === id ? { ...p, [field]: val } : p));
   const remove = (id) => setPositions(positions.filter((p) => p.id !== id));
+  const applyPositionMove = (id) => {
+    const move = positionMoveDraft[id] || {};
+    const delta = signedCostBasisDelta(move.amount, move.side || "debit");
+    if (!delta) return;
+    setPositions(positions.map((p) => {
+      if (p.id !== id) return p;
+      const nextCost = (cleanCurrency(p.cost) + delta).toFixed(2);
+      const note = move.note ? `${p.desc || ""}${p.desc ? " | " : ""}${move.note}` : p.desc;
+      return { ...p, cost: nextCost, desc: note };
+    }));
+    setPositionMoveDraft({ ...positionMoveDraft, [id]: { amount: "", side: move.side || "debit", note: "" } });
+  };
+  const savePositionState = async () => {
+    setSaveStatus("saving");
+    try {
+      await Promise.all([
+        store.set("positionTransactions", transactions, true),
+        store.set("positions", positions, true),
+        store.set("currentLongValue", currentLongValue, true),
+        store.set("currentShortCloseValue", currentShortCloseValue, true),
+      ]);
+      await store.flush();
+      setSaveStatus("saved");
+    } catch (e) {
+      setSaveStatus("error");
+    }
+  };
   const handleCsv = (event) => {
     const file = event.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = () => {
       const parsed = parseCsv(String(reader.result || ""));
-      setTransactions(parsed);
-      setImportMessage(parsed.length ? `Imported ${parsed.length} transaction${parsed.length === 1 ? "" : "s"} from ${file.name}.` : `No transactions found in ${file.name}.`);
+      setTransactions((existing) => {
+        const merged = mergeTransactions(existing, parsed);
+        setImportMessage(parsed.length
+          ? `Added ${merged.added} new transaction${merged.added === 1 ? "" : "s"} from ${file.name}${merged.skipped ? ` (${merged.skipped} duplicate${merged.skipped === 1 ? "" : "s"} skipped)` : ""}. Save to persist before leaving.`
+          : `No transactions found in ${file.name}.`);
+        return merged.rows;
+      });
     };
     reader.onerror = () => setImportMessage(`Could not read ${file.name}.`);
     reader.readAsText(file);
@@ -1083,7 +1147,7 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
         right={<span style={{ font: `700 12px ${C.mono}`, color: transactionSummary.total.estimated >= 0 ? C.green : C.red }}>Estimated {money(transactionSummary.total.estimated)}</span>}>
         <div style={{ display: "grid", gap: 14 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px,1fr))", gap: 12, alignItems: "end" }}>
-            <Field label="Upload transaction CSV" hint="replaces imported history">
+            <Field label="Upload transaction CSV" hint="adds new rows, skips duplicates">
               <input type="file" accept=".csv,text/csv" onChange={handleCsv} style={{ ...inputStyle, padding: "8px 10px" }} />
             </Field>
             <Field label="Current long value ($)" hint="market value">
@@ -1092,12 +1156,17 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
             <Field label="Current short close value ($)" hint="cost to close">
               <input type="number" value={currentShortCloseValue} onChange={(e) => setCurrentShortCloseValue(e.target.value)} placeholder="0.00" style={inputStyle} />
             </Field>
-            <button onClick={() => { setTransactions([]); setImportMessage("Transaction history cleared."); }} style={{ background: C.line, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `600 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Clear CSV</button>
+            <button onClick={() => { setTransactions([]); setImportMessage("Transaction history cleared. Save to persist this change."); }} style={{ background: C.line, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `600 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Clear CSV</button>
+            <button onClick={savePositionState} style={{ background: C.blue, border: `1px solid ${C.blue}`, borderRadius: 6, color: "white", font: `700 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Save transactions</button>
           </div>
           <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim }}>
-            CSV columns are auto-detected when named like date, symbol, action/side/type, quantity/qty, price, amount/net amount, and leg/position. If no amount column exists, P/L uses quantity × price. Short estimated P/L treats the current short value as the cost to close.
+            CSV columns are auto-detected when named like date, symbol, action/side/type, quantity/qty, price, amount/net amount, and leg/position. Uploads add to saved history instead of replacing it, so you can import new fills as you trade. Short estimated P/L treats the current short value as the cost to close.
           </div>
-          {importMessage && <div style={{ font: `500 12px ${C.sans}`, color: importMessage.startsWith("Imported") ? C.green : C.amber }}>{importMessage}</div>}
+          {(importMessage || saveStatus) && (
+            <div style={{ font: `500 12px ${C.sans}`, color: saveStatus === "error" ? C.red : saveStatus === "saved" || importMessage.startsWith("Added") ? C.green : C.amber }}>
+              {importMessage}{saveStatus === "saving" ? " Saving…" : saveStatus === "saved" ? " Saved to disk." : saveStatus === "error" ? " Save failed — backend state endpoint unavailable." : ""}
+            </div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(190px,1fr))", gap: 10 }}>
             <PLCard title="Long position" count={transactionSummary.long.count} cash={transactionSummary.long.cash} current={transactionSummary.long.current} estimated={transactionSummary.long.estimated} currentLabel="Current value" />
             <PLCard title="Short position" count={transactionSummary.short.count} cash={transactionSummary.short.cash} current={-transactionSummary.short.current} estimated={transactionSummary.short.estimated} currentLabel="Close value" />
@@ -1142,7 +1211,7 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 760 }}>
               <thead>
                 <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
-                  {["Strat", "Symbol", "Description", "Cost basis", "Current value", "P&L", "Guidance", "Opened", ""].map((h) =>
+                  {["Strat", "Symbol", "Description", "Cost basis", "Current value", "P&L", "Add move", "Guidance", "Opened", ""].map((h) =>
                     <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
                 </tr>
               </thead>
@@ -1164,6 +1233,18 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
                       <td style={{ ...td, color: pl >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>
                         {pl >= 0 ? "+" : ""}${pl.toLocaleString()} <span style={{ color: C.inkFaint, fontSize: 10 }}>({pct.toFixed(0)}%)</span>
                       </td>
+                      <td style={td}>
+                        <div style={{ display: "grid", gridTemplateColumns: "70px 74px 30px", gap: 6, alignItems: "center" }}>
+                          <input type="number" value={positionMoveDraft[p.id]?.amount || ""} onChange={(e) => setPositionMoveDraft({ ...positionMoveDraft, [p.id]: { ...(positionMoveDraft[p.id] || {}), amount: e.target.value } })}
+                            placeholder="$" style={{ ...inputStyle, padding: "5px 7px", font: `500 12px ${C.mono}` }} />
+                          <select value={positionMoveDraft[p.id]?.side || "debit"} onChange={(e) => setPositionMoveDraft({ ...positionMoveDraft, [p.id]: { ...(positionMoveDraft[p.id] || {}), side: e.target.value } })}
+                            style={{ ...inputStyle, padding: "5px 7px", font: `500 11px ${C.mono}` }}>
+                            <option value="debit" style={{ background: C.panel }}>Debit</option>
+                            <option value="credit" style={{ background: C.panel }}>Credit</option>
+                          </select>
+                          <button onClick={() => applyPositionMove(p.id)} title="Add this fill to cost basis" style={{ background: C.line, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, cursor: "pointer", height: 27 }}>+</button>
+                        </div>
+                      </td>
                       <td style={{ ...td, color: guide.color || C.inkDim, font: `700 11px ${C.mono}` }} title={guide.note || ""}>{guide.action || "Monitor"}</td>
                       <td style={{ ...td, font: `400 11px ${C.mono}`, color: C.inkDim }}>{p.opened}</td>
                       <td style={td}><button onClick={() => remove(p.id)} style={{ background: "none", border: "none", color: C.red, cursor: "pointer", font: `400 16px ${C.sans}` }}>×</button></td>
@@ -1174,6 +1255,36 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
             </table>
           </div>
         )}
+        <div style={{ marginTop: 14, paddingTop: 14, borderTop: `1px solid ${C.line}`, display: "grid", gap: 10 }}>
+          <div style={{ font: `700 12px ${C.sans}`, color: C.ink }}>Add / track a position</div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 10, alignItems: "end" }}>
+            <Field label="Strategy">
+              <select value={draft.strategy} onChange={(e) => setDraft({ ...draft, strategy: e.target.value })} style={{ ...inputStyle, appearance: "none" }}>
+                <option value="CFM" style={{ background: C.panel }}>CFM</option>
+                <option value="APP" style={{ background: C.panel }}>APP</option>
+              </select>
+            </Field>
+            <Field label="Symbol">
+              <input value={draft.symbol} onChange={(e) => setDraft({ ...draft, symbol: e.target.value.toUpperCase() })} placeholder="XLV" style={inputStyle} />
+            </Field>
+            <Field label="Description" hint="contract / spread">
+              <input value={draft.desc} onChange={(e) => setDraft({ ...draft, desc: e.target.value })} placeholder="XLV call spread" style={inputStyle} />
+            </Field>
+            <Field label="Cost basis ($)" hint="net debit paid">
+              <input type="number" value={draft.cost} onChange={(e) => setDraft({ ...draft, cost: e.target.value })} placeholder="0.00" style={inputStyle} />
+            </Field>
+            <Field label="Current value ($)">
+              <input type="number" value={draft.current} onChange={(e) => setDraft({ ...draft, current: e.target.value })} placeholder="0.00" style={inputStyle} />
+            </Field>
+            <Field label="Opened">
+              <input type="date" value={draft.opened} onChange={(e) => setDraft({ ...draft, opened: e.target.value })} style={inputStyle} />
+            </Field>
+            <button onClick={add} style={{ background: C.greenDim, border: `1px solid ${C.green}`, borderRadius: 6, color: C.green, font: `700 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38, marginBottom: 12 }}>Add position</button>
+          </div>
+          <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim }}>
+            Use the row-level <b>Add move</b> control to add later debits to cost basis or subtract credits received, then update current value to keep P/L current.
+          </div>
+        </div>
       </Panel>
     </div>
   );
