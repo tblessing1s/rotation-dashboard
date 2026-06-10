@@ -581,7 +581,15 @@ function TradingDashboard({ backendOffline }) {
           <ChecklistView cfm={cfm} app={app} />
         )}
         {tab === "Positions" && (
-          <PositionsView />
+          <PositionsView
+            positions={positions}
+            setPositions={setPositions}
+            guidance={positionGuide}
+            capital={capital}
+            reserve={reserve}
+            deployed={deployed}
+            openPL={openPL}
+          />
         )}
         {tab === "Indicators" && (
           <IndicatorsView
