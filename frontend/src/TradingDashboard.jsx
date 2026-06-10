@@ -955,6 +955,25 @@ function money(value) {
   return `${sign}$${Math.abs(num).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }
 
+
+function normalizeOptionExpiry(expiry = "") {
+  const parts = String(expiry).match(/^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/);
+  if (!parts) return String(expiry || "");
+  const year = parts[3].length === 2 ? `20${parts[3]}` : parts[3];
+  return `${parts[1].padStart(2, "0")}/${parts[2].padStart(2, "0")}/${year}`;
+}
+
+function inferOptionSymbolFromDescription(symbol = "", description = "") {
+  const base = String(symbol || "").trim().toUpperCase();
+  const text = String(description || "").toUpperCase();
+  if (!base || instrumentMetaFromSymbol(base).category === "Option") return base;
+  const type = text.match(/\b(CALL|PUT)\b/);
+  const expiry = text.match(/\bEXP(?:IR(?:ES|ATION)?)?\s*(\d{1,2}\/\d{1,2}\/\d{2,4})\b/);
+  const strike = text.match(/(?:\$|STRIKE\s*)([0-9]+(?:\.[0-9]+)?)/);
+  if (!type || !expiry || !strike) return base;
+  return `${base} ${normalizeOptionExpiry(expiry[1])} ${Number(strike[1]).toFixed(2)} ${type[1][0]}`;
+}
+
 function parseCsv(text) {
   const rows = [];
   let cell = "";
@@ -998,9 +1017,11 @@ function parseCsv(text) {
     const inferredAmount = inferTransactionAmount(actionText, legHint, qty, price);
     const amount = amountRaw === "" ? inferredAmount : cleanCurrency(amountRaw);
     const leg = inferTransactionLeg(actionText, legHint, qty);
+    const rawSymbol = pick(obj, ["symbol", "ticker", "underlying", "instrument"]).toUpperCase();
+    const note = pick(obj, ["description", "memo", "notes", "activity"]);
     const rowOut = {
       date: pick(obj, ["date", "transactiondate", "time", "datetime"]),
-      symbol: pick(obj, ["symbol", "ticker", "underlying", "instrument"]).toUpperCase(),
+      symbol: inferOptionSymbolFromDescription(rawSymbol, `${note} ${actionDisplay}`),
       positionId: explicitPosition || (rawPosition && !isLegLabel(rawPosition) ? rawPosition : ""),
       strategy: pick(obj, ["strategy", "setup", "system"]).toUpperCase() || "CSV",
       action: actionDisplay || "TRANSACTION",
@@ -1080,13 +1101,55 @@ function inferOpenClose(action, legHint, leg = "") {
   return "activity";
 }
 
+
+function instrumentMetaFromSymbol(symbol = "") {
+  const raw = String(symbol || "").trim();
+  const normalized = raw.replace(/\s+/g, " ").toUpperCase();
+  const optionMatch = normalized.match(/^([A-Z][A-Z0-9.]{0,5})\s+(\d{1,2}\/\d{1,2}\/\d{2,4})\s+([0-9]+(?:\.[0-9]+)?)\s*([CP])\b/);
+  if (optionMatch) {
+    return {
+      underlying: optionMatch[1],
+      category: "Option",
+      label: normalized,
+      symbol: normalized,
+    };
+  }
+  const compactOptionMatch = normalized.match(/^([A-Z][A-Z0-9.]{0,5})\s*(\d{6})[CP]\d{8}$/);
+  if (compactOptionMatch) {
+    return {
+      underlying: compactOptionMatch[1],
+      category: "Option",
+      label: normalized,
+      symbol: normalized,
+    };
+  }
+  const underlying = normalized.split(/[\s:-]+/)[0] || "—";
+  return {
+    underlying,
+    category: "Stock",
+    label: underlying,
+    symbol: normalized || underlying,
+  };
+}
+
+function getInstrumentMeta(item = {}) {
+  const meta = instrumentMetaFromSymbol(item.symbol);
+  return {
+    ...meta,
+    category: item.instrumentType || meta.category,
+    label: item.instrumentLabel || meta.label,
+    underlying: item.underlying || meta.underlying,
+  };
+}
+
 function isLegLabel(value) {
   return /^(LONG|SHORT)$/i.test(String(value || "").trim());
 }
 
 function positionKey(row) {
-  const symbol = row.symbol || "UNGROUPED";
-  return row.positionId ? `${symbol} · ${row.positionId}` : `${symbol} · ${row.leg || "position"}`;
+  const meta = getInstrumentMeta(row);
+  const root = meta.category === "Option" ? `${meta.underlying} · ${meta.label}` : meta.underlying;
+  return row.positionId ? `${root} · ${row.positionId}` : `${root} · ${row.leg || "position"}`;
 }
 
 function summarizeTransactions(rows, currentMarks = {}) {
@@ -1097,7 +1160,11 @@ function summarizeTransactions(rows, currentMarks = {}) {
       groups.set(key, {
         key,
         id: key,
-        symbol: row.symbol || "—",
+        symbol: getInstrumentMeta(row).underlying || row.symbol || "—",
+        underlying: getInstrumentMeta(row).underlying || row.symbol || "—",
+        instrumentType: getInstrumentMeta(row).category,
+        instrumentLabel: getInstrumentMeta(row).label,
+        rawSymbol: row.symbol || "",
         positionId: row.positionId || "",
         strategy: row.strategy || "CSV",
         firstDate: row.date || "",
@@ -1172,14 +1239,38 @@ function summarizeTransactions(rows, currentMarks = {}) {
 }
 
 
-function groupPositionsBySymbol(list) {
+function makePositionBucket(label) {
+  return {
+    label,
+    positions: [],
+    cash: 0,
+    estimated: 0,
+    current: 0,
+    opened: "",
+    closed: "",
+  };
+}
+
+function addPositionToBucket(bucket, position) {
+  bucket.positions.push(position);
+  bucket.cash += position.cash;
+  bucket.estimated += position.estimated;
+  bucket.current += position.current;
+  bucket.opened = [bucket.opened, position.opened].filter(Boolean).sort()[0] || bucket.opened;
+  bucket.closed = [bucket.closed, position.closed].filter(Boolean).sort().slice(-1)[0] || bucket.closed;
+}
+
+function groupPositionsByUnderlying(list) {
   const grouped = new Map();
   list.forEach((position) => {
-    const symbol = position.symbol || "—";
+    const meta = getInstrumentMeta(position);
+    const symbol = meta.underlying || "—";
+    const category = meta.category === "Option" ? "Option" : "Stock";
     if (!grouped.has(symbol)) {
       grouped.set(symbol, {
         symbol,
         positions: [],
+        categories: new Map(),
         cash: 0,
         estimated: 0,
         current: 0,
@@ -1188,14 +1279,21 @@ function groupPositionsBySymbol(list) {
       });
     }
     const group = grouped.get(symbol);
-    group.positions.push(position);
-    group.cash += position.cash;
-    group.estimated += position.estimated;
-    group.current += position.current;
-    group.opened = [group.opened, position.opened].filter(Boolean).sort()[0] || group.opened;
-    group.closed = [group.closed, position.closed].filter(Boolean).sort().slice(-1)[0] || group.closed;
+    if (!group.categories.has(category)) group.categories.set(category, makePositionBucket(category));
+    addPositionToBucket(group, position);
+    addPositionToBucket(group.categories.get(category), position);
   });
-  return [...grouped.values()].sort((a, b) => a.symbol.localeCompare(b.symbol));
+  return [...grouped.values()]
+    .map((group) => ({
+      ...group,
+      categories: [...group.categories.values()].sort((a, b) => {
+        if (a.label === b.label) return 0;
+        if (a.label === "Stock") return -1;
+        if (b.label === "Stock") return 1;
+        return a.label.localeCompare(b.label);
+      }),
+    }))
+    .sort((a, b) => a.symbol.localeCompare(b.symbol));
 }
 
 function toDashboardPosition(position) {
@@ -1203,8 +1301,8 @@ function toDashboardPosition(position) {
   return {
     id: position.key,
     strategy: position.strategy || "CSV",
-    symbol: position.symbol,
-    desc: position.positionId || `${position.rowCount} CSV fills`,
+    symbol: position.underlying || position.symbol,
+    desc: position.positionId || position.instrumentLabel || `${position.rowCount} CSV fills`,
     cost: basis.toFixed(2),
     current: (basis + position.estimated).toFixed(2),
     opened: position.opened,
@@ -1219,6 +1317,7 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
   const [positionMarks, setPositionMarks] = useState(store.get("positionMarks", {}));
   const [expandedPositions, setExpandedPositions] = useState({});
   const [collapsedSymbols, setCollapsedSymbols] = useState({});
+  const [collapsedCategories, setCollapsedCategories] = useState({});
   const [importMessage, setImportMessage] = useState("");
   const [saveStatus, setSaveStatus] = useState("");
 
@@ -1276,7 +1375,12 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
         <tr style={{ font: `400 12px ${C.sans}` }}>
           <td style={td}><button onClick={() => setExpandedPositions({ ...expandedPositions, [p.key]: !expanded })} style={{ background: "none", border: "none", color: C.blue, cursor: "pointer", font: `700 13px ${C.mono}` }} title="Expand open/close fills">{expanded ? "−" : "+"}</button></td>
           <td style={td}><span style={{ font: `700 11px ${C.mono}`, color: p.strategy === "CFM" ? C.blue : C.amber }}>{p.strategy}</span></td>
-          <td style={td}>{p.positionId || <span style={{ color: C.inkFaint }}>Ungrouped</span>}</td>
+          <td style={td}>
+            <div style={{ display: "grid", gap: 3 }}>
+              <span>{p.instrumentLabel || p.positionId || <span style={{ color: C.inkFaint }}>Ungrouped</span>}</span>
+              {p.positionId && <span style={{ font: `500 10px ${C.sans}`, color: C.inkFaint }}>{p.positionId}</span>}
+            </div>
+          </td>
           <td style={td}>{p.long.netQty || "—"}</td>
           <td style={td}>{p.short.netQty || "—"}</td>
           <td style={{ ...td, color: p.cash >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>{money(p.cash)}</td>
@@ -1311,9 +1415,35 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
     setCollapsedSymbols({ ...collapsedSymbols, [key]: !collapsedSymbols[key] });
   };
 
+  const toggleCategory = (status, symbol, category) => {
+    const key = `${status}:${symbol}:${category}`;
+    setCollapsedCategories({ ...collapsedCategories, [key]: !collapsedCategories[key] });
+  };
+
+  const renderCategoryGroup = (status, symbol, category, closed = false) => {
+    const key = `${status}:${symbol}:${category.label}`;
+    const collapsed = !!collapsedCategories[key];
+    return (
+      <div key={key} style={{ borderTop: `1px solid ${C.line}` }}>
+        <button onClick={() => toggleCategory(status, symbol, category.label)} style={{ width: "100%", background: C.panel, border: 0, color: C.ink, cursor: "pointer", padding: "9px 13px 9px 36px", display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 10, alignItems: "center", textAlign: "left" }}>
+          <span style={{ color: C.blue, font: `800 12px ${C.mono}` }}>{collapsed ? "+" : "−"}</span>
+          <span>
+            <span style={{ font: `800 12px ${C.sans}`, color: C.ink }}>{category.label}</span>
+            <span style={{ marginLeft: 10, font: `500 10px ${C.sans}`, color: C.inkDim }}>{category.positions.length} position{category.positions.length === 1 ? "" : "s"} · {category.opened || "—"}{closed && category.closed ? ` → ${category.closed}` : ""}</span>
+          </span>
+          <span style={{ display: "flex", gap: 14, font: `700 10px ${C.mono}` }}>
+            <span style={{ color: category.cash >= 0 ? C.green : C.red }}>Cash {money(category.cash)}</span>
+            <span style={{ color: category.estimated >= 0 ? C.green : C.red }}>{closed ? "P/L" : "Est."} {money(category.estimated)}</span>
+          </span>
+        </button>
+        {!collapsed && renderPositionTable(category.positions, closed)}
+      </div>
+    );
+  };
+
   const renderSymbolGroups = (list, status, closed = false) => (
     <div style={{ display: "grid", gap: 10 }}>
-      {groupPositionsBySymbol(list).map((group) => {
+      {groupPositionsByUnderlying(list).map((group) => {
         const key = `${status}:${group.symbol}`;
         const collapsed = !!collapsedSymbols[key];
         return (
@@ -1329,7 +1459,7 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
                 <span style={{ color: group.estimated >= 0 ? C.green : C.red }}>{closed ? "P/L" : "Est."} {money(group.estimated)}</span>
               </span>
             </button>
-            {!collapsed && <div style={{ borderTop: `1px solid ${C.line}` }}>{renderPositionTable(group.positions, closed)}</div>}
+            {!collapsed && group.categories.map((category) => renderCategoryGroup(status, group.symbol, category, closed))}
           </div>
         );
       })}
@@ -1412,7 +1542,7 @@ function PositionTransactionLog({ rows }) {
   return (
     <div style={{ padding: "12px", display: "grid", gap: 10 }}>
       <div style={{ font: `700 11px ${C.sans}`, color: C.ink }}>Open / close transaction detail</div>
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 10 }}>
         {sections.map((section) => (
           <div key={section.title} style={{ border: `1px solid ${C.line}`, borderRadius: 8, overflow: "hidden", background: C.panel }}>
             <div style={{ padding: "8px 10px", borderBottom: `1px solid ${C.line}`, display: "flex", justifyContent: "space-between", gap: 10 }}>
