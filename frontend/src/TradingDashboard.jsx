@@ -2305,6 +2305,10 @@ const td = { padding: "10px", borderBottom: `1px solid ${C.lineSoft}`, color: C.
 function IndicatorsView(props) {
   const { macro, setMacro, macroComputed, macroStatus, computed, calcStatus, onRefresh } = props;
   const cx = computed?.XLV, ci = computed?.ILMN;
+  const fed = macroComputed?.fields?.fed;
+  const fedConditions = fed
+    ? [...(fed.hawkishConditions || []), ...(fed.dovishConditions || [])].slice(0, 3).join(" · ")
+    : "";
   return (
     <div style={{ display: "grid", gap: 16 }}>
       {/* Auto-calc status banner */}
@@ -2318,7 +2322,7 @@ function IndicatorsView(props) {
             Auto-calc {calcStatus === "ok" ? "ready" : calcStatus === "loading" ? "computing…" : calcStatus === "fail" ? "unavailable" : "idle"}
           </div>
           <div style={{ font: `400 11px/1.4 ${C.sans}`, color: C.inkDim, maxWidth: 620 }}>
-            Computed from daily Yahoo/FRED history: Level 1 macro, RS3M, RS3M_MOM, volume ratio, volume acceleration, RSI, OBV trend, MFI, and MA21.
+            Computed from daily Yahoo/FRED history: Level 1 macro, conditions-based Fed policy, RS3M, RS3M_MOM, volume ratio, volume acceleration, RSI, OBV trend, MFI, and MA21.
             Each shows next to your manual field — tap <b style={{ color: C.blue }}>use</b> to apply.
             {calcStatus === "fail" && " History blocked (often CORS in preview) — keep entering manually."}
           </div>
@@ -2337,7 +2341,7 @@ function IndicatorsView(props) {
 
       <Panel title="Macro inputs" eyebrow={`Level 1 · ${macroStatus === "ok" ? "auto-filled" : macroStatus === "partial" ? "partial auto-fill" : macroStatus === "loading" ? "fetching macro" : "manual fallback"}`}>
         <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
-          Auto-fill uses ^VIX quotes, FRED fed funds/CPI/GDP data, and ETF breadth above 50-day MA. Fields remain editable for your override.
+          Auto-fill uses ^VIX quotes, FRED Fed funds/CPI/GDP/unemployment data, and ETF breadth above 50-day MA. Fed policy is scored from current inflation, growth, labor, and rate conditions. Fields remain editable for your override.
           {macroComputed?.asOf && <span style={{ color: C.inkFaint }}> Updated {macroComputed.asOf}</span>}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px,1fr))", gap: 14 }}>
@@ -2349,9 +2353,14 @@ function IndicatorsView(props) {
             <NumIn step="1" value={macro.breadth} onChange={(v) => setMacro({ ...macro, breadth: v })} />
             <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.breadth?.value} fmt={(v) => v.toFixed(0)} onApply={() => setMacro({ ...macro, breadth: macroComputed.fields.breadth.value })} /></div>
           </Field>
-          <Field label="Fed policy" hint={macroComputed?.fields?.fed ? `${macroComputed.fields.fed.rate}% / ${macroComputed.fields.fed.change63d}` : "FRED DFF"}>
+          <Field label="Fed policy" hint={fed ? `score ${fed.score} · ${fed.rate}% funds · CPI ${fed.cpiYoY}% · U-3 ${fed.unemployment}%` : "FRED DFF/CPI/GDP/UNRATE"}>
             <Sel value={macro.fed} onChange={(v) => setMacro({ ...macro, fed: v })} options={[["dovish", "Dovish"], ["holding", "Holding"], ["hawkish", "Hawkish"]]} />
-            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.fed?.value} onApply={() => setMacro({ ...macro, fed: macroComputed.fields.fed.value })} /></div>
+            <div style={{ marginTop: 5 }}><CalcChip value={fed?.value} onApply={() => setMacro({ ...macro, fed: fed.value })} /></div>
+            {fedConditions && (
+              <div style={{ font: `400 10px/1.35 ${C.sans}`, color: C.inkFaint, marginTop: 6 }}>
+                Current conditions: {fedConditions}
+              </div>
+            )}
           </Field>
           <Field label="Growth" hint={macroComputed?.fields?.growth ? `${macroComputed.fields.growth.qoqAnnualized}% GDP` : "FRED GDP"}>
             <Sel value={macro.growth} onChange={(v) => setMacro({ ...macro, growth: v })} options={[["accelerating", "Accelerating"], ["stable", "Stable"], ["slowing", "Slowing"]]} />

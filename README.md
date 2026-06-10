@@ -43,7 +43,7 @@ trend, volume ratio, MFI, RS3M, RS3M_MOM, MA21, and price-vs-MA21. RSI is
 verified against Wilder's reference (70.46).
 
 Level 1 uses `^VIX` from Yahoo Finance, breadth as the percent of a configured
-ETF universe trading above its 50-day moving average, Fed stance from FRED DFF,
+ETF universe trading above its 50-day moving average, Fed stance from a current-conditions model using FRED DFF/CPI/GDP/unemployment,
 inflation from FRED CPI YoY, and growth from FRED real-GDP momentum. All of
 these fields remain editable so you can override the automatic readout.
 
