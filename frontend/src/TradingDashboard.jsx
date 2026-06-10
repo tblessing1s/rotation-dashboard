@@ -9,30 +9,86 @@ import React, { useState, useEffect, useMemo, useCallback } from "react";
 
 const API = ""; // same origin when served by backend; Vite proxies /api in dev
 
-// In-memory mirror of persisted state. Hydrated from /api/state on load,
-// and written back (debounced) whenever it changes.
+// In-memory mirror of persisted state. Hydrated from local browser storage
+// first, then /api/state, and written back (debounced) whenever it changes.
+// Local storage makes positions sticky across fast refreshes and backend deploys.
+const STATE_STORAGE_KEY = "rotation-dashboard-state-v1";
+const STICKY_POSITION_KEYS = new Set(["positions", "positionTransactions", "positionMarks"]);
+
+const safeParseJson = (raw, fallback = {}) => {
+  try {
+    return raw ? JSON.parse(raw) : fallback;
+  } catch (e) {
+    return fallback;
+  }
+};
+
+const readLocalState = () => {
+  if (typeof window === "undefined") return {};
+  return safeParseJson(window.localStorage?.getItem(STATE_STORAGE_KEY), {});
+};
+
+const writeLocalState = (state) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage?.setItem(STATE_STORAGE_KEY, JSON.stringify(state));
+  } catch (e) {
+    // localStorage can be unavailable in private/restricted browsers; backend save still works.
+  }
+};
+
 const store = (() => {
-  let mem = {};
+  let mem = readLocalState();
   let saveTimer = null;
-  const flush = () => {
+  const persistLocal = () => writeLocalState(mem);
+  const stamp = (k) => {
+    mem.__updatedAt = { ...(mem.__updatedAt || {}), [k]: Date.now() };
+  };
+  const mergeRemote = (obj = {}) => {
+    const localUpdatedAt = mem.__updatedAt || {};
+    const remoteUpdatedAt = obj.__updatedAt || {};
+    const merged = { ...mem };
+
+    Object.entries(obj || {}).forEach(([key, value]) => {
+      if (key === "__updatedAt") return;
+      const keepLocalSticky = STICKY_POSITION_KEYS.has(key)
+        && key in mem
+        && (localUpdatedAt[key] || 0) > (remoteUpdatedAt[key] || 0);
+      if (!keepLocalSticky) merged[key] = value;
+    });
+
+    merged.__updatedAt = { ...remoteUpdatedAt, ...localUpdatedAt };
+    mem = merged;
+    persistLocal();
+  };
+  const flush = (useBeacon = false) => {
     clearTimeout(saveTimer);
     saveTimer = null;
+    persistLocal();
+    const body = JSON.stringify(mem);
+    if (useBeacon && typeof navigator !== "undefined" && navigator.sendBeacon) {
+      return navigator.sendBeacon(`${API}/api/state`, new Blob([body], { type: "application/json" }));
+    }
     return fetch(`${API}/api/state`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(mem),
+      body,
+      keepalive: true,
     });
   };
   return {
-    hydrate: (obj) => { mem = { ...mem, ...obj }; },
+    hydrate: mergeRemote,
     get: (k, fb) => (k in mem ? mem[k] : fb),
     set: (k, v, immediate = false) => {
       mem[k] = v;
+      stamp(k);
+      persistLocal();
       if (immediate) return flush();
       clearTimeout(saveTimer);
       saveTimer = setTimeout(() => { flush().catch(() => {}); }, 600); // debounce disk writes
       return Promise.resolve();
     },
     flush,
+    flushBeforeUnload: () => flush(true),
   };
 })();
 
@@ -576,10 +632,19 @@ export default function App() {
   const [offline, setOffline] = useState(false);
 
   useEffect(() => {
+    const persistBeforeUnload = () => { store.flushBeforeUnload(); };
+    window.addEventListener("pagehide", persistBeforeUnload);
+    window.addEventListener("beforeunload", persistBeforeUnload);
+
     fetch(`${API}/api/state`)
       .then((r) => r.json())
       .then((data) => { store.hydrate(data || {}); setReady(true); })
       .catch(() => { setOffline(true); setReady(true); });
+
+    return () => {
+      window.removeEventListener("pagehide", persistBeforeUnload);
+      window.removeEventListener("beforeunload", persistBeforeUnload);
+    };
   }, []);
 
   if (!ready) {
