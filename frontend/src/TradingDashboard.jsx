@@ -394,7 +394,7 @@ function CheckRow({ label, ok }) {
 // ============================================================================
 // MAIN APP
 // ============================================================================
-const TABS = ["Command", "Rotation", "Checklists", "Positions", "Indicators"];
+const TABS = ["Command", "Rotation", "Entry Watch", "Positions", "Indicators"];
 
 // Hydration gate: load persisted state from the backend before the dashboard
 // mounts, so saved positions and manual inputs initialize correctly.
@@ -582,8 +582,8 @@ function TradingDashboard({ backendOffline }) {
         {tab === "Rotation" && (
           <RotationView focus={focus} rows={sectorRows} />
         )}
-        {tab === "Checklists" && (
-          <ChecklistView cfm={cfm} app={app} />
+        {tab === "Entry Watch" && (
+          <EntryWatchView cfm={cfm} app={app} macro={macro} focus={focus} />
         )}
         {tab === "Positions" && (
           <PositionsView
@@ -910,31 +910,127 @@ function Stat({ label, value, color = C.ink, sub }) {
 }
 
 // ============================================================================
-// CHECKLIST VIEW — full entry checklists
+// ENTRY WATCH VIEW — actionable watch list for when to enter
 // ============================================================================
-function ChecklistView({ cfm, app }) {
+function readinessFromChecklist(data) {
+  const ratio = data.total ? data.pass / data.total : 0;
+  if (data.verdict === "ENTER") return { label: "Entry ready", color: C.green, tone: C.greenDim };
+  if (ratio >= 0.8) return { label: "Close watch", color: C.amber, tone: `${C.amber}22` };
+  if (ratio >= 0.6) return { label: "Building", color: C.blue, tone: `${C.blue}22` };
+  return { label: "Early / wait", color: C.inkDim, tone: C.panel2 };
+}
+
+function splitChecklistItems(items) {
+  const passed = items.filter(([, ok]) => ok).map(([label]) => label);
+  const missing = items.filter(([, ok]) => !ok).map(([label]) => label);
+  return { passed, missing };
+}
+
+function EntryWatchView({ cfm, app, macro, focus }) {
+  const candidates = [
+    {
+      tag: "CFM",
+      name: "Cashflow Machine",
+      symbol: "XLV",
+      color: C.blue,
+      data: cfm,
+      setup: "Defensive income / cashflow entry",
+      trigger: "Enter only after the XLV checklist is complete and support has held with constructive money flow.",
+      bestWhen: "Best when growth is slowing, inflation is sticky, and defensive sectors are gaining institutional sponsorship.",
+    },
+    {
+      tag: "APP",
+      name: "Appreciation",
+      symbol: "ILMN",
+      color: C.amber,
+      data: app,
+      setup: "Growth appreciation / breakout entry",
+      trigger: "Enter only after ILMN confirms a breakout above resistance with easy credit, strong breadth, and volume expansion.",
+      bestWhen: "Best when breadth is strong, volatility is calm, and growth leadership is rotating back into the tape.",
+    },
+  ].sort((a, b) => (b.data.pass / b.data.total) - (a.data.pass / a.data.total));
+
   return (
-    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 16 }}>
-      <FullChecklist tag="CFM" name="Cashflow Machine — XLV" color={C.blue} data={cfm} />
-      <FullChecklist tag="APP" name="Appreciation — ILMN" color={C.amber} data={app} />
+    <div style={{ display: "grid", gap: 16 }}>
+      <Panel title="Entry watch list" eyebrow="Purpose · tell me what is close enough to watch" accent={SIG[focus.level]}
+        right={<span style={{ font: `700 12px ${C.mono}`, color: SIG[focus.level] }}>{focus.level}</span>}>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+          <Stat label="Macro permission" value={focus.entryPermission} color={SIG[focus.level]} />
+          <Stat label="Favored strategy" value={focus.favoredStrategy} color={focus.favoredStrategy === "APP" ? C.amber : focus.favoredStrategy === "CFM" ? C.blue : C.ink} />
+          <Stat label="Risk state" value={macroSignal(macro).level === "RED" ? "Protect capital" : "Selective watch"} color={macroSignal(macro).level === "RED" ? C.red : C.green} />
+        </div>
+        <div style={{ marginTop: 12, font: `400 12px/1.45 ${C.sans}`, color: C.inkDim }}>
+          This tab is now a watch list, not a passive checklist: use it to see which setup is closest, what is blocking entry, and the exact trigger that would move it from <b style={{ color: C.ink }}>watch</b> to <b style={{ color: C.green }}>enter</b>.
+        </div>
+      </Panel>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 16 }}>
+        {candidates.map((candidate) => <EntryWatchCard key={candidate.tag} {...candidate} />)}
+      </div>
     </div>
   );
 }
 
-function FullChecklist({ tag, name, color, data }) {
+function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWhen }) {
   const go = data.verdict === "ENTER";
+  const readiness = readinessFromChecklist(data);
+  const { passed, missing } = splitChecklistItems(data.items);
+  const nextBlockers = missing.slice(0, 4);
+  const confirmations = passed.slice(0, 4);
+
   return (
-    <Panel title={name} eyebrow={`${tag} entry · all must pass`} accent={color}
-      right={<span style={{ font: `700 13px ${C.mono}`, padding: "6px 12px", borderRadius: 6, background: go ? C.greenDim : C.redDim, color: go ? C.green : C.red }}>{data.verdict} · {data.pass}/{data.total}</span>}>
-      <div>
-        {data.items.map((i) => <CheckRow key={i[0]} label={i[0]} ok={i[1]} />)}
-      </div>
-      {!go && (
-        <div style={{ marginTop: 12, font: `400 12px/1.4 ${C.sans}`, color: C.inkDim, background: C.panel2, padding: "10px 12px", borderRadius: 6 }}>
-          {data.total - data.pass} condition{data.total - data.pass > 1 ? "s" : ""} unmet. Per your rules: never force entry — wait for the full setup.
+    <Panel title={`${symbol} · ${name}`} eyebrow={`${tag} watch candidate`} accent={color}
+      right={<span style={{ font: `700 12px ${C.mono}`, padding: "5px 10px", borderRadius: 6, background: readiness.tone, color: readiness.color }}>{readiness.label}</span>}>
+      <div style={{ display: "grid", gap: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 12, alignItems: "center" }}>
+          <div>
+            <div style={{ font: `600 13px ${C.sans}`, color: C.ink }}>{setup}</div>
+            <div style={{ font: `400 12px/1.4 ${C.sans}`, color: C.inkDim, marginTop: 4 }}>{bestWhen}</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ font: `800 24px/1 ${C.mono}`, color: go ? C.green : color }}>{data.pass}/{data.total}</div>
+            <div style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, marginTop: 3 }}>READY</div>
+          </div>
         </div>
-      )}
+
+        <div style={{ height: 7, background: C.panel2, borderRadius: 4, overflow: "hidden" }}>
+          <div style={{ width: `${(data.pass / data.total) * 100}%`, height: "100%", background: go ? C.green : color, transition: "width .3s" }} />
+        </div>
+
+        <div style={{ background: go ? `${C.greenDim}55` : C.panel2, border: `1px solid ${go ? C.greenDim : C.lineSoft}`, borderRadius: 8, padding: "11px 12px" }}>
+          <div style={{ font: `700 10px ${C.mono}`, color: go ? C.green : C.inkFaint, letterSpacing: 1, marginBottom: 5 }}>{go ? "ENTRY TRIGGER ACTIVE" : "ENTRY TRIGGER TO WATCH"}</div>
+          <div style={{ font: `500 12px/1.45 ${C.sans}`, color: C.ink }}>{go ? "All conditions are met. Validate price/action live before placing the trade." : trigger}</div>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
+          <WatchList title="Blocking entry" items={nextBlockers} empty="No blockers — entry checklist complete." color={go ? C.green : C.red} />
+          <WatchList title="Already confirmed" items={confirmations} empty="No confirmations yet." color={C.green} />
+        </div>
+
+        <details style={{ borderTop: `1px solid ${C.lineSoft}`, paddingTop: 10 }}>
+          <summary style={{ cursor: "pointer", font: `700 11px ${C.mono}`, color: C.inkDim, letterSpacing: 1 }}>FULL RULE CHECK</summary>
+          <div style={{ marginTop: 8 }}>
+            {data.items.map((i) => <CheckRow key={i[0]} label={i[0]} ok={i[1]} />)}
+          </div>
+        </details>
+      </div>
     </Panel>
+  );
+}
+
+function WatchList({ title, items, empty, color }) {
+  return (
+    <div>
+      <div style={{ font: `700 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, marginBottom: 7 }}>{title}</div>
+      <div style={{ display: "grid", gap: 6 }}>
+        {items.length ? items.map((item) => (
+          <div key={item} style={{ display: "flex", gap: 7, alignItems: "flex-start", font: `400 12px/1.35 ${C.sans}`, color: C.inkDim }}>
+            <span style={{ color, font: `700 11px ${C.mono}`, marginTop: 1 }}>•</span>
+            <span>{item}</span>
+          </div>
+        )) : <div style={{ font: `400 12px ${C.sans}`, color }}>{empty}</div>}
+      </div>
+    </div>
   );
 }
 
