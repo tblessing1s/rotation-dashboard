@@ -1289,10 +1289,13 @@ function summarizeTransactions(rows, currentMarks = {}) {
     const marks = currentMarks[group.key] || {};
     const longCurrent = cleanCurrency(marks.long);
     const shortClose = cleanCurrency(marks.short);
+    const markCurrent = cleanCurrency(marks.current);
+    const hasCurrentMark = String(marks.current ?? "").trim() !== "";
     const cash = group.long.cash + group.short.cash;
     const netQty = group.long.netQty + group.short.netQty;
     const isClosed = Math.abs(group.long.netQty) < 0.000001 && Math.abs(group.short.netQty) < 0.000001 && group.rows.some((row) => row.flowType === "close");
-    const estimated = cash + (isClosed ? 0 : longCurrent - shortClose);
+    const netCurrent = hasCurrentMark ? markCurrent : longCurrent - shortClose;
+    const estimated = cash + (isClosed ? 0 : netCurrent);
     return {
       ...group,
       isClosed,
@@ -1300,7 +1303,9 @@ function summarizeTransactions(rows, currentMarks = {}) {
       netQty,
       longCurrent,
       shortClose,
-      current: isClosed ? 0 : longCurrent - shortClose,
+      markCurrent,
+      hasCurrentMark,
+      current: isClosed ? 0 : netCurrent,
       estimated,
       rowCount: group.rows.length,
       opened: group.firstDate,
@@ -1480,25 +1485,35 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
           <td style={td}>{p.long.netQty || "—"}</td>
           <td style={td}>{p.short.netQty || "—"}</td>
           <td style={{ ...td, color: p.cash >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>{money(p.cash)}</td>
-          {!closed && <td style={td}><input type="number" value={positionMarks[p.key]?.long || ""} onChange={(e) => updateMark(p.key, "long", e.target.value)} placeholder="Long MV" style={{ ...inputStyle, padding: "5px 7px", width: 90, font: `500 12px ${C.mono}` }} /></td>}
-          {!closed && <td style={td}><input type="number" value={positionMarks[p.key]?.short || ""} onChange={(e) => updateMark(p.key, "short", e.target.value)} placeholder="Short close" style={{ ...inputStyle, padding: "5px 7px", width: 100, font: `500 12px ${C.mono}` }} /></td>}
+          {!closed && <td style={td}>
+            <input type="number" value={positionMarks[p.key]?.current || ""} onChange={(e) => updateMark(p.key, "current", e.target.value)} placeholder="Current net" style={{ ...inputStyle, padding: "5px 7px", width: 120, font: `500 12px ${C.mono}` }} />
+            <div style={{ font: `500 9px ${C.sans}`, color: C.inkFaint, marginTop: 4 }}>Long MV − short close</div>
+          </td>}
+          {!closed && <td style={td}>
+            <div style={{ display: "flex", gap: 6 }}>
+              <input type="number" value={positionMarks[p.key]?.long || ""} onChange={(e) => updateMark(p.key, "long", e.target.value)} placeholder="Long MV" style={{ ...inputStyle, padding: "5px 7px", width: 82, font: `500 12px ${C.mono}` }} />
+              <input type="number" value={positionMarks[p.key]?.short || ""} onChange={(e) => updateMark(p.key, "short", e.target.value)} placeholder="Short close" style={{ ...inputStyle, padding: "5px 7px", width: 92, font: `500 12px ${C.mono}` }} />
+            </div>
+            <div style={{ font: `500 9px ${C.sans}`, color: C.inkFaint, marginTop: 4 }}>Optional legs if no current value</div>
+          </td>}
+          {!closed && <td style={{ ...td, color: p.current >= 0 ? C.green : C.red, font: `700 12px ${C.mono}` }}>{money(p.current)}</td>}
           <td style={{ ...td, color: p.estimated >= 0 ? C.green : C.red, font: `700 12px ${C.mono}` }}>{money(p.estimated)}</td>
           {!closed && <td style={{ ...td, color: guide.color || C.inkDim, font: `700 11px ${C.mono}` }} title={guide.note || ""}>{guide.action || "Monitor"}</td>}
           <td style={{ ...td, font: `400 11px ${C.mono}`, color: C.inkDim }}>{p.opened || "—"}</td>
           <td style={{ ...td, font: `400 11px ${C.mono}`, color: C.inkDim }}>{p.closed || "—"}</td>
         </tr>
-        {expanded && <tr><td colSpan={closed ? 9 : 12} style={{ ...td, background: C.panel2, padding: 0 }}><PositionTransactionLog rows={p.rows} /></td></tr>}
+        {expanded && <tr><td colSpan={closed ? 9 : 13} style={{ ...td, background: C.panel2, padding: 0 }}><PositionTransactionLog rows={p.rows} /></td></tr>}
       </React.Fragment>
     );
   });
 
   const renderPositionTable = (list, closed = false) => (
     <div style={{ overflowX: "auto" }}>
-      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: closed ? 760 : 900 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", minWidth: closed ? 760 : 1120 }}>
         <thead><tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
           {(closed
             ? ["", "Strat", "Position", "Long qty", "Short qty", "Cash flow", "P/L", "Opened", "Closed"]
-            : ["", "Strat", "Position", "Long qty", "Short qty", "Cash flow", "Long MV", "Short close", "Est. P/L", "Guidance", "Opened", "Closed"]
+            : ["", "Strat", "Position", "Long qty", "Short qty", "Cash flow", "Current value", "Optional leg marks", "Net current", "Est. P/L", "Guidance", "Opened", "Closed"]
           ).map((h) => <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
         </tr></thead>
         <tbody>{renderPositionRows(list, closed)}</tbody>
@@ -1575,7 +1590,7 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
             <button onClick={savePositionState} style={{ background: C.blue, border: `1px solid ${C.blue}`, borderRadius: 6, color: "white", font: `700 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Save positions</button>
           </div>
           <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim }}>
-            CSV columns are auto-detected when named like date, symbol/ticker, action/side/type, quantity/qty, price, amount/net amount, leg/longshort, and position id/group/trade id. Use a position id/group column to track multiple independent positions for the same ticker (for example, two separate short spreads in one ticker). New transactions cannot be typed in manually on this tab.
+            CSV columns are auto-detected when named like date, symbol/ticker, action/side/type, quantity/qty, price, amount/net amount, leg/longshort, and position id/group/trade id. After import, type each open position's current net value in the Current value column to update Net current and Estimated P/L; optional long/short leg marks are still available when you prefer to split the mark. New transactions cannot be typed in manually on this tab.
           </div>
           {(importMessage || saveStatus) && (
             <div style={{ font: `500 12px ${C.sans}`, color: saveStatus === "error" ? C.red : saveStatus === "saved" || importMessage.startsWith("Added") ? C.green : C.amber }}>
