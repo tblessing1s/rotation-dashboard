@@ -59,6 +59,7 @@ MACRO_CACHE_TTL_MINUTES = 60
 FRED_DFF_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFF"
 FRED_CPI_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
 FRED_GDPC1_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=GDPC1"
+FRED_UNRATE_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE"
 
 # ---- Portfolio defaults (mirrors your framework) ----------------------------
 CAPITAL = 35000
