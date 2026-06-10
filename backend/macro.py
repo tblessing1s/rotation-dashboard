@@ -69,25 +69,109 @@ def macro_breadth() -> dict:
     }
 
 
-def macro_fed_policy() -> dict:
-    """Classify Fed stance from recent effective fed funds rate direction."""
-    series = _fred_series(cfg.FRED_DFF_URL, "DFF")
-    latest = float(series.iloc[-1])
-    prior = float(series.iloc[-64]) if len(series) >= 64 else float(series.iloc[0])
-    change = latest - prior
-    if change >= 0.25:
+def _series_change(series: pd.Series, periods: int) -> float:
+    """Return latest value minus the value N observations ago."""
+    prior_idx = -(periods + 1)
+    prior = float(series.iloc[prior_idx]) if len(series) > periods else float(series.iloc[0])
+    return float(series.iloc[-1]) - prior
+
+
+def _cpi_yoy(series: pd.Series, offset: int = 0) -> float:
+    """Return CPI YoY percent for latest observation, optionally offset by months."""
+    latest_idx = -(offset + 1)
+    year_ago_idx = latest_idx - 12
+    latest = float(series.iloc[latest_idx])
+    year_ago = float(series.iloc[year_ago_idx]) if len(series) >= offset + 13 else float(series.iloc[0])
+    return (latest / year_ago - 1) * 100 if year_ago else 0.0
+
+
+def classify_fed_policy(rate_series: pd.Series, cpi_series: pd.Series, gdp_series: pd.Series, unemployment_series: pd.Series) -> dict:
+    """Classify Fed policy from current inflation, growth, labor, and rate conditions."""
+    latest_rate = float(rate_series.iloc[-1])
+    rate_change = _series_change(rate_series, 63)
+
+    cpi_yoy = _cpi_yoy(cpi_series)
+    cpi_yoy_3m_ago = _cpi_yoy(cpi_series, 3) if len(cpi_series) >= 16 else cpi_yoy
+    cpi_trend_3m = cpi_yoy - cpi_yoy_3m_ago
+
+    latest_gdp = float(gdp_series.iloc[-1])
+    prev_gdp = float(gdp_series.iloc[-2]) if len(gdp_series) >= 2 else latest_gdp
+    prev2_gdp = float(gdp_series.iloc[-3]) if len(gdp_series) >= 3 else prev_gdp
+    qoq_annualized = ((latest_gdp / prev_gdp) ** 4 - 1) * 100 if prev_gdp else 0.0
+    previous_qoq_annualized = ((prev_gdp / prev2_gdp) ** 4 - 1) * 100 if prev2_gdp else qoq_annualized
+    growth_accelerating = qoq_annualized > previous_qoq_annualized + 0.5
+    growth_slowing = qoq_annualized < previous_qoq_annualized - 0.5
+
+    unemployment = float(unemployment_series.iloc[-1])
+    unemployment_change_3m = _series_change(unemployment_series, 3)
+    real_policy_rate = latest_rate - cpi_yoy
+
+    hawkish = []
+    dovish = []
+    if rate_change >= 0.25:
+        hawkish.append("fed funds rate rising")
+    elif rate_change <= -0.25:
+        dovish.append("fed funds rate falling")
+
+    if cpi_yoy >= 3.0:
+        hawkish.append("inflation above 3%")
+    elif cpi_yoy <= 2.6:
+        dovish.append("inflation near target")
+
+    if cpi_trend_3m >= 0.2:
+        hawkish.append("inflation re-accelerating")
+    elif cpi_trend_3m <= -0.2:
+        dovish.append("inflation cooling")
+
+    if growth_accelerating or qoq_annualized >= 2.0:
+        hawkish.append("growth firm")
+    elif growth_slowing or qoq_annualized < 1.0:
+        dovish.append("growth slowing")
+
+    if unemployment <= 4.2 and unemployment_change_3m <= 0.1:
+        hawkish.append("labor market tight")
+    elif unemployment >= 4.5 or unemployment_change_3m >= 0.3:
+        dovish.append("labor market softening")
+
+    if real_policy_rate >= 1.0:
+        hawkish.append("real policy rate restrictive")
+    elif real_policy_rate <= 0.25:
+        dovish.append("real policy rate accommodative")
+
+    score = len(hawkish) - len(dovish)
+    if score >= 2:
         stance = "hawkish"
-    elif change <= -0.25:
+    elif score <= -2:
         stance = "dovish"
     else:
         stance = "holding"
+
     return {
         "value": stance,
-        "rate": round(latest, 2),
-        "change63d": round(change, 2),
-        "asOf": str(series.index[-1].date()),
-        "source": "FRED DFF, 63-trading-day rate change",
+        "rate": round(latest_rate, 2),
+        "change63d": round(rate_change, 2),
+        "cpiYoY": round(cpi_yoy, 1),
+        "cpiTrend3m": round(cpi_trend_3m, 1),
+        "qoqAnnualizedGrowth": round(qoq_annualized, 1),
+        "unemployment": round(unemployment, 1),
+        "unemploymentChange3m": round(unemployment_change_3m, 1),
+        "realPolicyRate": round(real_policy_rate, 1),
+        "score": score,
+        "hawkishConditions": hawkish,
+        "dovishConditions": dovish,
+        "asOf": str(rate_series.index[-1].date()),
+        "source": "FRED DFF/CPI/GDP/UNRATE current-conditions model",
     }
+
+
+def macro_fed_policy() -> dict:
+    """Classify Fed stance from current inflation, growth, labor, and rate conditions."""
+    return classify_fed_policy(
+        _fred_series(cfg.FRED_DFF_URL, "DFF"),
+        _fred_series(cfg.FRED_CPI_URL, "CPIAUCSL"),
+        _fred_series(cfg.FRED_GDPC1_URL, "GDPC1"),
+        _fred_series(cfg.FRED_UNRATE_URL, "UNRATE"),
+    )
 
 
 def macro_inflation() -> dict:

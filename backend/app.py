@@ -149,24 +149,13 @@ def macro_breadth() -> dict:
 
 
 def macro_fed_policy() -> dict:
-    """Classify Fed stance from recent effective fed funds rate direction."""
-    series = _fred_series(cfg.FRED_DFF_URL, "DFF")
-    latest = float(series.iloc[-1])
-    prior = float(series.iloc[-64]) if len(series) >= 64 else float(series.iloc[0])
-    change = latest - prior
-    if change >= 0.25:
-        stance = "hawkish"
-    elif change <= -0.25:
-        stance = "dovish"
-    else:
-        stance = "holding"
-    return {
-        "value": stance,
-        "rate": round(latest, 2),
-        "change63d": round(change, 2),
-        "asOf": str(series.index[-1].date()),
-        "source": "FRED DFF, 63-trading-day rate change",
-    }
+    """Classify Fed stance from current inflation, growth, labor, and rate conditions."""
+    return macro_data.classify_fed_policy(
+        _fred_series(cfg.FRED_DFF_URL, "DFF"),
+        _fred_series(cfg.FRED_CPI_URL, "CPIAUCSL"),
+        _fred_series(cfg.FRED_GDPC1_URL, "GDPC1"),
+        _fred_series(cfg.FRED_UNRATE_URL, "UNRATE"),
+    )
 
 
 def macro_inflation() -> dict:
