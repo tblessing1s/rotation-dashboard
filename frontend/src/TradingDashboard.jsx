@@ -73,6 +73,152 @@ const SECTORS = [
   { symbol: "XLRE", name: "Real Estate", group: "rates" },
 ];
 
+const SECTOR_WATCH_PROFILES = {
+  XLK: {
+    tag: "GROWTH",
+    name: "Technology Leadership",
+    color: C.blue,
+    setup: "Growth leadership / innovation entry",
+    strategy: "growth",
+    regimeLabel: "Risk-on growth",
+    trigger: "Enter after XLK shows leadership momentum, rising sponsorship, clean money flow, and price holds above MA21.",
+    bestWhen: "Best when growth is accelerating, breadth is firm, volatility is contained, and investors are paying up for earnings growth.",
+    macroOk: (m) => m.growth === "accelerating" || m.fed === "dovish" || m.breadth >= 60,
+    breadthMin: 55, vixMax: 22, rs3mMin: 0, mfiMin: 50, mfiMax: 80, volumeMin: 85, volumeMax: 180, needsRisingObv: true,
+    rsLabel: "RS3M leadership positive", obvLabel: "OBV rising confirms sponsorship",
+  },
+  XLY: {
+    tag: "CYCLE",
+    name: "Consumer Discretionary",
+    color: C.amber,
+    setup: "Consumer cycle / risk-on entry",
+    strategy: "cyclical growth",
+    regimeLabel: "Consumer risk-on",
+    trigger: "Enter after XLY confirms improving relative strength, broad risk appetite, constructive money flow, and MA21 support.",
+    bestWhen: "Best when growth is improving, credit conditions are not restrictive, volatility is calm, and consumers are not under macro pressure.",
+    macroOk: (m) => m.growth === "accelerating" || (m.fed !== "hawkish" && m.breadth >= 60),
+    breadthMin: 58, vixMax: 20, rs3mMin: 0, mfiMin: 50, mfiMax: 75, volumeMin: 90, volumeMax: 175, needsRisingObv: true,
+    rsLabel: "RS3M leadership positive", obvLabel: "OBV rising confirms risk appetite",
+  },
+  XLC: {
+    tag: "GROWTH",
+    name: "Communication Services",
+    color: C.blue,
+    setup: "Growth communication / platform entry",
+    strategy: "growth",
+    regimeLabel: "Growth leadership",
+    trigger: "Enter after XLC confirms leadership, positive money flow, and a clean hold above MA21.",
+    bestWhen: "Best when breadth is healthy, volatility is contained, and mega-cap/platform growth is attracting sponsorship.",
+    macroOk: (m) => m.growth === "accelerating" || m.fed === "dovish" || m.breadth >= 60,
+    breadthMin: 55, vixMax: 22, rs3mMin: 0, mfiMin: 50, mfiMax: 78, volumeMin: 85, volumeMax: 180, needsRisingObv: true,
+    rsLabel: "RS3M leadership positive", obvLabel: "OBV rising or clearly supportive",
+  },
+  XLI: {
+    tag: "CYCLE",
+    name: "Industrials",
+    color: C.green,
+    setup: "Industrial cycle / broad-economy entry",
+    strategy: "cyclical",
+    regimeLabel: "Cyclical expansion",
+    trigger: "Enter after XLI shows improving relative strength, healthy breadth, steady money flow, and MA21 support.",
+    bestWhen: "Best when growth is stable-to-improving, breadth is broad, and cyclical leadership is rotating into the tape.",
+    macroOk: (m) => m.growth !== "slowing" || m.breadth >= 60 || m.inflation > 3.2,
+    breadthMin: 55, vixMax: 24, rs3mMin: -5, mfiMin: 50, mfiMax: 75, volumeMin: 80, volumeMax: 170, needsRisingObv: false,
+    rsLabel: "RS3M at least near leadership", obvLabel: "OBV not falling",
+  },
+  XLF: {
+    tag: "CYCLE",
+    name: "Financials",
+    color: C.green,
+    setup: "Financials / credit-cycle entry",
+    strategy: "cyclical",
+    regimeLabel: "Credit-cycle support",
+    trigger: "Enter after XLF confirms relative strength, stable macro risk, constructive money flow, and price above MA21.",
+    bestWhen: "Best when credit is healthy, rates are not collapsing, breadth is stable, and financials are gaining sponsorship.",
+    macroOk: (m) => m.fed !== "dovish" || m.growth === "accelerating" || m.breadth >= 58,
+    breadthMin: 55, vixMax: 24, rs3mMin: -5, mfiMin: 50, mfiMax: 75, volumeMin: 80, volumeMax: 170, needsRisingObv: false,
+    rsLabel: "RS3M at least near leadership", obvLabel: "OBV not falling",
+  },
+  XLE: {
+    tag: "INFL",
+    name: "Energy",
+    color: C.amber,
+    setup: "Inflation / commodity pressure entry",
+    strategy: "inflation hedge",
+    regimeLabel: "Inflation support",
+    trigger: "Enter after XLE confirms commodity leadership, strong relative momentum, positive flow, and a controlled MA21 hold.",
+    bestWhen: "Best when inflation is hot or sticky, commodity leadership is present, and energy is attracting tactical sponsorship.",
+    macroOk: (m) => m.inflation > 3 || m.growth !== "accelerating" || m.fed === "hawkish",
+    breadthMin: 50, vixMax: 26, rs3mMin: 0, mfiMin: 52, mfiMax: 82, volumeMin: 90, volumeMax: 200, needsRisingObv: true,
+    rsLabel: "RS3M commodity leadership positive", obvLabel: "OBV rising confirms accumulation",
+  },
+  XLB: {
+    tag: "INFL",
+    name: "Materials",
+    color: C.amber,
+    setup: "Materials / inflation-cycle entry",
+    strategy: "inflation cyclical",
+    regimeLabel: "Commodity-cycle support",
+    trigger: "Enter after XLB confirms cyclical or inflation leadership, constructive flow, and price above MA21.",
+    bestWhen: "Best when inflation is sticky, global cycle data is firming, and materials are improving versus the market.",
+    macroOk: (m) => m.inflation > 3 || m.growth === "accelerating" || m.breadth >= 58,
+    breadthMin: 52, vixMax: 25, rs3mMin: -5, mfiMin: 50, mfiMax: 78, volumeMin: 85, volumeMax: 185, needsRisingObv: false,
+    rsLabel: "RS3M improving versus market", obvLabel: "OBV not falling",
+  },
+  XLV: {
+    tag: "DEF",
+    name: "Health Care Defense",
+    color: C.blue,
+    setup: "Defensive health care / cashflow entry",
+    strategy: "defensive cashflow",
+    regimeLabel: "Defensive rotation",
+    trigger: "Enter after XLV confirms defensive rotation, steady money flow, controlled volatility, and support above MA21.",
+    bestWhen: "Best when growth is slowing, inflation is sticky, volatility is contained, and defensive sectors are gaining sponsorship.",
+    macroOk: (m) => m.growth === "slowing" || m.fed === "hawkish" || (m.inflation >= 2 && m.inflation <= 3.2),
+    breadthMin: 50, vixMax: 25, rs3mMin: -15, mfiMin: 55, mfiMax: 75, volumeMin: 70, volumeMax: 150, needsRisingObv: false,
+    rsLabel: "RS3M defensive rotation range", obvLabel: "OBV green or flat",
+  },
+  XLP: {
+    tag: "DEF",
+    name: "Staples Defense",
+    color: C.green,
+    setup: "Defensive staples / capital-preservation entry",
+    strategy: "defensive cashflow",
+    regimeLabel: "Defensive rotation",
+    trigger: "Enter after XLP confirms defensive sponsorship, resilient relative strength, steady money flow, and MA21 support.",
+    bestWhen: "Best when growth is slowing, volatility is rising but not disorderly, and investors are rotating toward stable demand.",
+    macroOk: (m) => m.growth === "slowing" || m.fed === "hawkish" || m.vix >= 18,
+    breadthMin: 48, vixMax: 28, rs3mMin: -10, mfiMin: 52, mfiMax: 75, volumeMin: 70, volumeMax: 155, needsRisingObv: false,
+    rsLabel: "RS3M defensive rotation improving", obvLabel: "OBV green or flat",
+  },
+  XLU: {
+    tag: "DEF",
+    name: "Utilities Defense",
+    color: C.green,
+    setup: "Utilities / defensive yield entry",
+    strategy: "defensive yield",
+    regimeLabel: "Defensive yield support",
+    trigger: "Enter after XLU confirms defensive rotation, stable volatility, constructive flow, and MA21 support.",
+    bestWhen: "Best when growth is slowing, volatility is elevated-but-controlled, and defensive yield is being sponsored.",
+    macroOk: (m) => m.growth === "slowing" || m.fed !== "hawkish" || m.vix >= 18,
+    breadthMin: 48, vixMax: 28, rs3mMin: -10, mfiMin: 52, mfiMax: 75, volumeMin: 70, volumeMax: 155, needsRisingObv: false,
+    rsLabel: "RS3M defensive rotation improving", obvLabel: "OBV green or flat",
+  },
+  XLRE: {
+    tag: "RATES",
+    name: "Real Estate",
+    color: C.amber,
+    setup: "Rate-sensitive real estate entry",
+    strategy: "rate-sensitive income",
+    regimeLabel: "Rate relief support",
+    trigger: "Enter after XLRE confirms rate-sensitive sponsorship, improving relative strength, constructive flow, and MA21 support.",
+    bestWhen: "Best when the Fed is neutral-to-dovish, volatility is contained, and rate-sensitive groups are rotating higher.",
+    macroOk: (m) => m.fed !== "hawkish" || m.growth === "slowing" || m.inflation <= 3,
+    breadthMin: 52, vixMax: 24, rs3mMin: -5, mfiMin: 50, mfiMax: 75, volumeMin: 80, volumeMax: 165, needsRisingObv: false,
+    rsLabel: "RS3M rate-sensitive rotation improving", obvLabel: "OBV not falling",
+  },
+};
+
 // ============================================================================
 // DATA LAYER — all fetching + indicator math happens in the Python backend.
 // These just call the local API. No CORS, cached server-side.
@@ -605,7 +751,7 @@ function TradingDashboard({ backendOffline }) {
           <RotationView focus={focus} rows={sectorRows} />
         )}
         {tab === "Entry Watch" && (
-          <EntryWatchView cfm={cfm} app={app} macro={macro} focus={focus} computed={computed} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchSymbols} setEntryWatchSymbols={updateEntryWatchSymbols} />
+          <EntryWatchView app={app} macro={macro} focus={focus} computed={computed} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchSymbols} setEntryWatchSymbols={updateEntryWatchSymbols} />
         )}
         {tab === "Positions" && (
           <PositionsView
@@ -952,31 +1098,53 @@ function normalizeWatchSymbol(value) {
   return String(value || "").trim().toUpperCase().replace(/[^A-Z0-9.^-]/g, "");
 }
 
-function genericWatchChecklist(symbol, calc, macro, focus, calcStatus) {
-  if (!calc) {
-    const loading = calcStatus === "loading";
-    return {
-      items: [[loading ? "Looking up indicator data" : "Indicator data found", false]],
-      pass: 0,
-      total: 1,
-      verdict: "WAIT",
-      trigger: loading
-        ? `Looking up ${symbol} now. The checklist will evaluate as soon as indicators load.`
-        : `No indicator data was found for ${symbol}. Check the ticker symbol or refresh indicators before making an entry decision.`,
-      setup: "Custom ticker monitor",
-      bestWhen: "Add tickers you want monitored against the current macro and rotation framework.",
-    };
-  }
+function missingIndicatorChecklist(symbol, calcStatus, setup, bestWhen) {
+  const loading = calcStatus === "loading";
+  return {
+    items: [[loading ? "Looking up indicator data" : "Indicator data found", false]],
+    pass: 0,
+    total: 1,
+    verdict: "WAIT",
+    trigger: loading
+      ? `Looking up ${symbol} now. The checklist will evaluate as soon as indicators load.`
+      : `No indicator data was found for ${symbol}. Check the ticker symbol or refresh indicators before making an entry decision.`,
+    setup,
+    bestWhen,
+  };
+}
+
+function focusTierForSymbol(symbol, focus) {
+  if (focus.primary.includes(symbol)) return "Primary";
+  if (focus.secondary.includes(symbol)) return "Secondary";
+  if (focus.avoid.includes(symbol)) return "Ignored";
+  return "Neutral";
+}
+
+function sectorWatchChecklist(symbol, calc, macro, focus, calcStatus) {
+  const profile = SECTOR_WATCH_PROFILES[symbol];
+  if (!calc) return missingIndicatorChecklist(symbol, calcStatus, profile.setup, profile.bestWhen);
+
   const { inst, flow, tech } = bucketsFromCalc(calc);
-  const focusTier = focus.primary.includes(symbol) ? "Primary" : focus.secondary.includes(symbol) ? "Secondary" : focus.avoid.includes(symbol) ? "Ignored" : "Neutral";
+  const focusTier = focusTierForSymbol(symbol, focus);
+  const flowInRange = flow.mfi >= profile.mfiMin && flow.mfi <= profile.mfiMax;
+  const volumeParticipating = flow.volRatio >= profile.volumeMin;
+  const volumeControlled = flow.volRatio <= profile.volumeMax;
+  const obvOk = profile.needsRisingObv ? flow.obv === "rising" : flow.obv !== "falling";
+  const sectorIsFavored = focusTier === "Primary" || focusTier === "Secondary";
   const items = [
     ["Macro is not risk-off", macroSignal(macro).level !== "RED"],
-    ["Ticker is not in avoided sector list", focusTier !== "Ignored"],
+    [`${profile.regimeLabel} macro backdrop`, profile.macroOk(macro)],
+    [`Breadth supports ${profile.strategy} entries`, macro.breadth >= profile.breadthMin],
+    [`VIX below ${profile.vixMax}`, macro.vix < profile.vixMax],
+    ["Sector is primary or secondary focus", sectorIsFavored],
+    ["Sector is not in avoided list", focusTier !== "Ignored"],
+    [profile.rsLabel, inst.rs3m >= profile.rs3mMin],
     ["RS3M momentum positive", inst.rs3mMom > 0],
     ["RS3M trend rising", inst.rs3mTrend === "up"],
-    ["MoneyFlow 50+", flow.mfi >= 50],
-    ["OBV not falling", flow.obv !== "falling"],
-    ["Volume at least 70% of normal", flow.volRatio >= 70],
+    [`MoneyFlow ${profile.mfiMin}–${profile.mfiMax}`, flowInRange],
+    [profile.obvLabel, obvOk],
+    [`Volume at least ${profile.volumeMin}% of normal`, volumeParticipating],
+    ["Volume not a chase spike", volumeControlled],
     ["Price above MA21", tech.priceAboveMA21],
   ];
   const pass = items.filter(([, ok]) => ok).length;
@@ -985,25 +1153,51 @@ function genericWatchChecklist(symbol, calc, macro, focus, calcStatus) {
     pass,
     total: items.length,
     verdict: pass === items.length ? "ENTER" : "WAIT",
-    trigger: `${symbol} needs positive RS3M momentum, constructive flow, and price above MA21 before entry.`,
-    setup: "Custom ticker monitor",
+    trigger: profile.trigger,
+    setup: profile.setup,
+    bestWhen: profile.bestWhen,
+  };
+}
+
+function genericWatchChecklist(symbol, calc, macro, focus, calcStatus) {
+  if (!calc) {
+    return missingIndicatorChecklist(
+      symbol,
+      calcStatus,
+      "Custom ticker monitor",
+      "Add tickers you want monitored against the current macro and rotation framework."
+    );
+  }
+  const { inst, flow, tech } = bucketsFromCalc(calc);
+  const focusTier = focusTierForSymbol(symbol, focus);
+  const items = [
+    ["Macro is not risk-off", macroSignal(macro).level !== "RED"],
+    ["Ticker is not in avoided sector list", focusTier !== "Ignored"],
+    ["RS3M leadership positive", inst.rs3m > 0],
+    ["RS3M momentum positive", inst.rs3mMom > 0],
+    ["RS3M trend rising", inst.rs3mTrend === "up"],
+    ["MoneyFlow 50–75", flow.mfi >= 50 && flow.mfi <= 75],
+    ["OBV not falling", flow.obv !== "falling"],
+    ["Volume at least 70% of normal", flow.volRatio >= 70],
+    ["Volume not a chase spike", flow.volRatio <= 175],
+    ["Price above MA21", tech.priceAboveMA21],
+  ];
+  const pass = items.filter(([, ok]) => ok).length;
+  return {
+    items,
+    pass,
+    total: items.length,
+    verdict: pass === items.length ? "ENTER" : "WAIT",
+    trigger: `${symbol} needs relative-strength leadership, constructive flow, controlled volume, and price above MA21 before entry.`,
+    setup: "Standard ticker monitor",
     bestWhen: "Best when its indicators confirm the macro regime and money is rotating into the name.",
   };
 }
 
-function EntryWatchView({ cfm, app, macro, focus, computed, calcStatus, entryWatchSymbols, setEntryWatchSymbols }) {
+function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSymbols, setEntryWatchSymbols }) {
   const [draftSymbol, setDraftSymbol] = useState("");
   const normalizedWatch = Array.from(new Set((entryWatchSymbols || []).map(normalizeWatchSymbol).filter(Boolean)));
   const defaultCandidateData = {
-    XLV: {
-      tag: "CFM",
-      name: "Cashflow Machine",
-      color: C.blue,
-      data: cfm,
-      setup: "Defensive income / cashflow entry",
-      trigger: "Enter only after the XLV checklist is complete and support has held with constructive money flow.",
-      bestWhen: "Best when growth is slowing, inflation is sticky, and defensive sectors are gaining institutional sponsorship.",
-    },
     ILMN: {
       tag: "APP",
       name: "Appreciation",
@@ -1016,12 +1210,27 @@ function EntryWatchView({ cfm, app, macro, focus, computed, calcStatus, entryWat
   };
 
   const candidates = normalizedWatch.map((symbol) => {
+    const sectorProfile = SECTOR_WATCH_PROFILES[symbol];
+    if (sectorProfile) {
+      const data = sectorWatchChecklist(symbol, computed?.[symbol], macro, focus, calcStatus);
+      return {
+        tag: sectorProfile.tag,
+        name: sectorProfile.name,
+        symbol,
+        color: sectorProfile.color,
+        data,
+        setup: data.setup,
+        trigger: data.trigger,
+        bestWhen: data.bestWhen,
+      };
+    }
+
     const preset = defaultCandidateData[symbol];
     if (preset) return { ...preset, symbol };
     const generic = genericWatchChecklist(symbol, computed?.[symbol], macro, focus, calcStatus);
     return {
       tag: "WATCH",
-      name: "Custom ticker",
+      name: "Standard ticker",
       symbol,
       color: C.green,
       data: generic,
@@ -1053,7 +1262,7 @@ function EntryWatchView({ cfm, app, macro, focus, computed, calcStatus, entryWat
           <Stat label="Tickers monitored" value={normalizedWatch.length} color={C.blue} />
         </div>
         <div style={{ marginTop: 12, font: `400 12px/1.45 ${C.sans}`, color: C.inkDim }}>
-          Add tickers you want monitored for entry readiness. Custom names are checked against the same rotation, money-flow, and MA21 framework; XLV and ILMN keep their specialized CFM/APP rule checks.
+          Add tickers you want monitored for entry readiness. Sector ETFs use a consistent sector-specific checklist tuned to their macro role; non-sector tickers use the standardized rotation, money-flow, volume, and MA21 framework.
         </div>
         <form onSubmit={addSymbol} style={{ display: "flex", gap: 8, marginTop: 14, flexWrap: "wrap" }}>
           <input value={draftSymbol} onChange={(e) => setDraftSymbol(e.target.value)} placeholder="Add ticker (ex: MSFT)" style={{ ...inputStyle, flex: "1 1 180px", textTransform: "uppercase" }} />
