@@ -20,6 +20,23 @@ jobs:
       - name: Set up flyctl
         uses: superfly/flyctl-actions/setup-flyctl@master
 
+      - name: Ensure data volume exists
+        # The single-writer SQLite store lives on a volume named 'data'. Fly
+        # does not auto-create the first volume, so create it once (idempotent:
+        # skip if a 'data' volume already exists). Keep exactly ONE volume so we
+        # never end up with a second machine attaching to diverged data.
+        run: |
+          existing=$(flyctl volumes list --app rotation-dashboard --json \
+            | jq '[.[] | select(.name == "data" and .state != "destroyed")] | length')
+          if [ "$existing" -lt 1 ]; then
+            echo "No 'data' volume found; creating one in iad."
+            flyctl volume create data --region iad --size 1 --yes --app rotation-dashboard
+          else
+            echo "Found $existing 'data' volume(s); skipping creation."
+          fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
       - name: Deploy to Fly.io
         # Single-writer SQLite store: deploy exactly ONE machine. --ha=false
         # prevents Fly from provisioning a second machine, which would demand a
