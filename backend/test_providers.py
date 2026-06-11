@@ -7,6 +7,7 @@ import pytest
 
 import providers
 import providers.base as base
+import providers.fred as fred
 from ingest import fetch_symbol
 from providers.base import Provider, ProviderError, with_retries
 
@@ -55,6 +56,57 @@ def test_fetch_symbol_reports_all_errors_when_every_provider_fails(monkeypatch):
     monkeypatch.setattr(base.time, "sleep", lambda s: None)
     with pytest.raises(ProviderError, match="broken: "):
         fetch_symbol("SPY", [Broken(), Broken()], "2026-01-01")
+
+
+FRED_API_JSON = (
+    '{"observations":[{"date":"2026-06-09","value":"4.33"},'
+    '{"date":"2026-06-10","value":"."},'
+    '{"date":"2026-06-11","value":"4.34"}]}'
+)
+FRED_CSV = "observation_date,UNRATE\n2026-04-01,4.1\n2026-05-01,4.2\n"
+
+
+def test_fred_uses_keyed_api_when_key_present(monkeypatch):
+    monkeypatch.setenv("FRED_API_KEY", "testkey")
+    seen = {}
+    monkeypatch.setattr(fred, "_get", lambda url, timeout: (seen.update(url=url), FRED_API_JSON)[1])
+    series = fred.fetch_series("DFF")
+    assert "api.stlouisfed.org" in seen["url"]
+    assert list(series.values) == [4.33, 4.34]  # the "." observation is dropped
+
+
+def test_fred_falls_back_to_csv_when_api_fails(monkeypatch):
+    monkeypatch.setattr(base.time, "sleep", lambda s: None)
+    monkeypatch.setenv("FRED_API_KEY", "testkey")
+
+    def fake_get(url, timeout):
+        if "api.stlouisfed.org" in url:
+            raise ProviderError("HTTP Error 403: Forbidden")
+        return FRED_CSV
+
+    monkeypatch.setattr(fred, "_get", fake_get)
+    series = fred.fetch_series("UNRATE")
+    assert list(series.values) == [4.1, 4.2]
+
+
+def test_fred_uses_csv_directly_without_key(monkeypatch):
+    monkeypatch.delenv("FRED_API_KEY", raising=False)
+    urls = []
+    monkeypatch.setattr(fred, "_get", lambda url, timeout: (urls.append(url), FRED_CSV)[1])
+    fred.fetch_series("UNRATE")
+    assert urls and all("api.stlouisfed.org" not in u for u in urls)
+
+
+def test_fred_reports_both_failures(monkeypatch):
+    monkeypatch.setattr(base.time, "sleep", lambda s: None)
+    monkeypatch.setenv("FRED_API_KEY", "testkey")
+
+    def boom(url, timeout):
+        raise ProviderError("403")
+
+    monkeypatch.setattr(fred, "_get", boom)
+    with pytest.raises(ProviderError, match="api:.*csv:"):
+        fred.fetch_series("DFF")
 
 
 def test_with_retries_retries_then_succeeds(monkeypatch):

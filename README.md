@@ -96,10 +96,20 @@ last ingestion run. The same report is at `GET /api/data-status`.
 |---|---|---|
 | **Schwab Trader API** (primary) | daily OHLCV — same feed as thinkorswim | `SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, `SCHWAB_REFRESH_TOKEN` |
 | **Yahoo Finance** (fallback) | daily OHLCV when Schwab is unavailable | none |
-| **FRED** | Fed funds, CPI, real GDP, unemployment | none |
+| **FRED** | Fed funds, CPI, real GDP, unemployment | `FRED_API_KEY` (recommended) |
 
 Every stored row is tagged with its source, and the UI shows it in the
 staleness tooltip. Yahoo is explicitly the labeled last resort.
+
+**FRED:** ingestion prefers the official FRED API and falls back to the keyless
+graph CSV. The keyless endpoint has started returning HTTP 403 to programmatic
+requests, which leaves Fed policy / growth / inflation blank and shows the
+regime gate as **DEGRADED DATA**. Get a free key at
+https://fred.stlouisfed.org/docs/api/api_key.html and set it:
+
+```sh
+fly secrets set FRED_API_KEY=…
+```
 
 ### Schwab setup (one-time, ~10 minutes)
 
@@ -124,6 +134,7 @@ The root `Dockerfile` builds the frontend and runs Gunicorn on Fly's `$PORT`.
 fly launch                  # first time
 fly volume create data --region iad --size 1   # persistent volume for the datastore
 fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=… SCHWAB_REFRESH_TOKEN=…
+fly secrets set FRED_API_KEY=…                         # free key, keeps macro inputs auto-filling
 fly secrets set INGEST_TOKEN=$(openssl rand -hex 16)   # protects POST /api/ingest
 fly deploy
 fly scale count 1           # one machine — see note below
