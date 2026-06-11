@@ -24,22 +24,25 @@ TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # AAPL is the default APP stock candidate.
 QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", "^VIX", "SPY"]  # for the live ticker strip/API
 
 # ---- 5 key indicator settings ----------------------------------------------
-# RS3M uses the supplied raw close formula:
-#   (symbol % change over 90 rows) - (SPY % change over 90 rows)
-# RS3M_MOM uses the supplied acceleration formula:
-#   ((current RS3M - average RS3M over latest 10 readings) / abs(average)) * 100
+# Schwab daily bars line up with thinkorswim's daily studies, so defaults use
+# the same common study settings:
+# - RS3M: raw symbol-vs-SPY return spread over 63 trading bars (~3 months).
+# - RS3M_MOM: ((current RS3M - latest 10-reading avg) / abs(avg)) * 100.
+# - RSI: 14-period Wilder average (thinkorswim RSI default).
+# - MA21: 21-day simple moving average (thinkorswim SimpleMovingAvg).
 # VolumeRatio uses latest volume / prior 20-day average volume * 100.
 # VolumeAccel uses latest 5-day average volume / previous 5-day average * 100.
-# RSI uses a simple 14-period average gain/loss calculation.
 RS3M_METHOD = "return_spread"
 RS3M_EMA_SPAN = 1
-RS3M_LOOKBACK = 90
+RS3M_LOOKBACK = 63
 RS3M_MOM_WINDOW = 10
 MOM_SMOOTH = 1
 MOM_SCALE = 1.0
+RSI_METHOD = "wilder"
+MA21_METHOD = "sma"
 
 # ---- Data / ingestion --------------------------------------------------------
-HISTORY_DAYS = 320          # ~10 months of daily bars (enough for 90d RS3M + momentum)
+HISTORY_DAYS = 320          # ~10 months of daily bars (enough for 63-bar RS3M + momentum)
 
 # Entry-watch candidate universe (mirrors the frontend's CFM/APP candidate
 # lists) so scheduled ingestion covers every symbol the UI can request.

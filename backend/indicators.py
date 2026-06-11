@@ -3,34 +3,47 @@ Indicator math for the rotation dashboard.
 
 The five key sector indicators intentionally mirror the formulas supplied in
 this project brief:
-- RS3M = symbol 90-day percent change minus SPY 90-day percent change.
+- RS3M = symbol 63-bar percent change minus SPY 63-bar percent change, matching
+  the standard ~3 trading-month lookback used on daily Schwab/thinkorswim data.
 - RS3M_MOM = percent change of current RS3M versus the average RS3M over the
   latest 10 RS3M readings, using ``abs(average)`` in the denominator.
 - VolumeRatio = latest volume divided by the prior 20-day average volume, times 100.
 - VolumeAccel = latest 5-day average volume divided by the previous 5-day
   average volume, times 100.
-- RSI = simple 14-period average gain/loss RSI.
+- RSI = 14-period Wilder RSI by default, matching thinkorswim's default RSI.
 """
 from __future__ import annotations
 import numpy as np
 import pandas as pd
 
 
-def rsi(closes: pd.Series, period: int = 14) -> float | None:
-    """Simple RSI using the latest `period` price changes.
+def rsi(closes: pd.Series, period: int = 14, method: str = "wilder") -> float | None:
+    """Latest RSI value.
 
-    This matches the supplied calculation: split the latest 14 changes into
-    gains/losses, average each over 14 periods, then calculate
-    ``100 - (100 / (1 + average_gain / average_loss))``.
+    ``method="wilder"`` matches thinkorswim's default RSI study
+    (``average type = Wilders``): seed the average gain/loss with the first
+    ``period`` changes, then recursively smooth each subsequent change.
+    ``method="simple"`` retains the earlier plain average of the latest
+    ``period`` changes for backward-compatible fixtures/configs.
     """
     c = closes.dropna().to_numpy(dtype=float)
     if len(c) < period + 1:
         return None
-    deltas = np.diff(c)[-period:]
+
+    deltas = np.diff(c)
     gains = np.clip(deltas, 0, None)
     losses = np.clip(-deltas, 0, None)
-    avg_gain = gains.sum() / period
-    avg_loss = losses.sum() / period
+
+    if (method or "wilder").lower() == "simple":
+        avg_gain = gains[-period:].sum() / period
+        avg_loss = losses[-period:].sum() / period
+    else:
+        avg_gain = gains[:period].sum() / period
+        avg_loss = losses[:period].sum() / period
+        for gain, loss in zip(gains[period:], losses[period:]):
+            avg_gain = ((avg_gain * (period - 1)) + gain) / period
+            avg_loss = ((avg_loss * (period - 1)) + loss) / period
+
     if avg_loss == 0:
         return 100.0
     rs = avg_gain / avg_loss
@@ -95,15 +108,23 @@ def ema(series: pd.Series, span: int) -> pd.Series:
     return series.ewm(span=span, adjust=False).mean()
 
 
-def rs3m_series(sym_close: pd.Series, spy_close: pd.Series, lookback: int = 90,
+def moving_average(series: pd.Series, window: int, method: str = "sma") -> pd.Series:
+    """Moving average helper for MA21. Defaults to SMA like thinkorswim's
+    SimpleMovingAvg study; ``method="ema"`` preserves the previous behavior.
+    """
+    if (method or "sma").lower() == "ema":
+        return ema(series, window)
+    return series.rolling(window=window, min_periods=window).mean()
+
+
+def rs3m_series(sym_close: pd.Series, spy_close: pd.Series, lookback: int = 63,
                 smooth: int = 1, method: str = "return_spread", ema_span: int = 1) -> pd.Series:
     """Symbol-vs-SPY relative strength over `lookback` rows, in percent.
 
-    The default is the supplied RS3M formula using raw closes:
-    ``((current / lookback_ago) - 1) * 100`` for the symbol minus the same SPY
-    percent change. The optional legacy EMA/smoothing arguments are retained so
-    older config payloads do not break, but the dashboard config now defaults to
-    the raw 90-day calculation.
+    The default uses raw Schwab/thinkorswim daily closes over 63 trading bars
+    (about three months): ``((current / lookback_ago) - 1) * 100`` for the
+    symbol minus the same SPY percent change. The optional legacy EMA/smoothing
+    arguments are retained so older config payloads do not break.
     """
     df = pd.DataFrame({"s": sym_close, "p": spy_close}).dropna()
     rs_method = (method or "return_spread").lower()
@@ -151,7 +172,7 @@ def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
 
     rs3m_val = rs3m_mom = None
     rs3m_trend = None
-    lookback = getattr(cfg, "RS3M_LOOKBACK", 90)
+    lookback = getattr(cfg, "RS3M_LOOKBACK", 63)
     mom_window = getattr(cfg, "RS3M_MOM_WINDOW", 10)
     if spy_bars is not None and len(spy_bars) >= lookback + mom_window and len(close) >= lookback + mom_window:
         series = rs3m_series(close, spy_bars["Close"],
@@ -161,14 +182,21 @@ def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
         if len(series) >= mom_window:
             rs3m_val = float(series.iloc[-1])
             rs3m_mom = rs3m_momentum(series, mom_window)
+            mom_scale = float(getattr(cfg, "MOM_SCALE", 1.0) or 1.0)
+            if rs3m_mom is not None:
+                rs3m_mom *= mom_scale
             if len(series) >= mom_window + 1:
                 prev_mom = rs3m_momentum(series.iloc[:-1], mom_window)
+                if prev_mom is not None:
+                    prev_mom *= mom_scale
                 if prev_mom is not None and rs3m_mom is not None:
                     rs3m_trend = "up" if rs3m_mom > prev_mom else "down" if rs3m_mom < prev_mom else "flat"
             if rs3m_trend is None and rs3m_mom is not None:
                 rs3m_trend = "up" if rs3m_mom > 0 else "down" if rs3m_mom < 0 else "flat"
 
-    ma21 = float(ema(close, 21).iloc[-1])
+    ma_method = getattr(cfg, "MA21_METHOD", "sma")
+    ma21_series = moving_average(close, 21, ma_method)
+    ma21 = float(ma21_series.iloc[-1])
     price = float(close.iloc[-1])
 
     return {
@@ -176,7 +204,7 @@ def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
         "price": round(price, 2),
         "ma21": _round(ma21, 2),
         "priceAboveMA21": price > ma21,
-        "rsi": _round(rsi(close)),
+        "rsi": _round(rsi(close, method=getattr(cfg, "RSI_METHOD", "wilder"))),
         "obv": obv_trend(close, vol),
         "volRatio": _round(volume_ratio(vol), 0),
         "volAccel": _round(volume_acceleration(vol), 0),
@@ -187,6 +215,8 @@ def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
         "rs3mMethod": getattr(cfg, "RS3M_METHOD", "return_spread"),
         "rs3mLookback": lookback,
         "rs3mMomWindow": mom_window,
+        "rsiMethod": getattr(cfg, "RSI_METHOD", "wilder"),
+        "ma21Method": ma_method,
     }
 
 

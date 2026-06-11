@@ -8,29 +8,26 @@ called out; **the TOS value remains the source of truth when you use the
 manual override fields.**
 
 All price series are daily closes from the canonical stored bars (best
-provider per date: schwab > yahoo).
+provider per date: schwab > yahoo). Schwab daily bars are the primary target,
+so the defaults use common thinkorswim daily-study settings where applicable.
 
 ---
 
 ## RS3M — 3-month relative strength vs SPY
 
 ```
-sym_ret = (close_sym[t] / close_sym[t-90] - 1) × 100      # 90 daily rows
-spy_ret = (close_spy[t] / close_spy[t-90] - 1) × 100
+sym_ret = (close_sym[t] / close_sym[t-63] - 1) × 100      # 63 daily bars
+spy_ret = (close_spy[t] / close_spy[t-63] - 1) × 100
 RS3M    = sym_ret - spy_ret
 ```
 
-- Lookback is `RS3M_LOOKBACK = 90` **trading rows**, not calendar days
-  (~4.3 calendar months). Code: `rs3m_series()`.
+- Lookback is `RS3M_LOOKBACK = 63` **trading rows**, the standard daily-bar
+  approximation for three trading months. Code: `rs3m_series()`.
 - Dates where either series has no close are dropped before alignment.
-
-**Known difference vs thinkorswim:** your TOS RS3M studies are EMA-based and
-scaled (readings like +500/+884/+1128). This raw return-spread produces values
-in single/low-double-digit percent. The two agree directionally but not in
-magnitude. Config knobs `RS3M_METHOD="ema"`, `RS3M_EMA_SPAN`, `MOM_SCALE`
-exist to approximate TOS, but **when they diverge, trust thinkorswim and use
-the override fields** — overrides are stored with `source="manual"` and always
-beat ingested values.
+- Config knobs `RS3M_METHOD="ema"`, `RS3M_EMA_SPAN`, `MOM_SMOOTH`, and
+  `MOM_SCALE` remain available if you want to calibrate to a custom
+  thinkorswim study. Manual overrides are still stored with `source="manual"`
+  and beat ingested values.
 
 ## RS3M_MOM — relative-strength acceleration
 
@@ -40,24 +37,25 @@ avg     = mean(window)
 RS3M_MOM = ((RS3M[t] - avg) / |avg|) × 100
 ```
 
-Code: `rs3m_momentum()`. Same thinkorswim caveat as RS3M: magnitudes are not
-comparable to your TOS study; the sign/trend is. `rs3mTrend` is "up" when
-today's RS3M_MOM is above yesterday's recomputation, "down" when below.
+Code: `rs3m_momentum()`. `MOM_SCALE` is applied after the calculation so a
+custom study can be calibrated without changing the raw RS3M series.
+`rs3mTrend` is "up" when today's RS3M_MOM is above yesterday's recomputation,
+"down" when below.
 
-## RSI — 14-period, simple averages
+## RSI — 14-period Wilder average
 
 ```
-deltas    = last 14 daily close changes
-avg_gain  = sum(positive deltas) / 14
-avg_loss  = sum(|negative deltas|) / 14
-RSI       = 100 - 100 / (1 + avg_gain / avg_loss)        # 100 if avg_loss = 0
+deltas        = daily close changes
+seed_gain     = mean(positive deltas over the first 14 changes)
+seed_loss     = mean(|negative deltas| over the first 14 changes)
+avg_gain[t]   = (avg_gain[t-1] × 13 + gain[t]) / 14
+avg_loss[t]   = (avg_loss[t-1] × 13 + loss[t]) / 14
+RSI           = 100 - 100 / (1 + avg_gain / avg_loss)    # 100 if avg_loss = 0
 ```
 
-Code: `rsi()`. This is the **simple-average** RSI. thinkorswim's default
-`RSI` study uses Wilder smoothing (`WildersAverage`), which reacts more
-slowly; values typically differ by a few points. Verified against the
-project's reference fixture (70.46 on Wilder's classic series is the Wilder
-value; the simple version is asserted in tests at its own fixture values).
+Code: `rsi()`. Default `RSI_METHOD = "wilder"`, matching thinkorswim's
+default RSI study. `RSI_METHOD = "simple"` remains available for the earlier
+plain latest-14-change average.
 
 ## OBV trend
 
@@ -103,12 +101,12 @@ Code: `mfi()`.
 ## MA21
 
 ```
-MA21 = EMA(close, span=21, adjust=False)   — the LAST value
+MA21 = mean(close[t-20 .. t])   # 21 daily bars
 ```
 
-Code: `compute_all()`. **Note: this is an exponential MA, not a simple MA.**
-If your thinkorswim chart uses `SimpleMovingAvg(21)`, the values will differ
-slightly (EMA hugs price more closely). `priceAboveMA21 = close > MA21`.
+Code: `moving_average()` / `compute_all()`. Default `MA21_METHOD = "sma"`,
+matching thinkorswim's `SimpleMovingAvg(21)`. `MA21_METHOD = "ema"` preserves
+the earlier exponential behavior. `priceAboveMA21 = close > MA21`.
 
 ---
 

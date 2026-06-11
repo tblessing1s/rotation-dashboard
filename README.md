@@ -56,10 +56,11 @@ Key properties:
   count. Green dot = covers the last completed session, yellow = 1 session
   behind, red = 2+ behind.
 
-Formulas for every computed value (and known differences vs thinkorswim) are
-documented in [FORMULAS.md](FORMULAS.md). **When a backend value disagrees
-with thinkorswim, thinkorswim is the source of truth** — type the TOS value
-into the field; it is stored as a timestamped manual override that beats
+Formulas for every computed value are documented in [FORMULAS.md](FORMULAS.md).
+Defaults are tuned for Schwab/thinkorswim daily bars (63-bar RS3M, Wilder RSI,
+and SimpleMovingAvg(21)). **When a backend value still disagrees with your
+custom thinkorswim study, thinkorswim is the source of truth** — type the TOS
+value into the field; it is stored as a timestamped manual override that beats
 ingested data until you tap **auto ↻**.
 
 ---
@@ -236,9 +237,9 @@ you choose to override (marked MANUAL with its timestamp until cleared).
 
 `backend/config.py`: tracked symbols (XLV + AAPL), benchmark (SPY), breadth
 universe, validation bands, cross-check tolerances, RS3M calibration knobs
-(`RS3M_METHOD`, `RS3M_EMA_SPAN`, `RS3M_LOOKBACK`, `MOM_SMOOTH`, `MOM_SCALE` —
-see FORMULAS.md), staleness threshold for the catch-up runner, and capital /
-reserve figures.
+(`RS3M_METHOD`, `RS3M_EMA_SPAN`, `RS3M_LOOKBACK`, `MOM_SMOOTH`, `MOM_SCALE`),
+RSI/MA defaults (`RSI_METHOD`, `MA21_METHOD` — see FORMULAS.md), staleness
+threshold for the catch-up runner, and capital / reserve figures.
 
 ## Tests
 
