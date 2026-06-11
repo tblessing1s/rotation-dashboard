@@ -5,6 +5,7 @@ __pycache__/
 venv/
 backend/.cache/
 backend/state.json
+backend/data/
 
 # Node/Vite
 frontend/node_modules/

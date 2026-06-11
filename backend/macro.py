@@ -1,72 +1,12 @@
-"""Level 1 macro data calculations for the rotation dashboard."""
+"""Level 1 macro calculations for the rotation dashboard.
+
+Pure functions only: every calculator takes already-fetched series/bars as
+arguments. Fetching lives in the providers package and runs inside scheduled
+ingestion (see ingest.py) — never at view time.
+"""
 from __future__ import annotations
 
-import re
-import time
-from datetime import datetime
-from html import unescape
-from io import StringIO
-from urllib.request import Request, urlopen
-
 import pandas as pd
-
-import config as cfg
-
-_macro_mem: tuple[float, dict] | None = None
-
-
-def _fetch_public_url(url: str) -> str:
-    """Fetch a public no-key data page with a browser-like user agent."""
-    req = Request(url, headers={"User-Agent": cfg.PUBLIC_DATA_USER_AGENT})
-    with urlopen(req, timeout=12) as resp:
-        return resp.read().decode("utf-8", "ignore")
-
-
-def _fred_series(url: str, value_col: str) -> pd.Series:
-    """Load a public FRED graph CSV as a numeric Series indexed by date."""
-    csv = _fetch_public_url(url)
-    df = pd.read_csv(StringIO(csv))
-    df["observation_date"] = pd.to_datetime(df["observation_date"])
-    vals = pd.to_numeric(df[value_col].replace(".", pd.NA), errors="coerce")
-    return pd.Series(vals.to_numpy(), index=df["observation_date"]).dropna()
-
-
-def _parse_finviz_sma50_breadth(page: str) -> dict:
-    """Extract Finviz homepage market-breadth 'Above ... SMA50 Below ...' counts."""
-    text = unescape(re.sub(r"<[^>]+>", " ", page))
-    text = re.sub(r"\s+", " ", text)
-    match = re.search(
-        r"Above\s+([0-9]+(?:\.[0-9]+)?)%\s*\(([0-9,]+)\)\s*SMA50\s*Below\s*\(([0-9,]+)\)",
-        text,
-        re.IGNORECASE,
-    )
-    if not match:
-        raise ValueError("Finviz SMA50 breadth block not found")
-
-    percent = float(match.group(1))
-    above = int(match.group(2).replace(",", ""))
-    below = int(match.group(3).replace(",", ""))
-    total = above + below
-    if total <= 0:
-        raise ValueError("Finviz SMA50 breadth count is zero")
-
-    return {
-        "value": round(percent, 0),
-        "rawPercent": round(percent, 1),
-        "above": above,
-        "below": below,
-        "total": total,
-    }
-
-
-def macro_breadth() -> dict:
-    """Percent of Finviz-tracked stocks trading above their 50-day SMA."""
-    parsed = _parse_finviz_sma50_breadth(_fetch_public_url(cfg.FINVIZ_MARKET_URL))
-    return {
-        **parsed,
-        "source": "Finviz market breadth: stocks above 50-day SMA",
-        "url": cfg.FINVIZ_MARKET_URL,
-    }
 
 
 def _series_change(series: pd.Series, periods: int) -> float:
@@ -164,19 +104,8 @@ def classify_fed_policy(rate_series: pd.Series, cpi_series: pd.Series, gdp_serie
     }
 
 
-def macro_fed_policy() -> dict:
-    """Classify Fed stance from current inflation, growth, labor, and rate conditions."""
-    return classify_fed_policy(
-        _fred_series(cfg.FRED_DFF_URL, "DFF"),
-        _fred_series(cfg.FRED_CPI_URL, "CPIAUCSL"),
-        _fred_series(cfg.FRED_GDPC1_URL, "GDPC1"),
-        _fred_series(cfg.FRED_UNRATE_URL, "UNRATE"),
-    )
-
-
-def macro_inflation() -> dict:
+def inflation_from_cpi(series: pd.Series) -> dict:
     """Latest CPI year-over-year inflation rate."""
-    series = _fred_series(cfg.FRED_CPI_URL, "CPIAUCSL")
     latest = float(series.iloc[-1])
     year_ago = float(series.iloc[-13]) if len(series) >= 13 else float(series.iloc[0])
     yoy = (latest / year_ago - 1) * 100
@@ -188,9 +117,8 @@ def macro_inflation() -> dict:
     }
 
 
-def macro_growth() -> dict:
+def growth_from_gdp(series: pd.Series) -> dict:
     """Classify growth from real GDP annualized quarterly momentum."""
-    series = _fred_series(cfg.FRED_GDPC1_URL, "GDPC1")
     latest = float(series.iloc[-1])
     prev = float(series.iloc[-2]) if len(series) >= 2 else latest
     prev2 = float(series.iloc[-3]) if len(series) >= 3 else prev
@@ -211,44 +139,33 @@ def macro_growth() -> dict:
     }
 
 
-def macro_snapshot(latest_quote) -> dict:
-    """Return best-effort Level 1 macro values with field-level metadata."""
-    global _macro_mem
-    now = time.time()
-    ttl = cfg.MACRO_CACHE_TTL_MINUTES * 60
-    if _macro_mem and now - _macro_mem[0] < ttl:
-        return _macro_mem[1]
-
-    fields = {}
-    errors = {}
-
-    vix = latest_quote("^VIX")
-    if vix.get("error"):
-        errors["vix"] = "quote unavailable"
-    else:
-        fields["vix"] = {"value": vix["close"], "asOf": vix["date"], "source": "Yahoo Finance ^VIX"}
-
-    calculators = {
-        "breadth": macro_breadth,
-        "fed": macro_fed_policy,
-        "growth": macro_growth,
-        "inflation": macro_inflation,
+def breadth_from_bars(bars_by_symbol: dict[str, pd.DataFrame | None], window: int = 50) -> dict:
+    """Percent of the configured broad-market ETF universe above its 50-day MA."""
+    total = above = 0
+    members = []
+    as_of = None
+    for sym, bars in bars_by_symbol.items():
+        if bars is None or len(bars) < window:
+            continue
+        close = bars["Close"].dropna()
+        if len(close) < window:
+            continue
+        price = float(close.iloc[-1])
+        ma = float(close.iloc[-window:].mean())
+        is_above = price > ma
+        total += 1
+        above += 1 if is_above else 0
+        members.append({"symbol": sym, "above": is_above, "price": round(price, 2), "ma50": round(ma, 2)})
+        bar_date = str(bars.index[-1].date())
+        as_of = bar_date if as_of is None else max(as_of, bar_date)
+    if total == 0:
+        return {"value": None, "error": "no breadth data", "members": []}
+    return {
+        "value": round(above / total * 100, 0),
+        "above": above,
+        "total": total,
+        "window": window,
+        "members": members,
+        "asOf": as_of,
+        "source": "Configured ETF universe above 50-day MA",
     }
-    for key, fn in calculators.items():
-        try:
-            result = fn()
-            if result.get("value") is None:
-                errors[key] = result.get("error", "unavailable")
-            else:
-                fields[key] = result
-        except Exception as e:
-            errors[key] = str(e)
-
-    snapshot = {
-        "values": {key: meta["value"] for key, meta in fields.items()},
-        "fields": fields,
-        "errors": errors,
-        "asOf": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-    }
-    _macro_mem = (now, snapshot)
-    return snapshot

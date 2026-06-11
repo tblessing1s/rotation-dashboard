@@ -23,4 +23,6 @@ COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8080} --chdir backend app:app"]
+# Threaded worker so a synchronous /api/ingest?wait=1 run (cron trigger) does
+# not block dashboard requests; long timeout so the run isn't killed mid-cycle.
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8080} --chdir backend --threads 8 --timeout 600 app:app"]

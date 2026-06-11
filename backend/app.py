@@ -1,246 +1,244 @@
 """
-Rotation Dashboard — local backend.
+Rotation Dashboard — backend API.
 
-Fetches quotes + daily history server-side (no CORS), caches to disk, computes
-indicators, and persists your manual inputs / positions to a JSON file so your
-work survives restarts.
+The request path reads exclusively from the SQLite datastore (see db.py).
+External providers are only contacted by scheduled ingestion (ingest.py),
+triggered by the Fly cron machine via POST /api/ingest, the CLI, or a
+background catch-up thread when the app wakes up with stale data.
 
 Run:  python app.py     (then open http://localhost:5179)
 """
 from __future__ import annotations
+
 import json
 import os
+import shutil
 import time
-from datetime import datetime, timedelta
-from io import StringIO
 
-from urllib.request import urlopen
-
-import pandas as pd
-import yfinance as yf
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
 import config as cfg
-import indicators as ind
-import macro as macro_data
+import db
+import ingest
+import market_calendar as mcal
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CACHE = os.path.join(HERE, cfg.CACHE_DIR)
-STATE_FILE = os.path.join(HERE, "state.json")
 FRONTEND = os.path.join(HERE, "..", "frontend", "dist")
-os.makedirs(CACHE, exist_ok=True)
+
+STATE_FILE = ingest.STATE_FILE
+_LEGACY_STATE_FILE = os.path.join(HERE, "state.json")
 
 app = Flask(__name__, static_folder=None)
 CORS(app)
 
+
+def _migrate_legacy_state() -> None:
+    """One-time move of state.json into DATA_DIR (the Fly volume)."""
+    if os.path.exists(STATE_FILE) or not os.path.exists(_LEGACY_STATE_FILE):
+        return
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    shutil.copy2(_LEGACY_STATE_FILE, STATE_FILE)
+    print(f"[state] migrated {_LEGACY_STATE_FILE} -> {STATE_FILE}")
+
+
+_migrate_legacy_state()
+
+
 # ---------------------------------------------------------------------------
-# History cache (per symbol, on disk as parquet, with TTL)
+# Background catch-up: if the machine wakes up with stale data, kick one
+# ingestion run in a daemon thread. Requests are never blocked on providers.
 # ---------------------------------------------------------------------------
-_mem: dict[str, tuple[float, pd.DataFrame]] = {}
-_macro_mem: tuple[float, dict] | None = None
+_last_kick = 0.0
 
 
-def _cache_path(symbol: str) -> str:
-    safe = symbol.replace("^", "_")
-    return os.path.join(CACHE, f"{safe}.parquet")
-
-
-def get_history(symbol: str) -> pd.DataFrame | None:
+@app.before_request
+def _catchup_if_stale():
+    global _last_kick
+    if not request.path.startswith("/api/"):
+        return
     now = time.time()
-    ttl = cfg.CACHE_TTL_MINUTES * 60
+    if now - _last_kick < 600:  # at most one kick per 10 minutes
+        return
+    if ingest.is_stale():
+        _last_kick = now
+        print("[ingest] data stale — starting background catch-up run")
+        ingest.run_in_background("catchup")
 
-    # in-memory
-    if symbol in _mem and now - _mem[symbol][0] < ttl:
-        return _mem[symbol][1]
 
-    # on-disk
-    path = _cache_path(symbol)
-    if os.path.exists(path) and now - os.path.getmtime(path) < ttl:
-        try:
-            df = pd.read_parquet(path)
-            _mem[symbol] = (now, df)
-            return df
-        except Exception:
-            pass
+# ---------------------------------------------------------------------------
+# Staleness helpers
+# ---------------------------------------------------------------------------
+def _bar_staleness(as_of: str | None) -> str:
+    return mcal.staleness(as_of)
 
-    # fetch fresh
+
+def _ingest_staleness(fetched_at: str | None) -> str:
+    """Freshness of slow-moving (monthly/quarterly) series: what matters is
+    that ingestion keeps running, not that the observation is recent."""
+    if not fetched_at:
+        return "unknown"
     try:
-        start = (datetime.now() - timedelta(days=cfg.HISTORY_DAYS)).strftime("%Y-%m-%d")
-        df = yf.download(symbol, start=start, progress=False, auto_adjust=False)
-        if df is None or df.empty:
-            return _stale(path)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df = df[["Open", "High", "Low", "Close", "Volume"]].dropna()
-        df.to_parquet(path)
-        _mem[symbol] = (now, df)
-        return df
-    except Exception as e:
-        print(f"[fetch] {symbol} failed: {e}")
-        return _stale(path)
+        from datetime import datetime, timezone
 
-
-def _stale(path: str) -> pd.DataFrame | None:
-    """Fall back to any cached copy even if expired."""
-    if os.path.exists(path):
-        try:
-            return pd.read_parquet(path)
-        except Exception:
-            return None
-    return None
-
-
-def latest_quote(symbol: str) -> dict:
-    df = get_history(symbol)
-    if df is None or df.empty:
-        return {"symbol": symbol, "error": True}
-    last = df.iloc[-1]
-    return {
-        "symbol": symbol,
-        "close": round(float(last["Close"]), 2),
-        "open": round(float(last["Open"]), 2),
-        "date": str(df.index[-1].date()),
-    }
-
+        fetched = datetime.strptime(fetched_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        age_hours = (datetime.now(timezone.utc) - fetched).total_seconds() / 3600
+    except ValueError:
+        return "unknown"
+    if age_hours <= 36:
+        return "fresh"
+    if age_hours <= 96:
+        return "yellow"
+    return "red"
 
 
 # ---------------------------------------------------------------------------
-# Macro calculations (Level 1)
+# API — all reads come from the datastore
 # ---------------------------------------------------------------------------
-def _fred_series(url: str, value_col: str) -> pd.Series:
-    """Load a public FRED graph CSV as a numeric Series indexed by date."""
-    with urlopen(url, timeout=12) as resp:
-        csv = resp.read().decode("utf-8")
-    df = pd.read_csv(StringIO(csv))
-    df["observation_date"] = pd.to_datetime(df["observation_date"])
-    vals = pd.to_numeric(df[value_col].replace(".", pd.NA), errors="coerce")
-    return pd.Series(vals.to_numpy(), index=df["observation_date"]).dropna()
-
-
-def macro_breadth() -> dict:
-    """Percent of configured broad-market ETFs above their 50-day moving average."""
-    total = above = 0
-    members = []
-    window = cfg.BREADTH_MA_WINDOW
-    for sym in cfg.BREADTH_SYMBOLS:
-        bars = get_history(sym)
-        if bars is None or len(bars) < window:
+@app.route("/api/quotes")
+def api_quotes():
+    out = {}
+    for symbol in cfg.QUOTE_SYMBOLS:
+        bar = db.latest_bar(symbol)
+        if bar is None:
+            out[symbol] = {"symbol": symbol, "error": True}
             continue
-        close = bars["Close"].dropna()
-        if len(close) < window:
+        out[symbol] = {
+            "symbol": symbol,
+            "close": round(bar["close"], 2),
+            "open": round(bar["open"], 2) if bar["open"] is not None else None,
+            "date": bar["date"],
+            "source": bar["source"],
+            "fetchedAt": bar["fetched_at"],
+            "staleness": _bar_staleness(bar["date"]),
+        }
+    return jsonify(out)
+
+
+@app.route("/api/indicators")
+def api_indicators():
+    requested = request.args.get("symbols", "")
+    symbols = [s.strip().upper() for s in requested.split(",") if s.strip()] or cfg.TRACKED
+    symbols = list(dict.fromkeys(symbols))
+
+    snapshots = db.latest_snapshots("indicators")
+    out = {}
+    missing = []
+    for sym in symbols:
+        snap = snapshots.get(sym)
+        if snap is None:
+            out[sym] = {"error": "no data"}
+            missing.append(sym)
             continue
-        price = float(close.iloc[-1])
-        ma = float(close.iloc[-window:].mean())
-        is_above = price > ma
-        total += 1
-        above += 1 if is_above else 0
-        members.append({"symbol": sym, "above": is_above, "price": round(price, 2), "ma50": round(ma, 2)})
-    if total == 0:
-        return {"value": None, "error": "no breadth data", "members": []}
-    return {
-        "value": round(above / total * 100, 0),
-        "above": above,
-        "total": total,
-        "window": window,
-        "members": members,
-        "source": "Configured ETF universe above 50-day MA",
-    }
+        snap["staleness"] = _bar_staleness(snap.get("asOf"))
+        out[sym] = snap
+
+    # Newly watched symbols get picked up by a targeted background fetch; the
+    # response stays datastore-only.
+    if missing:
+        known = set(db.known_symbols())
+        new_symbols = [s for s in missing if s not in known]
+        if new_symbols:
+            ingest.run_in_background("new-symbols", new_symbols)
+    return jsonify(out)
 
 
-def macro_fed_policy() -> dict:
-    """Classify Fed stance from current inflation, growth, labor, and rate conditions."""
-    return macro_data.classify_fed_policy(
-        _fred_series(cfg.FRED_DFF_URL, "DFF"),
-        _fred_series(cfg.FRED_CPI_URL, "CPIAUCSL"),
-        _fred_series(cfg.FRED_GDPC1_URL, "GDPC1"),
-        _fred_series(cfg.FRED_UNRATE_URL, "UNRATE"),
-    )
+@app.route("/api/macro")
+def api_macro():
+    snap = db.latest_snapshot("macro", "macro") or {"values": {}, "fields": {}, "errors": {"macro": "no ingested data yet"}}
+    fields = dict(snap.get("fields") or {})
+    errors = dict(snap.get("errors") or {})
 
+    # Per-field staleness: market inputs by trading-day age, FRED-derived
+    # inputs by ingestion age (CPI being a month old is normal).
+    for key, meta in fields.items():
+        if key in ("vix", "breadth"):
+            meta["staleness"] = _bar_staleness(meta.get("asOf"))
+        else:
+            meta["staleness"] = _ingest_staleness(meta.get("fetchedAt"))
 
-def macro_inflation() -> dict:
-    """Latest CPI year-over-year inflation rate."""
-    series = _fred_series(cfg.FRED_CPI_URL, "CPIAUCSL")
-    latest = float(series.iloc[-1])
-    year_ago = float(series.iloc[-13]) if len(series) >= 13 else float(series.iloc[0])
-    yoy = (latest / year_ago - 1) * 100
-    return {
-        "value": round(yoy, 1),
-        "index": round(latest, 3),
-        "asOf": str(series.index[-1].date()),
-        "source": "FRED CPIAUCSL year-over-year",
-    }
-
-
-def macro_growth() -> dict:
-    """Classify growth from real GDP annualized quarterly momentum."""
-    series = _fred_series(cfg.FRED_GDPC1_URL, "GDPC1")
-    latest = float(series.iloc[-1])
-    prev = float(series.iloc[-2]) if len(series) >= 2 else latest
-    prev2 = float(series.iloc[-3]) if len(series) >= 3 else prev
-    qoq_ann = ((latest / prev) ** 4 - 1) * 100 if prev else 0.0
-    prev_qoq_ann = ((prev / prev2) ** 4 - 1) * 100 if prev2 else qoq_ann
-    if qoq_ann > prev_qoq_ann + 0.5:
-        growth = "accelerating"
-    elif qoq_ann < prev_qoq_ann - 0.5:
-        growth = "slowing"
-    else:
-        growth = "stable"
-    return {
-        "value": growth,
-        "qoqAnnualized": round(qoq_ann, 1),
-        "previousQoqAnnualized": round(prev_qoq_ann, 1),
-        "asOf": str(series.index[-1].date()),
-        "source": "FRED GDPC1 real GDP quarterly momentum",
-    }
-
-
-def macro_snapshot() -> dict:
-    """Return best-effort Level 1 macro values with field-level metadata."""
-    global _macro_mem
-    now = time.time()
-    ttl = cfg.MACRO_CACHE_TTL_MINUTES * 60
-    if _macro_mem and now - _macro_mem[0] < ttl:
-        return _macro_mem[1]
-
-    fields = {}
-    errors = {}
-
-    vix = latest_quote("^VIX")
-    if vix.get("error"):
-        errors["vix"] = "quote unavailable"
-    else:
-        fields["vix"] = {"value": vix["close"], "asOf": vix["date"], "source": "Yahoo Finance ^VIX"}
-
-    calculators = {
-        "breadth": macro_breadth,
-        "fed": macro_fed_policy,
-        "growth": macro_growth,
-        "inflation": macro_inflation,
-    }
-    for key, fn in calculators.items():
-        try:
-            result = fn()
-            if result.get("value") is None:
-                errors[key] = result.get("error", "unavailable")
-            else:
-                fields[key] = result
-        except Exception as e:
-            errors[key] = str(e)
+    # Manual overrides always win.
+    for key, ov in db.get_overrides("macro").items():
+        fields[key] = {
+            "value": ov["value"],
+            "source": "manual",
+            "asOf": ov["updatedAt"],
+            "override": True,
+            "staleness": "fresh",
+        }
+        errors.pop(key, None)
 
     values = {key: meta["value"] for key, meta in fields.items()}
-    snapshot = {
+
+    # The regime gate is only as fresh as its oldest input.
+    order = {"fresh": 0, "yellow": 1, "red": 2, "unknown": 2}
+    worst = max((meta.get("staleness", "unknown") for meta in fields.values()),
+                key=lambda s: order.get(s, 2), default="unknown")
+    expected = ["vix", "breadth", "fed", "growth", "inflation"]
+    if any(key not in fields for key in expected):
+        worst = "red"
+
+    return jsonify({
         "values": values,
         "fields": fields,
         "errors": errors,
-        "asOf": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-    }
-    _macro_mem = (now, snapshot)
-    return snapshot
+        "asOf": snap.get("_computedAt"),
+        "staleness": worst,
+        "degraded": worst == "red",
+    })
+
+
+@app.route("/api/overrides", methods=["GET", "POST"])
+def api_overrides():
+    if request.method == "GET":
+        scope = request.args.get("scope", "macro")
+        return jsonify(db.get_overrides(scope))
+    body = request.get_json(force=True) or {}
+    scope = str(body.get("scope") or "macro")
+    key = str(body.get("key") or "").strip()
+    if not key:
+        return jsonify({"error": "key required"}), 400
+    if body.get("value") is None:
+        db.clear_override(scope, key)
+        return jsonify({"ok": True, "cleared": key})
+    db.set_override(scope, key, body["value"], source="manual")
+    return jsonify({"ok": True, "key": key})
+
+
+@app.route("/api/data-issues")
+def api_data_issues():
+    return jsonify({
+        "quarantine": db.recent_quarantine(),
+        "lastRun": db.last_ingest_run(),
+        "lastSuccessfulRun": db.last_successful_ingest(),
+    })
+
+
+@app.route("/api/data-status")
+def api_data_status():
+    import status as status_mod
+
+    return jsonify(status_mod.data_status())
+
+
+@app.route("/api/ingest", methods=["POST"])
+def api_ingest():
+    token = os.environ.get("INGEST_TOKEN")
+    if token:
+        supplied = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() \
+            or request.args.get("token", "")
+        if supplied != token:
+            return jsonify({"error": "unauthorized"}), 401
+    if request.args.get("wait") == "1":
+        # Synchronous: the cron machine uses this so the Fly machine stays
+        # awake for the whole run.
+        return jsonify(ingest.run(trigger="cron"))
+    ingest.run_in_background("api")
+    return jsonify({"ok": True, "started": True}), 202
 
 
 # ---------------------------------------------------------------------------
-# State persistence (manual inputs, positions)
+# State persistence (manual inputs, positions) — lives on the data volume
 # ---------------------------------------------------------------------------
 def load_state() -> dict:
     if os.path.exists(STATE_FILE):
@@ -253,33 +251,11 @@ def load_state() -> dict:
 
 
 def save_state(data: dict) -> None:
-    with open(STATE_FILE, "w") as f:
+    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
-
-
-# ---------------------------------------------------------------------------
-# API
-# ---------------------------------------------------------------------------
-@app.route("/api/quotes")
-def api_quotes():
-    return jsonify({s: latest_quote(s) for s in cfg.QUOTE_SYMBOLS})
-
-
-@app.route("/api/indicators")
-def api_indicators():
-    requested = request.args.get("symbols", "")
-    symbols = [s.strip().upper() for s in requested.split(",") if s.strip()] or cfg.TRACKED
-    spy = get_history(cfg.BENCHMARK)
-    out = {}
-    for sym in dict.fromkeys(symbols):
-        bars = get_history(sym)
-        out[sym] = ind.compute_all(bars, spy, cfg) if bars is not None else {"error": "no data"}
-    return jsonify(out)
-
-
-@app.route("/api/macro")
-def api_macro():
-    return jsonify(macro_snapshot())
+    os.replace(tmp, STATE_FILE)
 
 
 @app.route("/api/state", methods=["GET", "POST"])
