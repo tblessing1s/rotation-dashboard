@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import os
 import time
+from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 import pandas as pd
 import requests
@@ -12,20 +14,120 @@ import db
 from .base import Provider, ProviderError
 
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
+AUTHORIZE_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 PRICE_HISTORY_URL = "https://api.schwabapi.com/marketdata/v1/pricehistory"
+
+# Schwab refresh tokens are valid for exactly 7 days after they are minted via
+# the authorization_code flow, and there is no way to extend one programmatically
+# (Schwab requires a fresh browser login). We track the mint time so the UI can
+# warn before it lapses. See backend/app.py for the hosted re-auth endpoints.
+REFRESH_TOKEN_TTL_DAYS = 7
 
 # Schwab prefixes index symbols with $ where Yahoo uses ^.
 SYMBOL_MAP = {"^VIX": "$VIX", "^NYA": "$NYA", "^GSPC": "$SPX"}
 
 
+# ---------------------------------------------------------------------------
+# Credentials & OAuth (shared by the CLI bootstrap and the hosted re-auth flow)
+# ---------------------------------------------------------------------------
+def app_credentials() -> tuple[str, str]:
+    """App key/secret (a.k.a. Schwab Client ID / Client Secret) from env."""
+    key = os.environ.get("SCHWAB_APP_KEY")
+    secret = os.environ.get("SCHWAB_APP_SECRET")
+    if not key or not secret:
+        raise ProviderError("SCHWAB_APP_KEY / SCHWAB_APP_SECRET are not set")
+    return key, secret
+
+
+def current_refresh_token() -> str | None:
+    """The active refresh token: the DB-stored one (set by the hosted re-auth
+    flow) wins over the bootstrap env secret, since it is always the freshest."""
+    rec = db.kv_get("schwab_token") or {}
+    return rec.get("refresh_token") or os.environ.get("SCHWAB_REFRESH_TOKEN")
+
+
+def store_refresh_token(refresh_token: str) -> None:
+    """Persist a freshly minted refresh token (and its mint time) to the
+    datastore, and clear any prior auth error."""
+    db.kv_set("schwab_token", {"refresh_token": refresh_token, "minted_at": db.utcnow()})
+    db.kv_set("schwab_auth_error", None)
+
+
+def authorize_url(redirect_uri: str, state: str) -> str:
+    """The Schwab consent URL the user opens in a browser to grant access."""
+    client_id, _ = app_credentials()
+    return AUTHORIZE_URL + "?" + urlencode(
+        {"client_id": client_id, "redirect_uri": redirect_uri, "state": state}
+    )
+
+
+def exchange_code(code: str, redirect_uri: str) -> dict:
+    """Exchange an authorization code for tokens (authorization_code grant).
+
+    `redirect_uri` must exactly match the callback registered with the app and
+    used in the authorize request. Returns the raw token payload.
+    """
+    client_id, client_secret = app_credentials()
+    basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
+    try:
+        resp = requests.post(
+            TOKEN_URL,
+            headers={
+                "Authorization": f"Basic {basic}",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data={"grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri},
+            timeout=20,
+        )
+    except requests.RequestException as e:
+        raise ProviderError(f"schwab code exchange request failed: {e}") from e
+    if resp.status_code != 200:
+        raise ProviderError(
+            f"schwab code exchange failed (HTTP {resp.status_code}): {resp.text[:300]}"
+        )
+    return resp.json()
+
+
+def token_status() -> dict:
+    """Health of the refresh token for the data-issues panel.
+
+    status is one of: missing, unknown (env token, mint time not tracked),
+    ok, warning (<=2 days left), expired.
+    """
+    rec = db.kv_get("schwab_token") or {}
+    refresh = rec.get("refresh_token") or os.environ.get("SCHWAB_REFRESH_TOKEN")
+    if not refresh:
+        return {"present": False, "status": "missing"}
+    out: dict = {"present": True, "source": "db" if rec.get("refresh_token") else "env"}
+    minted_at = rec.get("minted_at")
+    out["mintedAt"] = minted_at
+    if not minted_at:
+        # An env-provided token has no tracked mint time, so we cannot age it.
+        out["status"] = "unknown"
+        return out
+    try:
+        minted = datetime.strptime(minted_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        out["status"] = "unknown"
+        return out
+    expires = minted + timedelta(days=REFRESH_TOKEN_TTL_DAYS)
+    days_left = (expires - datetime.now(timezone.utc)).total_seconds() / 86400
+    out["expiresAt"] = expires.strftime("%Y-%m-%dT%H:%M:%SZ")
+    out["daysLeft"] = round(days_left, 2)
+    out["status"] = "expired" if days_left <= 0 else "warning" if days_left <= 2 else "ok"
+    return out
+
+
 class SchwabProvider(Provider):
     """Schwab Trader API — matches thinkorswim's data feed.
 
-    Credentials come from env (Fly secrets): SCHWAB_APP_KEY, SCHWAB_APP_SECRET,
-    SCHWAB_REFRESH_TOKEN. Schwab refresh tokens expire after 7 days; when the
-    refresh fails the error is recorded (surfaced in the data-issues panel)
-    and the chain falls through to the next provider. Re-mint with:
-    `python cli.py schwab-auth`.
+    App credentials come from env (Fly secrets): SCHWAB_APP_KEY,
+    SCHWAB_APP_SECRET. The refresh token is read from the datastore first
+    (refreshed via the hosted re-auth page, /auth/schwab) and falls back to the
+    SCHWAB_REFRESH_TOKEN env secret for bootstrap. Schwab refresh tokens expire
+    after 7 days; when the refresh fails the error is recorded (surfaced in the
+    data-issues panel) and the chain falls through to the next provider.
+    Re-mint by visiting /auth/schwab or running `python cli.py schwab-auth`.
     """
 
     name = "schwab"
@@ -36,19 +138,21 @@ class SchwabProvider(Provider):
 
     @staticmethod
     def configured() -> bool:
-        return all(
-            os.environ.get(k)
-            for k in ("SCHWAB_APP_KEY", "SCHWAB_APP_SECRET", "SCHWAB_REFRESH_TOKEN")
+        return bool(
+            os.environ.get("SCHWAB_APP_KEY")
+            and os.environ.get("SCHWAB_APP_SECRET")
+            and current_refresh_token()
         )
 
     # -- auth ----------------------------------------------------------------
     def _token(self) -> str:
         if self._access_token and time.time() < self._expires_at - 60:
             return self._access_token
-        key = os.environ["SCHWAB_APP_KEY"]
-        secret = os.environ["SCHWAB_APP_SECRET"]
-        refresh = os.environ["SCHWAB_REFRESH_TOKEN"]
-        basic = base64.b64encode(f"{key}:{secret}".encode()).decode()
+        client_id, client_secret = app_credentials()
+        refresh = current_refresh_token()
+        if not refresh:
+            raise ProviderError("no schwab refresh token — re-authorize at /auth/schwab")
+        basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
         try:
             resp = requests.post(
                 TOKEN_URL,
@@ -69,7 +173,7 @@ class SchwabProvider(Provider):
             )
             raise ProviderError(
                 f"schwab token refresh failed (HTTP {resp.status_code}) — "
-                "refresh token likely expired; run `python cli.py schwab-auth`"
+                "refresh token likely expired; re-authorize at /auth/schwab"
             )
         db.kv_set("schwab_auth_error", None)
         payload = resp.json()

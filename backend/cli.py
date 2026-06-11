@@ -93,6 +93,11 @@ def cmd_schwab_auth(args) -> int:
     print(f"  fly secrets set SCHWAB_APP_KEY='{key}' \\")
     print(f"                  SCHWAB_APP_SECRET='{secret}' \\")
     print(f"                  SCHWAB_REFRESH_TOKEN='{tokens['refresh_token']}'")
+    print(
+        "\nTip: once deployed, renew weekly with one click at"
+        " https://<your-app>.fly.dev/auth/schwab (register"
+        " https://<your-app>.fly.dev/auth/schwab/callback as a Schwab callback URL)."
+    )
     return 0
 
 

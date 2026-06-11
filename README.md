@@ -113,16 +113,25 @@ fly secrets set FRED_API_KEY=…
 
 ### Schwab setup (one-time, ~10 minutes)
 
-1. Create an app at https://developer.schwab.com (Trader API — Individual),
-   callback URL `https://127.0.0.1`.
-2. Run `python backend/cli.py schwab-auth`, follow the printed steps (log in,
-   approve, paste the redirect URL back).
-3. It prints the `fly secrets set …` command with all three values.
+1. Create an app at https://developer.schwab.com (Trader API — Individual).
+   Register your deployed callback as the Callback URL:
+   `https://<your-app>.fly.dev/auth/schwab/callback`
+   (keep `https://127.0.0.1` too if you want the CLI bootstrap flow).
+2. Set the app credentials: `fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=…`
+3. Visit `https://<your-app>.fly.dev/auth/schwab`, log in to Schwab, approve.
+   The refresh token is stored in the datastore automatically and an ingest
+   kicks off immediately — no secret to copy.
 
-**Schwab refresh tokens expire every 7 days.** When that happens the
-dashboard keeps working — ingestion falls back to Yahoo and the Data issues
-panel shows a "Schwab auth failed" notice — until you re-run `schwab-auth`
-and update the secret. Without Schwab credentials the app runs Yahoo-only.
+(Alternative bootstrap: `python backend/cli.py schwab-auth` mints a token
+locally and prints the `fly secrets set SCHWAB_REFRESH_TOKEN=…` command. A
+datastore token from `/auth/schwab` always beats the env secret.)
+
+**Schwab refresh tokens expire every 7 days and cannot be renewed
+programmatically — Schwab requires a fresh browser login.** The dashboard
+tracks the token's age: the Data issues panel warns when ≤2 days remain and
+shows a **Re-authorize Schwab** button that repeats step 3 in one click. If
+the token lapses anyway, nothing breaks — ingestion falls back to Yahoo until
+you re-authorize. Without Schwab credentials the app runs Yahoo-only.
 
 ---
 
