@@ -192,3 +192,102 @@ def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
 
 def _round(v, n=1):
     return None if v is None else round(float(v), n)
+
+
+# ---------------------------------------------------------------------------
+# Support / resistance — on-demand level detection for the Entry Watch cards.
+# Computed from the same stored daily bars as the indicators above. Pivots
+# (local swing highs/lows) are clustered into price zones, then scored by how
+# many swings touched the zone and how much volume traded inside it.
+# ---------------------------------------------------------------------------
+def _swing_pivots(high, low, window: int):
+    """Local maxima of the high series and minima of the low series.
+
+    A bar is a pivot high if its high is the max across +/- ``window`` bars
+    (and symmetrically for pivot lows). Returns two lists of prices.
+    """
+    h = high.to_numpy(dtype=float)
+    l = low.to_numpy(dtype=float)
+    n = len(h)
+    highs, lows = [], []
+    for i in range(window, n - window):
+        seg_h = h[i - window:i + window + 1]
+        seg_l = l[i - window:i + window + 1]
+        if h[i] >= seg_h.max():
+            highs.append(h[i])
+        if l[i] <= seg_l.min():
+            lows.append(l[i])
+    return highs, lows
+
+
+def _cluster(levels, tol):
+    """Group sorted price levels into zones where neighbours are within ``tol``."""
+    if not levels:
+        return []
+    levels = sorted(levels)
+    groups = [[levels[0]]]
+    for lv in levels[1:]:
+        if lv - groups[-1][-1] <= tol:
+            groups[-1].append(lv)
+        else:
+            groups.append([lv])
+    return groups
+
+
+def support_resistance(bars: pd.DataFrame, swing_window: int = 5,
+                       tol_pct: float = 0.015, max_zones: int = 3) -> dict:
+    """Detect support/resistance zones from daily bars.
+
+    Returns nearest-first support/resistance zone lists (each with band,
+    centre, distance-to-price %, swing touches, and a strength score), plus a
+    breakout trigger above the nearest resistance and a stop below the nearest
+    support. Zones are split by whether their centre sits below (support) or
+    at/above (resistance) the latest close.
+    """
+    if bars is None or len(bars) < swing_window * 2 + 10:
+        return {"error": "insufficient history"}
+
+    high = bars["High"].astype(float)
+    low = bars["Low"].astype(float)
+    close = bars["Close"].astype(float)
+    vol = bars["Volume"].astype(float).fillna(0.0)
+    price = float(close.iloc[-1])
+    if price <= 0:
+        return {"error": "insufficient history"}
+
+    pivot_highs, pivot_lows = _swing_pivots(high, low, swing_window)
+    groups = _cluster(pivot_highs + pivot_lows, price * tol_pct)
+    avg_vol = float(vol.tail(60).mean()) or 1.0
+
+    zones = []
+    for grp in groups:
+        lo, hi = min(grp), max(grp)
+        center = sum(grp) / len(grp)
+        in_band = (close >= lo * (1 - tol_pct)) & (close <= hi * (1 + tol_pct))
+        vol_score = float(vol[in_band].sum()) / (avg_vol * len(grp))
+        zones.append({
+            "low": round(lo, 2),
+            "high": round(hi, 2),
+            "center": round(center, 2),
+            "distancePct": round((center - price) / price * 100, 2),
+            "touches": len(grp),
+            "strength": round(len(grp) + min(vol_score, 5.0), 1),
+        })
+
+    support = sorted((z for z in zones if z["center"] < price),
+                     key=lambda z: price - z["center"])[:max_zones]
+    resistance = sorted((z for z in zones if z["center"] >= price),
+                        key=lambda z: z["center"] - price)[:max_zones]
+
+    nearest_support = support[0] if support else None
+    nearest_resistance = resistance[0] if resistance else None
+
+    return {
+        "price": round(price, 2),
+        "support": support,
+        "resistance": resistance,
+        "nearestSupport": nearest_support,
+        "nearestResistance": nearest_resistance,
+        "breakoutTrigger": round(nearest_resistance["high"] * 1.002, 2) if nearest_resistance else None,
+        "stop": round(nearest_support["low"] * 0.99, 2) if nearest_support else None,
+    }
