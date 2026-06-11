@@ -211,6 +211,7 @@ def api_data_issues():
         "quarantine": db.recent_quarantine(),
         "lastRun": db.last_ingest_run(),
         "lastSuccessfulRun": db.last_successful_ingest(),
+        "schwabAuthError": db.kv_get("schwab_auth_error"),
     })
 
 
