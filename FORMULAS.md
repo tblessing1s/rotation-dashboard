@@ -15,30 +15,39 @@ so the defaults use common thinkorswim daily-study settings where applicable.
 
 ## RS3M — 3-month relative strength vs SPY
 
+Matches the supplied Thinkorswim formula:
+
 ```
-sym_ret = (close_sym[t] / close_sym[t-63] - 1) × 100      # 63 daily bars
-spy_ret = (close_spy[t] / close_spy[t-63] - 1) × 100
-RS3M    = sym_ret - spy_ret
+rs      = close_sym[t] / close_spy[t]
+past    = rs[t-63]
+RS3M    = (rs / past - 1) × 100
 ```
 
 - Lookback is `RS3M_LOOKBACK = 63` **trading rows**, the standard daily-bar
   approximation for three trading months. Code: `rs3m_series()`.
 - Dates where either series has no close are dropped before alignment.
-- Config knobs `RS3M_METHOD="ema"`, `RS3M_EMA_SPAN`, `MOM_SMOOTH`, and
-  `MOM_SCALE` remain available if you want to calibrate to a custom
-  thinkorswim study. Manual overrides are still stored with `source="manual"`
-  and beat ingested values.
+- Schwab daily bars are preferred by ingestion, so these calculations run on the
+  same OHLCV fields that can be pulled from Schwab.
+- Config knobs `RS3M_METHOD="ema"`, `RS3M_METHOD="return_spread"`,
+  `RS3M_EMA_SPAN`, `MOM_SMOOTH`, and `MOM_SCALE` remain available for legacy or
+  custom calibration. The default `RS3M_METHOD="ratio"` is the supplied study.
+  Manual overrides are still stored with `source="manual"` and beat ingested values.
 
 ## RS3M_MOM — relative-strength acceleration
 
+Matches the supplied Thinkorswim formula exactly, including its absolute lags:
+
 ```
-window  = latest 10 RS3M readings (RS3M_MOM_WINDOW = 10)
-avg     = mean(window)
-RS3M_MOM = ((RS3M[t] - avg) / |avg|) × 100
+RS3M_current = ((rs[t]    / rs[t-63])  - 1) × 100
+RS3M_prior   = ((rs[t-68] / rs[t-131]) - 1) × 100
+RS3M_MOM     = if RS3M_prior != 0 then
+                 (RS3M_current - RS3M_prior) / RS3M_prior × 100
+               else 0
 ```
 
-Code: `rs3m_momentum()`. `MOM_SCALE` is applied after the calculation so a
-custom study can be calibrated without changing the raw RS3M series.
+Code: `rs3m_momentum_from_closes()`. `RS3M_MOM_PAST_END_LAG = 68` and
+`RS3M_MOM_PAST_LOOKBACK = 131` expose the supplied lag constants.
+`MOM_SCALE` is applied after the calculation for calibration.
 `rs3mTrend` is "up" when today's RS3M_MOM is above yesterday's recomputation,
 "down" when below.
 
@@ -72,19 +81,36 @@ Code: `obv_trend()`.
 
 ## VolumeRatio — today vs 20-day average
 
-```
-VolumeRatio = volume[t] / mean(volume[t-20 .. t-1]) × 100
-```
-
-Code: `volume_ratio()`. The denominator excludes today.
-
-## VolumeAccel — 5-day vs previous 5-day average volume
+Matches the supplied Thinkorswim formula:
 
 ```
-VolumeAccel = mean(volume[t-4 .. t]) / mean(volume[t-9 .. t-5]) × 100
+VolumeRatio = volume[t] / SMA(volume, 20)[t] × 100
+```
+
+Code: `volume_ratio()`. The denominator includes the current bar, as a daily
+Thinkorswim `MovingAverage(AverageType.SIMPLE, volume, 20)` value does.
+
+## VolumeAccel — 5-day vs 20-day average volume
+
+Matches the supplied Thinkorswim formula:
+
+```
+VolumeAccel = SMA(volume, 5)[t] / SMA(volume, 20)[t] × 100
 ```
 
 Code: `volume_acceleration()`.
+
+## Accumulation/Distribution Line
+
+```
+mfm = ((close - low) - (high - close)) / (high - low)
+mfv = mfm × volume
+ADL = cumulative_sum(mfv)
+```
+
+Code: `accumulation_distribution()` and `accumulation_distribution_trend()`.
+The trend field reports `rising`, `flat`, or `falling` by comparing the latest
+ADL to its EMA20 and five-bar slope.
 
 ## MFI — Money Flow Index, 14 periods
 
