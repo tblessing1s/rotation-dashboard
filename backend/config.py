@@ -28,18 +28,18 @@ QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", "^VIX", "SPY"]  # for the live ticker 
 # the same common study settings:
 # - RS3M: (close / close("SPY")) relative-strength ratio vs the same ratio
 #   63 trading bars ago.
-# - RS3M_MOM: ((current RS3M - (rs[68] / rs[131] - 1) * 100) / prior) * 100,
-#   matching the supplied Thinkorswim study exactly.
+# - RS3M_MOM: percent change from current RS3M to RS3M[5]. With defaults,
+#   current=(rs/rs[63]-1)*100 and prior=(rs[5]/rs[68]-1)*100.
 # - RSI: 14-period Wilder average (thinkorswim RSI default).
 # - MA21: 21-day simple moving average (thinkorswim SimpleMovingAvg).
 # VolumeRatio uses latest volume / latest 20-day average volume * 100.
-# VolumeAccel uses latest 5-day average volume / latest 20-day average volume * 100.
+# VolumeAccel uses latest volume / latest 5-day average volume * 100.
 RS3M_METHOD = "ratio"
 RS3M_EMA_SPAN = 1
 RS3M_LOOKBACK = 63
 RS3M_MOM_WINDOW = 10  # legacy/window metadata; exact TOS momentum uses the two lag settings below.
 RS3M_MOM_PAST_END_LAG = 68
-RS3M_MOM_PAST_LOOKBACK = 131
+RS3M_MOM_PAST_LOOKBACK = 131  # retained for API/config compatibility; TOS MOM uses the 5-bar lag above.
 MOM_SMOOTH = 1
 MOM_SCALE = 1.0
 RSI_METHOD = "wilder"

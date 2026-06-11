@@ -5,11 +5,10 @@ The key sector indicators intentionally mirror the Thinkorswim formulas supplied
 in this project brief and are designed to run on daily Schwab bars:
 - RS3M = ``close / close("SPY")`` relative-strength ratio versus the same ratio
   63 bars ago, expressed as a percent change.
-- RS3M_Momentum = percent rate-of-change between current RS3M and the supplied
-  shifted RS3M reference: ``rs[68] / rs[131] - 1``.
+- RS3M_Momentum = percent rate-of-change between current RS3M and the
+  RS3M value from the supplied momentum lag (5 bars with the default 63/68 settings).
 - VolumeRatio = latest volume divided by the 20-bar simple average volume, times 100.
-- VolumeAccel = latest 5-bar simple average volume divided by the latest 20-bar
-  simple average volume, times 100.
+- VolumeAccel = latest volume divided by the 5-bar simple average volume, times 100.
 - MFI, Accumulation/Distribution, and RSI use standard daily OHLCV formulas.
 """
 from __future__ import annotations
@@ -82,20 +81,21 @@ def volume_ratio(vols: pd.Series, window: int = 20) -> float | None:
     return float(v.iloc[-1] / avg * 100)
 
 
-def volume_acceleration(vols: pd.Series, short_window: int = 5, long_window: int = 20) -> float | None:
-    """Latest 5-bar SMA volume divided by the latest 20-bar SMA volume.
+def volume_acceleration(vols: pd.Series, short_window: int = 5) -> float | None:
+    """Latest volume divided by the latest 5-bar simple average, times 100.
 
-    This matches the supplied thinkScript:
-    ``MovingAverage(SIMPLE, volume, 5) / MovingAverage(SIMPLE, volume, 20) * 100``.
+    This mirrors a thinkorswim-style ``VolumeAccel`` column that answers
+    whether today's participation is accelerating versus the short-term
+    volume baseline:
+    ``volume / MovingAverage(AverageType.SIMPLE, volume, 5) * 100``.
     """
     v = vols.dropna()
-    if len(v) < max(short_window, long_window):
+    if len(v) < short_window:
         return None
     vol5 = v.iloc[-short_window:].mean()
-    vol20 = v.iloc[-long_window:].mean()
-    if vol20 == 0:
+    if vol5 == 0:
         return None
-    return float(vol5 / vol20 * 100)
+    return float(v.iloc[-1] / vol5 * 100)
 
 
 def mfi(high: pd.Series, low: pd.Series, close: pd.Series, vol: pd.Series, period: int = 14) -> float | None:
@@ -168,23 +168,35 @@ def rs3m_momentum_from_closes(sym_close: pd.Series, spy_close: pd.Series,
                               current_lookback: int = 63,
                               past_end_lag: int = 68,
                               past_lookback: int = 131) -> float | None:
-    """RS3M_Momentum from the supplied thinkScript formula.
+    """RS3M_Momentum as percent change in the RS3M plot over the momentum lag.
 
-    The provided study computes current RS3M from ``rs / rs[63]`` and its
-    comparison value from ``rs[68] / rs[131]``. The latter is intentionally
-    parameterized by absolute lags to mirror the script exactly.
+    In thinkScript, indexing a plot such as ``RS3M[5]`` means "the RS3M value
+    from 5 bars ago", not a separate 63-bar window ending 68 bars ago. With the
+    default settings this computes:
+
+    ``current = (rs[t] / rs[t-63] - 1) * 100``
+    ``prior   = (rs[t-5] / rs[t-68] - 1) * 100``
+    ``mom     = (current - prior) / prior * 100``
+
+    ``past_end_lag`` is kept for compatibility with the existing config; the
+    effective momentum lag is ``past_end_lag - current_lookback``.
+    ``past_lookback`` is accepted but no longer used by the TOS-compatible path.
     """
     df = pd.DataFrame({"s": sym_close, "p": spy_close}).dropna()
-    if len(df) <= max(current_lookback, past_end_lag, past_lookback):
+    momentum_lag = int(past_end_lag) - int(current_lookback)
+    if momentum_lag <= 0:
+        momentum_lag = 5
+    required_lagged_lookback = current_lookback + momentum_lag
+    if len(df) <= required_lagged_lookback:
         return None
     ratio = df["s"] / df["p"]
     current_past = ratio.iloc[-(current_lookback + 1)]
-    prior_end = ratio.iloc[-(past_end_lag + 1)]
-    prior_past = ratio.iloc[-(past_lookback + 1)]
+    prior_current = ratio.iloc[-(momentum_lag + 1)]
+    prior_past = ratio.iloc[-(required_lagged_lookback + 1)]
     if current_past == 0 or prior_past == 0:
         return None
     current_rs3m = ((ratio.iloc[-1] / current_past) - 1) * 100
-    previous_rs3m = ((prior_end / prior_past) - 1) * 100
+    previous_rs3m = ((prior_current / prior_past) - 1) * 100
     if previous_rs3m == 0:
         return 0.0
     return float((current_rs3m - previous_rs3m) / previous_rs3m * 100)

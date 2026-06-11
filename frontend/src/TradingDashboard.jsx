@@ -2908,7 +2908,7 @@ function InstrumentInputs({ label, color, calc, inst, setInst, flow, setFlow, te
           <NumIn step="1" value={flow.volRatio} onChange={(v) => setFlow({ ...flow, volRatio: v })} />
           <div style={{ marginTop: 5 }}><CalcChip value={c.volRatio} fmt={(v) => v.toFixed(0)} onApply={() => setFlow({ ...flow, volRatio: +c.volRatio.toFixed(0) })} /></div>
         </Field>
-        <Field label="Volume accel %" hint="5d avg / prior 5d avg">
+        <Field label="Volume accel %" hint="today / 5d avg">
           <NumIn step="1" value={flow.volAccel ?? 0} onChange={(v) => setFlow({ ...flow, volAccel: v })} />
           <div style={{ marginTop: 5 }}><CalcChip value={c.volAccel} fmt={(v) => v.toFixed(0)} onApply={() => setFlow({ ...flow, volAccel: +c.volAccel.toFixed(0) })} /></div>
         </Field>
