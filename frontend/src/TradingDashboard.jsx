@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 
 /* ============================================================================
    TRAVIS — INSTITUTIONAL ROTATION DASHBOARD  (local app build)
@@ -114,6 +114,48 @@ const C = {
 };
 
 const SIG = { GREEN: C.green, YELLOW: C.yellow, RED: C.red };
+
+// ---- Staleness (Phase 4) ----------------------------------------------------
+// Every backend value carries staleness: fresh = covers the last completed
+// trading session, yellow = 1 session behind, red = 2+ behind or quarantined.
+const STALE_COLOR = { fresh: C.green, yellow: C.yellow, red: C.red, unknown: C.inkFaint, missing: C.red };
+const STALE_LABEL = { fresh: "fresh", yellow: "1 day stale", red: "STALE", unknown: "unknown", missing: "missing" };
+
+function StaleDot({ state, asOf, source, showDate = false }) {
+  const color = STALE_COLOR[state] || C.inkFaint;
+  const title = `${STALE_LABEL[state] || state || "unknown"}${asOf ? ` · as of ${asOf}` : ""}${source ? ` · ${source}` : ""}`;
+  return (
+    <span title={title} style={{ display: "inline-flex", alignItems: "center", gap: 4, verticalAlign: "middle" }}>
+      <span style={{ width: 7, height: 7, borderRadius: "50%", background: color, display: "inline-block", flexShrink: 0 }} />
+      {showDate && asOf && (
+        <span style={{ font: `400 10px ${C.mono}`, color: state === "fresh" ? C.inkFaint : color }}>
+          {String(asOf).slice(0, 10)}
+        </span>
+      )}
+    </span>
+  );
+}
+
+// Worst staleness across the Level 1 inputs, plus which input is oldest.
+function macroFreshness(macroComputed) {
+  const order = { fresh: 0, yellow: 1, red: 2, unknown: 2, missing: 2 };
+  const expected = ["vix", "breadth", "fed", "growth", "inflation"];
+  const fields = macroComputed?.fields || {};
+  let worst = "unknown";
+  let oldest = null;
+  for (const key of expected) {
+    const f = fields[key];
+    const state = f ? (f.staleness || "unknown") : "missing";
+    if (order[state] >= order[worst]) worst = state;
+    const asOf = f?.asOf || null;
+    if (!f || (oldest == null) || (order[state] > order[oldest.state]) ||
+        (order[state] === order[oldest.state] && asOf && oldest.asOf && asOf < oldest.asOf)) {
+      oldest = { key, state, asOf };
+    }
+  }
+  const degraded = !macroComputed || macroComputed.degraded || worst === "red" || worst === "missing";
+  return { worst, oldest, degraded };
+}
 
 const SECTORS = [
   { symbol: "XLK", name: "Technology", group: "growth" },
@@ -334,6 +376,21 @@ async function apiMacro() {
   const r = await fetch(`${API}/api/macro`);
   if (!r.ok) throw new Error("macro failed");
   return r.json();
+}
+
+async function apiDataIssues() {
+  const r = await fetch(`${API}/api/data-issues`);
+  if (!r.ok) throw new Error("data issues failed");
+  return r.json();
+}
+
+// Manual overrides persist server-side with source="manual" and always beat
+// ingested values. value=null clears the override (back to auto).
+async function apiSetOverride(key, value) {
+  return fetch(`${API}/api/overrides`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scope: "macro", key, value }),
+  });
 }
 
 // ============================================================================
@@ -689,25 +746,28 @@ function TradingDashboard({ backendOffline }) {
   const [instXLV, setInstXLV] = useState(store.get("instXLV", {
     rs3m: -8.91, rs3mMom: 884, rs3mTrend: "up", earnings: "up", valuation: "cheap", credit: "easy",
   }));
-  const [instILMN, setInstILMN] = useState(store.get("instILMN", {
-    rs3m: 16.88, rs3mMom: 1128, rs3mTrend: "up", earnings: "up", valuation: "reasonable", credit: "easy",
+  const [instAAPL, setInstAAPL] = useState(store.get("instAAPL", {
+    rs3m: 0, rs3mMom: 0, rs3mTrend: "flat", earnings: "flat", valuation: "reasonable", credit: "neutral",
   }));
 
   // ---- State: money flow (Level 3) per instrument ----
   const [flowXLV, setFlowXLV] = useState(store.get("flowXLV", {
     mfi: 70.66, rsi: 58, obv: "rising", volRatio: 95, volAccel: 100,
   }));
-  const [flowILMN, setFlowILMN] = useState(store.get("flowILMN", {
-    mfi: 71.95, rsi: 64, obv: "rising", volRatio: 110, volAccel: 100,
+  const [flowAAPL, setFlowAAPL] = useState(store.get("flowAAPL", {
+    mfi: 50, rsi: 50, obv: "flat", volRatio: 100, volAccel: 100,
   }));
 
   // ---- State: technical (Level 4) per instrument ----
   const [techXLV, setTechXLV] = useState(store.get("techXLV", {
     priceAboveMA21: true, bouncesConfirmed: false, supportDefined: true, breakoutConfirmed: false,
   }));
-  const [techILMN, setTechILMN] = useState(store.get("techILMN", {
-    priceAboveMA21: true, bouncesConfirmed: false, supportDefined: true, breakoutConfirmed: false,
+  const [techAAPL, setTechAAPL] = useState(store.get("techAAPL", {
+    priceAboveMA21: false, bouncesConfirmed: false, supportDefined: false, breakoutConfirmed: false,
   }));
+
+  // ---- State: data issues (quarantine, provider auth, last ingest run) ----
+  const [dataIssues, setDataIssues] = useState(null);
 
   // ---- State: positions ----
   const [positions, setPositions] = useState(store.get("positions", []));
@@ -736,9 +796,9 @@ function TradingDashboard({ backendOffline }) {
 
   // Persist on change
   useEffect(() => { store.set("macro", macro); }, [macro]);
-  useEffect(() => { store.set("instXLV", instXLV); store.set("instILMN", instILMN); }, [instXLV, instILMN]);
-  useEffect(() => { store.set("flowXLV", flowXLV); store.set("flowILMN", flowILMN); }, [flowXLV, flowILMN]);
-  useEffect(() => { store.set("techXLV", techXLV); store.set("techILMN", techILMN); }, [techXLV, techILMN]);
+  useEffect(() => { store.set("instXLV", instXLV); store.set("instAAPL", instAAPL); }, [instXLV, instAAPL]);
+  useEffect(() => { store.set("flowXLV", flowXLV); store.set("flowAAPL", flowAAPL); }, [flowXLV, flowAAPL]);
+  useEffect(() => { store.set("techXLV", techXLV); store.set("techAAPL", techAAPL); }, [techXLV, techAAPL]);
   useEffect(() => { store.set("positions", positions); }, [positions]);
   useEffect(() => { store.set("entryWatchSymbols", normalizedEntryWatchItems); }, [normalizedEntryWatchItems]);
   useEffect(() => { store.set("sectorOverrides", sectorOverrides); }, [sectorOverrides]);
@@ -749,12 +809,12 @@ function TradingDashboard({ backendOffline }) {
     setCalcStatus("loading");
     setMacroStatus("loading");
 
-    // Quotes (backend returns keys XLV, ILMN, ^VIX, SPY)
+    // Quotes (backend returns keys XLV, AAPL, ^VIX, SPY — read from the datastore)
     try {
       const raw = await apiQuotes();
       const out = {
         XLV: raw.XLV || { symbol: "XLV", error: true },
-        ILMN: raw.ILMN || { symbol: "ILMN", error: true },
+        AAPL: raw.AAPL || { symbol: "AAPL", error: true },
         VIX: raw["^VIX"] || { symbol: "VIX", error: true },
         SPY: raw.SPY || { symbol: "SPY", error: true },
       };
@@ -765,6 +825,13 @@ function TradingDashboard({ backendOffline }) {
       setFetchStatus(Object.values(out).some((q) => q.error) ? "partial" : "ok");
     } catch (e) {
       setFetchStatus("partial");
+    }
+
+    // Data issues (quarantine, provider auth problems, last ingest run)
+    try {
+      setDataIssues(await apiDataIssues());
+    } catch (e) {
+      /* panel simply shows nothing new */
     }
 
     // Level 1 macro snapshot (best-effort server-side calculations)
@@ -797,6 +864,26 @@ function TradingDashboard({ backendOffline }) {
 
   useEffect(() => { refreshQuotes(); /* once on mount and watch-list changes */ }, [refreshQuotes]);
 
+  // ---- Macro manual overrides --------------------------------------------
+  // Editing a Level 1 field stores a server-side override (source="manual",
+  // timestamped) that wins over ingested values on every refresh. Accepting
+  // the computed value clears the override.
+  const overrideTimers = useRef({});
+  const setMacroField = useCallback((key, value) => {
+    setMacro((m) => ({ ...m, [key]: value }));
+    clearTimeout(overrideTimers.current[key]);
+    overrideTimers.current[key] = setTimeout(() => { apiSetOverride(key, value).catch(() => {}); }, 800);
+  }, []);
+  const acceptAutoMacro = useCallback(async (key) => {
+    clearTimeout(overrideTimers.current[key]);
+    try {
+      await apiSetOverride(key, null);
+      const snap = await apiMacro();
+      setMacroComputed(snap); store.set("macroComputed", snap);
+      if (snap?.values?.[key] != null) setMacro((m) => ({ ...m, [key]: snap.values[key] }));
+    } catch (e) { /* keep current value; next refresh reconciles */ }
+  }, []);
+
   // ---- Derived signals ----
   const sig = useMemo(() => macroSignal(macro), [macro]);
   const focus = useMemo(() => sectorFocus(macro), [macro]);
@@ -810,9 +897,9 @@ function TradingDashboard({ backendOffline }) {
   }), [computed, focus, macro]);
   const positionGuide = useMemo(() => Object.fromEntries(positions.map((p) => [p.id, positionGuidance(p, computed, macro, focus)])), [positions, computed, macro, focus]);
   const cfm = useMemo(() => cfmChecklist(macro, instXLV, flowXLV, techXLV), [macro, instXLV, flowXLV, techXLV]);
-  const app = useMemo(() => appChecklist(macro, instILMN, flowILMN, techILMN), [macro, instILMN, flowILMN, techILMN]);
+  const app = useMemo(() => appChecklist(macro, instAAPL, flowAAPL, techAAPL), [macro, instAAPL, flowAAPL, techAAPL]);
   const exitsXLV = useMemo(() => exitTriggers(instXLV, flowXLV, macro, techXLV), [instXLV, flowXLV, macro, techXLV]);
-  const exitsILMN = useMemo(() => exitTriggers(instILMN, flowILMN, macro, techILMN), [instILMN, flowILMN, macro, techILMN]);
+  const exitsAAPL = useMemo(() => exitTriggers(instAAPL, flowAAPL, macro, techAAPL), [instAAPL, flowAAPL, macro, techAAPL]);
 
   // ---- Portfolio math ----
   const capital = 35000, reserve = 13000;
@@ -831,7 +918,7 @@ function TradingDashboard({ backendOffline }) {
       `}</style>
 
       <div style={{ maxWidth: 1180, margin: "0 auto" }}>
-        <Header sig={sig} lastFetch={lastFetch} status={fetchStatus} onRefresh={refreshQuotes} quotes={quotes} />
+        <Header sig={sig} lastFetch={lastFetch} status={fetchStatus} onRefresh={refreshQuotes} quotes={quotes} macroComputed={macroComputed} />
 
         {/* Tabs */}
         <nav style={{ display: "flex", gap: 4, margin: "20px 0 18px", borderBottom: `1px solid ${C.line}` }}>
@@ -846,7 +933,7 @@ function TradingDashboard({ backendOffline }) {
 
         {tab === "Command" && (
           <CommandView sig={sig} focus={focus} sectorRows={sectorRows} positionGuide={positionGuide} cfm={cfm} app={app} macro={macro} setMacro={setMacro}
-            quotes={quotes} exitsXLV={exitsXLV} exitsILMN={exitsILMN}
+            quotes={quotes} exitsXLV={exitsXLV} exitsAAPL={exitsAAPL}
             deployed={deployed} reserve={reserve} capital={capital} openPL={openPL} positions={positions} />
         )}
         {tab === "Rotation" && (
@@ -868,11 +955,12 @@ function TradingDashboard({ backendOffline }) {
         )}
         {tab === "Indicators" && (
           <IndicatorsView
-            macro={macro} setMacro={setMacro}
+            macro={macro} setMacroField={setMacroField} acceptAutoMacro={acceptAutoMacro}
             macroComputed={macroComputed} macroStatus={macroStatus}
             computed={computed} calcStatus={calcStatus} onRefresh={refreshQuotes}
+            dataIssues={dataIssues}
             instXLV={instXLV} setInstXLV={setInstXLV} flowXLV={flowXLV} setFlowXLV={setFlowXLV} techXLV={techXLV} setTechXLV={setTechXLV}
-            instILMN={instILMN} setInstILMN={setInstILMN} flowILMN={flowILMN} setFlowILMN={setFlowILMN} techILMN={techILMN} setTechILMN={setTechILMN}
+            instAAPL={instAAPL} setInstAAPL={setInstAAPL} flowAAPL={flowAAPL} setFlowAAPL={setFlowAAPL} techAAPL={techAAPL} setTechAAPL={setTechAAPL}
           />
         )}
       </div>
@@ -883,19 +971,26 @@ function TradingDashboard({ backendOffline }) {
 // ============================================================================
 // HEADER — the signature: a live macro verdict beacon + ticker strip
 // ============================================================================
-function Header({ sig, lastFetch, status, onRefresh, quotes }) {
-  const color = SIG[sig.level];
+function Header({ sig, lastFetch, status, onRefresh, quotes, macroComputed }) {
+  const fresh = macroFreshness(macroComputed);
+  // A permission system must never show a confident verdict on stale inputs:
+  // when any regime input is red-stale or missing, the beacon goes grey.
+  const degraded = fresh.degraded;
+  const color = degraded ? C.inkFaint : SIG[sig.level];
   const verdictMap = { GREEN: "RISK-ON", YELLOW: "MIXED", RED: "RISK-OFF" };
   const actionMap = {
     GREEN: "Conditions favor deployment",
     YELLOW: "Hold — wait for confirmation",
     RED: "Defensive — do not force entries",
   };
+  const oldestNote = fresh.oldest
+    ? `oldest input: ${fresh.oldest.key}${fresh.oldest.asOf ? ` (as of ${String(fresh.oldest.asOf).slice(0, 10)})` : " (no data)"}`
+    : "no ingested macro data";
   return (
     <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "stretch" }}>
       {/* Beacon */}
       <div style={{
-        flex: "1 1 320px", background: C.panel, border: `1px solid ${C.line}`,
+        flex: "1 1 320px", background: C.panel, border: `1px solid ${degraded ? C.red : C.line}`,
         borderRadius: 12, padding: "18px 20px", display: "flex", alignItems: "center", gap: 18,
         position: "relative", overflow: "hidden",
       }}>
@@ -906,8 +1001,19 @@ function Header({ sig, lastFetch, status, onRefresh, quotes }) {
         }} />
         <div style={{ position: "relative" }}>
           <div style={{ font: `600 10px/1 ${C.mono}`, letterSpacing: 2.5, color: C.inkFaint, marginBottom: 7 }}>LEVEL 1 · MACRO ENVIRONMENT</div>
-          <div style={{ font: `700 30px/1 ${C.sans}`, color, letterSpacing: -0.8 }}>{verdictMap[sig.level]}</div>
-          <div style={{ font: `400 12px/1.3 ${C.sans}`, color: C.inkDim, marginTop: 6 }}>{actionMap[sig.level]}</div>
+          <div style={{ font: `700 30px/1 ${C.sans}`, color, letterSpacing: -0.8 }}>
+            {degraded ? "DEGRADED DATA" : verdictMap[sig.level]}
+          </div>
+          <div style={{ font: `400 12px/1.3 ${C.sans}`, color: degraded ? C.red : C.inkDim, marginTop: 6 }}>
+            {degraded
+              ? `Regime inputs are stale or missing — do not trust this gate. ${oldestNote}`
+              : actionMap[sig.level]}
+          </div>
+          {!degraded && (
+            <div style={{ font: `400 10px/1.3 ${C.mono}`, color: fresh.worst === "yellow" ? C.yellow : C.inkFaint, marginTop: 5 }}>
+              {fresh.worst === "yellow" ? `⚠ data 1 trading day behind — ${oldestNote}` : oldestNote}
+            </div>
+          )}
         </div>
       </div>
 
@@ -926,9 +1032,9 @@ function Header({ sig, lastFetch, status, onRefresh, quotes }) {
           </button>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
-          {["XLV", "ILMN", "VIX", "SPY"].map((s) => {
+          {["XLV", "AAPL", "VIX", "SPY"].map((s) => {
             const q = quotes[s];
-            const chg = q && !q.error ? q.close - q.open : null;
+            const chg = q && !q.error && q.open != null ? q.close - q.open : null;
             const up = chg >= 0;
             return (
               <div key={s} style={{ background: C.panel2, border: `1px solid ${C.lineSoft}`, borderRadius: 8, padding: "10px 12px" }}>
@@ -941,11 +1047,16 @@ function Header({ sig, lastFetch, status, onRefresh, quotes }) {
                     {up ? "▲" : "▼"} {Math.abs(chg).toFixed(2)}
                   </div>
                 )}
+                <div style={{ marginTop: 5 }}>
+                  {q && !q.error
+                    ? <StaleDot state={q.staleness || "unknown"} asOf={q.date} source={q.source} showDate />
+                    : <StaleDot state="missing" asOf={null} showDate={false} />}
+                  {q && q.error && <span style={{ font: `400 10px ${C.mono}`, color: C.red, marginLeft: 4 }}>no data</span>}
+                </div>
               </div>
             );
           })}
         </div>
-        {status === "partial" && <div style={{ font: `400 10px ${C.mono}`, color: C.amber }}>Some quotes unavailable — enter manually in Indicators.</div>}
       </div>
     </div>
   );
@@ -954,7 +1065,7 @@ function Header({ sig, lastFetch, status, onRefresh, quotes }) {
 // ============================================================================
 // COMMAND VIEW — everything at a glance
 // ============================================================================
-function CommandView({ sig, focus, sectorRows, positionGuide, cfm, app, macro, setMacro, quotes, exitsXLV, exitsILMN, deployed, reserve, capital, openPL, positions }) {
+function CommandView({ sig, focus, sectorRows, positionGuide, cfm, app, macro, setMacro, quotes, exitsXLV, exitsAAPL, deployed, reserve, capital, openPL, positions }) {
   const macroFavorsCFM = macro.growth === "slowing";
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -981,7 +1092,7 @@ function CommandView({ sig, focus, sectorRows, positionGuide, cfm, app, macro, s
           verdict={cfm.verdict} pass={cfm.pass} total={cfm.total}
           target="1–2% weekly" note={macroFavorsCFM ? "Macro supports defensive rotation" : "Macro not ideal for CFM"} />
         <StrategyCard
-          tag="APP" name="Appreciation" instrument="ILMN" color={C.amber}
+          tag="APP" name="Appreciation" instrument="AAPL" color={C.amber}
           verdict={app.verdict} pass={app.pass} total={app.total}
           target="30–50% / trade" note={macro.breadth > 60 ? "Breadth supports growth" : "Breadth below 60% — wait"} />
       </div>
@@ -989,7 +1100,7 @@ function CommandView({ sig, focus, sectorRows, positionGuide, cfm, app, macro, s
       {/* Exit watch */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
         <ExitWatch title="XLV exit triggers" triggers={exitsXLV} />
-        <ExitWatch title="ILMN exit triggers" triggers={exitsILMN} />
+        <ExitWatch title="AAPL exit triggers" triggers={exitsAAPL} />
       </div>
 
       {/* Capital bar */}
@@ -1044,7 +1155,11 @@ function SectorRotationTable({ rows, compact = false }) {
               return (
                 <tr key={r.symbol} style={{ font: `400 12px ${C.sans}` }}>
                   <td style={td}><span style={{ color: r.tier === "Primary" ? C.green : r.tier === "Secondary" ? C.yellow : r.tier === "Ignored" ? C.inkFaint : C.inkDim, font: `700 10px ${C.mono}` }}>{r.tier}</span></td>
-                  <td style={td}><b>{r.symbol}</b><div style={{ color: C.inkFaint, fontSize: 10 }}>{r.name}</div></td>
+                  <td style={td}>
+                    <b>{r.symbol}</b>{" "}
+                    <StaleDot state={c.staleness || (r.calc ? "unknown" : "missing")} asOf={c.asOf} source={c.source} />
+                    <div style={{ color: C.inkFaint, fontSize: 10 }}>{r.name}</div>
+                  </td>
                   <td style={{ ...td, color: (c.rs3m ?? 0) >= 0 ? C.green : C.red }}>{c.rs3m != null ? c.rs3m.toFixed(2) : "—"}</td>
                   <td style={{ ...td, color: (c.rs3mMom ?? 0) >= 0 ? C.green : C.red }}>{c.rs3mMom != null ? c.rs3mMom.toFixed(0) : "—"}</td>
                   <td style={td}>{c.volRatio != null ? c.volRatio.toFixed(0) : "—"}</td>
@@ -2392,9 +2507,30 @@ const td = { padding: "10px", borderBottom: `1px solid ${C.lineSoft}`, color: C.
 // INDICATORS VIEW — manual inputs for thinkorswim studies + macro
 // ============================================================================
 function IndicatorsView(props) {
-  const { macro, setMacro, macroComputed, macroStatus, computed, calcStatus, onRefresh } = props;
-  const cx = computed?.XLV, ci = computed?.ILMN;
+  const { macro, setMacroField, acceptAutoMacro, macroComputed, macroStatus, computed, calcStatus, onRefresh, dataIssues } = props;
+  const cx = computed?.XLV, ci = computed?.AAPL;
   const fed = macroComputed?.fields?.fed;
+  const fieldMeta = (key) => macroComputed?.fields?.[key] || null;
+  const overrideBadge = (key) => {
+    const f = fieldMeta(key);
+    if (!f?.override) return null;
+    return (
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 6, marginLeft: 6 }}>
+        <span style={{ font: `600 9px ${C.mono}`, color: C.amber, border: `1px solid ${C.amber}55`, borderRadius: 4, padding: "1px 5px" }}
+          title={`Manual override since ${f.asOf || "?"} — beats ingested data`}>
+          MANUAL {String(f.asOf || "").slice(0, 10)}
+        </span>
+        <button onClick={() => acceptAutoMacro(key)} title="Clear override, back to computed value" style={{
+          background: "none", border: `1px solid ${C.line}`, borderRadius: 4, cursor: "pointer",
+          font: `500 9px ${C.mono}`, color: C.inkDim, padding: "1px 5px",
+        }}>auto ↻</button>
+      </span>
+    );
+  };
+  const staleFor = (key) => {
+    const f = fieldMeta(key);
+    return f ? <StaleDot state={f.staleness || "unknown"} asOf={f.asOf} source={f.source} showDate /> : <StaleDot state="missing" />;
+  };
   const fedConditions = fed
     ? [...(fed.hawkishConditions || []), ...(fed.dovishConditions || [])].slice(0, 3).join(" · ")
     : "";
@@ -2411,9 +2547,9 @@ function IndicatorsView(props) {
             Auto-calc {calcStatus === "ok" ? "ready" : calcStatus === "loading" ? "computing…" : calcStatus === "fail" ? "unavailable" : "idle"}
           </div>
           <div style={{ font: `400 11px/1.4 ${C.sans}`, color: C.inkDim, maxWidth: 620 }}>
-            Computed from daily Yahoo/FRED history: Level 1 macro, conditions-based Fed policy, RS3M, RS3M_MOM, volume ratio, volume acceleration, RSI, OBV trend, MFI, and MA21.
-            Each shows next to your manual field — tap <b style={{ color: C.blue }}>use</b> to apply.
-            {calcStatus === "fail" && " History blocked (often CORS in preview) — keep entering manually."}
+            Computed during scheduled ingestion from stored daily bars (Schwab primary, Yahoo fallback) and FRED history: Level 1 macro, conditions-based Fed policy, RS3M, RS3M_MOM, volume ratio, volume acceleration, RSI, OBV trend, MFI, and MA21.
+            Each shows next to your manual field — tap <b style={{ color: C.blue }}>use</b> to apply. Formulas: FORMULAS.md.
+            {calcStatus === "fail" && " No ingested data yet — run ingestion or keep entering manually."}
           </div>
         </div>
         <button onClick={onRefresh} style={{
@@ -2424,40 +2560,43 @@ function IndicatorsView(props) {
 
       {(cx || ci) && (
         <div style={{ font: `400 10px ${C.mono}`, color: C.amber, padding: "0 2px" }}>
-          ⚠ Scale note: backend RS3M / RS3M_MOM use a generic % formula and may not match thinkorswim. Use the Rotation tab’s TOS override importer when TOS should be the source of truth. As of: {cx?.asOf || ci?.asOf || "—"}.
+          ⚠ Scale note: backend RS3M / RS3M_MOM use a raw return-spread formula and will not match your EMA-based thinkorswim studies in magnitude (see FORMULAS.md). When they diverge, thinkorswim is the source of truth — type the TOS value into the field; it is stored as a manual override. As of: {cx?.asOf || ci?.asOf || "—"}.
         </div>
       )}
 
+      <DataIssuesPanel issues={dataIssues} />
+
       <Panel title="Macro inputs" eyebrow={`Level 1 · ${macroStatus === "ok" ? "auto-filled" : macroStatus === "partial" ? "partial auto-fill" : macroStatus === "loading" ? "fetching macro" : "manual fallback"}`}>
         <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
-          Auto-fill uses ^VIX quotes, FRED Fed funds/CPI/GDP/unemployment data, and ETF breadth above 50-day MA. Fed policy is scored from current inflation, growth, labor, and rate conditions. Fields remain editable for your override.
+          Auto-fill uses ingested ^VIX bars, FRED Fed funds/CPI/GDP/unemployment data, and ETF breadth above 50-day MA. Fed policy is scored from current inflation, growth, labor, and rate conditions.
+          Editing a field stores a <b style={{ color: C.amber }}>manual override</b> that beats ingested values until you tap <b>auto ↻</b>.
           {macroComputed?.asOf && <span style={{ color: C.inkFaint }}> Updated {macroComputed.asOf}</span>}
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px,1fr))", gap: 14 }}>
-          <Field label="VIX" hint={macroComputed?.fields?.vix?.asOf || "auto"}>
-            <NumIn value={macro.vix} onChange={(v) => setMacro({ ...macro, vix: v })} />
-            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.vix?.value} onApply={() => setMacro({ ...macro, vix: macroComputed.fields.vix.value })} /></div>
+          <Field label={<span>VIX {staleFor("vix")}{overrideBadge("vix")}</span>} hint={fieldMeta("vix")?.override ? "manual" : fieldMeta("vix")?.asOf || "auto"}>
+            <NumIn value={macro.vix} onChange={(v) => setMacroField("vix", v)} />
+            <div style={{ marginTop: 5 }}><CalcChip value={fieldMeta("vix")?.override ? null : fieldMeta("vix")?.value} onApply={() => setMacroField("vix", fieldMeta("vix").value)} /></div>
           </Field>
-          <Field label="Breadth %" hint={macroComputed?.fields?.breadth ? `${macroComputed.fields.breadth.above}/${macroComputed.fields.breadth.total} above MA50` : ">55 CFM / >60 APP"}>
-            <NumIn step="1" value={macro.breadth} onChange={(v) => setMacro({ ...macro, breadth: v })} />
-            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.breadth?.value} fmt={(v) => v.toFixed(0)} onApply={() => setMacro({ ...macro, breadth: macroComputed.fields.breadth.value })} /></div>
+          <Field label={<span>Breadth % {staleFor("breadth")}{overrideBadge("breadth")}</span>} hint={macroComputed?.fields?.breadth?.above != null ? `${macroComputed.fields.breadth.above}/${macroComputed.fields.breadth.total} above MA50` : ">55 CFM / >60 APP"}>
+            <NumIn step="1" value={macro.breadth} onChange={(v) => setMacroField("breadth", v)} />
+            <div style={{ marginTop: 5 }}><CalcChip value={fieldMeta("breadth")?.override ? null : fieldMeta("breadth")?.value} fmt={(v) => v.toFixed(0)} onApply={() => setMacroField("breadth", fieldMeta("breadth").value)} /></div>
           </Field>
-          <Field label="Fed policy" hint={fed ? `score ${fed.score} · ${fed.rate}% funds · CPI ${fed.cpiYoY}% · U-3 ${fed.unemployment}%` : "FRED DFF/CPI/GDP/UNRATE"}>
-            <Sel value={macro.fed} onChange={(v) => setMacro({ ...macro, fed: v })} options={[["dovish", "Dovish"], ["holding", "Holding"], ["hawkish", "Hawkish"]]} />
-            <div style={{ marginTop: 5 }}><CalcChip value={fed?.value} onApply={() => setMacro({ ...macro, fed: fed.value })} /></div>
+          <Field label={<span>Fed policy {staleFor("fed")}{overrideBadge("fed")}</span>} hint={fed && fed.score != null ? `score ${fed.score} · ${fed.rate}% funds · CPI ${fed.cpiYoY}% · U-3 ${fed.unemployment}%` : "FRED DFF/CPI/GDP/UNRATE"}>
+            <Sel value={macro.fed} onChange={(v) => setMacroField("fed", v)} options={[["dovish", "Dovish"], ["holding", "Holding"], ["hawkish", "Hawkish"]]} />
+            <div style={{ marginTop: 5 }}><CalcChip value={fed?.override ? null : fed?.value} onApply={() => setMacroField("fed", fed.value)} /></div>
             {fedConditions && (
               <div style={{ font: `400 10px/1.35 ${C.sans}`, color: C.inkFaint, marginTop: 6 }}>
                 Current conditions: {fedConditions}
               </div>
             )}
           </Field>
-          <Field label="Growth" hint={macroComputed?.fields?.growth ? `${macroComputed.fields.growth.qoqAnnualized}% GDP` : "FRED GDP"}>
-            <Sel value={macro.growth} onChange={(v) => setMacro({ ...macro, growth: v })} options={[["accelerating", "Accelerating"], ["stable", "Stable"], ["slowing", "Slowing"]]} />
-            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.growth?.value} onApply={() => setMacro({ ...macro, growth: macroComputed.fields.growth.value })} /></div>
+          <Field label={<span>Growth {staleFor("growth")}{overrideBadge("growth")}</span>} hint={macroComputed?.fields?.growth?.qoqAnnualized != null ? `${macroComputed.fields.growth.qoqAnnualized}% GDP` : "FRED GDP"}>
+            <Sel value={macro.growth} onChange={(v) => setMacroField("growth", v)} options={[["accelerating", "Accelerating"], ["stable", "Stable"], ["slowing", "Slowing"]]} />
+            <div style={{ marginTop: 5 }}><CalcChip value={fieldMeta("growth")?.override ? null : fieldMeta("growth")?.value} onApply={() => setMacroField("growth", fieldMeta("growth").value)} /></div>
           </Field>
-          <Field label="Inflation %" hint={macroComputed?.fields?.inflation?.asOf || "FRED CPI YoY"}>
-            <NumIn step="0.1" value={macro.inflation} onChange={(v) => setMacro({ ...macro, inflation: v })} />
-            <div style={{ marginTop: 5 }}><CalcChip value={macroComputed?.fields?.inflation?.value} fmt={(v) => v.toFixed(1)} onApply={() => setMacro({ ...macro, inflation: macroComputed.fields.inflation.value })} /></div>
+          <Field label={<span>Inflation % {staleFor("inflation")}{overrideBadge("inflation")}</span>} hint={fieldMeta("inflation")?.override ? "manual" : fieldMeta("inflation")?.asOf || "FRED CPI YoY"}>
+            <NumIn step="0.1" value={macro.inflation} onChange={(v) => setMacroField("inflation", v)} />
+            <div style={{ marginTop: 5 }}><CalcChip value={fieldMeta("inflation")?.override ? null : fieldMeta("inflation")?.value} fmt={(v) => v.toFixed(1)} onApply={() => setMacroField("inflation", fieldMeta("inflation").value)} /></div>
           </Field>
         </div>
         {macroComputed?.errors && Object.keys(macroComputed.errors).length > 0 && (
@@ -2470,10 +2609,52 @@ function IndicatorsView(props) {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px,1fr))", gap: 16 }}>
         <InstrumentInputs label="XLV — CFM candidate" color={C.blue} calc={cx}
           inst={props.instXLV} setInst={props.setInstXLV} flow={props.flowXLV} setFlow={props.setFlowXLV} tech={props.techXLV} setTech={props.setTechXLV} />
-        <InstrumentInputs label="ILMN — APP candidate" color={C.amber} calc={ci}
-          inst={props.instILMN} setInst={props.setInstILMN} flow={props.flowILMN} setFlow={props.setFlowILMN} tech={props.techILMN} setTech={props.setTechILMN} />
+        <InstrumentInputs label="AAPL — APP candidate" color={C.amber} calc={ci}
+          inst={props.instAAPL} setInst={props.setInstAAPL} flow={props.flowAAPL} setFlow={props.setFlowAAPL} tech={props.techAAPL} setTech={props.setTechAAPL} />
       </div>
     </div>
+  );
+}
+
+// Small data-issues panel: quarantined rows, provider auth problems, last run.
+function DataIssuesPanel({ issues }) {
+  const quarantine = issues?.quarantine || [];
+  const auth = issues?.schwabAuthError;
+  const run = issues?.lastRun;
+  const ok = quarantine.length === 0 && !auth;
+  const runLine = run
+    ? `Last ingest: ${run.started_at || "—"} · ${run.status || "—"} (${run.trigger || "?"})`
+    : "No ingestion run recorded yet.";
+  return (
+    <Panel title="Data issues" eyebrow="validation · quarantine · providers"
+      accent={ok ? C.greenDim : C.red}
+      right={<span style={{ font: `700 11px ${C.mono}`, color: ok ? C.green : C.red }}>{ok ? "CLEAN" : `${quarantine.length + (auth ? 1 : 0)} OPEN`}</span>}>
+      <div style={{ font: `400 11px ${C.mono}`, color: C.inkFaint, marginBottom: 8 }}>{runLine}</div>
+      {auth && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", background: C.redDim + "33", border: `1px solid ${C.redDim}`, borderRadius: 6, padding: "8px 10px", marginBottom: 6 }}>
+          <span style={{ color: C.red }}>⚠</span>
+          <span style={{ font: `500 12px ${C.sans}`, color: C.ink }}>
+            Schwab auth failed ({auth.at}) — refresh token likely expired; ingestion is falling back to Yahoo. Run <code>python cli.py schwab-auth</code>.
+          </span>
+        </div>
+      )}
+      {quarantine.length > 0 ? (
+        <div style={{ display: "grid", gap: 4 }}>
+          {quarantine.slice(0, 8).map((q) => (
+            <div key={q.id} style={{ display: "flex", gap: 8, alignItems: "baseline", padding: "5px 0", borderBottom: `1px solid ${C.lineSoft}` }}>
+              <span style={{ font: `700 11px ${C.mono}`, color: C.amber, minWidth: 80 }}>{q.kind}{q.symbol ? ` ${q.symbol}` : ""}</span>
+              <span style={{ font: `400 11px ${C.sans}`, color: C.inkDim, flex: 1 }}>{q.reason}</span>
+              <span style={{ font: `400 10px ${C.mono}`, color: C.inkFaint }}>{String(q.created_at || "").slice(0, 10)}</span>
+            </div>
+          ))}
+          {quarantine.length > 8 && (
+            <div style={{ font: `400 10px ${C.mono}`, color: C.inkFaint }}>…and {quarantine.length - 8} more</div>
+          )}
+        </div>
+      ) : !auth && (
+        <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No quarantined data. The last good value is always served; bad rows never overwrite it.</div>
+      )}
+    </Panel>
   );
 }
 

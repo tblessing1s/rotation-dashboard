@@ -20,7 +20,7 @@ SECTOR_UNIVERSE = [
 ]
 SECTOR_SYMBOLS = [s["symbol"] for s in SECTOR_UNIVERSE]
 BENCHMARK = "SPY"
-TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # ILMN remains as the default APP stock candidate.
+TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # AAPL is the default APP stock candidate.
 QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", "^VIX", "SPY"]  # for the live ticker strip/API
 
 # ---- 5 key indicator settings ----------------------------------------------
@@ -38,28 +38,58 @@ RS3M_MOM_WINDOW = 10
 MOM_SMOOTH = 1
 MOM_SCALE = 1.0
 
-# ---- Data / cache -----------------------------------------------------------
+# ---- Data / ingestion --------------------------------------------------------
 HISTORY_DAYS = 320          # ~10 months of daily bars (enough for 90d RS3M + momentum)
-CACHE_TTL_MINUTES = 15      # re-fetch history at most this often
-CACHE_DIR = ".cache"
 
+# Entry-watch candidate universe (mirrors the frontend's CFM/APP candidate
+# lists) so scheduled ingestion covers every symbol the UI can request.
+ENTRY_CANDIDATES = [
+    "XLV", "XLP", "XLU", "XLRE",
+    "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE",
+    "PG", "COST", "WMT", "PEP", "KO",
+    "NEE", "SO", "DUK", "PLD", "AMT",
+    "XLK", "XLY", "XLC", "XLI",
+    "NVDA", "MSFT", "AAPL", "AVGO", "AMD", "CRM", "NOW",
+    "META", "GOOGL", "NFLX", "AMZN", "TSLA",
+    "HD", "CAT", "GE", "HON", "DE",
+]
+
+# If the newest successful ingest is older than this, an API hit kicks off a
+# background catch-up run (the request itself is never blocked).
+INGEST_STALE_AFTER_HOURS = 6
+
+# ---- Validation / quarantine -------------------------------------------------
+# A bar is quarantined when its close moves more than this fraction vs the
+# prior close (plus null/negative/high<low checks). Per-symbol overrides for
+# things that legitimately gap hard.
+VALIDATION_MAX_MOVE = 0.25
+VALIDATION_MAX_MOVE_PER_SYMBOL = {
+    "^VIX": 1.00,   # VIX more than doubled on 2018-02-05; ±100% band
+}
+
+# Level 1 regime inputs cross-checked across two providers when both are
+# available. Divergence beyond tolerance is flagged in the data-issues panel
+# instead of silently trusting one source.
+CROSS_CHECK_SYMBOLS = ["^VIX", "SPY"]
+CROSS_CHECK_TOLERANCE = 0.01            # 1% on close
+CROSS_CHECK_TOLERANCE_PER_SYMBOL = {
+    "^VIX": 0.03,   # the two feeds snapshot VIX at slightly different times
+}
 
 # ---- Macro automation -------------------------------------------------------
 # Level 1 inputs are derived from public, no-key sources where possible.
 # Breadth is approximated as the percent of this broad ETF universe trading above
 # its 50-day moving average. Adjust the universe if you prefer a different lens.
+# (^NYA was previously listed as "NYA", which Yahoo doesn't recognize, so the
+# NYSE Composite was silently missing from breadth.)
 BREADTH_SYMBOLS = [
-    "SPY", "QQQ", "IWM", "NYA",
+    "SPY", "QQQ", "IWM", "^NYA",
     "XLK", "XLV", "XLF", "XLY", "XLC", "XLI", "XLP", "XLE", "XLU", "XLB", "XLRE",
 ]
 BREADTH_MA_WINDOW = 50
-MACRO_CACHE_TTL_MINUTES = 60
 
-# FRED graph CSV downloads do not require an API key.
-FRED_DFF_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=DFF"
-FRED_CPI_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
-FRED_GDPC1_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=GDPC1"
-FRED_UNRATE_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=UNRATE"
+# FRED series ingested daily (graph CSV download, no API key required).
+FRED_SERIES = ["DFF", "CPIAUCSL", "GDPC1", "UNRATE"]
 
 # ---- Portfolio defaults (mirrors your framework) ----------------------------
 CAPITAL = 35000

@@ -4,6 +4,15 @@ primary_region = "iad"
 [build]
   dockerfile = "Dockerfile"
 
+# Persistent datastore (SQLite + state.json). Create once with:
+#   fly volumes create data --region iad --size 1
+[mounts]
+  source = "data"
+  destination = "/data"
+
+[env]
+  DATA_DIR = "/data"
+
 [http_service]
   internal_port = 8080
   force_https = true
