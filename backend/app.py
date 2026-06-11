@@ -106,7 +106,7 @@ def api_quotes():
         if bar is None:
             out[symbol] = {"symbol": symbol, "error": True}
             continue
-        out[symbol] = {
+        quote = {
             "symbol": symbol,
             "close": round(bar["close"], 2),
             "open": round(bar["open"], 2) if bar["open"] is not None else None,
@@ -115,6 +115,9 @@ def api_quotes():
             "fetchedAt": bar["fetched_at"],
             "staleness": _bar_staleness(bar["date"]),
         }
+        out[symbol] = quote
+        if symbol == cfg.VIX_PROXY_SYMBOL:
+            out["VIX"] = {**quote, "symbol": "VIX", "underlyingSymbol": symbol}
     return jsonify(out)
 
 

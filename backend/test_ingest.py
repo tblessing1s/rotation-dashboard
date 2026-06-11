@@ -107,6 +107,7 @@ def test_api_serves_from_datastore_when_providers_are_down(env):
     assert quotes["SPY"]["close"] > 0
     assert quotes["SPY"]["source"] == "schwab"
     assert "staleness" in quotes["SPY"] and "date" in quotes["SPY"]
+    assert quotes["VIX"]["underlyingSymbol"] == cfg.VIX_PROXY_SYMBOL
 
     indicators = client.get("/api/indicators").get_json()
     xlv = indicators["XLV"]
@@ -114,6 +115,7 @@ def test_api_serves_from_datastore_when_providers_are_down(env):
 
     macro = client.get("/api/macro").get_json()
     assert macro["values"]["vix"] > 0
+    assert macro["fields"]["vix"]["source"] == f"schwab {cfg.VIX_PROXY_SYMBOL}"
     assert macro["staleness"] in ("fresh", "yellow", "red")
 
 

@@ -45,11 +45,11 @@ Key properties:
   data. Corrections land as new rows; reads resolve the best row per date
   (manual > schwab > yahoo, then newest fetch).
 - **Validation before write.** Bars with null/negative prices, high < low,
-  negative volume, or absurd moves (±25% vs prior close; ±100% for ^VIX —
+  negative volume, or absurd moves (±25% vs prior close; ±100% for the VIX ETF proxy —
   configurable in `config.py`) are quarantined with the reason and surfaced
   in the UI's Data issues panel.
 - **Cross-checks.** When both providers are available, the regime inputs
-  (^VIX, SPY) are compared across them; divergence beyond tolerance is
+  (VIX ETF proxy, SPY) are compared across them; divergence beyond tolerance is
   flagged instead of silently trusting one source.
 - **Staleness is measured in trading days** (`market_calendar.py`): Friday's
   data is fresh all weekend and through Monday's session; NYSE holidays don't
