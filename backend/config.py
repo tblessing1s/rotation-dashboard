@@ -20,7 +20,7 @@ SECTOR_UNIVERSE = [
 ]
 SECTOR_SYMBOLS = [s["symbol"] for s in SECTOR_UNIVERSE]
 BENCHMARK = "SPY"
-TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # ILMN remains as the default APP stock candidate.
+TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # AAPL is the default APP stock candidate.
 QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", "^VIX", "SPY"]  # for the live ticker strip/API
 
 # ---- 5 key indicator settings ----------------------------------------------
