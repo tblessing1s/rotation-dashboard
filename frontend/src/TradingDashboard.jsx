@@ -379,6 +379,12 @@ async function apiMacro() {
   return r.json();
 }
 
+async function apiIndicatorSnapshots(limit = 3) {
+  const r = await fetch(`${API}/api/indicator-snapshots?limit=${encodeURIComponent(limit)}`);
+  if (!r.ok) throw new Error("indicator snapshots failed");
+  return r.json();
+}
+
 async function apiLevels(symbol) {
   const r = await fetch(`${API}/api/levels?symbol=${encodeURIComponent(symbol)}`);
   if (!r.ok) throw new Error("levels failed");
@@ -796,6 +802,7 @@ function TradingDashboard({ backendOffline }) {
 
   // ---- State: auto-computed indicators per symbol + TOS sector overrides ----
   const [computed, setComputed] = useState(store.get("computed", {}));
+  const [indicatorHistory, setIndicatorHistory] = useState(store.get("indicatorHistory", null));
   const [sectorOverrides, setSectorOverrides] = useState(store.get("sectorOverrides", {}));
   const [calcStatus, setCalcStatus] = useState("idle");
 
@@ -879,6 +886,17 @@ function TradingDashboard({ backendOffline }) {
     } catch (e) {
       setCalcStatus("fail");
     }
+
+    // Recent Entry Watch snapshots (datastore-only) for rank movement versus
+    // the prior completed candidate session. Missing history is a display
+    // state, not a refresh failure.
+    try {
+      const history = await apiIndicatorSnapshots(5);
+      setIndicatorHistory(history);
+      store.set("indicatorHistory", history);
+    } catch (e) {
+      setIndicatorHistory({ historyState: "insufficient_history", sessions: [] });
+    }
   }, [normalizedEntryWatchItems]);
 
   useEffect(() => { refreshQuotes(); /* once on mount and watch-list changes */ }, [refreshQuotes]);
@@ -959,7 +977,7 @@ function TradingDashboard({ backendOffline }) {
           <RotationView focus={focus} rows={sectorRows} />
         )}
         {tab === "Entry Watch" && (
-          <EntryWatchView app={app} macro={macro} focus={focus} computed={computed} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchItems} setEntryWatchSymbols={updateEntryWatchSymbols} />
+          <EntryWatchView app={app} macro={macro} focus={focus} computed={computed} indicatorHistory={indicatorHistory} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchItems} setEntryWatchSymbols={updateEntryWatchSymbols} />
         )}
         {tab === "Positions" && (
           <PositionsView
@@ -1699,12 +1717,86 @@ function RankMovementChip({ candidate }) {
   );
 }
 
+
+function priorComputedFromHistory(indicatorHistory, currentComputed = {}) {
+  const sessions = indicatorHistory?.sessions || [];
+  if (sessions.length < 2) {
+    return { state: "insufficient_history", label: "Insufficient history" };
+  }
+  const latestAsOf = sessions[0]?.asOf || null;
+  const currentSymbols = Object.keys(currentComputed || {}).filter((symbol) => currentComputed?.[symbol]);
+  const hasRankableCoverage = (session) => {
+    const symbols = session?.symbols || {};
+    const coverageSet = currentSymbols.length ? currentSymbols : ENTRY_CANDIDATE_UNIVERSE;
+    return coverageSet.some((symbol) => symbols?.[symbol]?.indicators);
+  };
+  const prior = sessions.slice(1).find((session) => session?.complete && hasRankableCoverage(session))
+    || sessions.slice(1).find(hasRankableCoverage);
+  if (!prior) {
+    return { state: "insufficient_history", latestAsOf, label: "Insufficient history" };
+  }
+  const computed = {};
+  Object.entries(prior.symbols || {}).forEach(([symbol, row]) => {
+    computed[symbol] = row?.indicators || null;
+  });
+  return {
+    state: prior.complete ? "ok" : "partial",
+    latestAsOf,
+    asOf: prior.asOf,
+    missing: prior.missing || [],
+    computed,
+    label: prior.complete ? `vs ${prior.asOf}` : `partial vs ${prior.asOf}`,
+  };
+}
+
+function rankingMovement(currentCandidates, priorCandidates, priorState) {
+  if (!priorState || priorState.state === "insufficient_history") {
+    return currentCandidates.map((candidate) => ({
+      ...candidate,
+      movement: { state: "insufficient_history", label: "—", title: "Insufficient history" },
+    }));
+  }
+  const priorRanks = new Map(priorCandidates.map((candidate, index) => [candidate.symbol, { rank: index + 1, score: candidate.score }]));
+  return currentCandidates.map((candidate, index) => {
+    const currentRank = index + 1;
+    const prior = priorRanks.get(candidate.symbol);
+    if (!prior) {
+      return {
+        ...candidate,
+        movement: { state: "new", label: "New", currentRank, priorRank: null, delta: null, asOf: priorState.asOf },
+      };
+    }
+    const delta = prior.rank - currentRank;
+    const state = delta > 0 ? "up" : delta < 0 ? "down" : "flat";
+    const label = delta > 0 ? `↑${delta}` : delta < 0 ? `↓${Math.abs(delta)}` : "→";
+    return {
+      ...candidate,
+      movement: {
+        state,
+        label,
+        currentRank,
+        priorRank: prior.rank,
+        delta,
+        asOf: priorState.asOf,
+        scoreDelta: candidate.score - prior.score,
+      },
+    };
+  });
+}
+
 function CandidateLeaderboard({ title, strategy, candidates, watchedSymbols, onAdd }) {
   const color = STRATEGY_META[strategy]?.color || C.blue;
   const visible = candidates.slice(0, 6);
+  const historyState = visible.find((candidate) => candidate.movement)?.movement?.state || "insufficient_history";
+  const historyLabel = visible.find((candidate) => candidate.movement?.asOf)?.movement?.asOf || null;
   return (
-    <Panel title={title} eyebrow={`${strategy} ranked candidates`} accent={color}
+    <Panel title={title} eyebrow={`${strategy} ranked candidates${historyLabel ? ` · vs ${historyLabel}` : ""}`} accent={color}
       right={<span style={{ font: `800 11px ${C.mono}`, color }}>{visible.length ? `${Math.round(visible[0].score * 100)}% top` : "No data"}</span>}>
+      {historyState === "insufficient_history" && (
+        <div style={{ font: `600 11px/1.35 ${C.sans}`, color: C.inkFaint, marginBottom: 8 }}>
+          Insufficient history: rank movement appears after at least two stored Entry Watch snapshot sessions.
+        </div>
+      )}
       <div style={{ display: "grid", gap: 8 }}>
         {visible.map((candidate, idx) => {
           const watched = watchedSymbols.has(candidate.symbol);
@@ -1720,6 +1812,11 @@ function CandidateLeaderboard({ title, strategy, candidates, watchedSymbols, onA
                   <span style={{ font: `700 10px ${C.mono}`, color, border: `1px solid ${color}`, borderRadius: 999, padding: "2px 6px" }}>{candidate.data.pass}/{candidate.data.total}</span>
                   {candidate.proxy && <span style={{ font: `600 10px ${C.mono}`, color: C.inkFaint }}>Proxy {candidate.proxy}</span>}
                   <span style={{ font: `700 10px ${C.mono}`, color: candidate.readiness.color }}>{candidate.readiness.label}</span>
+                  {candidate.movement && candidate.movement.state !== "insufficient_history" && (
+                    <span title={candidate.movement.priorRank ? `Prior rank #${candidate.movement.priorRank}` : "New in ranked set"} style={{ font: `800 10px ${C.mono}`, color: candidate.movement.state === "up" ? C.green : candidate.movement.state === "down" ? C.red : C.inkFaint }}>
+                      {candidate.movement.label}
+                    </span>
+                  )}
                 </div>
                 <div style={{ font: `400 11px/1.35 ${C.sans}`, color: C.inkDim, marginTop: 4 }}>{candidate.nextBlocker}</div>
               </div>
@@ -1770,7 +1867,7 @@ function genericWatchChecklist(symbol, calc, macro, focus, calcStatus) {
   };
 }
 
-function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSymbols, setEntryWatchSymbols }) {
+function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcStatus, entryWatchSymbols, setEntryWatchSymbols }) {
   const [draftSymbol, setDraftSymbol] = useState("");
   const [draftStrategyMode, setDraftStrategyMode] = useState("AUTO");
   const [draftSectorProxy, setDraftSectorProxy] = useState("");
@@ -1815,6 +1912,20 @@ function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSym
   }).sort((a, b) => (b.data.pass / b.data.total) - (a.data.pass / a.data.total));
 
   const watchedSymbolSet = new Set(normalizedWatch.map((item) => item.symbol));
+  const priorRankState = priorComputedFromHistory(indicatorHistory, computed);
+  const priorCalcStatus = priorRankState.state === "insufficient_history" ? "fail" : "ok";
+  const cfmPriorCandidates = priorRankState.computed ? strategyCandidateRanking(CFM_CANDIDATE_UNIVERSE, "CFM", priorRankState.computed, macro, focus, priorCalcStatus) : [];
+  const appPriorCandidates = priorRankState.computed ? strategyCandidateRanking(APP_CANDIDATE_UNIVERSE, "APP", priorRankState.computed, macro, focus, priorCalcStatus) : [];
+  const cfmTopCandidates = rankingMovement(
+    strategyCandidateRanking(CFM_CANDIDATE_UNIVERSE, "CFM", computed, macro, focus, calcStatus),
+    cfmPriorCandidates,
+    priorRankState
+  );
+  const appTopCandidates = rankingMovement(
+    strategyCandidateRanking(APP_CANDIDATE_UNIVERSE, "APP", computed, macro, focus, calcStatus),
+    appPriorCandidates,
+    priorRankState
+  );
   const cfmRankingAsOf = candidateRankingSessionAsOf(CFM_CANDIDATE_UNIVERSE, computed, calcStatus);
   const appRankingAsOf = candidateRankingSessionAsOf(APP_CANDIDATE_UNIVERSE, computed, calcStatus);
   const cfmPreviousSnapshot = previousCompletedRankingSnapshot(candidateRankingHistory, "CFM", cfmRankingAsOf);

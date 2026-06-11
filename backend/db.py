@@ -339,6 +339,61 @@ def latest_snapshots(kind: str) -> dict[str, dict]:
     return out
 
 
+def snapshots_by_as_of(kind: str, keys: list[str], as_of: str | None = None, limit_sessions: int = 3) -> list[dict]:
+    """Return latest snapshot payloads grouped by as_of for selected keys.
+
+    Each group contains the most recent snapshot row for each key on that
+    as_of date. This is intentionally read-only and used by request handlers
+    that need historical computed payloads without recalculating or fetching
+    provider data.
+    """
+    if not keys:
+        return []
+    conn = connect()
+    placeholders = ",".join("?" for _ in keys)
+    params: list = [kind, *keys]
+    if as_of:
+        as_of_rows = [as_of]
+    else:
+        rows = conn.execute(
+            f"SELECT DISTINCT as_of FROM snapshots WHERE kind=? AND key IN ({placeholders})"
+            " AND as_of IS NOT NULL ORDER BY as_of DESC LIMIT ?",
+            (*params, max(1, int(limit_sessions))),
+        ).fetchall()
+        as_of_rows = [row["as_of"] for row in rows]
+
+    sessions = []
+    for session_as_of in as_of_rows:
+        rows = conn.execute(
+            f"""
+            SELECT s.key, s.as_of, s.payload, s.computed_at
+            FROM snapshots s
+            JOIN (
+                SELECT key, MAX(id) AS id
+                FROM snapshots
+                WHERE kind=? AND as_of=? AND key IN ({placeholders})
+                GROUP BY key
+            ) latest ON latest.id = s.id
+            ORDER BY s.key
+            """,
+            (kind, session_as_of, *keys),
+        ).fetchall()
+        payloads = {}
+        computed = []
+        for row in rows:
+            payload = json.loads(row["payload"])
+            payload["_asOf"] = row["as_of"]
+            payload["_computedAt"] = row["computed_at"]
+            payloads[row["key"]] = payload
+            computed.append(row["computed_at"])
+        sessions.append({
+            "asOf": session_as_of,
+            "computedAt": max(computed) if computed else None,
+            "snapshots": payloads,
+        })
+    return sessions
+
+
 # ---------------------------------------------------------------------------
 # Overrides (manual values always beat ingested values)
 # ---------------------------------------------------------------------------
