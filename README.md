@@ -1,122 +1,185 @@
-# Rotation Dashboard (local app)
+# Rotation Dashboard
 
-Your two-strategy (CFM / APP) institutional rotation system, running locally.
-A Python backend fetches market data and computes indicators server-side (no
-browser CORS limits, cached to disk); a React frontend renders the 4-level
-decision system, checklists, exit alarms, positions, and P&L.
+Your two-strategy (CFM / APP) institutional rotation system. A Python backend
+ingests market data on a schedule into a SQLite datastore and computes all
+indicators there; a React frontend renders the 4-level decision system,
+checklists, exit alarms, positions, and P&L.
 
-Everything you enter — manual thinkorswim inputs and positions — is saved to
-`backend/state.json` and reloads automatically.
+This dashboard gates real capital deployment, so the data pipeline is built
+around one rule: **the UI never silently shows stale or wrong data.** Every
+value carries its as-of date and a freshness dot; if the regime inputs go
+stale, the Level 1 banner says DEGRADED DATA instead of a confident
+RISK-ON/RISK-OFF.
 
 ---
 
-## Requirements
+## Architecture
 
-- **Python 3.10+**
-- **Node.js 18+** (only needed the first time, to build the frontend)
+```
+        scheduled ingestion (cron / CLI / catch-up thread)
+                          │
+   Schwab Trader API ──►  │   ◄── FRED (DFF, CPIAUCSL, GDPC1, UNRATE)
+   Yahoo (fallback)  ──►  │
+                          ▼
+              validation (validation.py)
+        bad bars → quarantine table (with reason)
+                          ▼
+            SQLite datastore (backend/data/rotation.db)
+        bars · macro series · snapshots · overrides · runs
+                          ▼
+        indicator + macro snapshots recomputed at ingest
+                          ▼
+              Flask API (reads datastore ONLY)
+                          ▼
+                    React frontend
+```
 
-## Run it
+Key properties:
 
-**macOS / Linux**
+- **The request path never contacts a provider.** If every provider is down,
+  the dashboard still serves the last good values — visibly aged, never wrong.
+- **Append-only history.** A bad fetch can never delete or overwrite good
+  data. Corrections land as new rows; reads resolve the best row per date
+  (manual > schwab > yahoo, then newest fetch).
+- **Validation before write.** Bars with null/negative prices, high < low,
+  negative volume, or absurd moves (±25% vs prior close; ±100% for ^VIX —
+  configurable in `config.py`) are quarantined with the reason and surfaced
+  in the UI's Data issues panel.
+- **Cross-checks.** When both providers are available, the regime inputs
+  (^VIX, SPY) are compared across them; divergence beyond tolerance is
+  flagged instead of silently trusting one source.
+- **Staleness is measured in trading days** (`market_calendar.py`): Friday's
+  data is fresh all weekend and through Monday's session; NYSE holidays don't
+  count. Green dot = covers the last completed session, yellow = 1 session
+  behind, red = 2+ behind.
+
+Formulas for every computed value (and known differences vs thinkorswim) are
+documented in [FORMULAS.md](FORMULAS.md). **When a backend value disagrees
+with thinkorswim, thinkorswim is the source of truth** — type the TOS value
+into the field; it is stored as a timestamped manual override that beats
+ingested data until you tap **auto ↻**.
+
+---
+
+## Run it locally
+
+Requirements: Python 3.10+, Node 18+ (first run only, to build the frontend).
+
 ```bash
-./start.sh
+./start.sh        # macOS / Linux
+start.bat         # Windows
 ```
 
-**Windows**
-```bat
-start.bat
+Open **http://localhost:5179**. Stop with `Ctrl+C`.
+
+## CLI
+
+```bash
+cd backend
+python cli.py ingest --now          # force one ingestion cycle
+python cli.py ingest --symbols XLV  # targeted run for specific symbols
+python cli.py status                # per-symbol freshness report
+python cli.py status --json         # same, machine-readable
+python cli.py schwab-auth           # mint a Schwab refresh token (see below)
 ```
 
-The first run creates a Python virtual environment, installs dependencies, and
-builds the frontend. Subsequent runs skip straight to launching. When it's up,
-open **http://localhost:5179** in your browser.
+`status` shows, per symbol: last bar date, close, source (schwab/yahoo), and
+whether that's current / 1 day behind / stale relative to the last completed
+NYSE session — plus FRED series freshness, open quarantine items, and the
+last ingestion run. The same report is at `GET /api/data-status`.
 
-To stop: `Ctrl+C` in the terminal.
+---
+
+## Data sources
+
+| Source | Used for | Credentials |
+|---|---|---|
+| **Schwab Trader API** (primary) | daily OHLCV — same feed as thinkorswim | `SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, `SCHWAB_REFRESH_TOKEN` |
+| **Yahoo Finance** (fallback) | daily OHLCV when Schwab is unavailable | none |
+| **FRED** | Fed funds, CPI, real GDP, unemployment | none |
+
+Every stored row is tagged with its source, and the UI shows it in the
+staleness tooltip. Yahoo is explicitly the labeled last resort.
+
+### Schwab setup (one-time, ~10 minutes)
+
+1. Create an app at https://developer.schwab.com (Trader API — Individual),
+   callback URL `https://127.0.0.1`.
+2. Run `python backend/cli.py schwab-auth`, follow the printed steps (log in,
+   approve, paste the redirect URL back).
+3. It prints the `fly secrets set …` command with all three values.
+
+**Schwab refresh tokens expire every 7 days.** When that happens the
+dashboard keeps working — ingestion falls back to Yahoo and the Data issues
+panel shows a "Schwab auth failed" notice — until you re-run `schwab-auth`
+and update the secret. Without Schwab credentials the app runs Yahoo-only.
+
+---
+
+## Deploy to Fly.io
+
+The root `Dockerfile` builds the frontend and runs Gunicorn on Fly's `$PORT`.
+
+```bash
+fly launch                  # first time
+fly volumes create data --size 1   # persistent volume for the datastore
+fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=… SCHWAB_REFRESH_TOKEN=…
+fly secrets set INGEST_TOKEN=$(openssl rand -hex 16)   # protects POST /api/ingest
+fly deploy
+```
+
+Mount the volume at `/data` and set `DATA_DIR=/data` in `fly.toml` so the
+SQLite datastore and your saved inputs survive deploys and machine restarts.
+
+### Scheduled ingestion
+
+Ingestion is triggered by `POST /api/ingest?wait=1` (Bearer `INGEST_TOKEN`).
+Schedule it twice on trading days — after the close and a pre-open catch-up:
+
+```bash
+# 21:30 UTC ≈ 30 min after the NYSE close; 11:00 UTC pre-open catch-up
+fly machine run --schedule "30 21 * * 1-5" curlimages/curl -- \
+  curl -fsS -X POST -H "Authorization: Bearer $INGEST_TOKEN" \
+  "https://YOUR-APP.fly.dev/api/ingest?wait=1"
+```
+
+There is also a belt-and-braces catch-up: if the app wakes up and the newest
+successful ingest is older than `INGEST_STALE_AFTER_HOURS` (6h), it kicks a
+background run — API requests are never blocked on providers.
 
 ---
 
 ## What's automated vs. manual
 
-**Computed automatically** (backend, from public market/economic data):
-Level 1 macro inputs (VIX, breadth, Fed stance, growth, inflation), RSI, OBV
-trend, volume ratio, MFI, RS3M, RS3M_MOM, MA21, and price-vs-MA21. RSI is
-verified against Wilder's reference (70.46).
+**Computed at ingest** (from stored bars + FRED): Level 1 macro (VIX,
+breadth, Fed stance, growth, inflation), RS3M, RS3M_MOM, RSI, OBV trend,
+volume ratio, volume acceleration, MFI, MA21, price-vs-MA21.
 
-Level 1 uses `^VIX` from Yahoo Finance, breadth as the percent of a configured
-ETF universe trading above its 50-day moving average, Fed stance from a current-conditions model using FRED DFF/CPI/GDP/unemployment,
-inflation from FRED CPI YoY, and growth from FRED real-GDP momentum. All of
-these fields remain editable so you can override the automatic readout.
-
-**Manual** (your judgment / non-price data, entered on the Indicators tab):
-Earnings revisions, valuation, credit, and the chart-reading toggles (bounces at
-support, breakout, support defined).
-
-On the Indicators tab, Level 1 macro values auto-fill on refresh and remain
-editable. Other computed values appear as a small `calc … use ↵` chip next to
-their field; you compare against thinkorswim and tap **use** to apply.
-
----
-
-## Calibrating RS3M / RS3M_MOM to thinkorswim
-
-Your thinkorswim RS3M studies are EMA-based and scaled to the numbers you know
-(e.g. +500 / +884 / +1128). The backend now defaults to an EMA-smoothed
-relative-strength approximation: it smooths the sector ETF and SPY closes, then
-compares their 3-month returns. That should track EMA-based watchlists better
-than the old raw close-to-close spread, but the **exact magnitude may still
-differ** until the settings match your ThinkScript. These knobs in
-`backend/config.py` let you line it up:
-
-- `RS3M_METHOD` — `"ema"` for EMA-smoothed prices, or `"return_spread"` for the
-  legacy raw return-spread formula.
-- `RS3M_EMA_SPAN` — EMA length applied to both the sector ETF and SPY before the
-  lookback return is measured.
-- `RS3M_LOOKBACK` — trading days in the relative-strength window (63 ≈ 3 months).
-- `MOM_SMOOTH` — EMA span applied to the RS3M series before momentum is taken.
-- `MOM_SCALE` — multiplier on RS3M_MOM so its size matches your thinkorswim
-  reading. Compare a few live values, then set this ratio.
-
-Edit, save, restart the backend. Until calibrated, trust RS3M_MOM directionally
-or paste TOS watchlist rows in the Rotation tab when TOS should be the source of
-truth.
-
----
-
-
-## Deploy to Fly.io
-
-The repository includes a root-level `Dockerfile` so Fly can detect the app from
-the GitHub repository root. The Docker build compiles the Vite frontend and then
-runs the Flask backend with Gunicorn on Fly's `$PORT` (default `8080`).
-
-From the repository root, launch or deploy with:
-
-```bash
-fly launch
-fly deploy
-```
-
-Make sure `Dockerfile` and `.dockerignore` are committed and pushed to GitHub;
-Fly's GitHub deployment will not see local-only files.
+**Manual** (your judgment / non-price data, on the Indicators tab): earnings
+revisions, valuation, credit, chart-reading toggles — and any Level 1 field
+you choose to override (marked MANUAL with its timestamp until cleared).
 
 ## Configuration
 
-`backend/config.py` also holds the tracked symbols (`XLV`, `ILMN`), the
-benchmark (`SPY`), the Level 1 breadth universe, cache freshness
-(`CACHE_TTL_MINUTES`, default 15), and your capital / reserve figures. Change
-symbols there and restart.
+`backend/config.py`: tracked symbols (XLV + AAPL), benchmark (SPY), breadth
+universe, validation bands, cross-check tolerances, RS3M calibration knobs
+(`RS3M_METHOD`, `RS3M_EMA_SPAN`, `RS3M_LOOKBACK`, `MOM_SMOOTH`, `MOM_SCALE` —
+see FORMULAS.md), staleness threshold for the catch-up runner, and capital /
+reserve figures.
 
-## Data source
+## Tests
 
-Daily OHLCV via `yfinance` (no API key), plus FRED graph CSV downloads for Fed
-funds, CPI, and real GDP (also no API key). Price history is cached to
-`backend/.cache/` as parquet and refreshed at most every `CACHE_TTL_MINUTES`; the
-macro snapshot is cached in memory for `MACRO_CACHE_TTL_MINUTES`. If a price
-fetch fails, the last cached copy is used so the dashboard still loads.
+```bash
+python -m pytest backend -q
+```
+
+Covers the indicator formulas against reference fixtures, validation rules,
+trading-day staleness (weekends/holidays), provider fallback order, and an
+end-to-end ingestion cycle including garbage-data and provider-outage cases.
 
 ## Notes
 
 - This implements *your* framework's mechanical logic. It is not financial
   advice; the GO/WAIT verdicts are checklist outputs, not recommendations.
-- Single-user, localhost only. Nothing is sent anywhere except the market-data
-  request to Yahoo Finance.
+- Single-user. External calls are limited to the configured market-data
+  providers (Schwab/Yahoo) and FRED, during ingestion only.
