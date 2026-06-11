@@ -88,7 +88,10 @@ BREADTH_SYMBOLS = [
 ]
 BREADTH_MA_WINDOW = 50
 
-# FRED series ingested daily (graph CSV download, no API key required).
+# FRED series ingested daily. Fetched via the official FRED API when the
+# FRED_API_KEY env var is set (free key from https://fred.stlouisfed.org/docs/api/api_key.html),
+# falling back to the keyless graph CSV. The keyless endpoint has started
+# returning HTTP 403 to programmatic requests, so a key is strongly recommended.
 FRED_SERIES = ["DFF", "CPIAUCSL", "GDPC1", "UNRATE"]
 
 # ---- Portfolio defaults (mirrors your framework) ----------------------------
