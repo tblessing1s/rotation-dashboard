@@ -36,8 +36,11 @@ RISK-ON/RISK-OFF.
 
 Key properties:
 
-- **The request path never contacts a provider.** If every provider is down,
-  the dashboard still serves the last good values — visibly aged, never wrong.
+- **The request path never contacts a provider** for market data. If every
+  provider is down, the dashboard still serves the last good values — visibly
+  aged, never wrong. (The one deliberate exception is the user-triggered
+  Positions → *Sync from Schwab* button, which reads your brokerage account
+  live; it touches no market data and writes nothing to the datastore.)
 - **Append-only history.** A bad fetch can never delete or overwrite good
   data. Corrections land as new rows; reads resolve the best row per date
   (manual > schwab > yahoo, then newest fetch).
@@ -124,6 +127,25 @@ dashboard keeps working — ingestion falls back to Yahoo and the Data issues
 panel shows a "Schwab auth failed" notice — until you re-run `schwab-auth`
 and update the secret. Without Schwab credentials the app runs Yahoo-only.
 
+#### Account sync (positions, on top of market data)
+
+The same three secrets also power the Positions tab's **Sync from Schwab**
+button, which pulls your live holdings and trade history via Schwab's
+*Accounts & Trading* API (`/trader/v1/accounts…`) instead of having you import
+a CSV. This is a **different Schwab product** than the market-data feed: in
+your app at https://developer.schwab.com, the app must be approved for
+**Accounts and Trading Production** (not just Market Data). If it isn't, market
+data keeps flowing but the sync button returns an HTTP 401/403 with a note to
+enable that product. No new credentials are needed — it reuses the existing
+key/secret/refresh token.
+
+The sync is **on-demand and user-triggered** (`POST /api/account/sync`); it is
+the only API route that contacts a provider at request time, because account
+data has no place in the scheduled market datastore. Synced trades land in the
+same ledger as CSV imports, so open/close history and estimated P&L work
+identically. Set each open position's *current net value* to mark it to market
+(or read the live market value from the account snapshot panel).
+
 ---
 
 ## Deploy to Fly.io
@@ -188,6 +210,14 @@ background run — API requests are never blocked on providers.
 **Computed at ingest** (from stored bars + FRED): Level 1 macro (VIX,
 breadth, Fed stance, growth, inflation), RS3M, RS3M_MOM, RSI, OBV trend,
 volume ratio, volume acceleration, MFI, MA21, price-vs-MA21.
+
+**Synced from your account** (Positions tab → **Sync from Schwab**): your live
+holdings snapshot (symbol, qty, average price, market value, open P/L) and the
+last year of trade fills, normalized into the same transaction ledger a CSV
+import feeds. Synced fills merge with — and de-duplicate against — anything
+already there, so you no longer have to keep exporting and re-importing a CSV.
+CSV upload still works as a fallback. (Requires the Schwab app to also be
+approved for the **Accounts and Trading** product — see below.)
 
 **Manual** (your judgment / non-price data, on the Indicators tab): earnings
 revisions, valuation, credit, chart-reading toggles — and any Level 1 field

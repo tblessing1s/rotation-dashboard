@@ -390,6 +390,18 @@ async function apiDataIssues() {
   return r.json();
 }
 
+// Pull live positions + trade history from the linked Schwab account. Returns
+// { configured, accounts, transactions, errors } — transactions arrive in the
+// same row shape parseCsv produces, so they merge through mergeTransactions.
+async function apiAccountSync(days = 365) {
+  const r = await fetch(`${API}/api/account/sync`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ days }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: r.ok };
+}
+
 // Manual overrides persist server-side with source="manual" and always beat
 // ingested values. value=null clears the override (back to auto).
 async function apiSetOverride(key, value) {
@@ -2304,6 +2316,52 @@ function toDashboardPosition(position) {
 // ============================================================================
 // POSITIONS VIEW
 // ============================================================================
+function SchwabAccountPanel({ snapshot }) {
+  if (!snapshot || !snapshot.length) return null;
+  return (
+    <Panel title="Schwab account snapshot" eyebrow="Live holdings · last sync">
+      <div style={{ display: "grid", gap: 14 }}>
+        {snapshot.map((acct, idx) => (
+          <div key={acct.account || idx} style={{ border: `1px solid ${C.line}`, borderRadius: 9, overflow: "hidden", background: C.panel2 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 10, padding: "11px 13px", borderBottom: `1px solid ${C.line}` }}>
+              <span style={{ font: `800 13px ${C.mono}`, color: C.ink }}>{acct.account}{acct.type ? <span style={{ marginLeft: 8, font: `500 11px ${C.sans}`, color: C.inkDim }}>{acct.type}</span> : null}</span>
+              <span style={{ display: "flex", gap: 16, font: `700 11px ${C.mono}` }}>
+                {acct.liquidationValue != null && <span style={{ color: C.ink }}>Value {money(acct.liquidationValue)}</span>}
+                {acct.cashBalance != null && <span style={{ color: C.inkDim }}>Cash {money(acct.cashBalance)}</span>}
+              </span>
+            </div>
+            {acct.positions && acct.positions.length ? (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
+                  <thead><tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
+                    {["Symbol", "Net qty", "Avg price", "Market value", "Open P/L"].map((h) => <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
+                  </tr></thead>
+                  <tbody>
+                    {acct.positions.map((p) => (
+                      <tr key={p.symbol} style={{ font: `400 12px ${C.sans}` }}>
+                        <td style={td}><b style={{ font: `700 12px ${C.mono}` }}>{p.symbol}</b></td>
+                        <td style={td}>{p.netQty}</td>
+                        <td style={td}>{p.averagePrice != null ? `$${p.averagePrice.toLocaleString()}` : "—"}</td>
+                        <td style={{ ...td, font: `600 12px ${C.mono}` }}>{p.marketValue != null ? money(p.marketValue) : "—"}</td>
+                        <td style={{ ...td, font: `700 12px ${C.mono}`, color: (p.openPL || 0) >= 0 ? C.green : C.red }}>{p.openPL != null ? money(p.openPL) : "—"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim, padding: "10px 13px" }}>No open positions in this account.</div>
+            )}
+          </div>
+        ))}
+        <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkFaint }}>
+          Read-only snapshot from your last sync. The Open/Closed tables below are built from the trade ledger (synced fills + any CSV), so they keep open/close history and estimated P&L the snapshot alone can't show.
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 function PositionsView({ positions, setPositions, guidance = {}, capital, reserve, deployed, openPL }) {
   const [transactions, setTransactions] = useState(store.get("positionTransactions", []));
   const [positionMarks, setPositionMarks] = useState(store.get("positionMarks", {}));
@@ -2312,6 +2370,8 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
   const [collapsedCategories, setCollapsedCategories] = useState({});
   const [importMessage, setImportMessage] = useState("");
   const [saveStatus, setSaveStatus] = useState("");
+  const [schwabSnapshot, setSchwabSnapshot] = useState(store.get("schwabSnapshot", []));
+  const [schwabStatus, setSchwabStatus] = useState("");
 
   useEffect(() => { store.set("positionTransactions", transactions); }, [transactions]);
   useEffect(() => { store.set("positionMarks", positionMarks); }, [positionMarks]);
@@ -2357,6 +2417,37 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
     reader.onerror = () => setImportMessage(`Could not read ${file.name}.`);
     reader.readAsText(file);
     event.target.value = "";
+  };
+
+  const syncFromSchwab = async () => {
+    setSchwabStatus("syncing");
+    try {
+      const res = await apiAccountSync(365);
+      if (!res.configured) {
+        setSchwabStatus("error");
+        setImportMessage(res.error || "Schwab account sync is unavailable — credentials not set.");
+        return;
+      }
+      const incoming = res.transactions || [];
+      setTransactions((existing) => {
+        const merged = mergeTransactions(existing, incoming);
+        const errCount = Object.keys(res.errors || {}).length;
+        setImportMessage(
+          `Synced ${merged.added} new transaction${merged.added === 1 ? "" : "s"} from Schwab`
+          + `${merged.skipped ? ` (${merged.skipped} already present)` : ""}`
+          + `${errCount ? ` — ${errCount} source${errCount === 1 ? "" : "s"} errored, see below` : ""}`
+          + `. Save to persist before leaving.`
+        );
+        return merged.rows;
+      });
+      const accounts = res.accounts || [];
+      setSchwabSnapshot(accounts);
+      store.set("schwabSnapshot", accounts, true).catch(() => {});
+      setSchwabStatus(Object.keys(res.errors || {}).length ? "partial" : "done");
+    } catch (e) {
+      setSchwabStatus("error");
+      setImportMessage(`Schwab sync failed: ${e.message}`);
+    }
   };
 
   const renderPositionRows = (list, closed = false) => list.map((p) => {
@@ -2470,21 +2561,28 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
-      <Panel title="CSV transaction import" eyebrow="Only source for new transactions"
+      <SchwabAccountPanel snapshot={schwabSnapshot} />
+
+      <Panel title="Import transactions" eyebrow="Sync from Schwab or upload a CSV"
         right={<span style={{ font: `700 12px ${C.mono}`, color: transactionSummary.totals.total.estimated >= 0 ? C.green : C.red }}>Total {money(transactionSummary.totals.total.estimated)}</span>}>
         <div style={{ display: "grid", gap: 14 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px,1fr))", gap: 12, alignItems: "end" }}>
-            <Field label="Upload transaction CSV" hint="adds new rows, skips duplicates">
+            <Field label="Sync from Schwab" hint="pulls the last year of fills">
+              <button onClick={syncFromSchwab} disabled={schwabStatus === "syncing"} style={{ width: "100%", background: schwabStatus === "syncing" ? C.line : C.green, border: `1px solid ${schwabStatus === "syncing" ? C.line : C.green}`, borderRadius: 6, color: "white", font: `700 13px ${C.sans}`, padding: "9px 16px", cursor: schwabStatus === "syncing" ? "default" : "pointer", height: 38 }}>
+                {schwabStatus === "syncing" ? "Syncing…" : "↻ Sync from Schwab"}
+              </button>
+            </Field>
+            <Field label="Or upload transaction CSV" hint="adds new rows, skips duplicates">
               <input type="file" accept=".csv,text/csv" onChange={handleCsv} style={{ ...inputStyle, padding: "8px 10px" }} />
             </Field>
-            <button onClick={() => { setTransactions([]); setImportMessage("Transaction history cleared. Save to persist this change."); }} style={{ background: C.line, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `600 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Clear CSV</button>
+            <button onClick={() => { setTransactions([]); setImportMessage("Transaction history cleared. Save to persist this change."); }} style={{ background: C.line, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `600 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Clear all</button>
             <button onClick={savePositionState} style={{ background: C.blue, border: `1px solid ${C.blue}`, borderRadius: 6, color: "white", font: `700 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Save positions</button>
           </div>
           <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim }}>
-            CSV columns are auto-detected when named like date, symbol/ticker, action/side/type, quantity/qty, price, amount/net amount, leg/longshort, and position id/group/trade id. After import, type each open position's current net value in the Current value column to update Net current and Estimated P/L; optional long/short leg marks are still available when you prefer to split the mark. New transactions cannot be typed in manually on this tab.
+            <b>Sync from Schwab</b> pulls trade fills straight from your linked account (needs the app's "Accounts and Trading" product enabled); it merges with anything already here and skips duplicates. <b>CSV</b> columns are auto-detected when named like date, symbol/ticker, action/side/type, quantity/qty, price, amount/net amount, leg/longshort, and position id/group/trade id. After import, type each open position's current net value in the Current value column to update Net current and Estimated P/L; optional long/short leg marks are still available when you prefer to split the mark.
           </div>
           {(importMessage || saveStatus) && (
-            <div style={{ font: `500 12px ${C.sans}`, color: saveStatus === "error" ? C.red : saveStatus === "saved" || importMessage.startsWith("Added") ? C.green : C.amber }}>
+            <div style={{ font: `500 12px ${C.sans}`, color: saveStatus === "error" || schwabStatus === "error" ? C.red : schwabStatus === "partial" ? C.amber : saveStatus === "saved" || schwabStatus === "done" || importMessage.startsWith("Added") || importMessage.startsWith("Synced") ? C.green : C.amber }}>
               {importMessage}{saveStatus === "saving" ? " Saving…" : saveStatus === "saved" ? " Saved to disk." : saveStatus === "error" ? " Save failed — backend state endpoint unavailable." : ""}
             </div>
           )}
