@@ -13,7 +13,7 @@ const API = ""; // same origin when served by backend; Vite proxies /api in dev
 // first, then /api/state, and written back (debounced) whenever it changes.
 // Local storage makes positions sticky across fast refreshes and backend deploys.
 const STATE_STORAGE_KEY = "rotation-dashboard-state-v1";
-const STICKY_POSITION_KEYS = new Set(["positions", "positionTransactions", "positionMarks"]);
+const STICKY_POSITION_KEYS = new Set(["positions", "positionTransactions", "positionMarks", "schwabSnapshot"]);
 
 const safeParseJson = (raw, fallback = {}) => {
   try {
@@ -2145,14 +2145,32 @@ function isLegLabel(value) {
   return /^(LONG|SHORT)$/i.test(String(value || "").trim());
 }
 
+function isSchwabRow(row = {}) {
+  return String(row.strategy || "").toUpperCase() === "SCHWAB";
+}
+
 function positionKey(row) {
   const meta = getInstrumentMeta(row);
   const root = meta.category === "Option" ? `${meta.underlying} · ${meta.label}` : meta.underlying;
+  if (isSchwabRow(row)) return `${root} · SCHWAB`;
   return row.positionId ? `${root} · ${row.positionId}` : `${root} · ${row.leg || "position"}`;
 }
 
-function summarizeTransactions(rows, currentMarks = {}) {
+function schwabOpenHoldingSymbols(accounts = []) {
+  const symbols = new Set();
+  (accounts || []).forEach((acct) => {
+    (acct?.positions || []).forEach((position) => {
+      const qty = cleanCurrency(position.netQty ?? position.longQty ?? position.shortQty);
+      const symbol = String(position.symbol || "").trim().toUpperCase();
+      if (symbol && Math.abs(qty) > 0.000001) symbols.add(symbol);
+    });
+  });
+  return symbols;
+}
+
+function summarizeTransactions(rows, currentMarks = {}, schwabSnapshot = []) {
   const groups = new Map();
+  const openSchwabSymbols = schwabOpenHoldingSymbols(schwabSnapshot);
   rows.forEach((row, idx) => {
     const key = positionKey(row);
     if (!groups.has(key)) {
@@ -2166,6 +2184,7 @@ function summarizeTransactions(rows, currentMarks = {}) {
         rawSymbol: row.symbol || "",
         positionId: row.positionId || "",
         strategy: row.strategy || "CSV",
+        sourceStrategies: new Set(),
         firstDate: row.date || "",
         lastDate: row.date || "",
         rows: [],
@@ -2178,6 +2197,7 @@ function summarizeTransactions(rows, currentMarks = {}) {
     const flowType = row.flowType && row.flowType !== "activity" ? row.flowType : inferOpenClose(row.action, row.leg, row.leg);
     const typed = { ...row, flowType, signedQty: signedTransactionQty(row), order: idx };
     group.rows.push(typed);
+    group.sourceStrategies.add(String(row.strategy || "CSV").toUpperCase());
     group.strategy = group.strategy === "CSV" && row.strategy ? row.strategy : group.strategy;
     group.firstDate = [group.firstDate, row.date].filter(Boolean).sort()[0] || group.firstDate;
     group.lastDate = [group.lastDate, row.date].filter(Boolean).sort().slice(-1)[0] || group.lastDate;
@@ -2196,11 +2216,15 @@ function summarizeTransactions(rows, currentMarks = {}) {
     const hasCurrentMark = String(marks.current ?? "").trim() !== "";
     const cash = group.long.cash + group.short.cash;
     const netQty = group.long.netQty + group.short.netQty;
-    const isClosed = Math.abs(group.long.netQty) < 0.000001 && Math.abs(group.short.netQty) < 0.000001 && group.rows.some((row) => row.flowType === "close");
+    const nettedClosed = Math.abs(group.long.netQty) < 0.000001 && Math.abs(group.short.netQty) < 0.000001 && group.rows.some((row) => row.flowType === "close");
+    const schwabOnly = group.sourceStrategies.size === 1 && group.sourceStrategies.has("SCHWAB");
+    const missingFromLiveSchwabBook = schwabOnly && openSchwabSymbols.size > 0 && !openSchwabSymbols.has(String(group.rawSymbol || group.underlying || group.symbol || "").toUpperCase());
+    const isClosed = nettedClosed || missingFromLiveSchwabBook;
     const netCurrent = hasCurrentMark ? markCurrent : longCurrent - shortClose;
     const estimated = cash + (isClosed ? 0 : netCurrent);
     return {
       ...group,
+      sourceStrategies: [...group.sourceStrategies],
       isClosed,
       cash,
       netQty,
@@ -2376,7 +2400,7 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
   useEffect(() => { store.set("positionTransactions", transactions); }, [transactions]);
   useEffect(() => { store.set("positionMarks", positionMarks); }, [positionMarks]);
 
-  const transactionSummary = useMemo(() => summarizeTransactions(transactions, positionMarks), [transactions, positionMarks]);
+  const transactionSummary = useMemo(() => summarizeTransactions(transactions, positionMarks, schwabSnapshot), [transactions, positionMarks, schwabSnapshot]);
 
   useEffect(() => {
     setPositions(transactionSummary.openPositions.map(toDashboardPosition));
