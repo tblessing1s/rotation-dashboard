@@ -35,21 +35,26 @@ RS3M    = (rs / past - 1) × 100
 
 ## RS3M_MOM — relative-strength acceleration
 
-Matches the supplied Thinkorswim formula exactly, including its absolute lags:
+Matches a thinkorswim momentum column that compares the current RS3M plot to
+the same plot from the momentum lag ago. With the default 63-bar RS3M lookback
+and 5-bar momentum lag:
 
 ```
-RS3M_current = ((rs[t]    / rs[t-63])  - 1) × 100
-RS3M_prior   = ((rs[t-68] / rs[t-131]) - 1) × 100
+rs           = close / close("SPY")
+RS3M_current = ((rs[t]   / rs[t-63]) - 1) × 100
+RS3M_prior   = ((rs[t-5] / rs[t-68]) - 1) × 100
 RS3M_MOM     = if RS3M_prior != 0 then
                  (RS3M_current - RS3M_prior) / RS3M_prior × 100
                else 0
 ```
 
-Code: `rs3m_momentum_from_closes()`. `RS3M_MOM_PAST_END_LAG = 68` and
-`RS3M_MOM_PAST_LOOKBACK = 131` expose the supplied lag constants.
-`MOM_SCALE` is applied after the calculation for calibration.
+Code: `rs3m_momentum_from_closes()`. `RS3M_MOM_PAST_END_LAG = 68`
+means the momentum lag is `68 - RS3M_LOOKBACK`, or 5 bars with the defaults.
+`RS3M_MOM_PAST_LOOKBACK` remains in the config/API payload for backward
+compatibility but is not used by the TOS-compatible momentum calculation.
+
 `rs3mTrend` is "up" when today's RS3M_MOM is above yesterday's recomputation,
-"down" when below.
+"down" if below, otherwise "flat".
 
 ## RSI — 14-period Wilder average
 
@@ -90,15 +95,16 @@ VolumeRatio = volume[t] / SMA(volume, 20)[t] × 100
 Code: `volume_ratio()`. The denominator includes the current bar, as a daily
 Thinkorswim `MovingAverage(AverageType.SIMPLE, volume, 20)` value does.
 
-## VolumeAccel — 5-day vs 20-day average volume
+## VolumeAccel — today vs 5-day average volume
 
-Matches the supplied Thinkorswim formula:
+Matches a thinkorswim-style volume acceleration column:
 
 ```
-VolumeAccel = SMA(volume, 5)[t] / SMA(volume, 20)[t] × 100
+VolumeAccel = volume[t] / SMA(volume, 5)[t] × 100
 ```
 
-Code: `volume_acceleration()`.
+Code: `volume_acceleration()`. The denominator includes the current bar, just
+like thinkorswim daily moving-average studies.
 
 ## Accumulation/Distribution Line
 

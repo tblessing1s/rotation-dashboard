@@ -14,17 +14,30 @@ def test_rs3m_matches_supplied_tos_ratio_formula():
     assert round(value, 2) == 10.77
 
 
-def test_rs3m_momentum_matches_supplied_tos_lag_formula():
-    spy = pd.Series([100.0] * 132)
-    stock = pd.Series([100.0] * 132)
-    stock.iloc[0] = 100.0    # rs[131] in thinkScript on the latest bar
-    stock.iloc[63] = 110.0   # rs[68]
-    stock.iloc[68] = 100.0   # rs[63]
-    stock.iloc[-1] = 120.0   # rs
+def test_rs3m_momentum_matches_tos_rs3m_plot_lag_formula():
+    spy = pd.Series([100.0] * 69)
+    stock = pd.Series([100.0] * 69)
+    stock.iloc[0] = 100.0    # rs[68], prior RS3M denominator
+    stock.iloc[5] = 110.0    # rs[63], current RS3M denominator
+    stock.iloc[-6] = 120.0   # rs[5], prior RS3M numerator
+    stock.iloc[-1] = 132.0   # rs, current RS3M numerator
 
     value = rs3m_momentum_from_closes(stock, spy)
 
-    assert round(value, 0) == 100
+    assert round(value, 0) == 0
+
+
+def test_rs3m_momentum_can_show_large_tos_cross_zero_values():
+    spy = pd.Series([100.0] * 69)
+    stock = pd.Series([100.0] * 69)
+    stock.iloc[0] = 100.0
+    stock.iloc[5] = 100.0
+    stock.iloc[-6] = 99.0    # prior RS3M = -1
+    stock.iloc[-1] = 119.0   # current RS3M = +19
+
+    value = rs3m_momentum_from_closes(stock, spy)
+
+    assert round(value, 0) == -2000
 
 
 def test_volume_ratio_uses_latest_volume_over_current_20_day_average():
@@ -39,12 +52,12 @@ def test_volume_ratio_uses_latest_volume_over_current_20_day_average():
     assert round(value, 1) == 156.8
 
 
-def test_volume_acceleration_matches_supplied_5_day_vs_20_day_formula():
+def test_volume_acceleration_uses_latest_volume_over_current_5_day_average():
     volumes = pd.Series([100.0] * 15 + [110.0, 112.0, 114.0, 116.0, 118.0])
 
     value = volume_acceleration(volumes)
 
-    assert round(value, 1) == 110.1
+    assert round(value, 1) == 103.5
 
 
 def test_accumulation_distribution_uses_standard_chaikin_formula():
