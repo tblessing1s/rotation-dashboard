@@ -185,7 +185,7 @@ def get_bars(symbol: str) -> pd.DataFrame | None:
     """Canonical daily series: per date, best source (priority) then newest fetch."""
     conn = connect()
     rows = conn.execute(
-        "SELECT date, open, high, low, close, volume, source, fetched_at"
+        "SELECT id, date, open, high, low, close, volume, source, fetched_at"
         " FROM bars WHERE symbol=? ORDER BY date, fetched_at, id",
         (symbol,),
     ).fetchall()
