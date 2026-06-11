@@ -2151,7 +2151,26 @@ function positionKey(row) {
   return row.positionId ? `${root} · ${row.positionId}` : `${root} · ${row.leg || "position"}`;
 }
 
-function summarizeTransactions(rows, currentMarks = {}) {
+// Collapse the Schwab account snapshot into per-symbol open share counts so the
+// ledger can tell which Schwab positions are genuinely still held. `ready` is
+// false until a sync actually returns a positions snapshot, so we never close
+// positions just because we haven't looked yet.
+function buildLiveOpen(snapshot, ready) {
+  const symbols = {};
+  (snapshot || []).forEach((account) => {
+    (account.positions || []).forEach((pos) => {
+      const sym = String(pos.symbol || "").toUpperCase();
+      if (!sym) return;
+      const agg = symbols[sym] || { long: 0, short: 0 };
+      agg.long += Number(pos.longQty) || 0;
+      agg.short += Number(pos.shortQty) || 0;
+      symbols[sym] = agg;
+    });
+  });
+  return { ready: !!ready, symbols };
+}
+
+function summarizeTransactions(rows, currentMarks = {}, liveOpen = null) {
   const groups = new Map();
   rows.forEach((row, idx) => {
     const key = positionKey(row);
@@ -2166,6 +2185,7 @@ function summarizeTransactions(rows, currentMarks = {}) {
         rawSymbol: row.symbol || "",
         positionId: row.positionId || "",
         strategy: row.strategy || "CSV",
+        hasSchwab: false,
         firstDate: row.date || "",
         lastDate: row.date || "",
         rows: [],
@@ -2174,6 +2194,7 @@ function summarizeTransactions(rows, currentMarks = {}) {
       });
     }
     const group = groups.get(key);
+    if (row.strategy === "SCHWAB") group.hasSchwab = true;
     const bucket = row.leg === "short" ? "short" : "long";
     const flowType = row.flowType && row.flowType !== "activity" ? row.flowType : inferOpenClose(row.action, row.leg, row.leg);
     const typed = { ...row, flowType, signedQty: signedTransactionQty(row), order: idx };
@@ -2196,7 +2217,19 @@ function summarizeTransactions(rows, currentMarks = {}) {
     const hasCurrentMark = String(marks.current ?? "").trim() !== "";
     const cash = group.long.cash + group.short.cash;
     const netQty = group.long.netQty + group.short.netQty;
-    const isClosed = Math.abs(group.long.netQty) < 0.000001 && Math.abs(group.short.netQty) < 0.000001 && group.rows.some((row) => row.flowType === "close");
+    let isClosed = Math.abs(group.long.netQty) < 0.000001 && Math.abs(group.short.netQty) < 0.000001 && group.rows.some((row) => row.flowType === "close");
+    // Reconcile Schwab-sourced positions against the live account snapshot.
+    // The transactions endpoint only goes back ~1 year, so a position whose
+    // opening fill predates the window (or a DRIP/partial fill) can leave a
+    // non-zero net that would otherwise look "open" forever. The account knows
+    // exactly what's still held, so for Schwab groups it is the source of truth.
+    if (liveOpen && liveOpen.ready && group.hasSchwab) {
+      const live = liveOpen.symbols[group.symbol] || { long: 0, short: 0 };
+      const stillOpen =
+        (group.long.count > 0 && Math.abs(live.long) > 0.000001) ||
+        (group.short.count > 0 && Math.abs(live.short) > 0.000001);
+      isClosed = !stillOpen;
+    }
     const netCurrent = hasCurrentMark ? markCurrent : longCurrent - shortClose;
     const estimated = cash + (isClosed ? 0 : netCurrent);
     return {
@@ -2371,12 +2404,16 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
   const [importMessage, setImportMessage] = useState("");
   const [saveStatus, setSaveStatus] = useState("");
   const [schwabSnapshot, setSchwabSnapshot] = useState(store.get("schwabSnapshot", []));
+  // True once a sync has returned an authoritative positions snapshot, so the
+  // ledger may treat the account as source-of-truth for what's still open.
+  const [schwabPositionsReady, setSchwabPositionsReady] = useState(store.get("schwabPositionsReady", false));
   const [schwabStatus, setSchwabStatus] = useState("");
 
   useEffect(() => { store.set("positionTransactions", transactions); }, [transactions]);
   useEffect(() => { store.set("positionMarks", positionMarks); }, [positionMarks]);
 
-  const transactionSummary = useMemo(() => summarizeTransactions(transactions, positionMarks), [transactions, positionMarks]);
+  const liveOpen = useMemo(() => buildLiveOpen(schwabSnapshot, schwabPositionsReady), [schwabSnapshot, schwabPositionsReady]);
+  const transactionSummary = useMemo(() => summarizeTransactions(transactions, positionMarks, liveOpen), [transactions, positionMarks, liveOpen]);
 
   useEffect(() => {
     setPositions(transactionSummary.openPositions.map(toDashboardPosition));
@@ -2448,6 +2485,12 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
       const accounts = res.accounts || [];
       setSchwabSnapshot(accounts);
       store.set("schwabSnapshot", accounts, true).catch(() => {});
+      // The positions snapshot is authoritative only if it actually came back.
+      // If it errored, leave reconciliation off so we don't wrongly close
+      // anything based on a missing snapshot.
+      const positionsOk = !(res.errors || {}).positions;
+      setSchwabPositionsReady(positionsOk);
+      store.set("schwabPositionsReady", positionsOk, true).catch(() => {});
       setSchwabStatus(Object.keys(res.errors || {}).length ? "partial" : "done");
     } catch (e) {
       setSchwabStatus("error");
