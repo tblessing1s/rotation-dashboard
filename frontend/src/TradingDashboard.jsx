@@ -996,6 +996,7 @@ function TradingDashboard({ backendOffline }) {
             macroComputed={macroComputed} macroStatus={macroStatus}
             computed={computed} calcStatus={calcStatus} onRefresh={refreshQuotes}
             dataIssues={dataIssues}
+            cfm={cfm} app={app} exitsXLV={exitsXLV} exitsAAPL={exitsAAPL}
             instXLV={instXLV} setInstXLV={setInstXLV} flowXLV={flowXLV} setFlowXLV={setFlowXLV} techXLV={techXLV} setTechXLV={setTechXLV}
             instAAPL={instAAPL} setInstAAPL={setInstAAPL} flowAAPL={flowAAPL} setFlowAAPL={setFlowAAPL} techAAPL={techAAPL} setTechAAPL={setTechAAPL}
           />
@@ -2907,11 +2908,12 @@ function PLCard({ title, count, cash, current, estimated, currentLabel }) {
 const td = { padding: "10px", borderBottom: `1px solid ${C.lineSoft}`, color: C.ink };
 
 // ============================================================================
-// INDICATORS VIEW — manual inputs for thinkorswim studies + macro
+// INDICATORS VIEW — calculations, trading-plan enforcement, and manual thesis inputs
 // ============================================================================
 function IndicatorsView(props) {
-  const { macro, setMacroField, acceptAutoMacro, macroComputed, macroStatus, computed, calcStatus, onRefresh, dataIssues } = props;
+  const { macro, setMacroField, acceptAutoMacro, macroComputed, macroStatus, computed, calcStatus, onRefresh, dataIssues, cfm, app, exitsXLV, exitsAAPL } = props;
   const cx = computed?.XLV, ci = computed?.AAPL;
+  const calculationRows = buildIndicatorCalculationRows(computed);
   const fed = macroComputed?.fields?.fed;
   const fieldMeta = (key) => macroComputed?.fields?.[key] || null;
   const overrideBadge = (key) => {
@@ -2969,6 +2971,10 @@ function IndicatorsView(props) {
 
       <DataIssuesPanel issues={dataIssues} />
 
+      <IndicatorCalculationsPanel rows={calculationRows} calcStatus={calcStatus} />
+
+      <TradingPlanEnforcer cfm={cfm} app={app} calcXLV={cx} calcAAPL={ci} exitsXLV={exitsXLV} exitsAAPL={exitsAAPL} />
+
       <Panel title="Macro inputs" eyebrow={`Level 1 · ${macroStatus === "ok" ? "auto-filled" : macroStatus === "partial" ? "partial auto-fill" : macroStatus === "loading" ? "fetching macro" : "manual fallback"}`}>
         <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
           Auto-fill uses the ingested VIX ETF proxy, FRED Fed funds/CPI/GDP/unemployment data, and ETF breadth above 50-day MA. Fed policy is scored from current inflation, growth, labor, and rate conditions.
@@ -3015,6 +3021,134 @@ function IndicatorsView(props) {
         <InstrumentInputs label="AAPL — APP candidate" color={C.amber} calc={ci}
           inst={props.instAAPL} setInst={props.setInstAAPL} flow={props.flowAAPL} setFlow={props.setFlowAAPL} tech={props.techAAPL} setTech={props.setTechAAPL} />
       </div>
+    </div>
+  );
+}
+
+function buildIndicatorCalculationRows(computed = {}) {
+  const sectorOrder = new Map(SECTORS.map((sector, index) => [sector.symbol, index]));
+  return Object.entries(computed || {})
+    .filter(([, calc]) => !!calc)
+    .map(([symbol, calc]) => ({
+      symbol,
+      calc,
+      group: symbol === "XLV" || symbol === "AAPL"
+        ? "Primary"
+        : sectorOrder.has(symbol)
+          ? "Sector"
+          : "Watch",
+    }))
+    .sort((a, b) => {
+      const groupRank = { Primary: 0, Sector: 1, Watch: 2 };
+      const groupDelta = (groupRank[a.group] ?? 9) - (groupRank[b.group] ?? 9);
+      if (groupDelta) return groupDelta;
+      if (a.group === "Sector") return (sectorOrder.get(a.symbol) ?? 99) - (sectorOrder.get(b.symbol) ?? 99);
+      return a.symbol.localeCompare(b.symbol);
+    });
+}
+
+function fmtCalc(value, digits = 1) {
+  return value == null || Number.isNaN(value) ? "—" : Number(value).toFixed(digits);
+}
+
+function IndicatorCalculationsPanel({ rows, calcStatus }) {
+  const visible = rows.slice(0, 18);
+  return (
+    <Panel title="Calculations table" eyebrow="read-only indicator feed · no manual copy/paste" accent={calcStatus === "ok" ? C.greenDim : C.amber}
+      right={<span style={{ font: `700 11px ${C.mono}`, color: calcStatus === "ok" ? C.green : C.amber }}>{visible.length ? `${visible.length} SYMBOLS` : "WAITING"}</span>}>
+      <div style={{ font: `400 12px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
+        This is the canonical calculation section: backend-computed values from stored OHLCV bars and macro history. Use the manual study panels below only for thesis inputs the feed cannot know.
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980 }}>
+          <thead>
+            <tr style={{ font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, textTransform: "uppercase" }}>
+              {["Group", "Symbol", "As of", "Price", "RS3M", "MOM", "Trend", "MFI", "RSI", "OBV", "Vol%", "Accel%", "MA21", "MA gate"].map((h) =>
+                <th key={h} style={{ textAlign: "left", padding: "8px 10px", borderBottom: `1px solid ${C.line}` }}>{h}</th>)}
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map(({ symbol, calc, group }) => (
+              <tr key={symbol} style={{ font: `400 12px ${C.sans}` }}>
+                <td style={td}><span style={{ font: `700 10px ${C.mono}`, color: group === "Primary" ? C.blue : group === "Sector" ? C.green : C.inkDim }}>{group}</span></td>
+                <td style={td}><b>{symbol}</b> <StaleDot state={calc.staleness || "unknown"} asOf={calc.asOf} source={calc.source} /></td>
+                <td style={{ ...td, color: C.inkDim }}>{calc.asOf ? String(calc.asOf).slice(0, 10) : "—"}</td>
+                <td style={td}>{fmtCalc(calc.price, 2)}</td>
+                <td style={{ ...td, color: (calc.rs3m ?? 0) >= 0 ? C.green : C.red }}>{fmtCalc(calc.rs3m, 2)}</td>
+                <td style={{ ...td, color: (calc.rs3mMom ?? 0) >= 0 ? C.green : C.red }}>{fmtCalc(calc.rs3mMom, 0)}</td>
+                <td style={td}>{calc.rs3mTrend || "—"}</td>
+                <td style={td}>{fmtCalc(calc.mfi, 1)}</td>
+                <td style={td}>{fmtCalc(calc.rsi, 1)}</td>
+                <td style={td}>{calc.obv || "—"}</td>
+                <td style={td}>{fmtCalc(calc.volRatio, 0)}</td>
+                <td style={td}>{fmtCalc(calc.volAccel, 0)}</td>
+                <td style={td}>{fmtCalc(calc.ma21, 2)}</td>
+                <td style={{ ...td, color: calc.priceAboveMA21 ? C.green : C.red }}>{calc.priceAboveMA21 == null ? "—" : calc.priceAboveMA21 ? "PASS" : "BLOCK"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {!visible.length && <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No computed indicators are loaded yet. Run ingestion or refresh calculations.</div>}
+      {rows.length > visible.length && <div style={{ marginTop: 8, font: `400 10px ${C.mono}`, color: C.inkFaint }}>Showing first {visible.length} of {rows.length} symbols.</div>}
+    </Panel>
+  );
+}
+
+function TradingPlanEnforcer({ cfm, app, calcXLV, calcAAPL, exitsXLV = [], exitsAAPL = [] }) {
+  const cfmExitCount = exitsXLV.filter(([, ok]) => ok).length;
+  const appExitCount = exitsAAPL.filter(([, ok]) => ok).length;
+  const cfmDataOk = !!calcXLV && calcXLV.staleness !== "red";
+  const appDataOk = !!calcAAPL && calcAAPL.staleness !== "red";
+  const cfmAllowed = cfm?.verdict === "ENTER" && cfmDataOk && cfmExitCount === 0;
+  const appAllowed = app?.verdict === "ENTER" && appDataOk && appExitCount === 0;
+  const allowed = cfmAllowed || appAllowed;
+  const blockers = [
+    ["Fresh computed data loaded", cfmDataOk || appDataOk],
+    ["At least one strategy checklist is complete", cfm?.verdict === "ENTER" || app?.verdict === "ENTER"],
+    ["No active exit trigger on the selected setup", (cfmAllowed || appAllowed) || (cfmExitCount === 0 && appExitCount === 0)],
+    ["Manual chart/thesis gates are confirmed", cfm?.verdict === "ENTER" || app?.verdict === "ENTER"],
+  ];
+  return (
+    <Panel title="Trading plan enforcer" eyebrow="permission gate · protects against discretionary overrides" accent={allowed ? C.green : C.redDim}
+      right={<span style={{ font: `800 12px ${C.mono}`, color: allowed ? C.green : C.red }}>{allowed ? "ENTRY ALLOWED" : "NO TRADE"}</span>}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
+        <PlanCard title="CFM / XLV" verdict={cfmAllowed ? "ALLOWED" : "LOCKED"} color={cfmAllowed ? C.green : C.red}
+          checklist={cfm} dataOk={cfmDataOk} exitCount={cfmExitCount} symbol="XLV" />
+        <PlanCard title="APP / AAPL" verdict={appAllowed ? "ALLOWED" : "LOCKED"} color={appAllowed ? C.green : C.red}
+          checklist={app} dataOk={appDataOk} exitCount={appExitCount} symbol="AAPL" />
+        <div style={{ background: C.panel2, border: `1px solid ${C.lineSoft}`, borderRadius: 8, padding: "12px 13px" }}>
+          <div style={{ font: `700 11px ${C.mono}`, color: C.ink, marginBottom: 8 }}>NON-NEGOTIABLES</div>
+          {blockers.map(([label, ok]) => <CheckRow key={label} label={label} ok={ok} />)}
+          <div style={{ marginTop: 10, font: `400 11px/1.45 ${C.sans}`, color: C.inkDim }}>
+            If this panel says <b style={{ color: C.red }}>NO TRADE</b>, the plan requires waiting, reducing risk, or updating the manual thesis gates before execution.
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function PlanCard({ title, verdict, color, checklist, dataOk, exitCount, symbol }) {
+  const failed = (checklist?.items || []).filter(([, ok]) => !ok).slice(0, 4);
+  return (
+    <div style={{ background: C.panel2, border: `1px solid ${color}55`, borderRadius: 8, padding: "12px 13px" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, marginBottom: 8 }}>
+        <div>
+          <div style={{ font: `700 12px ${C.sans}`, color: C.ink }}>{title}</div>
+          <div style={{ font: `500 10px ${C.mono}`, color: C.inkFaint }}>{checklist?.pass ?? 0}/{checklist?.total ?? 0} gates passed</div>
+        </div>
+        <span style={{ font: `800 11px ${C.mono}`, color }}>{verdict}</span>
+      </div>
+      <CheckRow label={`${symbol} calculation data is loaded and not red-stale`} ok={dataOk} />
+      <CheckRow label="Strategy checklist verdict is ENTER" ok={checklist?.verdict === "ENTER"} />
+      <CheckRow label="No active exit trigger" ok={exitCount === 0} />
+      {failed.length > 0 && (
+        <div style={{ marginTop: 9 }}>
+          <div style={{ font: `700 10px ${C.mono}`, color: C.inkFaint, marginBottom: 4 }}>TOP BLOCKERS</div>
+          {failed.map(([label]) => <div key={label} style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim }}>• {label}</div>)}
+        </div>
+      )}
     </div>
   );
 }
