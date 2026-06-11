@@ -378,6 +378,12 @@ async function apiMacro() {
   return r.json();
 }
 
+async function apiLevels(symbol) {
+  const r = await fetch(`${API}/api/levels?symbol=${encodeURIComponent(symbol)}`);
+  if (!r.ok) throw new Error("levels failed");
+  return r.json();
+}
+
 async function apiDataIssues() {
   const r = await fetch(`${API}/api/data-issues`);
   if (!r.ok) throw new Error("data issues failed");
@@ -1765,6 +1771,20 @@ function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWh
   const nextBlockers = missing.slice(0, 4);
   const confirmations = passed.slice(0, 4);
 
+  const [levels, setLevels] = useState(null);
+  const [levelsState, setLevelsState] = useState("idle"); // idle | loading | done | empty | error
+  const loadLevels = async () => {
+    setLevelsState("loading");
+    try {
+      const result = await apiLevels(symbol);
+      if (result.error) { setLevels(null); setLevelsState("empty"); }
+      else { setLevels(result); setLevelsState("done"); }
+    } catch {
+      setLevels(null);
+      setLevelsState("error");
+    }
+  };
+
   return (
     <Panel title={`${symbol} · ${name}`} eyebrow={`${tag} watch candidate`} accent={color}
       right={<div style={{ display: "flex", gap: 8, alignItems: "center" }}><span style={{ font: `700 12px ${C.mono}`, padding: "5px 10px", borderRadius: 6, background: readiness.tone, color: readiness.color }}>{readiness.label}</span><button onClick={() => onRemove(symbol)} title={`Remove ${symbol}`} style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.inkDim, cursor: "pointer", padding: "4px 8px", font: `700 12px ${C.mono}` }}>×</button></div>}>
@@ -1813,6 +1833,20 @@ function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWh
           <div style={{ font: `500 12px/1.45 ${C.sans}`, color: C.ink }}>{go ? "All conditions are met. Validate price/action live before placing the trade." : trigger}</div>
         </div>
 
+        <div style={{ borderTop: `1px solid ${C.lineSoft}`, paddingTop: 10 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: levelsState === "idle" ? 0 : 8 }}>
+            <span style={{ font: `700 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1 }}>SUPPORT / RESISTANCE</span>
+            <button onClick={loadLevels} disabled={levelsState === "loading"} style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.inkDim, cursor: levelsState === "loading" ? "default" : "pointer", padding: "4px 10px", font: `700 11px ${C.mono}`, opacity: levelsState === "loading" ? 0.6 : 1 }}>
+              {levelsState === "loading" ? "Analyzing…" : levels ? "Refresh levels" : "Analyze levels"}
+            </button>
+          </div>
+          {levelsState === "empty" && <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No bar data yet for {symbol} — try again after the next ingest.</div>}
+          {levelsState === "error" && <div style={{ font: `400 12px ${C.sans}`, color: C.red }}>Couldn’t compute levels. Try again.</div>}
+          {levels && (levels.support?.length || levels.resistance?.length
+            ? <LevelsBlock levels={levels} />
+            : <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No clear levels detected in recent history.</div>)}
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12 }}>
           <WatchList title="Blocking entry" items={nextBlockers} empty="No blockers — entry checklist complete." color={go ? C.green : C.red} />
           <WatchList title="Already confirmed" items={confirmations} empty="No confirmations yet." color={C.green} />
@@ -1832,6 +1866,46 @@ function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWh
         </details>
       </div>
     </Panel>
+  );
+}
+
+function LevelsBlock({ levels }) {
+  const price = Number(levels.price) || 0;
+  const dots = (s) => "●".repeat(Math.max(1, Math.min(3, Math.round((Number(s) || 0) / 2))));
+
+  const LevelRow = ({ tag, zone, color }) => (
+    <div style={{ display: "grid", gridTemplateColumns: "28px 1fr auto 34px", gap: 8, alignItems: "center", padding: "3px 0", font: `600 12px ${C.mono}` }}>
+      <span style={{ color, font: `800 11px ${C.mono}` }}>{tag}</span>
+      <span style={{ color: C.ink }}>${zone.center.toFixed(2)} <span style={{ color: C.inkFaint, font: `500 11px ${C.mono}` }}>({zone.low.toFixed(2)}–{zone.high.toFixed(2)})</span></span>
+      <span style={{ color: zone.distancePct >= 0 ? C.red : C.green, textAlign: "right" }}>{zone.distancePct >= 0 ? "+" : ""}{zone.distancePct.toFixed(1)}%</span>
+      <span style={{ color: C.inkFaint, textAlign: "right" }} title={`${zone.touches} swing touches · strength ${zone.strength}`}>{dots(zone.strength)}</span>
+    </div>
+  );
+
+  const resistance = (levels.resistance || []);
+  const support = (levels.support || []);
+
+  return (
+    <div style={{ display: "grid", gap: 1 }}>
+      {/* Resistance: render farthest at top, nearest just above the price line */}
+      {resistance.slice().reverse().map((z, i, arr) => (
+        <LevelRow key={`r${i}`} tag={`R${arr.length - i}`} zone={z} color={C.red} />
+      ))}
+      <div style={{ display: "flex", justifyContent: "center", gap: 8, alignItems: "center", padding: "5px 0", borderTop: `1px dashed ${C.lineSoft}`, borderBottom: `1px dashed ${C.lineSoft}`, margin: "3px 0", font: `700 12px ${C.mono}`, color: C.blue }}>
+        <span>● now ${price.toFixed(2)}</span>
+        {levels.asOf && <span style={{ color: C.inkFaint, font: `500 10px ${C.mono}` }}>as of {levels.asOf}</span>}
+      </div>
+      {support.map((z, i) => (
+        <LevelRow key={`s${i}`} tag={`S${i + 1}`} zone={z} color={C.green} />
+      ))}
+      {(levels.breakoutTrigger != null || levels.stop != null) && (
+        <div style={{ font: `500 11px/1.5 ${C.sans}`, color: C.inkDim, marginTop: 7 }}>
+          {levels.breakoutTrigger != null && <>Break trigger ≈ <b style={{ color: C.ink }}>${levels.breakoutTrigger.toFixed(2)}</b></>}
+          {levels.breakoutTrigger != null && levels.stop != null && " · "}
+          {levels.stop != null && <>Stop ≈ <b style={{ color: C.ink }}>${levels.stop.toFixed(2)}</b></>}
+        </div>
+      )}
+    </div>
   );
 }
 

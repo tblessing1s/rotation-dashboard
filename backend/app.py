@@ -20,6 +20,7 @@ from flask_cors import CORS
 
 import config as cfg
 import db
+import indicators as ind
 import ingest
 import market_calendar as mcal
 
@@ -141,6 +142,30 @@ def api_indicators():
         if new_symbols:
             ingest.run_in_background("new-symbols", new_symbols)
     return jsonify(out)
+
+
+@app.route("/api/levels")
+def api_levels():
+    """On-demand support/resistance for a single Entry Watch symbol.
+
+    Reads stored daily bars only (no provider call). Unknown symbols trigger a
+    targeted background fetch so a retry after the next ingest has data.
+    """
+    symbol = request.args.get("symbol", "").strip().upper()
+    if not symbol:
+        return jsonify({"error": "symbol required"}), 400
+
+    bars = db.get_bars(symbol)
+    if bars is None or bars.empty:
+        if symbol not in set(db.known_symbols()):
+            ingest.run_in_background("new-symbols", [symbol])
+        return jsonify({"symbol": symbol, "error": "no data"})
+
+    result = ind.support_resistance(bars)
+    result["symbol"] = symbol
+    result["asOf"] = str(bars.index[-1].date())
+    result["staleness"] = _bar_staleness(result["asOf"])
+    return jsonify(result)
 
 
 @app.route("/api/macro")

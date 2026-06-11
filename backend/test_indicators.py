@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from indicators import compute_all, rsi, rs3m_momentum, rs3m_series, volume_acceleration, volume_ratio
+from indicators import compute_all, rsi, rs3m_momentum, rs3m_series, support_resistance, volume_acceleration, volume_ratio
 
 
 def test_rs3m_matches_supplied_90_day_formula():
@@ -69,3 +69,34 @@ def test_compute_all_exposes_all_five_key_indicators():
     assert result["volRatio"] is not None
     assert result["volAccel"] is not None
     assert result["rsi"] is not None
+
+
+def test_support_resistance_splits_zones_around_price():
+    # Price oscillates between a ~100 floor and ~120 ceiling, then settles at 110.
+    index = pd.date_range("2025-01-01", periods=160, freq="D")
+    wave = [100, 105, 112, 120, 113, 106, 100, 107, 114, 120, 112, 104] * 14
+    close = pd.Series(wave[:160], index=index, dtype=float)
+    close.iloc[-1] = 110.0
+    bars = pd.DataFrame(
+        {"Open": close, "High": close + 1, "Low": close - 1, "Close": close, "Volume": 1_000_000.0},
+        index=index,
+    )
+
+    result = support_resistance(bars)
+
+    assert result["price"] == 110.0
+    assert result["support"] and all(z["center"] < 110.0 for z in result["support"])
+    assert result["resistance"] and all(z["center"] >= 110.0 for z in result["resistance"])
+    # Nearest-first ordering: closest zone leads each list.
+    assert result["nearestSupport"] == result["support"][0]
+    assert result["nearestResistance"] == result["resistance"][0]
+    assert result["stop"] < result["nearestSupport"]["low"]
+    assert result["breakoutTrigger"] > result["nearestResistance"]["high"]
+
+
+def test_support_resistance_reports_insufficient_history():
+    index = pd.date_range("2025-01-01", periods=8, freq="D")
+    close = pd.Series(range(100, 108), index=index, dtype=float)
+    bars = pd.DataFrame({"Open": close, "High": close + 1, "Low": close - 1, "Close": close, "Volume": 1.0}, index=index)
+
+    assert support_resistance(bars) == {"error": "insufficient history"}
