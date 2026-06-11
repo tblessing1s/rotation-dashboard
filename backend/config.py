@@ -4,6 +4,8 @@ Configuration & calibration knobs for the rotation dashboard.
 Edit these to match your thinkorswim studies, then restart the backend.
 """
 
+import os
+
 # Symbols the dashboard tracks. SPY is the RS3M benchmark (always needed).
 SECTOR_UNIVERSE = [
     {"symbol": "XLK", "name": "Technology", "group": "growth"},
@@ -21,7 +23,15 @@ SECTOR_UNIVERSE = [
 SECTOR_SYMBOLS = [s["symbol"] for s in SECTOR_UNIVERSE]
 BENCHMARK = "SPY"
 TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # AAPL is the default APP stock candidate.
-QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", "^VIX", "SPY"]  # for the live ticker strip/API
+
+# Volatility proxy used anywhere the dashboard labels the regime input as VIX.
+# Use a traded ETF so Schwab/Yahoo can pull it like every other quote symbol.
+# Override with VIX_PROXY_SYMBOL if you prefer another VIX ETF/ETN such as VXX.
+VIX_PROXY_SYMBOL = (
+    (os.environ.get("VIX_PROXY_SYMBOL") or "VIXY").strip().upper() or "VIXY"
+)
+
+QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", VIX_PROXY_SYMBOL, "SPY"]  # for the live ticker strip/API
 
 # ---- 5 key indicator settings ----------------------------------------------
 # Schwab daily bars line up with thinkorswim's daily studies, so defaults use
@@ -84,16 +94,18 @@ INGEST_STALE_AFTER_HOURS = 6
 # things that legitimately gap hard.
 VALIDATION_MAX_MOVE = 0.25
 VALIDATION_MAX_MOVE_PER_SYMBOL = {
-    "^VIX": 1.00,   # VIX more than doubled on 2018-02-05; ±100% band
+    VIX_PROXY_SYMBOL: 1.00,  # VIX futures ETFs can gap hard during volatility shocks.
+    "^VIX": 1.00,           # keep legacy/index support for older stored data or ad-hoc pulls.
 }
 
 # Level 1 regime inputs cross-checked across two providers when both are
 # available. Divergence beyond tolerance is flagged in the data-issues panel
 # instead of silently trusting one source.
-CROSS_CHECK_SYMBOLS = ["^VIX", "SPY"]
+CROSS_CHECK_SYMBOLS = [VIX_PROXY_SYMBOL, "SPY"]
 CROSS_CHECK_TOLERANCE = 0.01            # 1% on close
 CROSS_CHECK_TOLERANCE_PER_SYMBOL = {
-    "^VIX": 0.03,   # the two feeds snapshot VIX at slightly different times
+    VIX_PROXY_SYMBOL: 0.03,  # volatility feeds can snapshot at slightly different times
+    "^VIX": 0.03,           # legacy/index support
 }
 
 # ---- Macro automation -------------------------------------------------------

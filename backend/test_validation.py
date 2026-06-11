@@ -3,6 +3,7 @@ bar must not poison the reference close for the bars after it."""
 import numpy as np
 import pandas as pd
 
+import config as cfg
 import validation
 
 
@@ -57,7 +58,7 @@ def test_spike_beyond_band_rejected_with_band_in_reason():
 
 def test_vix_band_is_wider_per_symbol():
     bars = frame([base_row(20), base_row(32)])  # +60%
-    accepted_vix, rejected_vix = validation.validate_bars("^VIX", bars)
+    accepted_vix, rejected_vix = validation.validate_bars(cfg.VIX_PROXY_SYMBOL, bars)
     accepted_spy, rejected_spy = validation.validate_bars("SPY", bars)
     assert len(accepted_vix) == 2 and not rejected_vix   # within ±100%
     assert len(accepted_spy) == 1 and rejected_spy       # beyond ±25%

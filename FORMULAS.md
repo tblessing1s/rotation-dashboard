@@ -145,7 +145,7 @@ the earlier exponential behavior. `priceAboveMA21 = close > MA21`.
 ## Level 1 macro inputs
 
 ### VIX
-Latest stored `^VIX` close (Schwab `$VIX` when available, else Yahoo `^VIX`).
+Latest stored VIX ETF proxy close. The default proxy is `VIXY`, and `VIX_PROXY_SYMBOL` can override it (for example to `VXX`).
 
 ### Breadth
 Percent of the configured ETF universe (`BREADTH_SYMBOLS`: SPY, QQQ, IWM,

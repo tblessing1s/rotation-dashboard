@@ -198,14 +198,14 @@ def compute_macro_snapshot(detail: dict) -> None:
     fields = {}
     errors = {}
 
-    vix = db.latest_bar("^VIX")
+    vix = db.latest_bar(cfg.VIX_PROXY_SYMBOL)
     if vix is None:
-        errors["vix"] = "no stored VIX bar"
+        errors["vix"] = f"no stored {cfg.VIX_PROXY_SYMBOL} bar"
     else:
         fields["vix"] = {
             "value": round(vix["close"], 2),
             "asOf": vix["date"],
-            "source": f"{vix['source']} ^VIX",
+            "source": f"{vix['source']} {cfg.VIX_PROXY_SYMBOL}",
             "fetchedAt": vix["fetched_at"],
         }
 

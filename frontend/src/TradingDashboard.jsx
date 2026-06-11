@@ -835,13 +835,13 @@ function TradingDashboard({ backendOffline }) {
     setCalcStatus("loading");
     setMacroStatus("loading");
 
-    // Quotes (backend returns keys XLV, AAPL, ^VIX, SPY — read from the datastore)
+    // Quotes (backend returns keys XLV, AAPL, VIX ETF proxy, SPY — read from the datastore)
     try {
       const raw = await apiQuotes();
       const out = {
         XLV: raw.XLV || { symbol: "XLV", error: true },
         AAPL: raw.AAPL || { symbol: "AAPL", error: true },
-        VIX: raw["^VIX"] || { symbol: "VIX", error: true },
+        VIX: raw.VIX || raw.VIXY || raw.VXX || raw["^VIX"] || { symbol: "VIX", error: true },
         SPY: raw.SPY || { symbol: "SPY", error: true },
       };
       setQuotes(out);
@@ -2971,7 +2971,7 @@ function IndicatorsView(props) {
 
       <Panel title="Macro inputs" eyebrow={`Level 1 · ${macroStatus === "ok" ? "auto-filled" : macroStatus === "partial" ? "partial auto-fill" : macroStatus === "loading" ? "fetching macro" : "manual fallback"}`}>
         <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
-          Auto-fill uses ingested ^VIX bars, FRED Fed funds/CPI/GDP/unemployment data, and ETF breadth above 50-day MA. Fed policy is scored from current inflation, growth, labor, and rate conditions.
+          Auto-fill uses the ingested VIX ETF proxy, FRED Fed funds/CPI/GDP/unemployment data, and ETF breadth above 50-day MA. Fed policy is scored from current inflation, growth, labor, and rate conditions.
           Editing a field stores a <b style={{ color: C.amber }}>manual override</b> that beats ingested values until you tap <b>auto ↻</b>.
           {macroComputed?.asOf && <span style={{ color: C.inkFaint }}> Updated {macroComputed.asOf}</span>}
         </div>
