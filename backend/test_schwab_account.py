@@ -1,6 +1,6 @@
-"""Schwab account sync: trade activity normalizes into the same ledger rows a
-CSV import produces, the positions snapshot is summarized, and partial provider
-failures are reported per-source instead of aborting the whole sync."""
+"""Schwab account sync: trade activity normalizes into frontend ledger rows,
+the positions snapshot is summarized, and partial provider failures are reported
+per-source instead of aborting the whole sync."""
 from unittest import mock
 
 import pytest
@@ -45,6 +45,7 @@ def test_normalize_trade_maps_a_buy_to_open_long_row():
     assert row["action"] == "BUY TO OPEN"
     assert row["amount"] == -1400.0      # buy is a cash debit
     assert row["strategy"] == "SCHWAB"
+    assert row["source"] == "schwab"
     assert row["positionId"] == "555"
 
 
