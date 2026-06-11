@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import time
 
 from flask import Flask, jsonify, request, send_from_directory
@@ -277,11 +278,25 @@ def load_state() -> dict:
 
 
 def save_state(data: dict) -> None:
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=2)
-    os.replace(tmp, STATE_FILE)
+    # Gunicorn serves this with multiple threads and the frontend POSTs state
+    # back debounced + on beforeunload, so writes overlap. A shared temp path
+    # would let one writer's os.replace yank the file out from under another
+    # (FileNotFoundError on the rename), so give each writer a unique temp file
+    # in the same directory and atomically rename it into place.
+    state_dir = os.path.dirname(STATE_FILE)
+    os.makedirs(state_dir, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=state_dir, prefix="state.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, STATE_FILE)
+    except BaseException:
+        # Don't leak the temp file if the write or rename fails.
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 @app.route("/api/state", methods=["GET", "POST"])
