@@ -122,14 +122,37 @@ The root `Dockerfile` builds the frontend and runs Gunicorn on Fly's `$PORT`.
 
 ```bash
 fly launch                  # first time
-fly volumes create data --size 1   # persistent volume for the datastore
+fly volume create data --region iad --size 1   # persistent volume for the datastore
 fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=… SCHWAB_REFRESH_TOKEN=…
 fly secrets set INGEST_TOKEN=$(openssl rand -hex 16)   # protects POST /api/ingest
 fly deploy
+fly scale count 1           # one machine — see note below
 ```
 
 Mount the volume at `/data` and set `DATA_DIR=/data` in `fly.toml` so the
 SQLite datastore and your saved inputs survive deploys and machine restarts.
+
+**Run exactly one machine.** This app is a single-writer SQLite + `state.json`
+store, and a Fly volume attaches to only one machine. If you let Fly run its
+default of 2 machines you need 2 volumes, and the two copies of your data will
+silently diverge. Keep one machine (`fly scale count 1`) bound to the single
+`data` volume.
+
+If a deploy fails with:
+
+```
+Error: Process group 'app' needs volumes with name 'data' to fulfill mounts
+defined in fly.toml; Run `fly volume create data -r REGION -n COUNT` ... iad=2
+```
+
+it means no volume exists yet (and Fly is trying to place 2 machines). Create
+one volume and pin to a single machine:
+
+```bash
+fly volume create data --region iad --size 1
+fly deploy
+fly scale count 1
+```
 
 ### Scheduled ingestion
 
