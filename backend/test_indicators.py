@@ -2,27 +2,32 @@ from types import SimpleNamespace
 
 import pandas as pd
 
-from indicators import compute_all, moving_average, rsi, rs3m_momentum, rs3m_series, support_resistance, volume_acceleration, volume_ratio
+from indicators import accumulation_distribution, accumulation_distribution_trend, compute_all, moving_average, rsi, rs3m_momentum_from_closes, rs3m_series, support_resistance, volume_acceleration, volume_ratio
 
 
-def test_rs3m_matches_three_month_schwab_daily_formula():
+def test_rs3m_matches_supplied_tos_ratio_formula():
     stock = pd.Series([130.0] + [140.0] * 62 + [153.0])
     spy = pd.Series([480.0] + [500.0] * 62 + [510.0])
 
     value = rs3m_series(stock, spy).iloc[-1]
 
-    assert round(value, 2) == 11.44
+    assert round(value, 2) == 10.77
 
 
-def test_rs3m_momentum_matches_supplied_10_day_average_formula():
-    values = pd.Series([-15, -14, -12, -10, -8, -5, 0, 3, 8, 16.88])
+def test_rs3m_momentum_matches_supplied_tos_lag_formula():
+    spy = pd.Series([100.0] * 132)
+    stock = pd.Series([100.0] * 132)
+    stock.iloc[0] = 100.0    # rs[131] in thinkScript on the latest bar
+    stock.iloc[63] = 110.0   # rs[68]
+    stock.iloc[68] = 100.0   # rs[63]
+    stock.iloc[-1] = 120.0   # rs
 
-    value = rs3m_momentum(values)
+    value = rs3m_momentum_from_closes(stock, spy)
 
-    assert round(value, 0) == 567
+    assert round(value, 0) == 100
 
 
-def test_volume_ratio_uses_latest_volume_over_prior_20_day_average():
+def test_volume_ratio_uses_latest_volume_over_current_20_day_average():
     volumes = pd.Series([
         5.075, 5.075, 5.075, 5.075, 5.075, 5.075, 5.075, 5.075, 5.075, 5.075,
         5.075, 5.075, 5.075, 5.075, 5.075, 5.075, 5.075, 5.075, 5.075, 5.075,
@@ -31,15 +36,36 @@ def test_volume_ratio_uses_latest_volume_over_prior_20_day_average():
 
     value = volume_ratio(volumes)
 
-    assert round(value, 1) == 161.6
+    assert round(value, 1) == 156.8
 
 
-def test_volume_acceleration_matches_supplied_current_vs_previous_5_day_formula():
-    volumes = pd.Series([5.0, 5.1, 4.9, 5.0, 5.2, 5.1, 5.3, 5.5, 5.7, 5.9])
+def test_volume_acceleration_matches_supplied_5_day_vs_20_day_formula():
+    volumes = pd.Series([100.0] * 15 + [110.0, 112.0, 114.0, 116.0, 118.0])
 
     value = volume_acceleration(volumes)
 
-    assert round(value, 1) == 109.1
+    assert round(value, 1) == 110.1
+
+
+def test_accumulation_distribution_uses_standard_chaikin_formula():
+    high = pd.Series([10.0, 12.0, 14.0])
+    low = pd.Series([8.0, 10.0, 12.0])
+    close = pd.Series([9.0, 11.5, 13.5])
+    volume = pd.Series([100.0, 100.0, 100.0])
+
+    values = accumulation_distribution(high, low, close, volume)
+
+    assert values.round(1).tolist() == [0.0, 50.0, 100.0]
+
+
+def test_accumulation_distribution_trend_reports_rising_state():
+    index = pd.RangeIndex(30)
+    high = pd.Series([10.0] * 30, index=index)
+    low = pd.Series([8.0] * 30, index=index)
+    close = pd.Series([9.0] * 20 + [9.8] * 10, index=index)
+    volume = pd.Series([100.0] * 30, index=index)
+
+    assert accumulation_distribution_trend(high, low, close, volume) == "rising"
 
 
 def test_rsi_defaults_to_wilder_average_like_thinkorswim():
@@ -73,13 +99,13 @@ def test_ma21_defaults_to_simple_moving_average():
 
 
 def test_compute_all_exposes_all_five_key_indicators():
-    index = pd.date_range("2026-01-01", periods=100, freq="D")
-    close = pd.Series(range(100, 200), index=index, dtype=float)
-    spy_close = pd.Series(range(400, 500), index=index, dtype=float)
-    volume = pd.Series([100.0] * 90 + [100.0, 101.0, 99.0, 100.0, 102.0, 110.0, 112.0, 114.0, 116.0, 118.0], index=index)
+    index = pd.date_range("2026-01-01", periods=160, freq="D")
+    close = pd.Series(range(100, 260), index=index, dtype=float)
+    spy_close = pd.Series(range(400, 560), index=index, dtype=float)
+    volume = pd.Series([100.0] * 150 + [100.0, 101.0, 99.0, 100.0, 102.0, 110.0, 112.0, 114.0, 116.0, 118.0], index=index)
     bars = pd.DataFrame({"Open": close, "High": close + 1, "Low": close - 1, "Close": close, "Volume": volume}, index=index)
     spy_bars = pd.DataFrame({"Open": spy_close, "High": spy_close + 1, "Low": spy_close - 1, "Close": spy_close, "Volume": volume}, index=index)
-    cfg = SimpleNamespace(RS3M_LOOKBACK=63, RS3M_MOM_WINDOW=10, MOM_SMOOTH=1, MOM_SCALE=1.0, RS3M_METHOD="return_spread", RS3M_EMA_SPAN=1, RSI_METHOD="wilder", MA21_METHOD="sma")
+    cfg = SimpleNamespace(RS3M_LOOKBACK=63, RS3M_MOM_WINDOW=10, MOM_SMOOTH=1, MOM_SCALE=1.0, RS3M_METHOD="ratio", RS3M_EMA_SPAN=1, RS3M_MOM_PAST_END_LAG=68, RS3M_MOM_PAST_LOOKBACK=131, RSI_METHOD="wilder", MA21_METHOD="sma")
 
     result = compute_all(bars, spy_bars, cfg)
 
