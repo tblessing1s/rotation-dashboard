@@ -14,6 +14,7 @@ const API = ""; // same origin when served by backend; Vite proxies /api in dev
 // Local storage makes positions sticky across fast refreshes and backend deploys.
 const STATE_STORAGE_KEY = "rotation-dashboard-state-v1";
 const STICKY_POSITION_KEYS = new Set(["positions", "positionTransactions", "positionMarks", "schwabSnapshot"]);
+const SCHWAB_STRATEGY = "SCHWAB";
 
 const safeParseJson = (raw, fallback = {}) => {
   try {
@@ -392,7 +393,7 @@ async function apiDataIssues() {
 
 // Pull live positions + trade history from the linked Schwab account. Returns
 // { configured, accounts, transactions, errors } — transactions arrive in the
-// same row shape parseCsv produces, so they merge through mergeTransactions.
+// same row shape the positions ledger consumes, so they merge through mergeTransactions.
 async function apiAccountSync(days = 365) {
   const r = await fetch(`${API}/api/account/sync`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -1973,63 +1974,13 @@ function inferOptionSymbolFromDescription(symbol = "", description = "") {
   return `${base} ${normalizeOptionExpiry(expiry[1])} ${Number(strike[1]).toFixed(2)} ${type[1][0]}`;
 }
 
-function parseCsv(text) {
-  const rows = [];
-  let cell = "";
-  let row = [];
-  let quoted = false;
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    const next = text[i + 1];
-    if (ch === '"') {
-      if (quoted && next === '"') { cell += '"'; i += 1; }
-      else quoted = !quoted;
-    } else if (ch === "," && !quoted) {
-      row.push(cell.trim());
-      cell = "";
-    } else if ((ch === "\n" || ch === "\r") && !quoted) {
-      if (ch === "\r" && next === "\n") i += 1;
-      row.push(cell.trim());
-      if (row.some(Boolean)) rows.push(row);
-      row = [];
-      cell = "";
-    } else cell += ch;
-  }
-  row.push(cell.trim());
-  if (row.some(Boolean)) rows.push(row);
-  if (rows.length < 2) return [];
-  const headers = rows[0].map((h) => h.toLowerCase().replace(/[^a-z0-9]/g, ""));
-  const pick = (obj, names) => {
-    for (const name of names) if (obj[name] !== undefined && obj[name] !== "") return obj[name];
-    return "";
-  };
-  return rows.slice(1).map((cells, idx) => {
-    const obj = Object.fromEntries(headers.map((h, i) => [h, cells[i] ?? ""]));
-    const actionDisplay = pick(obj, ["action", "side", "type", "transactiontype", "activity", "description"]);
-    const actionText = ["action", "side", "type", "transactiontype", "activity", "description"].map((key) => obj[key]).filter(Boolean).join(" ").toUpperCase();
-    const rawPosition = pick(obj, ["position", "positionname", "positionlabel"]);
-    const explicitPosition = pick(obj, ["positionid", "positiongroup", "group", "groupid", "tradeid", "trade", "lot", "lotid", "orderid", "spread", "spreadid"]);
-    const legHint = pick(obj, ["leg", "positiontype", "strategy", "longshort", ...(isLegLabel(rawPosition) ? ["position"] : [])]).toUpperCase();
-    const qty = cleanCurrency(pick(obj, ["quantity", "qty", "shares", "contracts"]));
-    const price = cleanCurrency(pick(obj, ["price", "fillprice", "avgprice", "averageprice"]));
-    const amountRaw = pick(obj, ["amount", "netamount", "net", "proceeds", "value", "total"]);
-    const inferredAmount = inferTransactionAmount(actionText, legHint, qty, price);
-    const amount = amountRaw === "" ? inferredAmount : cleanCurrency(amountRaw);
-    const leg = inferTransactionLeg(actionText, legHint, qty);
-    const rawSymbol = pick(obj, ["symbol", "ticker", "underlying", "instrument"]).toUpperCase();
-    const note = pick(obj, ["description", "memo", "notes", "activity"]);
-    const rowOut = {
-      date: pick(obj, ["date", "transactiondate", "time", "datetime"]),
-      symbol: inferOptionSymbolFromDescription(rawSymbol, `${note} ${actionDisplay}`),
-      positionId: explicitPosition || (rawPosition && !isLegLabel(rawPosition) ? rawPosition : ""),
-      strategy: pick(obj, ["strategy", "setup", "system"]).toUpperCase() || "CSV",
-      action: actionDisplay || "TRANSACTION",
-      flowType: inferOpenClose(actionText, legHint, leg),
-      leg, qty, price, amount,
-      note: pick(obj, ["description", "memo", "notes", "activity"]),
-    };
-    return { ...rowOut, id: transactionKey(rowOut, idx) };
-  }).filter((row) => row.amount !== 0 || row.qty !== 0 || row.symbol || row.action);
+function isSchwabTransaction(row) {
+  return String(row?.source || "").toLowerCase() === "schwab"
+    || String(row?.strategy || "").toUpperCase() === SCHWAB_STRATEGY;
+}
+
+function schwabTransactionsOnly(rows = []) {
+  return (rows || []).filter(isSchwabTransaction);
 }
 
 function transactionKey(row, fallback = "") {
@@ -2040,15 +1991,17 @@ function transactionKey(row, fallback = "") {
 }
 
 function mergeTransactions(existing, incoming) {
-  const seen = new Set(existing.map((row) => transactionKey(row)));
+  const existingSchwabRows = schwabTransactionsOnly(existing);
+  const incomingSchwabRows = schwabTransactionsOnly(incoming);
+  const seen = new Set(existingSchwabRows.map((row) => transactionKey(row)));
   const additions = [];
-  incoming.forEach((row) => {
+  incomingSchwabRows.forEach((row) => {
     const key = transactionKey(row);
     if (seen.has(key)) return;
     seen.add(key);
     additions.push({ ...row, id: row.id || `${Date.now()}-${additions.length}` });
   });
-  return { rows: [...existing, ...additions], added: additions.length, skipped: incoming.length - additions.length };
+  return { rows: [...existingSchwabRows, ...additions], added: additions.length, skipped: incomingSchwabRows.length - additions.length, removedCsv: existing.length - existingSchwabRows.length };
 }
 
 function signedCostBasisDelta(value, side) {
@@ -2146,7 +2099,7 @@ function isLegLabel(value) {
 }
 
 function isSchwabRow(row = {}) {
-  return String(row.strategy || "").toUpperCase() === "SCHWAB";
+  return isSchwabTransaction(row);
 }
 
 function positionKey(row) {
@@ -2156,21 +2109,40 @@ function positionKey(row) {
   return row.positionId ? `${root} · ${row.positionId}` : `${root} · ${row.leg || "position"}`;
 }
 
-function schwabOpenHoldingSymbols(accounts = []) {
-  const symbols = new Set();
+function schwabOpenHoldings(accounts = []) {
+  const holdings = new Map();
   (accounts || []).forEach((acct) => {
     (acct?.positions || []).forEach((position) => {
       const qty = cleanCurrency(position.netQty ?? position.longQty ?? position.shortQty);
       const symbol = String(position.symbol || "").trim().toUpperCase();
-      if (symbol && Math.abs(qty) > 0.000001) symbols.add(symbol);
+      if (!symbol || Math.abs(qty) <= 0.000001) return;
+      const marketValue = cleanCurrency(position.marketValue);
+      const existing = holdings.get(symbol) || { qty: 0, marketValue: 0 };
+      holdings.set(symbol, {
+        qty: existing.qty + qty,
+        marketValue: existing.marketValue + marketValue,
+      });
     });
   });
-  return symbols;
+  return holdings;
+}
+
+function schwabHoldingForPosition(group, holdings) {
+  const candidates = (group.instrumentType === "Option"
+    ? [group.rawSymbol, group.instrumentLabel]
+    : [group.rawSymbol, group.symbol, group.underlying])
+    .map((value) => String(value || "").trim().toUpperCase())
+    .filter(Boolean);
+  for (const symbol of candidates) {
+    if (holdings.has(symbol)) return holdings.get(symbol);
+  }
+  return null;
 }
 
 function summarizeTransactions(rows, currentMarks = {}, schwabSnapshot = []) {
   const groups = new Map();
-  const openSchwabSymbols = schwabOpenHoldingSymbols(schwabSnapshot);
+  const openSchwabHoldings = schwabOpenHoldings(schwabSnapshot);
+  const openSchwabSymbols = new Set(openSchwabHoldings.keys());
   rows.forEach((row, idx) => {
     const key = positionKey(row);
     if (!groups.has(key)) {
@@ -2183,7 +2155,7 @@ function summarizeTransactions(rows, currentMarks = {}, schwabSnapshot = []) {
         instrumentLabel: getInstrumentMeta(row).label,
         rawSymbol: row.symbol || "",
         positionId: row.positionId || "",
-        strategy: row.strategy || "CSV",
+        strategy: row.strategy || SCHWAB_STRATEGY,
         sourceStrategies: new Set(),
         firstDate: row.date || "",
         lastDate: row.date || "",
@@ -2197,8 +2169,8 @@ function summarizeTransactions(rows, currentMarks = {}, schwabSnapshot = []) {
     const flowType = row.flowType && row.flowType !== "activity" ? row.flowType : inferOpenClose(row.action, row.leg, row.leg);
     const typed = { ...row, flowType, signedQty: signedTransactionQty(row), order: idx };
     group.rows.push(typed);
-    group.sourceStrategies.add(String(row.strategy || "CSV").toUpperCase());
-    group.strategy = group.strategy === "CSV" && row.strategy ? row.strategy : group.strategy;
+    group.sourceStrategies.add(String(row.strategy || SCHWAB_STRATEGY).toUpperCase());
+    group.strategy = group.strategy === SCHWAB_STRATEGY && row.strategy ? row.strategy : group.strategy;
     group.firstDate = [group.firstDate, row.date].filter(Boolean).sort()[0] || group.firstDate;
     group.lastDate = [group.lastDate, row.date].filter(Boolean).sort().slice(-1)[0] || group.lastDate;
     group[bucket].cash += row.amount;
@@ -2218,9 +2190,14 @@ function summarizeTransactions(rows, currentMarks = {}, schwabSnapshot = []) {
     const netQty = group.long.netQty + group.short.netQty;
     const nettedClosed = Math.abs(group.long.netQty) < 0.000001 && Math.abs(group.short.netQty) < 0.000001 && group.rows.some((row) => row.flowType === "close");
     const schwabOnly = group.sourceStrategies.size === 1 && group.sourceStrategies.has("SCHWAB");
-    const missingFromLiveSchwabBook = schwabOnly && openSchwabSymbols.size > 0 && !openSchwabSymbols.has(String(group.rawSymbol || group.underlying || group.symbol || "").toUpperCase());
+    const liveHolding = schwabHoldingForPosition(group, openSchwabHoldings);
+    const hasSchwabCurrent = liveHolding?.marketValue != null;
+    const schwabCurrent = hasSchwabCurrent ? liveHolding.marketValue : 0;
+    const missingFromLiveSchwabBook = schwabOnly && openSchwabSymbols.size > 0 && !liveHolding;
     const isClosed = nettedClosed || missingFromLiveSchwabBook;
-    const netCurrent = hasCurrentMark ? markCurrent : longCurrent - shortClose;
+    const manualLegCurrent = longCurrent - shortClose;
+    const netCurrent = hasCurrentMark ? markCurrent : hasSchwabCurrent ? schwabCurrent : manualLegCurrent;
+    const currentSource = hasCurrentMark ? "manual" : hasSchwabCurrent ? "schwab" : "manual-legs";
     const estimated = cash + (isClosed ? 0 : netCurrent);
     return {
       ...group,
@@ -2232,6 +2209,9 @@ function summarizeTransactions(rows, currentMarks = {}, schwabSnapshot = []) {
       shortClose,
       markCurrent,
       hasCurrentMark,
+      schwabCurrent,
+      hasSchwabCurrent,
+      currentSource,
       current: isClosed ? 0 : netCurrent,
       estimated,
       rowCount: group.rows.length,
@@ -2328,9 +2308,9 @@ function toDashboardPosition(position) {
   const basis = Math.abs(position.cash);
   return {
     id: position.key,
-    strategy: position.strategy || "CSV",
+    strategy: position.strategy || SCHWAB_STRATEGY,
     symbol: position.underlying || position.symbol,
-    desc: position.positionId || position.instrumentLabel || `${position.rowCount} CSV fills`,
+    desc: position.positionId || position.instrumentLabel || `${position.rowCount} Schwab fills`,
     cost: basis.toFixed(2),
     current: (basis + position.estimated).toFixed(2),
     opened: position.opened,
@@ -2379,7 +2359,7 @@ function SchwabAccountPanel({ snapshot }) {
           </div>
         ))}
         <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkFaint }}>
-          Read-only snapshot from your last sync. The Open/Closed tables below are built from the trade ledger (synced fills + any CSV), so they keep open/close history and estimated P&L the snapshot alone can't show.
+          Read-only snapshot from your last sync. The Open/Closed tables below are built only from Schwab-synced fills, so they keep open/close history and estimated P&L the snapshot alone can't show.
         </div>
       </div>
     </Panel>
@@ -2387,7 +2367,7 @@ function SchwabAccountPanel({ snapshot }) {
 }
 
 function PositionsView({ positions, setPositions, guidance = {}, capital, reserve, deployed, openPL }) {
-  const [transactions, setTransactions] = useState(store.get("positionTransactions", []));
+  const [transactions, setTransactions] = useState(() => schwabTransactionsOnly(store.get("positionTransactions", [])));
   const [positionMarks, setPositionMarks] = useState(store.get("positionMarks", {}));
   const [expandedPositions, setExpandedPositions] = useState({});
   const [collapsedSymbols, setCollapsedSymbols] = useState({});
@@ -2396,8 +2376,9 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
   const [saveStatus, setSaveStatus] = useState("");
   const [schwabSnapshot, setSchwabSnapshot] = useState(store.get("schwabSnapshot", []));
   const [schwabStatus, setSchwabStatus] = useState("");
+  const autoSyncStarted = useRef(false);
 
-  useEffect(() => { store.set("positionTransactions", transactions); }, [transactions]);
+  useEffect(() => { store.set("positionTransactions", schwabTransactionsOnly(transactions)); }, [transactions]);
   useEffect(() => { store.set("positionMarks", positionMarks); }, [positionMarks]);
 
   const transactionSummary = useMemo(() => summarizeTransactions(transactions, positionMarks, schwabSnapshot), [transactions, positionMarks, schwabSnapshot]);
@@ -2424,27 +2405,9 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
       setSaveStatus("error");
     }
   };
-  const handleCsv = (event) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const parsed = parseCsv(String(reader.result || ""));
-      setTransactions((existing) => {
-        const merged = mergeTransactions(existing, parsed);
-        setImportMessage(parsed.length
-          ? `Added ${merged.added} new transaction${merged.added === 1 ? "" : "s"} from ${file.name}${merged.skipped ? ` (${merged.skipped} duplicate${merged.skipped === 1 ? "" : "s"} skipped)` : ""}. Positions are rebuilt from CSV fills; save to persist before leaving.`
-          : `No transactions found in ${file.name}.`);
-        return merged.rows;
-      });
-    };
-    reader.onerror = () => setImportMessage(`Could not read ${file.name}.`);
-    reader.readAsText(file);
-    event.target.value = "";
-  };
 
-  const syncFromSchwab = async () => {
-    setSchwabStatus("syncing");
+  const syncFromSchwab = async ({ auto = false } = {}) => {
+    setSchwabStatus(auto ? "refreshing" : "syncing");
     try {
       const res = await apiAccountSync(365);
       if (!res.configured) {
@@ -2456,9 +2419,11 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
       setTransactions((existing) => {
         const merged = mergeTransactions(existing, incoming);
         const errCount = Object.keys(res.errors || {}).length;
+        const verb = auto ? "Refreshed" : "Synced";
         setImportMessage(
-          `Synced ${merged.added} new transaction${merged.added === 1 ? "" : "s"} from Schwab`
+          `${verb} current values and ${merged.added} new transaction${merged.added === 1 ? "" : "s"} from Schwab`
           + `${merged.skipped ? ` (${merged.skipped} already present)` : ""}`
+          + `${merged.removedCsv ? ` — removed ${merged.removedCsv} CSV-imported row${merged.removedCsv === 1 ? "" : "s"}` : ""}`
           + `${errCount ? ` — ${errCount} source${errCount === 1 ? "" : "s"} errored, see below` : ""}`
           + `. Save to persist before leaving.`
         );
@@ -2473,6 +2438,12 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
       setImportMessage(`Schwab sync failed: ${e.message}`);
     }
   };
+
+  useEffect(() => {
+    if (autoSyncStarted.current) return;
+    autoSyncStarted.current = true;
+    syncFromSchwab({ auto: true });
+  }, []);
 
   const renderPositionRows = (list, closed = false) => list.map((p) => {
     const guide = guidance[p.key] || {};
@@ -2492,8 +2463,8 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
           <td style={td}>{p.short.netQty || "—"}</td>
           <td style={{ ...td, color: p.cash >= 0 ? C.green : C.red, font: `600 12px ${C.mono}` }}>{money(p.cash)}</td>
           {!closed && <td style={td}>
-            <input type="number" value={positionMarks[p.key]?.current || ""} onChange={(e) => updateMark(p.key, "current", e.target.value)} placeholder="Current net" style={{ ...inputStyle, padding: "5px 7px", width: 120, font: `500 12px ${C.mono}` }} />
-            <div style={{ font: `500 9px ${C.sans}`, color: C.inkFaint, marginTop: 4 }}>Long MV − short close</div>
+            <input type="number" value={positionMarks[p.key]?.current || ""} onChange={(e) => updateMark(p.key, "current", e.target.value)} placeholder={p.hasSchwabCurrent ? money(p.schwabCurrent) : "Current net"} style={{ ...inputStyle, padding: "5px 7px", width: 120, font: `500 12px ${C.mono}` }} />
+            <div style={{ font: `500 9px ${C.sans}`, color: C.inkFaint, marginTop: 4 }}>{p.hasSchwabCurrent && !p.hasCurrentMark ? "Auto from Schwab MV" : "Long MV − short close"}</div>
           </td>}
           {!closed && <td style={td}>
             <div style={{ display: "flex", gap: 6 }}>
@@ -2502,7 +2473,10 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
             </div>
             <div style={{ font: `500 9px ${C.sans}`, color: C.inkFaint, marginTop: 4 }}>Optional legs if no current value</div>
           </td>}
-          {!closed && <td style={{ ...td, color: p.current >= 0 ? C.green : C.red, font: `700 12px ${C.mono}` }}>{money(p.current)}</td>}
+          {!closed && <td style={{ ...td, color: p.current >= 0 ? C.green : C.red, font: `700 12px ${C.mono}` }}>
+            {money(p.current)}
+            {p.currentSource === "schwab" && <div style={{ font: `500 9px ${C.sans}`, color: C.inkFaint, marginTop: 4 }}>Schwab MV</div>}
+          </td>}
           <td style={{ ...td, color: p.estimated >= 0 ? C.green : C.red, font: `700 12px ${C.mono}` }}>{money(p.estimated)}</td>
           {!closed && <td style={{ ...td, color: guide.color || C.inkDim, font: `700 11px ${C.mono}` }} title={guide.note || ""}>{guide.action || "Monitor"}</td>}
           <td style={{ ...td, font: `400 11px ${C.mono}`, color: C.inkDim }}>{p.opened || "—"}</td>
@@ -2529,17 +2503,17 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
 
   const toggleSymbol = (status, symbol) => {
     const key = `${status}:${symbol}`;
-    setCollapsedSymbols({ ...collapsedSymbols, [key]: !collapsedSymbols[key] });
+    setCollapsedSymbols((prev) => ({ ...prev, [key]: !(prev[key] ?? true) }));
   };
 
   const toggleCategory = (status, symbol, category) => {
     const key = `${status}:${symbol}:${category}`;
-    setCollapsedCategories({ ...collapsedCategories, [key]: !collapsedCategories[key] });
+    setCollapsedCategories((prev) => ({ ...prev, [key]: !(prev[key] ?? true) }));
   };
 
   const renderCategoryGroup = (status, symbol, category, closed = false) => {
     const key = `${status}:${symbol}:${category.label}`;
-    const collapsed = !!collapsedCategories[key];
+    const collapsed = collapsedCategories[key] ?? true;
     return (
       <div key={key} style={{ borderTop: `1px solid ${C.line}` }}>
         <button onClick={() => toggleCategory(status, symbol, category.label)} style={{ width: "100%", background: C.panel, border: 0, color: C.ink, cursor: "pointer", padding: "9px 13px 9px 36px", display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 10, alignItems: "center", textAlign: "left" }}>
@@ -2562,7 +2536,7 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
     <div style={{ display: "grid", gap: 10 }}>
       {groupPositionsByUnderlying(list).map((group) => {
         const key = `${status}:${group.symbol}`;
-        const collapsed = !!collapsedSymbols[key];
+        const collapsed = collapsedSymbols[key] ?? true;
         return (
           <div key={key} style={{ border: `1px solid ${C.line}`, borderRadius: 9, overflow: "hidden", background: C.panel2 }}>
             <button onClick={() => toggleSymbol(status, group.symbol)} style={{ width: "100%", background: "transparent", border: 0, color: C.ink, cursor: "pointer", padding: "11px 13px", display: "grid", gridTemplateColumns: "auto 1fr auto", gap: 12, alignItems: "center", textAlign: "left" }}>
@@ -2587,26 +2561,23 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
     <div style={{ display: "grid", gap: 16 }}>
       <SchwabAccountPanel snapshot={schwabSnapshot} />
 
-      <Panel title="Import transactions" eyebrow="Sync from Schwab or upload a CSV"
+      <Panel title="Sync transactions" eyebrow="Schwab-only ledger"
         right={<span style={{ font: `700 12px ${C.mono}`, color: transactionSummary.totals.total.estimated >= 0 ? C.green : C.red }}>Total {money(transactionSummary.totals.total.estimated)}</span>}>
         <div style={{ display: "grid", gap: 14 }}>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px,1fr))", gap: 12, alignItems: "end" }}>
             <Field label="Sync from Schwab" hint="pulls the last year of fills">
-              <button onClick={syncFromSchwab} disabled={schwabStatus === "syncing"} style={{ width: "100%", background: schwabStatus === "syncing" ? C.line : C.green, border: `1px solid ${schwabStatus === "syncing" ? C.line : C.green}`, borderRadius: 6, color: "white", font: `700 13px ${C.sans}`, padding: "9px 16px", cursor: schwabStatus === "syncing" ? "default" : "pointer", height: 38 }}>
-                {schwabStatus === "syncing" ? "Syncing…" : "↻ Sync from Schwab"}
+              <button onClick={syncFromSchwab} disabled={schwabStatus === "syncing" || schwabStatus === "refreshing"} style={{ width: "100%", background: schwabStatus === "syncing" || schwabStatus === "refreshing" ? C.line : C.green, border: `1px solid ${schwabStatus === "syncing" || schwabStatus === "refreshing" ? C.line : C.green}`, borderRadius: 6, color: "white", font: `700 13px ${C.sans}`, padding: "9px 16px", cursor: schwabStatus === "syncing" || schwabStatus === "refreshing" ? "default" : "pointer", height: 38 }}>
+                {schwabStatus === "syncing" ? "Syncing…" : schwabStatus === "refreshing" ? "Refreshing…" : "↻ Sync from Schwab"}
               </button>
             </Field>
-            <Field label="Or upload transaction CSV" hint="adds new rows, skips duplicates">
-              <input type="file" accept=".csv,text/csv" onChange={handleCsv} style={{ ...inputStyle, padding: "8px 10px" }} />
-            </Field>
-            <button onClick={() => { setTransactions([]); setImportMessage("Transaction history cleared. Save to persist this change."); }} style={{ background: C.line, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `600 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Clear all</button>
+            <button onClick={() => { setTransactions([]); setImportMessage("Schwab transaction history cleared. Save to persist this change."); }} style={{ background: C.line, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `600 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Clear Schwab history</button>
             <button onClick={savePositionState} style={{ background: C.blue, border: `1px solid ${C.blue}`, borderRadius: 6, color: "white", font: `700 13px ${C.sans}`, padding: "10px 16px", cursor: "pointer", height: 38 }}>Save positions</button>
           </div>
           <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim }}>
-            <b>Sync from Schwab</b> pulls trade fills straight from your linked account (needs the app's "Accounts and Trading" product enabled); it merges with anything already here and skips duplicates. <b>CSV</b> columns are auto-detected when named like date, symbol/ticker, action/side/type, quantity/qty, price, amount/net amount, leg/longshort, and position id/group/trade id. After import, type each open position's current net value in the Current value column to update Net current and Estimated P/L; optional long/short leg marks are still available when you prefer to split the mark.
+            <b>Sync from Schwab</b> pulls trade fills straight from your linked account (needs the app's "Accounts and Trading" product enabled); it keeps only Schwab-sourced rows, refreshes live market values for open positions, removes legacy CSV-imported rows, and skips duplicate Schwab fills. Type an open position's current net value in the Current value column to update Net current and Estimated P/L; optional long/short leg marks are still available when you prefer to split the mark.
           </div>
           {(importMessage || saveStatus) && (
-            <div style={{ font: `500 12px ${C.sans}`, color: saveStatus === "error" || schwabStatus === "error" ? C.red : schwabStatus === "partial" ? C.amber : saveStatus === "saved" || schwabStatus === "done" || importMessage.startsWith("Added") || importMessage.startsWith("Synced") ? C.green : C.amber }}>
+            <div style={{ font: `500 12px ${C.sans}`, color: saveStatus === "error" || schwabStatus === "error" ? C.red : schwabStatus === "partial" ? C.amber : saveStatus === "saved" || schwabStatus === "done" || importMessage.startsWith("Synced") || importMessage.startsWith("Refreshed") ? C.green : C.amber }}>
               {importMessage}{saveStatus === "saving" ? " Saving…" : saveStatus === "saved" ? " Saved to disk." : saveStatus === "error" ? " Save failed — backend state endpoint unavailable." : ""}
             </div>
           )}
@@ -2618,17 +2589,17 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
         </div>
       </Panel>
 
-      <Panel title="Open positions" eyebrow="CSV-built · current logs"
+      <Panel title="Open positions" eyebrow="Schwab-built · current logs"
         right={<span style={{ font: `500 12px ${C.mono}`, color: transactionSummary.totals.open.estimated >= 0 ? C.green : C.red }}>Open est. {money(transactionSummary.totals.open.estimated)}</span>}>
         {transactionSummary.openPositions.length === 0 ? (
-          <div style={{ font: `400 13px ${C.sans}`, color: C.inkDim, padding: "10px 0" }}>No open positions from imported CSV transactions.</div>
+          <div style={{ font: `400 13px ${C.sans}`, color: C.inkDim, padding: "10px 0" }}>No open positions from Schwab-synced transactions.</div>
         ) : renderSymbolGroups(transactionSummary.openPositions, "open")}
       </Panel>
 
       <Panel title="Closed positions" eyebrow="Archive · expandable open/close detail"
         right={<span style={{ font: `500 12px ${C.mono}`, color: transactionSummary.totals.closed.estimated >= 0 ? C.green : C.red }}>Closed P/L {money(transactionSummary.totals.closed.estimated)}</span>}>
         {transactionSummary.closedPositions.length === 0 ? (
-          <div style={{ font: `400 13px ${C.sans}`, color: C.inkDim, padding: "10px 0" }}>Closed positions will appear here automatically once every long and short leg in a CSV position nets to zero.</div>
+          <div style={{ font: `400 13px ${C.sans}`, color: C.inkDim, padding: "10px 0" }}>Closed positions will appear here automatically once every long and short leg in a Schwab-synced position nets to zero.</div>
         ) : renderSymbolGroups(transactionSummary.closedPositions, "closed", true)}
       </Panel>
     </div>

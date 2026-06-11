@@ -4,9 +4,9 @@ account, so positions no longer have to be hand-imported via CSV.
 Unlike market-data ingestion (which writes to the datastore on a schedule),
 this is contacted on-demand when the user taps "Sync from Schwab" on the
 Positions tab — it returns a current-holdings snapshot plus trade activity
-normalized into the exact row shape the frontend's transaction ledger already
-consumes (date / symbol / action / leg / qty / price / amount / flowType …),
-so synced fills merge and de-duplicate alongside any CSV imports.
+normalized into the exact row shape the frontend's Schwab-only transaction
+ledger already consumes (date / symbol / action / leg / qty / price / amount /
+flowType …), so synced fills merge and de-duplicate without requiring CSV data.
 
 Requires the Schwab app to be approved for "Accounts and Trading Production"
 (a separate product from the market-data feed); without it the account calls
@@ -86,7 +86,7 @@ def normalize_trade(txn: dict) -> list[dict]:
 
     Fee/commission and cash legs are skipped. Sign and open/close are derived
     from each leg's signed quantity and positionEffect so equity buys/sells and
-    multi-leg option fills net the same way an imported CSV does.
+    multi-leg option fills net consistently in the frontend ledger.
     """
     when = txn.get("tradeDate") or txn.get("time") or ""
     date = str(when)[:10]
@@ -123,6 +123,7 @@ def normalize_trade(txn: dict) -> list[dict]:
             "symbol": str(symbol).upper(),
             "positionId": order_id,
             "strategy": "SCHWAB",
+            "source": "schwab",
             "action": action,
             "flowType": flow,
             "leg": leg,
