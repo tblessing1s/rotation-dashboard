@@ -89,9 +89,11 @@ CREATE TABLE IF NOT EXISTS quarantine (
     payload TEXT,
     reason TEXT NOT NULL,
     source TEXT,
+    dedup_key TEXT,
     created_at TEXT NOT NULL,
     resolved INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS idx_quarantine_dedup ON quarantine(dedup_key, resolved);
 
 CREATE TABLE IF NOT EXISTS ingest_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -372,14 +374,26 @@ def get_overrides(scope: str) -> dict[str, dict]:
 # ---------------------------------------------------------------------------
 # Quarantine
 # ---------------------------------------------------------------------------
-def quarantine(kind: str, symbol: str | None, payload, reason: str, source: str | None) -> None:
+def quarantine(kind: str, symbol: str | None, payload, reason: str, source: str | None,
+               dedup_key: str | None = None) -> bool:
+    """Record a data issue. With a dedup_key, re-detecting the same issue on
+    every ingest run does not re-alert while the original is unresolved.
+    Returns True when a new row was written."""
     conn = connect()
+    if dedup_key:
+        row = conn.execute(
+            "SELECT 1 FROM quarantine WHERE dedup_key=? AND resolved=0 LIMIT 1",
+            (dedup_key,),
+        ).fetchone()
+        if row:
+            return False
     with conn:
         conn.execute(
-            "INSERT INTO quarantine (kind, symbol, payload, reason, source, created_at)"
-            " VALUES (?,?,?,?,?,?)",
-            (kind, symbol, json.dumps(payload, default=str), reason, source, utcnow()),
+            "INSERT INTO quarantine (kind, symbol, payload, reason, source, dedup_key, created_at)"
+            " VALUES (?,?,?,?,?,?,?)",
+            (kind, symbol, json.dumps(payload, default=str), reason, source, dedup_key, utcnow()),
         )
+    return True
 
 
 def recent_quarantine(limit: int = 50) -> list[dict]:

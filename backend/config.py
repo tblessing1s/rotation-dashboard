@@ -58,6 +58,24 @@ ENTRY_CANDIDATES = [
 # background catch-up run (the request itself is never blocked).
 INGEST_STALE_AFTER_HOURS = 6
 
+# ---- Validation / quarantine -------------------------------------------------
+# A bar is quarantined when its close moves more than this fraction vs the
+# prior close (plus null/negative/high<low checks). Per-symbol overrides for
+# things that legitimately gap hard.
+VALIDATION_MAX_MOVE = 0.25
+VALIDATION_MAX_MOVE_PER_SYMBOL = {
+    "^VIX": 1.00,   # VIX more than doubled on 2018-02-05; ±100% band
+}
+
+# Level 1 regime inputs cross-checked across two providers when both are
+# available. Divergence beyond tolerance is flagged in the data-issues panel
+# instead of silently trusting one source.
+CROSS_CHECK_SYMBOLS = ["^VIX", "SPY"]
+CROSS_CHECK_TOLERANCE = 0.01            # 1% on close
+CROSS_CHECK_TOLERANCE_PER_SYMBOL = {
+    "^VIX": 0.03,   # the two feeds snapshot VIX at slightly different times
+}
+
 # ---- Macro automation -------------------------------------------------------
 # Level 1 inputs are derived from public, no-key sources where possible.
 # Breadth is approximated as the percent of this broad ETF universe trading above

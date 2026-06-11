@@ -22,10 +22,13 @@ import time
 import traceback
 from datetime import datetime, timedelta
 
+import pandas as pd
+
 import config as cfg
 import db
 import indicators as ind
 import macro as macro_calc
+import validation
 from providers import build_chain
 from providers.base import ProviderError, with_retries
 from providers import fred
@@ -95,17 +98,69 @@ def ingest_bars(symbols: list[str], detail: dict) -> None:
     chain = build_chain()
     detail["providers"] = [p.name for p in chain]
     start = (datetime.now() - timedelta(days=cfg.HISTORY_DAYS)).strftime("%Y-%m-%d")
-    ok, failed, written = [], {}, 0
+    ok, failed, written, quarantined = [], {}, 0, 0
     for symbol in symbols:
         try:
             bars, source = fetch_symbol(symbol, chain, start)
-            written += db.append_bars(symbol, bars, source)
+            accepted, rejected = validation.validate_bars(symbol, bars)
+            for rej in rejected:
+                if db.quarantine(
+                    "bar", symbol, rej, rej["reason"], source,
+                    dedup_key=f"bar:{symbol}:{rej['date']}:{source}",
+                ):
+                    quarantined += 1
+                    print(f"[quarantine] {symbol} {rej['date']}: {rej['reason']}")
+            written += db.append_bars(symbol, accepted, source)
             ok.append(symbol)
         except Exception as e:  # noqa: BLE001 — keep going; last good value stays current
             failed[symbol] = str(e)
             print(f"[ingest] bars {symbol} failed: {e}")
         time.sleep(0.1)  # be gentle with rate limits
-    detail["bars"] = {"ok": len(ok), "failed": failed, "rowsWritten": written}
+    detail["bars"] = {"ok": len(ok), "failed": failed, "rowsWritten": written, "quarantined": quarantined}
+    cross_check(chain, detail)
+
+
+def cross_check(chain, detail: dict) -> None:
+    """Compare regime-gating market inputs across two providers.
+
+    When both Schwab and Yahoo are available, divergence on the latest common
+    close beyond tolerance is flagged in the data-issues panel instead of
+    silently trusting the priority source.
+    """
+    if len(chain) < 2:
+        detail["crossCheck"] = "single provider — skipped"
+        return
+    primary, secondary = chain[0], chain[1]
+    start = (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d")
+    results = {}
+    for symbol in cfg.CROSS_CHECK_SYMBOLS:
+        try:
+            bars_a = primary.get_daily_bars(symbol, start)
+            bars_b = secondary.get_daily_bars(symbol, start)
+        except Exception as e:  # noqa: BLE001 — cross-check is best-effort
+            results[symbol] = f"unavailable: {e}"
+            continue
+        closes_a = {str(pd.Timestamp(i).date()): float(v) for i, v in bars_a["Close"].items()}
+        closes_b = {str(pd.Timestamp(i).date()): float(v) for i, v in bars_b["Close"].items()}
+        common = sorted(closes_a.keys() & closes_b.keys())
+        if not common:
+            results[symbol] = "no common dates"
+            continue
+        date = common[-1]
+        close_a, close_b = closes_a[date], closes_b[date]
+        tol = cfg.CROSS_CHECK_TOLERANCE_PER_SYMBOL.get(symbol, cfg.CROSS_CHECK_TOLERANCE)
+        diff = abs(close_a - close_b) / max(close_a, close_b)
+        results[symbol] = {"date": date, primary.name: close_a, secondary.name: close_b,
+                           "diffPct": round(diff * 100, 2), "tolerancePct": tol * 100}
+        if diff > tol:
+            db.quarantine(
+                "divergence", symbol, results[symbol],
+                f"{primary.name} {close_a} vs {secondary.name} {close_b} on {date}"
+                f" diverge {diff * 100:.2f}% (tolerance {tol * 100:.0f}%)",
+                f"{primary.name}/{secondary.name}",
+                dedup_key=f"divergence:{symbol}:{date}",
+            )
+    detail["crossCheck"] = results
 
 
 def ingest_fred(detail: dict) -> None:
