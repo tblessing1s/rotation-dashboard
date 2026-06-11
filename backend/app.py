@@ -146,6 +146,83 @@ def api_indicators():
     return jsonify(out)
 
 
+def _entry_candidate_universe() -> list[dict]:
+    cfm = set(getattr(cfg, "CFM_ENTRY_CANDIDATES", []))
+    app_candidates = set(getattr(cfg, "APP_ENTRY_CANDIDATES", []))
+    proxies = getattr(cfg, "ENTRY_CANDIDATE_PROXY", {})
+    universe = []
+    for symbol in getattr(cfg, "ENTRY_CANDIDATES", []):
+        strategies = []
+        if symbol in cfm:
+            strategies.append("CFM")
+        if symbol in app_candidates:
+            strategies.append("APP")
+        universe.append({
+            "symbol": symbol,
+            "candidateStrategies": strategies,
+            "sectorProxy": proxies.get(symbol, symbol if symbol in getattr(cfg, "SECTOR_SYMBOLS", []) else None),
+        })
+    return universe
+
+
+@app.route("/api/indicator-snapshots")
+def api_indicator_snapshots():
+    """Recent indicator snapshots for Entry Watch candidate rank comparisons.
+
+    Datastore-only: returns previously computed snapshot payloads from SQLite.
+    The symbol set is clamped to the Entry Watch candidate universe so the UI
+    can rebuild prior CFM/APP rankings without broad arbitrary history reads.
+    """
+    universe = _entry_candidate_universe()
+    allowed = {item["symbol"] for item in universe}
+    requested = request.args.get("symbols", "")
+    symbols = [s.strip().upper() for s in requested.split(",") if s.strip()]
+    if symbols:
+        symbols = [s for s in dict.fromkeys(symbols) if s in allowed]
+    else:
+        symbols = [item["symbol"] for item in universe]
+
+    as_of = request.args.get("as_of") or None
+    try:
+        limit = max(1, min(10, int(request.args.get("limit", "3"))))
+    except ValueError:
+        return jsonify({"error": "limit must be an integer"}), 400
+
+    sessions = []
+    for session in db.snapshots_by_as_of("indicators", symbols, as_of=as_of, limit_sessions=limit):
+        snapshots = session.get("snapshots", {})
+        missing = [s for s in symbols if s not in snapshots]
+        enriched = {}
+        for item in universe:
+            symbol = item["symbol"]
+            if symbol not in snapshots:
+                continue
+            payload = snapshots[symbol]
+            enriched[symbol] = {
+                "symbol": symbol,
+                "candidateStrategies": item["candidateStrategies"],
+                "sectorProxy": item["sectorProxy"],
+                "asOf": session["asOf"],
+                "computedAt": payload.get("_computedAt") or session.get("computedAt"),
+                "indicators": payload,
+                "staleness": _bar_staleness(session["asOf"]),
+            }
+        sessions.append({
+            "asOf": session["asOf"],
+            "computedAt": session.get("computedAt"),
+            "complete": not missing,
+            "missing": missing,
+            "symbols": enriched,
+        })
+
+    return jsonify({
+        "universe": universe,
+        "asOf": as_of,
+        "sessions": sessions,
+        "historyState": "ok" if sessions else "insufficient_history",
+    })
+
+
 @app.route("/api/levels")
 def api_levels():
     """On-demand support/resistance for a single Entry Watch symbol.

@@ -50,16 +50,29 @@ HISTORY_DAYS = 320          # ~10 months of daily bars (enough for RS3M_MOM's 13
 
 # Entry-watch candidate universe (mirrors the frontend's CFM/APP candidate
 # lists) so scheduled ingestion covers every symbol the UI can request.
-ENTRY_CANDIDATES = [
+CFM_ENTRY_CANDIDATES = [
     "XLV", "XLP", "XLU", "XLRE",
     "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE",
     "PG", "COST", "WMT", "PEP", "KO",
     "NEE", "SO", "DUK", "PLD", "AMT",
+]
+APP_ENTRY_CANDIDATES = [
     "XLK", "XLY", "XLC", "XLI",
     "NVDA", "MSFT", "AAPL", "AVGO", "AMD", "CRM", "NOW",
     "META", "GOOGL", "NFLX", "AMZN", "TSLA",
     "HD", "CAT", "GE", "HON", "DE",
 ]
+ENTRY_CANDIDATES = list(dict.fromkeys(CFM_ENTRY_CANDIDATES + APP_ENTRY_CANDIDATES))
+ENTRY_CANDIDATE_PROXY = {
+    "XLV": "XLV", "XLP": "XLP", "XLU": "XLU", "XLRE": "XLRE",
+    "LLY": "XLV", "UNH": "XLV", "JNJ": "XLV", "MRK": "XLV", "ABBV": "XLV", "PFE": "XLV",
+    "PG": "XLP", "COST": "XLP", "WMT": "XLP", "PEP": "XLP", "KO": "XLP",
+    "NEE": "XLU", "SO": "XLU", "DUK": "XLU", "PLD": "XLRE", "AMT": "XLRE",
+    "XLK": "XLK", "XLY": "XLY", "XLC": "XLC", "XLI": "XLI",
+    "NVDA": "XLK", "MSFT": "XLK", "AAPL": "XLK", "AVGO": "XLK", "AMD": "XLK", "CRM": "XLK", "NOW": "XLK",
+    "META": "XLC", "GOOGL": "XLC", "NFLX": "XLC", "AMZN": "XLY", "TSLA": "XLY",
+    "HD": "XLY", "CAT": "XLI", "GE": "XLI", "HON": "XLI", "DE": "XLI",
+}
 
 # If the newest successful ingest is older than this, an API hit kicks off a
 # background catch-up run (the request itself is never blocked).
