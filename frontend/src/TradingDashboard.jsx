@@ -1566,9 +1566,29 @@ function autoStrategyWatchChecklist(symbol, calc, sectorCalc, macro, focus, calc
   };
 }
 
-function strategyCandidateRanking(symbols, strategy, computed, macro, focus, calcStatus) {
+function movementLabelForRankDelta(rankDelta) {
+  if (rankDelta == null) return "Insufficient history";
+  if (rankDelta >= 3) return "Rising fast";
+  if (rankDelta > 0) return "Rising";
+  if (rankDelta <= -3) return "Falling fast";
+  if (rankDelta < 0) return "Falling";
+  return "Flat";
+}
+
+function previousRankForCandidate(previousSnapshot, symbol) {
+  const rankRecord = previousSnapshot?.ranks?.[symbol];
+  if (rankRecord && typeof rankRecord === "object") return rankRecord.rank ?? null;
+  return rankRecord ?? null;
+}
+
+function previousScoreForCandidate(previousSnapshot, symbol) {
+  const rankRecord = previousSnapshot?.ranks?.[symbol];
+  return rankRecord && typeof rankRecord === "object" ? rankRecord.score ?? null : null;
+}
+
+function strategyCandidateRanking(symbols, strategy, computed, macro, focus, calcStatus, previousSnapshot = null) {
   const checklistFn = strategy === "CFM" ? cfmStockWatchChecklist : appStockWatchChecklist;
-  return symbols.map((symbol) => {
+  const ranked = symbols.map((symbol) => {
     const proxy = inferSectorProxy(symbol);
     const data = checklistFn(symbol, computed?.[symbol], computed?.[proxy], macro, focus, calcStatus, proxy);
     const score = data.total ? data.pass / data.total : 0;
@@ -1584,6 +1604,99 @@ function strategyCandidateRanking(symbols, strategy, computed, macro, focus, cal
       nextBlocker: missing[0] || "Entry checklist complete",
     };
   }).sort((a, b) => (b.score - a.score) || (b.data.pass - a.data.pass) || a.symbol.localeCompare(b.symbol));
+
+  return ranked.map((candidate, index) => {
+    const currentRank = index + 1;
+    const previousRank = previousRankForCandidate(previousSnapshot, candidate.symbol);
+    const previousScore = previousScoreForCandidate(previousSnapshot, candidate.symbol);
+    const hasRankHistory = Number.isFinite(previousRank);
+    const rankDelta = hasRankHistory ? previousRank - currentRank : null;
+    const scoreDelta = Number.isFinite(previousScore) ? candidate.score - previousScore : null;
+    return {
+      ...candidate,
+      currentRank,
+      previousRank: hasRankHistory ? previousRank : null,
+      rankDelta,
+      scoreDelta,
+      momentumLabel: movementLabelForRankDelta(rankDelta),
+    };
+  });
+}
+
+function candidateRankingSessionAsOf(symbols, computed, calcStatus) {
+  if (calcStatus !== "ok") return null;
+  const asOfValues = symbols.map((symbol) => computed?.[symbol]?.asOf).filter(Boolean);
+  const uniqueAsOfValues = [...new Set(asOfValues)];
+  if (asOfValues.length !== symbols.length || uniqueAsOfValues.length !== 1) return null;
+  return uniqueAsOfValues[0] || null;
+}
+
+function snapshotFromCandidateRanking(strategy, asOf, candidates) {
+  if (!asOf || !candidates?.length) return null;
+  return {
+    strategy,
+    asOf,
+    createdAt: new Date().toISOString(),
+    ranks: Object.fromEntries(candidates.map((candidate, index) => [
+      candidate.symbol,
+      { rank: index + 1, score: candidate.score },
+    ])),
+  };
+}
+
+function previousCompletedRankingSnapshot(history, strategy, currentAsOf) {
+  const snapshots = Array.isArray(history?.[strategy]) ? history[strategy] : [];
+  if (!currentAsOf) return null;
+  return snapshots
+    .filter((snapshot) => snapshot?.asOf && snapshot.asOf < currentAsOf)
+    .sort((a, b) => String(b.asOf).localeCompare(String(a.asOf)))[0] || null;
+}
+
+function rankingSnapshotsEqual(a, b) {
+  if (!a || !b || a.strategy !== b.strategy || a.asOf !== b.asOf) return false;
+  const aRanks = a.ranks || {};
+  const bRanks = b.ranks || {};
+  const symbols = Object.keys(aRanks);
+  if (symbols.length !== Object.keys(bRanks).length) return false;
+  return symbols.every((symbol) => {
+    const ar = aRanks[symbol];
+    const br = bRanks[symbol];
+    return br && ar.rank === br.rank && ar.score === br.score;
+  });
+}
+
+function upsertRankingSnapshot(history, snapshot) {
+  if (!snapshot?.strategy || !snapshot?.asOf) return history || {};
+  const strategySnapshots = Array.isArray(history?.[snapshot.strategy]) ? history[snapshot.strategy] : [];
+  const existing = strategySnapshots.find((item) => item?.asOf === snapshot.asOf);
+  if (rankingSnapshotsEqual(existing, snapshot)) return history || {};
+  const nextStrategySnapshots = [
+    snapshot,
+    ...strategySnapshots.filter((item) => item?.asOf !== snapshot.asOf),
+  ]
+    .sort((a, b) => String(b.asOf).localeCompare(String(a.asOf)))
+    .slice(0, 10);
+  return { ...(history || {}), [snapshot.strategy]: nextStrategySnapshots };
+}
+
+function RankMovementChip({ candidate }) {
+  const delta = candidate.rankDelta;
+  const insufficient = delta == null;
+  const up = delta > 0;
+  const label = insufficient || delta === 0 ? "—" : `${up ? "▲" : "▼"} ${up ? "+" : ""}${delta}`;
+  const color = insufficient || delta === 0 ? C.inkFaint : up ? C.green : C.red;
+  const title = insufficient
+    ? "No prior completed-session rank available yet"
+    : `${candidate.momentumLabel}: was #${candidate.previousRank}${candidate.scoreDelta == null ? "" : ` · score ${candidate.scoreDelta >= 0 ? "+" : ""}${Math.round(candidate.scoreDelta * 100)} pts`}`;
+  return (
+    <span title={title} style={{
+      display: "inline-flex", alignItems: "center", justifyContent: "center", minWidth: 34,
+      border: `1px solid ${insufficient || delta === 0 ? C.line : color}`, borderRadius: 999, padding: "2px 5px",
+      font: `800 10px ${C.mono}`, color, background: insufficient ? C.panel2 : "transparent", opacity: insufficient ? 0.72 : 1,
+    }}>
+      {label}
+    </span>
+  );
 }
 
 function CandidateLeaderboard({ title, strategy, candidates, watchedSymbols, onAdd }) {
@@ -1596,8 +1709,11 @@ function CandidateLeaderboard({ title, strategy, candidates, watchedSymbols, onA
         {visible.map((candidate, idx) => {
           const watched = watchedSymbols.has(candidate.symbol);
           return (
-            <div key={candidate.symbol} style={{ display: "grid", gridTemplateColumns: "28px 1fr auto", gap: 9, alignItems: "center", padding: "9px 0", borderBottom: idx === visible.length - 1 ? "none" : `1px solid ${C.lineSoft}` }}>
-              <div style={{ font: `800 12px ${C.mono}`, color: C.inkFaint }}>#{idx + 1}</div>
+            <div key={candidate.symbol} style={{ display: "grid", gridTemplateColumns: "72px 1fr auto", gap: 9, alignItems: "center", padding: "9px 0", borderBottom: idx === visible.length - 1 ? "none" : `1px solid ${C.lineSoft}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 5, flexWrap: "wrap" }}>
+                <span style={{ font: `800 12px ${C.mono}`, color: C.inkFaint }}>#{candidate.currentRank || idx + 1}</span>
+                <RankMovementChip candidate={candidate} />
+              </div>
               <div>
                 <div style={{ display: "flex", gap: 7, alignItems: "center", flexWrap: "wrap" }}>
                   <span style={{ font: `800 13px ${C.mono}`, color: C.ink }}>{candidate.symbol}</span>
@@ -1658,6 +1774,7 @@ function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSym
   const [draftSymbol, setDraftSymbol] = useState("");
   const [draftStrategyMode, setDraftStrategyMode] = useState("AUTO");
   const [draftSectorProxy, setDraftSectorProxy] = useState("");
+  const [candidateRankingHistory, setCandidateRankingHistory] = useState(() => store.get("entryCandidateRankingSnapshots", {}));
   const normalizedWatch = normalizeWatchItems(entryWatchSymbols || []);
 
   const candidates = normalizedWatch.map((watch) => {
@@ -1698,8 +1815,33 @@ function EntryWatchView({ app, macro, focus, computed, calcStatus, entryWatchSym
   }).sort((a, b) => (b.data.pass / b.data.total) - (a.data.pass / a.data.total));
 
   const watchedSymbolSet = new Set(normalizedWatch.map((item) => item.symbol));
-  const cfmTopCandidates = strategyCandidateRanking(CFM_CANDIDATE_UNIVERSE, "CFM", computed, macro, focus, calcStatus);
-  const appTopCandidates = strategyCandidateRanking(APP_CANDIDATE_UNIVERSE, "APP", computed, macro, focus, calcStatus);
+  const cfmRankingAsOf = candidateRankingSessionAsOf(CFM_CANDIDATE_UNIVERSE, computed, calcStatus);
+  const appRankingAsOf = candidateRankingSessionAsOf(APP_CANDIDATE_UNIVERSE, computed, calcStatus);
+  const cfmPreviousSnapshot = previousCompletedRankingSnapshot(candidateRankingHistory, "CFM", cfmRankingAsOf);
+  const appPreviousSnapshot = previousCompletedRankingSnapshot(candidateRankingHistory, "APP", appRankingAsOf);
+  const cfmTopCandidates = useMemo(
+    () => strategyCandidateRanking(CFM_CANDIDATE_UNIVERSE, "CFM", computed, macro, focus, calcStatus, cfmPreviousSnapshot),
+    [computed, macro, focus, calcStatus, cfmPreviousSnapshot]
+  );
+  const appTopCandidates = useMemo(
+    () => strategyCandidateRanking(APP_CANDIDATE_UNIVERSE, "APP", computed, macro, focus, calcStatus, appPreviousSnapshot),
+    [computed, macro, focus, calcStatus, appPreviousSnapshot]
+  );
+
+  useEffect(() => {
+    const snapshots = [
+      snapshotFromCandidateRanking("CFM", cfmRankingAsOf, cfmTopCandidates),
+      snapshotFromCandidateRanking("APP", appRankingAsOf, appTopCandidates),
+    ].filter(Boolean);
+    if (!snapshots.length) return;
+
+    setCandidateRankingHistory((history) => {
+      const next = snapshots.reduce((acc, snapshot) => upsertRankingSnapshot(acc, snapshot), history || {});
+      if (next === history) return history;
+      store.set("entryCandidateRankingSnapshots", next, true).catch(() => {});
+      return next;
+    });
+  }, [cfmRankingAsOf, appRankingAsOf, cfmTopCandidates, appTopCandidates]);
 
   const addRankedCandidate = (candidate) => {
     setEntryWatchSymbols([
