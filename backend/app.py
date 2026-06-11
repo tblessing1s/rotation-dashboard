@@ -12,11 +12,12 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import shutil
 import tempfile
 import time
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
 
 import config as cfg
@@ -233,12 +234,101 @@ def api_overrides():
 
 @app.route("/api/data-issues")
 def api_data_issues():
+    from providers import schwab
+
     return jsonify({
         "quarantine": db.recent_quarantine(),
         "lastRun": db.last_ingest_run(),
         "lastSuccessfulRun": db.last_successful_ingest(),
         "schwabAuthError": db.kv_get("schwab_auth_error"),
+        "schwabToken": schwab.token_status(),
     })
+
+
+# ---------------------------------------------------------------------------
+# Schwab re-authorization (hosted OAuth) — browser flow so the weekly refresh
+# is a one-click consent instead of a CLI + secret-edit chore. Schwab requires
+# a human login every 7 days; this just removes everything around that click.
+# The minted refresh token is stored in the datastore (current_refresh_token()
+# reads it before the env secret), so no redeploy/secret edit is needed.
+# ---------------------------------------------------------------------------
+def _schwab_redirect_uri() -> str:
+    """The callback that must be registered on the Schwab app. Defaults to this
+    app's public URL; override with SCHWAB_REDIRECT_URI if the host differs."""
+    override = os.environ.get("SCHWAB_REDIRECT_URI")
+    if override:
+        return override
+    return f"https://{request.host}/auth/schwab/callback"
+
+
+def _auth_result_page(title: str, message: str, ok: bool = True):
+    color = "#1f9d55" if ok else "#e3342f"
+    html = (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        f"<title>{title}</title><style>"
+        "body{font-family:system-ui,-apple-system,sans-serif;background:#0b0e14;color:#e6e6e6;"
+        "display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}"
+        ".card{max-width:520px;padding:32px;border:1px solid #222;border-radius:12px;background:#11151c}"
+        f"h1{{color:{color};font-size:20px;margin:0 0 12px}}"
+        "p{color:#9aa4b2;line-height:1.55}a{color:#3b82f6}</style></head>"
+        f"<body><div class='card'><h1>{title}</h1><p>{message}</p>"
+        "<p><a href='/'>&larr; Back to dashboard</a></p></div></body></html>"
+    )
+    return html, (200 if ok else 400)
+
+
+@app.route("/auth/schwab")
+def auth_schwab_start():
+    if not (os.environ.get("SCHWAB_APP_KEY") and os.environ.get("SCHWAB_APP_SECRET")):
+        return _auth_result_page(
+            "Schwab not configured",
+            "Set the SCHWAB_APP_KEY and SCHWAB_APP_SECRET secrets first.",
+            ok=False,
+        )
+    from providers import schwab
+
+    state = secrets.token_urlsafe(24)
+    db.kv_set("schwab_oauth_state", {"state": state, "at": db.utcnow()})
+    return redirect(schwab.authorize_url(_schwab_redirect_uri(), state))
+
+
+@app.route("/auth/schwab/callback")
+def auth_schwab_callback():
+    from providers import schwab
+
+    if request.args.get("error"):
+        return _auth_result_page(
+            "Schwab authorization declined",
+            f"Schwab returned: {request.args.get('error')}",
+            ok=False,
+        )
+    code = request.args.get("code")
+    state = request.args.get("state")
+    saved = db.kv_get("schwab_oauth_state") or {}
+    if not code:
+        return _auth_result_page("Missing code", "No authorization code in the callback URL.", ok=False)
+    if not state or state != saved.get("state"):
+        return _auth_result_page(
+            "State mismatch",
+            "The authorization state did not match. Start again from /auth/schwab.",
+            ok=False,
+        )
+    db.kv_set("schwab_oauth_state", None)  # single-use
+    try:
+        tokens = schwab.exchange_code(code, _schwab_redirect_uri())
+    except Exception as e:  # noqa: BLE001 — surface the failure to the browser
+        return _auth_result_page("Token exchange failed", str(e), ok=False)
+    refresh = tokens.get("refresh_token")
+    if not refresh:
+        return _auth_result_page("No refresh token", "Schwab did not return a refresh token.", ok=False)
+    schwab.store_refresh_token(refresh)
+    ingest.run_in_background("schwab-reauth")  # pull Schwab data right away
+    return _auth_result_page(
+        "Schwab re-authorized ✓",
+        "Your refresh token is stored and valid for 7 days. A fresh ingest is "
+        "running now and the dashboard will use Schwab as the primary feed.",
+        ok=True,
+    )
 
 
 @app.route("/api/data-status")

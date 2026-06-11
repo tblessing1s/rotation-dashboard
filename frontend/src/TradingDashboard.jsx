@@ -2792,22 +2792,43 @@ function IndicatorsView(props) {
 function DataIssuesPanel({ issues }) {
   const quarantine = issues?.quarantine || [];
   const auth = issues?.schwabAuthError;
+  const token = issues?.schwabToken;
   const run = issues?.lastRun;
-  const ok = quarantine.length === 0 && !auth;
+  // Token nearing expiry (or aged out) is a warning even before a fetch fails.
+  const tokenWarn = !auth && token?.present && (token.status === "warning" || token.status === "expired");
+  const ok = quarantine.length === 0 && !auth && !tokenWarn;
   const runLine = run
     ? `Last ingest: ${run.started_at || "—"} · ${run.status || "—"} (${run.trigger || "?"})`
     : "No ingestion run recorded yet.";
+  const reauthBtn = (
+    <a href="/auth/schwab" style={{
+      background: C.blue, borderRadius: 5, color: "#fff", textDecoration: "none",
+      font: `600 11px ${C.sans}`, padding: "5px 10px", whiteSpace: "nowrap",
+    }}>Re-authorize Schwab →</a>
+  );
   return (
     <Panel title="Data issues" eyebrow="validation · quarantine · providers"
       accent={ok ? C.greenDim : C.red}
-      right={<span style={{ font: `700 11px ${C.mono}`, color: ok ? C.green : C.red }}>{ok ? "CLEAN" : `${quarantine.length + (auth ? 1 : 0)} OPEN`}</span>}>
+      right={<span style={{ font: `700 11px ${C.mono}`, color: ok ? C.green : C.red }}>{ok ? "CLEAN" : `${quarantine.length + (auth ? 1 : 0) + (tokenWarn ? 1 : 0)} OPEN`}</span>}>
       <div style={{ font: `400 11px ${C.mono}`, color: C.inkFaint, marginBottom: 8 }}>{runLine}</div>
       {auth && (
         <div style={{ display: "flex", gap: 8, alignItems: "center", background: C.redDim + "33", border: `1px solid ${C.redDim}`, borderRadius: 6, padding: "8px 10px", marginBottom: 6 }}>
           <span style={{ color: C.red }}>⚠</span>
-          <span style={{ font: `500 12px ${C.sans}`, color: C.ink }}>
-            Schwab auth failed ({auth.at}) — refresh token likely expired; ingestion is falling back to Yahoo. Run <code>python cli.py schwab-auth</code>.
+          <span style={{ font: `500 12px ${C.sans}`, color: C.ink, flex: 1 }}>
+            Schwab auth failed ({auth.at}) — refresh token likely expired; ingestion is falling back to Yahoo.
           </span>
+          {reauthBtn}
+        </div>
+      )}
+      {tokenWarn && (
+        <div style={{ display: "flex", gap: 8, alignItems: "center", background: C.amber + "22", border: `1px solid ${C.amber}66`, borderRadius: 6, padding: "8px 10px", marginBottom: 6 }}>
+          <span style={{ color: C.amber }}>⚠</span>
+          <span style={{ font: `500 12px ${C.sans}`, color: C.ink, flex: 1 }}>
+            {token.status === "expired"
+              ? "Schwab refresh token has expired — ingestion is falling back to Yahoo until you re-authorize."
+              : `Schwab refresh token expires in ${Math.max(0, Math.floor(token.daysLeft ?? 0) )}d ${Math.max(0, Math.round((((token.daysLeft ?? 0) % 1) * 24)))}h — re-authorize before it lapses.`}
+          </span>
+          {reauthBtn}
         </div>
       )}
       {quarantine.length > 0 ? (

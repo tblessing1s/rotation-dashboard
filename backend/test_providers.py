@@ -38,11 +38,61 @@ def test_chain_is_yahoo_only_without_schwab_credentials(monkeypatch):
     assert [p.name for p in providers.build_chain()] == ["yahoo"]
 
 
-def test_chain_puts_schwab_first_when_configured(monkeypatch):
+def test_chain_puts_schwab_first_when_configured(fresh_db, monkeypatch):
     monkeypatch.setenv("SCHWAB_APP_KEY", "k")
     monkeypatch.setenv("SCHWAB_APP_SECRET", "s")
     monkeypatch.setenv("SCHWAB_REFRESH_TOKEN", "r")
     assert [p.name for p in providers.build_chain()] == ["schwab", "yahoo"]
+
+
+def test_chain_uses_db_stored_token_without_env_token(fresh_db, monkeypatch):
+    # The hosted re-auth flow stores the token in the datastore; no
+    # SCHWAB_REFRESH_TOKEN secret is needed once that has happened.
+    from providers import schwab
+
+    monkeypatch.setenv("SCHWAB_APP_KEY", "k")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "s")
+    monkeypatch.delenv("SCHWAB_REFRESH_TOKEN", raising=False)
+    schwab.store_refresh_token("db-token")
+    assert [p.name for p in providers.build_chain()] == ["schwab", "yahoo"]
+    assert schwab.current_refresh_token() == "db-token"
+
+
+def test_db_token_beats_env_token(fresh_db, monkeypatch):
+    from providers import schwab
+
+    monkeypatch.setenv("SCHWAB_REFRESH_TOKEN", "stale-env-token")
+    schwab.store_refresh_token("fresh-db-token")
+    assert schwab.current_refresh_token() == "fresh-db-token"
+
+
+def test_token_status_tracks_expiry(fresh_db, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    import db
+    from providers import schwab
+
+    monkeypatch.delenv("SCHWAB_REFRESH_TOKEN", raising=False)
+    assert schwab.token_status()["status"] == "missing"
+
+    schwab.store_refresh_token("tok")
+    assert schwab.token_status()["status"] == "ok"
+
+    # Age the mint time to 6 days -> warning; 8 days -> expired.
+    def minted_days_ago(days):
+        at = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        db.kv_set("schwab_token", {"refresh_token": "tok", "minted_at": at})
+
+    minted_days_ago(6)
+    assert schwab.token_status()["status"] == "warning"
+    minted_days_ago(8)
+    assert schwab.token_status()["status"] == "expired"
+
+    # Env-only token has no tracked mint time -> unknown, but present.
+    db.kv_set("schwab_token", None)
+    monkeypatch.setenv("SCHWAB_REFRESH_TOKEN", "envtok")
+    status = schwab.token_status()
+    assert status["present"] is True and status["status"] == "unknown"
 
 
 def test_fetch_symbol_falls_through_to_next_provider(monkeypatch):
@@ -134,7 +184,7 @@ def test_schwab_auth_failure_is_soft_and_recorded(fresh_db, monkeypatch):
     monkeypatch.setenv("SCHWAB_REFRESH_TOKEN", "expired")
     resp = mock.Mock(status_code=401, text="token expired")
     with mock.patch("providers.schwab.requests.post", return_value=resp):
-        with pytest.raises(ProviderError, match="schwab-auth"):
+        with pytest.raises(ProviderError, match="/auth/schwab"):
             SchwabProvider().get_daily_bars("SPY", "2026-01-01")
     flag = db.kv_get("schwab_auth_error")
     assert flag and flag["status"] == 401
