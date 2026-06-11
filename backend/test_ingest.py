@@ -91,6 +91,22 @@ def test_full_cycle_writes_bars_snapshots_and_macro(env):
     assert bars.attrs["source"] == "schwab"
 
 
+def test_get_bars_resolves_duplicate_dates_via_newest_fetch(fresh_db):
+    """Two rows for the same (symbol, date) force _beats to run, which reads
+    each row's id — so get_bars must SELECT id or it raises IndexError."""
+    idx = pd.bdate_range(end="2026-06-10", periods=3)
+    first = pd.DataFrame({"Open": 100.0, "High": 101.0, "Low": 99.0,
+                          "Close": 100.0, "Volume": 1e6}, index=idx)
+    assert db.append_bars("SPY", first, "yahoo") == 3
+    # A corrected close for the latest date lands as a second row (newer fetch).
+    correction = first.copy()
+    correction.iloc[-1, correction.columns.get_loc("Close")] = 105.0
+    assert db.append_bars("SPY", correction.iloc[[-1]], "yahoo") == 1
+
+    bars = db.get_bars("SPY")  # must not raise
+    assert float(bars["Close"].iloc[-1]) == 105.0  # newer fetch wins
+
+
 def test_api_serves_from_datastore_when_providers_are_down(env):
     run_with([FakeProvider()], env)
 
