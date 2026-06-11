@@ -13,6 +13,7 @@ from .base import Provider, ProviderError
 
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 PRICE_HISTORY_URL = "https://api.schwabapi.com/marketdata/v1/pricehistory"
+ACCOUNTS_BASE = "https://api.schwabapi.com/trader/v1"
 
 # Schwab prefixes index symbols with $ where Yahoo uses ^.
 SYMBOL_MAP = {"^VIX": "$VIX", "^NYA": "$NYA", "^GSPC": "$SPX"}
@@ -117,3 +118,45 @@ class SchwabProvider(Provider):
         if df.empty:
             raise ProviderError(f"schwab {symbol}: no usable rows")
         return df
+
+    # -- accounts & trading --------------------------------------------------
+    # These hit the Trader API's account endpoints (a different product than the
+    # market-data feed above). The same app key / secret / refresh token are
+    # used, but the Schwab app must also be approved for the "Accounts and
+    # Trading Production" product or these return HTTP 401/403.
+    def _get_json(self, url: str, params: dict | None = None):
+        try:
+            resp = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {self._token()}", "Accept": "application/json"},
+                params=params,
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab account request failed: {e}") from e
+        if resp.status_code == 200:
+            return resp.json()
+        hint = ""
+        if resp.status_code in (401, 403):
+            hint = (
+                " — the token lacks account access; confirm the Schwab app is "
+                "approved for 'Accounts and Trading Production' and the refresh "
+                "token is current (`python cli.py schwab-auth`)"
+            )
+        raise ProviderError(f"schwab account: HTTP {resp.status_code} {resp.text[:200]}{hint}")
+
+    def account_numbers(self) -> list[dict]:
+        """Plain account number -> encrypted hashValue used by other endpoints."""
+        return self._get_json(f"{ACCOUNTS_BASE}/accounts/accountNumbers") or []
+
+    def get_accounts(self, positions: bool = True) -> list[dict]:
+        """All linked accounts with balances; include current positions when asked."""
+        params = {"fields": "positions"} if positions else None
+        return self._get_json(f"{ACCOUNTS_BASE}/accounts", params=params) or []
+
+    def get_transactions(self, account_hash: str, start: str, end: str, types: str = "TRADE") -> list[dict]:
+        """Activity for one account between two ISO-8601 instants (max 1y span)."""
+        return self._get_json(
+            f"{ACCOUNTS_BASE}/accounts/{account_hash}/transactions",
+            params={"startDate": start, "endDate": end, "types": types},
+        ) or []

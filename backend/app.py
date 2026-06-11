@@ -265,6 +265,38 @@ def api_ingest():
 
 
 # ---------------------------------------------------------------------------
+# Schwab account sync — pull live positions + trade history on demand.
+#
+# Unlike every other API route, this one deliberately contacts a provider: it
+# is user-triggered (the Positions tab "Sync from Schwab" button), returns
+# account data that has no place in the market datastore, and degrades to a
+# clear error if the Schwab app lacks the Accounts & Trading product.
+# ---------------------------------------------------------------------------
+@app.route("/api/account/status")
+def api_account_status():
+    import schwab_account
+
+    return jsonify({
+        "configured": schwab_account.available(),
+        "lastError": db.kv_get("schwab_account_error"),
+    })
+
+
+@app.route("/api/account/sync", methods=["POST"])
+def api_account_sync():
+    import schwab_account
+
+    body = request.get_json(silent=True) or {}
+    days = body.get("days") or request.args.get("days") or schwab_account.MAX_SYNC_DAYS
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = schwab_account.MAX_SYNC_DAYS
+    result = schwab_account.sync(days=days)
+    return jsonify(result), 200 if result.get("configured") else 409
+
+
+# ---------------------------------------------------------------------------
 # State persistence (manual inputs, positions) — lives on the data volume
 # ---------------------------------------------------------------------------
 def load_state() -> dict:
