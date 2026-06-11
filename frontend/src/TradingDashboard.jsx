@@ -2430,11 +2430,16 @@ function PositionsView({ positions, setPositions, guidance = {}, capital, reserv
       }
       const incoming = res.transactions || [];
       setTransactions((existing) => {
-        const merged = mergeTransactions(existing, incoming);
+        // Idempotent re-sync: drop the prior Schwab-sourced rows (keeping any
+        // CSV rows) before merging, so repeated syncs never duplicate and the
+        // freshly normalized grouping always wins.
+        const csvRows = existing.filter((row) => row.strategy !== "SCHWAB");
+        const droppedSchwab = existing.length - csvRows.length;
+        const merged = mergeTransactions(csvRows, incoming);
         const errCount = Object.keys(res.errors || {}).length;
         setImportMessage(
-          `Synced ${merged.added} new transaction${merged.added === 1 ? "" : "s"} from Schwab`
-          + `${merged.skipped ? ` (${merged.skipped} already present)` : ""}`
+          `Synced ${merged.added} transaction${merged.added === 1 ? "" : "s"} from Schwab`
+          + `${droppedSchwab ? ` (replaced ${droppedSchwab} from the previous sync)` : ""}`
           + `${errCount ? ` — ${errCount} source${errCount === 1 ? "" : "s"} errored, see below` : ""}`
           + `. Save to persist before leaving.`
         );

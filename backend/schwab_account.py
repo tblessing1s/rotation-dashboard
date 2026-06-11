@@ -90,7 +90,6 @@ def normalize_trade(txn: dict) -> list[dict]:
     """
     when = txn.get("tradeDate") or txn.get("time") or ""
     date = str(when)[:10]
-    order_id = str(txn.get("orderId") or txn.get("activityId") or "")
     description = txn.get("description") or ""
     rows = []
     for item in txn.get("transferItems", []) or []:
@@ -121,7 +120,13 @@ def normalize_trade(txn: dict) -> list[dict]:
         rows.append({
             "date": date,
             "symbol": str(symbol).upper(),
-            "positionId": order_id,
+            # Intentionally blank: Schwab assigns a distinct orderId to the
+            # opening and closing orders, so keying positions on it would split
+            # every round-trip into two never-netting groups (all stuck "open").
+            # An empty positionId makes the ledger net fills per symbol+leg —
+            # the same behavior as a CSV without explicit trade IDs — so a fully
+            # exited symbol nets to zero and shows as closed.
+            "positionId": "",
             "strategy": "SCHWAB",
             "action": action,
             "flowType": flow,

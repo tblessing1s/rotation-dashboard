@@ -45,7 +45,9 @@ def test_normalize_trade_maps_a_buy_to_open_long_row():
     assert row["action"] == "BUY TO OPEN"
     assert row["amount"] == -1400.0      # buy is a cash debit
     assert row["strategy"] == "SCHWAB"
-    assert row["positionId"] == "555"
+    # positionId is intentionally blank so the open and close of a round-trip
+    # (which Schwab gives different orderIds) net into one symbol+leg group.
+    assert row["positionId"] == ""
 
 
 def test_normalize_trade_maps_a_sell_to_close_long_row():
@@ -55,6 +57,22 @@ def test_normalize_trade_maps_a_sell_to_close_long_row():
     assert row["flowType"] == "close"
     assert row["action"] == "SELL TO CLOSE"
     assert row["amount"] == 1500.0       # sale is a cash credit
+
+
+def test_round_trip_nets_to_zero_across_separate_orders():
+    # Opening and closing fills come from different Schwab orders; both must
+    # land in the same symbol+leg group so the net quantity cancels (the bug
+    # that left exited positions stuck in the open section).
+    opening = _trade("XLV", 10, 140.0, "OPENING", -1400.0)
+    opening["orderId"] = 111
+    closing = _trade("XLV", -10, 150.0, "CLOSING", 1500.0)
+    closing["orderId"] = 222
+    rows = schwab_account.normalize_trade(opening) + schwab_account.normalize_trade(closing)
+    assert {r["positionId"] for r in rows} == {""}
+    assert {r["leg"] for r in rows} == {"long"}        # both fills on the long leg
+    net = sum(q if r["flowType"] == "open" else -q
+              for r in rows for q in [r["qty"]])
+    assert net == 0                                     # nets flat -> closed
 
 
 def test_normalize_trade_infers_cash_when_cost_missing():
