@@ -1627,6 +1627,7 @@ function strategyCandidateRanking(symbols, strategy, computed, macro, focus, cal
     const currentRank = index + 1;
     const previousRank = previousRankForCandidate(previousSnapshot, candidate.symbol);
     const previousScore = previousScoreForCandidate(previousSnapshot, candidate.symbol);
+    const previousAsOf = previousSnapshot?.asOf || null;
     const hasRankHistory = Number.isFinite(previousRank);
     const rankDelta = hasRankHistory ? previousRank - currentRank : null;
     const scoreDelta = Number.isFinite(previousScore) ? candidate.score - previousScore : null;
@@ -1634,6 +1635,7 @@ function strategyCandidateRanking(symbols, strategy, computed, macro, focus, cal
       ...candidate,
       currentRank,
       previousRank: hasRankHistory ? previousRank : null,
+      previousAsOf,
       rankDelta,
       scoreDelta,
       momentumLabel: movementLabelForRankDelta(rankDelta),
@@ -1787,12 +1789,12 @@ function rankingMovement(currentCandidates, priorCandidates, priorState) {
 function CandidateLeaderboard({ title, strategy, candidates, watchedSymbols, onAdd }) {
   const color = STRATEGY_META[strategy]?.color || C.blue;
   const visible = candidates.slice(0, 6);
-  const historyState = visible.find((candidate) => candidate.movement)?.movement?.state || "insufficient_history";
-  const historyLabel = visible.find((candidate) => candidate.movement?.asOf)?.movement?.asOf || null;
+  const hasRankHistory = visible.some((candidate) => candidate.previousRank != null);
+  const historyLabel = visible.find((candidate) => candidate.previousAsOf)?.previousAsOf || null;
   return (
     <Panel title={title} eyebrow={`${strategy} ranked candidates${historyLabel ? ` · vs ${historyLabel}` : ""}`} accent={color}
       right={<span style={{ font: `800 11px ${C.mono}`, color }}>{visible.length ? `${Math.round(visible[0].score * 100)}% top` : "No data"}</span>}>
-      {historyState === "insufficient_history" && (
+      {!hasRankHistory && (
         <div style={{ font: `600 11px/1.35 ${C.sans}`, color: C.inkFaint, marginBottom: 8 }}>
           Insufficient history: rank movement appears after at least two stored Entry Watch snapshot sessions.
         </div>
@@ -1812,11 +1814,6 @@ function CandidateLeaderboard({ title, strategy, candidates, watchedSymbols, onA
                   <span style={{ font: `700 10px ${C.mono}`, color, border: `1px solid ${color}`, borderRadius: 999, padding: "2px 6px" }}>{candidate.data.pass}/{candidate.data.total}</span>
                   {candidate.proxy && <span style={{ font: `600 10px ${C.mono}`, color: C.inkFaint }}>Proxy {candidate.proxy}</span>}
                   <span style={{ font: `700 10px ${C.mono}`, color: candidate.readiness.color }}>{candidate.readiness.label}</span>
-                  {candidate.movement && candidate.movement.state !== "insufficient_history" && (
-                    <span title={candidate.movement.priorRank ? `Prior rank #${candidate.movement.priorRank}` : "New in ranked set"} style={{ font: `800 10px ${C.mono}`, color: candidate.movement.state === "up" ? C.green : candidate.movement.state === "down" ? C.red : C.inkFaint }}>
-                      {candidate.movement.label}
-                    </span>
-                  )}
                 </div>
                 <div style={{ font: `400 11px/1.35 ${C.sans}`, color: C.inkDim, marginTop: 4 }}>{candidate.nextBlocker}</div>
               </div>
@@ -1912,20 +1909,6 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
   }).sort((a, b) => (b.data.pass / b.data.total) - (a.data.pass / a.data.total));
 
   const watchedSymbolSet = new Set(normalizedWatch.map((item) => item.symbol));
-  const priorRankState = priorComputedFromHistory(indicatorHistory, computed);
-  const priorCalcStatus = priorRankState.state === "insufficient_history" ? "fail" : "ok";
-  const cfmPriorCandidates = priorRankState.computed ? strategyCandidateRanking(CFM_CANDIDATE_UNIVERSE, "CFM", priorRankState.computed, macro, focus, priorCalcStatus) : [];
-  const appPriorCandidates = priorRankState.computed ? strategyCandidateRanking(APP_CANDIDATE_UNIVERSE, "APP", priorRankState.computed, macro, focus, priorCalcStatus) : [];
-  const cfmTopCandidates = rankingMovement(
-    strategyCandidateRanking(CFM_CANDIDATE_UNIVERSE, "CFM", computed, macro, focus, calcStatus),
-    cfmPriorCandidates,
-    priorRankState
-  );
-  const appTopCandidates = rankingMovement(
-    strategyCandidateRanking(APP_CANDIDATE_UNIVERSE, "APP", computed, macro, focus, calcStatus),
-    appPriorCandidates,
-    priorRankState
-  );
   const cfmRankingAsOf = candidateRankingSessionAsOf(CFM_CANDIDATE_UNIVERSE, computed, calcStatus);
   const appRankingAsOf = candidateRankingSessionAsOf(APP_CANDIDATE_UNIVERSE, computed, calcStatus);
   const cfmPreviousSnapshot = previousCompletedRankingSnapshot(candidateRankingHistory, "CFM", cfmRankingAsOf);
