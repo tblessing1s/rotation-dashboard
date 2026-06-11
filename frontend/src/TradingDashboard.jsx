@@ -2732,7 +2732,7 @@ function IndicatorsView(props) {
 
       {(cx || ci) && (
         <div style={{ font: `400 10px ${C.mono}`, color: C.amber, padding: "0 2px" }}>
-          ⚠ Scale note: backend RS3M / RS3M_MOM use a raw return-spread formula and will not match your EMA-based thinkorswim studies in magnitude (see FORMULAS.md). When they diverge, thinkorswim is the source of truth — type the TOS value into the field; it is stored as a manual override. As of: {cx?.asOf || ci?.asOf || "—"}.
+          Schwab-aligned auto values use 63-bar RS3M, Wilder RSI, SimpleMovingAvg(21), and stored daily OHLCV (see FORMULAS.md). If a custom thinkorswim study diverges, type the TOS value into the field; it is stored as a manual override. As of: {cx?.asOf || ci?.asOf || "—"}.
         </div>
       )}
 

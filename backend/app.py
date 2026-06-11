@@ -439,6 +439,7 @@ def api_config():
             "method": cfg.RS3M_METHOD, "emaSpan": cfg.RS3M_EMA_SPAN,
             "lookback": cfg.RS3M_LOOKBACK, "momWindow": cfg.RS3M_MOM_WINDOW,
             "smooth": cfg.MOM_SMOOTH, "scale": cfg.MOM_SCALE,
+            "rsiMethod": cfg.RSI_METHOD, "ma21Method": cfg.MA21_METHOD,
         },
     })
 
