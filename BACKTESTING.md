@@ -130,6 +130,26 @@ backfill pulls each ticker plus its sector proxy and SPY (needed for market
 context). A Schwab token that has lapsed surfaces as a per-symbol error with the
 re-authorization hint, exactly like the rest of the dashboard.
 
+### Backfill / verify from the CLI
+
+Schwab is only contacted where its secrets live (the Fly machine). To pull or
+check 5-minute history directly — handy for the first backfill or to confirm the
+live Schwab path — `fly ssh console` onto the app and run:
+
+```bash
+cd backend
+python cli.py backtest-coverage --symbols AMD,HOOD --start 2026-05-15 --end 2026-06-14
+python cli.py backtest-backfill --symbols AMD,HOOD --start 2026-05-15 --end 2026-06-14
+```
+
+`backtest-backfill` prints a per-symbol report (`rowsWritten`, `source`, and any
+`error`) and lists the provider chain it used — `["schwab", "yahoo"]` when the
+Schwab secrets are present, `["yahoo"]` otherwise.
+
+> Schwab serves a limited window of minute history (recent months), so very old
+> date ranges may come back empty even with valid credentials — verify with
+> `backtest-coverage` after a backfill.
+
 ---
 
 ## Extending it

@@ -4,6 +4,11 @@ Admin CLI for the rotation dashboard.
   python cli.py ingest --now            force one ingestion cycle
   python cli.py ingest --symbols XLV,SPY  targeted run (bars + snapshots only)
   python cli.py status                  per-symbol / per-series freshness report
+  python cli.py backtest-backfill --symbols AMD,HOOD --start 2026-05-15 --end 2026-06-14
+                                        pull 5-minute bars from Schwab (Yahoo
+                                        fallback) into the datastore
+  python cli.py backtest-coverage --symbols AMD --start 2026-05-15 --end 2026-06-14
+                                        report which intraday sessions are stored
   python cli.py schwab-auth             one-time OAuth dance to mint a Schwab
                                         refresh token (expires every 7 days)
 """
@@ -54,6 +59,46 @@ def cmd_status(args) -> int:
             f"{info.get('value', '—'):>10}  {info.get('fetchedAt', '—')}"
         )
     return 0
+
+
+def _intraday_symbols(args) -> list[str]:
+    return [s.strip().upper() for s in (args.symbols or "").split(",") if s.strip()]
+
+
+def cmd_backtest_backfill(args) -> int:
+    """Pull 5-minute bars for the given symbols/date range into the datastore.
+
+    The quickest way to exercise the live Schwab intraday path in production:
+    `fly ssh console` onto the machine (where the Schwab secrets live) and run
+    this. Per-symbol errors (e.g. an expired refresh token) are printed, not
+    swallowed."""
+    import backtest_service
+
+    symbols = _intraday_symbols(args)
+    if not symbols:
+        print("--symbols is required (comma-separated, e.g. AMD,HOOD)", file=sys.stderr)
+        return 1
+    result = backtest_service.backfill(symbols, args.start, args.end, int(args.interval))
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result.get("ok") else 1
+
+
+def cmd_backtest_coverage(args) -> int:
+    import backtest_service
+
+    symbols = _intraday_symbols(args)
+    if not symbols:
+        print("--symbols is required (comma-separated, e.g. AMD,HOOD)", file=sys.stderr)
+        return 1
+    config = {
+        "tickers": symbols,
+        "date_range": {"start": args.start, "end": args.end},
+        "interval_min": int(args.interval),
+    }
+    config = backtest_service._apply_default_sector_map(config)
+    report = backtest_service.coverage_report(config)
+    print(json.dumps(report, indent=2, default=str))
+    return 0 if report.get("complete") else 1
 
 
 def cmd_schwab_auth(args) -> int:
@@ -113,6 +158,20 @@ def main(argv=None) -> int:
     p_status = sub.add_parser("status", help="per-symbol freshness report")
     p_status.add_argument("--json", action="store_true", help="raw JSON output")
     p_status.set_defaults(fn=cmd_status)
+
+    p_bf = sub.add_parser("backtest-backfill", help="pull 5-minute bars into the datastore")
+    p_bf.add_argument("--symbols", required=True, help="comma-separated tickers (e.g. AMD,HOOD)")
+    p_bf.add_argument("--start", required=True, help="start date YYYY-MM-DD")
+    p_bf.add_argument("--end", required=True, help="end date YYYY-MM-DD (inclusive)")
+    p_bf.add_argument("--interval", default=5, type=int, help="minutes per candle (default 5)")
+    p_bf.set_defaults(fn=cmd_backtest_backfill)
+
+    p_cov = sub.add_parser("backtest-coverage", help="report stored intraday coverage")
+    p_cov.add_argument("--symbols", required=True, help="comma-separated tickers")
+    p_cov.add_argument("--start", required=True, help="start date YYYY-MM-DD")
+    p_cov.add_argument("--end", required=True, help="end date YYYY-MM-DD (inclusive)")
+    p_cov.add_argument("--interval", default=5, type=int, help="minutes per candle (default 5)")
+    p_cov.set_defaults(fn=cmd_backtest_coverage)
 
     p_auth = sub.add_parser("schwab-auth", help="mint a Schwab refresh token")
     p_auth.add_argument("--key", help="Schwab app key (prompted if omitted)")
