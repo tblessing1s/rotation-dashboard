@@ -9,7 +9,9 @@ import numpy as np
 import pandas as pd
 
 import backtest as engine
+import backtest_service
 import db
+from providers.base import Provider
 
 
 # ---------------------------------------------------------------------------
@@ -227,3 +229,40 @@ def test_intraday_db_roundtrip(fresh_db):
     assert list(got["Close"]) == [1.5, 2.5, 3.5]
     assert got.index[0].strftime("%H:%M") == "09:30"  # returned in ET wall-clock
     assert db.intraday_coverage("AMD", "2026-06-01", "2026-06-01", 5) == {"2026-06-01"}
+
+
+# ---------------------------------------------------------------------------
+# Service: backfill pulls *daily* too, and coverage flags missing daily history
+# ---------------------------------------------------------------------------
+class _FakeProvider(Provider):
+    """Stands in for Schwab: serves both daily and intraday for any symbol."""
+    name = "schwab"
+
+    def get_daily_bars(self, symbol, start):
+        return daily_frame(end="2026-06-02", periods=30)
+
+    def get_intraday_bars(self, symbol, start, end, interval_min=5, extended_hours=False):
+        rows = [("09:30", 105, 106, 104, 105, 1000), ("09:35", 105, 106, 104, 105, 1000)]
+        idx = pd.to_datetime([f"{start} {r[0]}" for r in rows]).tz_localize("America/New_York")
+        return pd.DataFrame(
+            {"Open": [r[1] for r in rows], "High": [r[2] for r in rows], "Low": [r[3] for r in rows],
+             "Close": [r[4] for r in rows], "Volume": [r[5] for r in rows]}, index=idx,
+        )
+
+
+def test_backfill_pulls_daily_and_intraday(fresh_db, monkeypatch):
+    monkeypatch.setattr(backtest_service.time, "sleep", lambda s: None)
+    monkeypatch.setattr(backtest_service, "build_chain", lambda: [_FakeProvider()])
+
+    # A backtest ticker (CRWV) with no daily history -> coverage flags it.
+    config = backtest_service._apply_default_sector_map(
+        {"tickers": ["CRWV"], "date_range": {"start": "2026-06-01", "end": "2026-06-01"}})
+    assert "CRWV" in backtest_service.coverage_report(config)["missingDaily"]
+
+    out = backtest_service.backfill(["CRWV"], "2026-06-01", "2026-06-01", 5)
+    assert out["ok"] and out["dailyWritten"] > 0 and out["rowsWritten"] > 0
+    assert out["perSymbol"]["CRWV"]["daily"]["rowsWritten"] > 0
+
+    # Daily history now present -> no longer flagged.
+    assert backtest_service.coverage_report(config)["missingDaily"] == []
+    assert db.get_bars("CRWV") is not None

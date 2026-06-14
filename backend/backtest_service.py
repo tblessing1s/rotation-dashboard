@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import time
 
+import pandas as pd
+
 import config as cfg
 import db
 import backtest as engine
@@ -69,7 +71,9 @@ def _context_symbols(config: dict) -> list[str]:
 # Coverage + backfill
 # ---------------------------------------------------------------------------
 def coverage_report(config: dict) -> dict:
-    """Which (symbol, date) intraday sessions are missing from the datastore."""
+    """Which (symbol, date) intraday sessions — and which tickers' daily history —
+    are missing from the datastore. The engine needs daily bars for yesterday's
+    levels + ATR, so a ticker with no daily history is flagged separately."""
     interval = int(config.get("interval_min", 5))
     start = config["date_range"]["start"]
     end = config["date_range"]["end"]
@@ -83,17 +87,32 @@ def coverage_report(config: dict) -> dict:
                            "missing": len(gaps)}
         for d in gaps:
             missing.append({"symbol": sym, "date": d})
+
+    # Daily history (only the tickers need it; SPY/sector fall back to intraday).
+    missing_daily = []
+    for ticker in config.get("tickers", []):
+        bars = db.get_bars(ticker)
+        has_prior = bars is not None and not bars.empty and \
+            (bars.index.normalize() < pd.Timestamp(start).normalize()).any()
+        if not has_prior:
+            missing_daily.append(ticker)
+
     return {"sessions": len(dates), "missing": missing, "perSymbol": per_symbol,
-            "complete": not missing}
+            "missingDaily": missing_daily,
+            "complete": not missing and not missing_daily}
 
 
 def backfill(symbols: list[str], start: str, end: str, interval_min: int = 5) -> dict:
-    """Pull intraday bars for `symbols` over [start, end] and store them.
+    """Pull daily *and* intraday bars for `symbols` over [start, end] and store them.
 
-    Tries each provider in priority order (Schwab first, Yahoo last) and writes
-    accepted candles append-only. Returns a per-symbol status so the UI can show
-    what was filled and what failed (e.g. Schwab token expired)."""
+    The engine needs both: daily bars supply yesterday's high/low and ATR, while
+    intraday bars are what the candles are walked over. Arbitrary backtest
+    tickers (e.g. CRWV) are usually outside the scheduled-ingestion universe, so
+    their daily history must be pulled here too — otherwise every session is
+    skipped with "no prior daily bar". Tries each provider in priority order
+    (Schwab first, Yahoo last); returns a per-symbol status for both feeds."""
     chain = [p for p in build_chain()]
+    daily = _backfill_daily(symbols, start, chain)
     results = {}
     total_written = 0
     for sym in symbols:
@@ -114,12 +133,39 @@ def backfill(symbols: list[str], start: str, end: str, interval_min: int = 5) ->
             except Exception as e:  # noqa: BLE001 — fall through to the next provider
                 errors.append(f"{provider.name}: {e}")
         total_written += wrote
-        results[sym] = {"rowsWritten": wrote, "source": source,
-                        "error": None if source else ("; ".join(errors) or "no intraday provider")}
+        results[sym] = {
+            "rowsWritten": wrote, "source": source,
+            "error": None if source else ("; ".join(errors) or "no intraday provider"),
+            "daily": daily.get(sym, {}),
+        }
         time.sleep(0.1)  # be gentle with rate limits
     ok = any(r["source"] for r in results.values())
-    return {"ok": ok, "rowsWritten": total_written, "perSymbol": results,
-            "providers": [p.name for p in chain]}
+    return {"ok": ok, "rowsWritten": total_written,
+            "dailyWritten": sum(d.get("rowsWritten", 0) for d in daily.values()),
+            "perSymbol": results, "providers": [p.name for p in chain]}
+
+
+def _backfill_daily(symbols: list[str], start: str, chain) -> dict:
+    """Ensure daily bars exist for `symbols`, with enough history before `start`
+    to seed ATR and yesterday's level. Reuses the ingestion fetch + validation so
+    daily rows enter exactly as the scheduled pipeline writes them."""
+    import ingest
+    import validation
+
+    # Pull a generous lookback before the first session so ATR(14) and the prior
+    # daily bar are available on day one of the range.
+    lookback_days = max(int(getattr(cfg, "HISTORY_DAYS", 320)), 60)
+    daily_start = (pd.Timestamp(start) - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    out = {}
+    for sym in symbols:
+        try:
+            bars, source = ingest.fetch_symbol(sym, chain, daily_start)
+            accepted, _rejected = validation.validate_bars(sym, bars)
+            wrote = db.append_bars(sym, accepted, source)
+            out[sym] = {"rowsWritten": wrote, "source": source, "error": None}
+        except Exception as e:  # noqa: BLE001 — report, don't abort the whole backfill
+            out[sym] = {"rowsWritten": 0, "source": None, "error": str(e)}
+    return out
 
 
 # ---------------------------------------------------------------------------
