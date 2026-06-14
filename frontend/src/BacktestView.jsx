@@ -140,18 +140,27 @@ export default function BacktestView({ store }) {
   }, [form]);
 
   const backfill = useCallback(async () => {
-    setBackfilling(true); setStatus("Backfilling intraday history from Schwab…"); setErrors([]);
+    setBackfilling(true); setStatus("Backfilling daily + intraday history from Schwab…"); setErrors([]);
     const { ok, data } = await postJson("/api/backtest/backfill", { config: buildConfig(form) });
     setBackfilling(false);
+    const bf = data.backfill || {};
+    const perSym = bf.perSymbol || {};
+    // Surface any per-symbol problem (intraday or daily), even on partial success.
+    const msgs = Object.entries(perSym).flatMap(([k, v]) => {
+      const out = [];
+      if (v.error) out.push(`${k} intraday: ${v.error}`);
+      if (v.daily && v.daily.error) out.push(`${k} daily: ${v.daily.error}`);
+      return out;
+    });
+    setCoverage(data.coverage || null);
     if (!ok || data.ok === false) {
-      const perSym = data.backfill?.perSymbol || {};
-      const msgs = Object.entries(perSym).filter(([, v]) => v.error).map(([k, v]) => `${k}: ${v.error}`);
       setErrors(msgs.length ? msgs : [data.error || "Backfill failed — Schwab may need re-authorization."]);
-      setCoverage(data.coverage || null); setStatus("");
+      setStatus("");
       return;
     }
-    setCoverage(data.coverage);
-    setStatus(`Backfilled ${data.backfill.rowsWritten} candles.`);
+    if (msgs.length) setErrors(msgs);
+    setStatus(`Backfilled ${bf.rowsWritten ?? 0} intraday candles and ${bf.dailyWritten ?? 0} daily bars` +
+      (bf.providers ? ` via ${bf.providers.join(" → ")}.` : "."));
   }, [form]);
 
   const saveConfig = useCallback(async () => {
@@ -299,9 +308,13 @@ export default function BacktestView({ store }) {
       {/* ---- Coverage alert ---- */}
       {coverage && !coverage.complete && (
         <div style={{ padding: 12, border: `1px solid ${C.yellow}`, borderRadius: 8, background: "#1a160c", display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-          <span style={{ font: `600 13px ${C.sans}`, color: C.yellow }}>⚠ Missing intraday data</span>
+          <span style={{ font: `600 13px ${C.sans}`, color: C.yellow }}>⚠ Missing data</span>
           <span style={{ font: `400 12px ${C.mono}`, color: C.inkDim }}>
-            {coverage.missing.length} session(s) absent from the datastore. Results omit those sessions — backfill to include them.
+            {coverage.missingDaily?.length > 0 && (
+              <>No <b>daily</b> history for {coverage.missingDaily.join(", ")} (needed for yesterday's level + ATR). </>
+            )}
+            {coverage.missing?.length > 0 && <>{coverage.missing.length} intraday session(s) absent. </>}
+            Backfill to include them.
           </span>
           <span style={{ flex: 1 }} />
           <Button disabled={backfilling} onClick={backfill}>{backfilling ? "Backfilling…" : "Backfill from Schwab"}</Button>
