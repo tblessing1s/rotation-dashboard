@@ -467,6 +467,88 @@ def api_account_sync():
 
 
 # ---------------------------------------------------------------------------
+# Backtesting engine — configure a day-trading setup, run it against stored
+# 5-minute bars, and get a trade log + summary stats. The run path is
+# datastore-only; pulling missing intraday history from Schwab/Yahoo is an
+# explicit, user-triggered action (the backfill endpoint, or autoBackfill).
+# ---------------------------------------------------------------------------
+@app.route("/api/backtest/run", methods=["POST"])
+def api_backtest_run():
+    import backtest_service
+
+    body = request.get_json(silent=True) or {}
+    auto = bool(body.get("autoBackfill"))
+    config = body.get("config") if "config" in body else body
+    out = backtest_service.run(config, auto_backfill=auto)
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
+@app.route("/api/backtest/coverage", methods=["POST"])
+def api_backtest_coverage():
+    import backtest as engine
+    import backtest_service
+
+    body = request.get_json(silent=True) or {}
+    config, errors = engine.validate_config(body.get("config") if "config" in body else body)
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+    config = backtest_service._apply_default_sector_map(config)
+    return jsonify({"ok": True, "coverage": backtest_service.coverage_report(config)})
+
+
+@app.route("/api/backtest/backfill", methods=["POST"])
+def api_backtest_backfill():
+    import backtest as engine
+    import backtest_service
+
+    body = request.get_json(silent=True) or {}
+    config, errors = engine.validate_config(body.get("config") if "config" in body else body)
+    if errors:
+        return jsonify({"ok": False, "errors": errors}), 400
+    config = backtest_service._apply_default_sector_map(config)
+    symbols = backtest_service._context_symbols(config)
+    result = backtest_service.backfill(
+        symbols, config["date_range"]["start"], config["date_range"]["end"],
+        int(config.get("interval_min", 5)),
+    )
+    return jsonify({"ok": result["ok"], "backfill": result,
+                    "coverage": backtest_service.coverage_report(config)})
+
+
+@app.route("/api/backtest/export", methods=["POST"])
+def api_backtest_export():
+    import backtest as engine
+
+    body = request.get_json(silent=True) or {}
+    csv_text = engine.trades_to_csv(body.get("trades") or [])
+    return app.response_class(
+        csv_text, mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=backtest_trades.csv"},
+    )
+
+
+@app.route("/api/backtest/configs", methods=["GET", "POST", "DELETE"])
+def api_backtest_configs():
+    import backtest_service
+
+    if request.method == "GET":
+        return jsonify(backtest_service.list_configs())
+    body = request.get_json(silent=True) or {}
+    name = str(body.get("name") or "").strip()
+    if not name:
+        return jsonify({"error": "name required"}), 400
+    if request.method == "DELETE":
+        return jsonify(backtest_service.delete_config(name))
+    if body.get("config") is None:
+        return jsonify({"error": "config required"}), 400
+    try:
+        store = backtest_service.save_config(name, body["config"])
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify({"ok": True, "configs": store})
+
+
+# ---------------------------------------------------------------------------
 # State persistence (manual inputs, positions) — lives on the data volume
 # ---------------------------------------------------------------------------
 def load_state() -> dict:

@@ -56,6 +56,10 @@ Key properties:
   count. Green dot = covers the last completed session, yellow = 1 session
   behind, red = 2+ behind.
 
+The **Backtest** tab replays a configurable day-trading setup against stored
+5-minute history and produces an auditable trade log with win-rate and
+expectancy stats — see [BACKTESTING.md](BACKTESTING.md).
+
 Formulas for every computed value are documented in [FORMULAS.md](FORMULAS.md).
 Defaults are tuned for Schwab/thinkorswim daily bars (63-bar RS3M, Wilder RSI,
 and SimpleMovingAvg(21)). **When a backend value still disagrees with your

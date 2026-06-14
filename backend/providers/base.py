@@ -20,6 +20,16 @@ class Provider:
         """
         raise NotImplementedError
 
+    def get_intraday_bars(self, symbol: str, start: str, end: str,
+                          interval_min: int = 5, extended_hours: bool = False) -> pd.DataFrame:
+        """Intraday OHLCV between `start` and `end` (YYYY-MM-DD, inclusive).
+
+        Returns a DataFrame with columns Open/High/Low/Close/Volume indexed by
+        timestamp (tz-aware). Raises ProviderError on failure or empty data, or
+        NotImplementedError when the provider has no intraday feed.
+        """
+        raise NotImplementedError(f"{self.name} has no intraday feed")
+
     def supports(self, symbol: str) -> bool:
         return True
 
