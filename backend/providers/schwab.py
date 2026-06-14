@@ -223,6 +223,57 @@ class SchwabProvider(Provider):
             raise ProviderError(f"schwab {symbol}: no usable rows")
         return df
 
+    def get_intraday_bars(self, symbol: str, start: str, end: str,
+                          interval_min: int = 5, extended_hours: bool = False) -> pd.DataFrame:
+        """5-minute (or `interval_min`) bars from Schwab for the backtester.
+
+        Uses the same pricehistory endpoint as the daily feed but with a minute
+        frequency. `end` is inclusive: Schwab's endDate is the start of the last
+        candle, so we push it to the end of that ET day.
+        """
+        schwab_symbol = SYMBOL_MAP.get(symbol, symbol)
+        start_ms = int(pd.Timestamp(start).timestamp() * 1000)
+        # Make `end` inclusive of the whole ET trading day.
+        end_ms = int((pd.Timestamp(end) + pd.Timedelta(days=1)).timestamp() * 1000)
+        try:
+            resp = requests.get(
+                PRICE_HISTORY_URL,
+                headers={"Authorization": f"Bearer {self._token()}"},
+                params={
+                    "symbol": schwab_symbol,
+                    "periodType": "day",
+                    "frequencyType": "minute",
+                    "frequency": interval_min,
+                    "startDate": start_ms,
+                    "endDate": end_ms,
+                    "needExtendedHoursData": "true" if extended_hours else "false",
+                },
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab {symbol} intraday: {e}") from e
+        if resp.status_code != 200:
+            raise ProviderError(f"schwab {symbol} intraday: HTTP {resp.status_code} {resp.text[:200]}")
+        payload = resp.json()
+        candles = payload.get("candles") or []
+        if payload.get("empty") or not candles:
+            raise ProviderError(f"schwab {symbol} intraday: empty response")
+        idx = pd.to_datetime([c["datetime"] for c in candles], unit="ms", utc=True) \
+            .tz_convert("America/New_York")
+        df = pd.DataFrame(
+            {
+                "Open": [c.get("open") for c in candles],
+                "High": [c.get("high") for c in candles],
+                "Low": [c.get("low") for c in candles],
+                "Close": [c.get("close") for c in candles],
+                "Volume": [c.get("volume") for c in candles],
+            },
+            index=idx,
+        ).dropna(subset=["Close"])
+        if df.empty:
+            raise ProviderError(f"schwab {symbol} intraday: no usable rows")
+        return df
+
     # -- accounts & trading --------------------------------------------------
     # These hit the Trader API's account endpoints (a different product than the
     # market-data feed above). The same app key / secret / refresh token are

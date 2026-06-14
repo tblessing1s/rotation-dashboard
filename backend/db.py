@@ -10,6 +10,9 @@ bars                daily OHLCV rows; append-only. A (symbol, date) can have
                     multiple rows over time (re-fetches, corrections, multiple
                     sources); reads resolve the canonical row per date by
                     source priority, then fetched_at.
+intraday_bars       5-minute (or other interval) OHLCV rows used by the
+                    backtesting engine; same append-only / source-priority
+                    pattern as `bars`, keyed by the candle's UTC epoch.
 macro_observations  FRED-style series points (DFF, CPIAUCSL, GDPC1, UNRATE);
                     same append-only pattern.
 snapshots           computed indicator / macro payloads (JSON), written by
@@ -52,6 +55,22 @@ CREATE TABLE IF NOT EXISTS bars (
     fetched_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_bars_symbol_date ON bars(symbol, date);
+
+CREATE TABLE IF NOT EXISTS intraday_bars (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    date TEXT NOT NULL,          -- YYYY-MM-DD, exchange-local (America/New_York)
+    time TEXT NOT NULL,          -- HH:MM, exchange-local candle start
+    epoch_ms INTEGER NOT NULL,   -- candle start in UTC ms; canonical ordering key
+    interval_min INTEGER NOT NULL DEFAULT 5,
+    open REAL, high REAL, low REAL,
+    close REAL NOT NULL,
+    volume REAL,
+    source TEXT NOT NULL,
+    fetched_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_intraday_symbol_date ON intraday_bars(symbol, interval_min, date);
+CREATE INDEX IF NOT EXISTS idx_intraday_symbol_epoch ON intraday_bars(symbol, interval_min, epoch_ms);
 
 CREATE TABLE IF NOT EXISTS macro_observations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -239,6 +258,135 @@ def latest_bar(symbol: str) -> dict | None:
 def known_symbols() -> list[str]:
     conn = connect()
     return [r["symbol"] for r in conn.execute("SELECT DISTINCT symbol FROM bars ORDER BY symbol")]
+
+
+# ---------------------------------------------------------------------------
+# Intraday bars (5-minute OHLCV for the backtesting engine)
+# ---------------------------------------------------------------------------
+EXCHANGE_TZ = "America/New_York"
+
+
+def _to_exchange_index(index) -> pd.DatetimeIndex:
+    """Normalize a bar index to a tz-aware America/New_York DatetimeIndex.
+
+    Providers hand us either UTC-aware timestamps (Schwab/Yahoo) or tz-naive
+    timestamps already in exchange wall-clock (synthetic/test data); naive input
+    is interpreted as exchange-local so the stored date/time match the trading
+    session a human would read off the chart.
+    """
+    idx = pd.DatetimeIndex(pd.to_datetime(index))
+    if idx.tz is None:
+        return idx.tz_localize(EXCHANGE_TZ, nonexistent="shift_forward", ambiguous="NaT")
+    return idx.tz_convert(EXCHANGE_TZ)
+
+
+def append_intraday_bars(symbol: str, bars: pd.DataFrame, source: str,
+                         interval_min: int = 5) -> int:
+    """Append intraday OHLCV (index: timestamps; columns: Open/High/Low/Close/Volume).
+
+    Append-only with dedup on (symbol, interval, epoch, source): re-pulling the
+    same window is idempotent, but a provider correction still lands as a new
+    row that wins by source priority then fetched_at (mirrors `bars`).
+    """
+    conn = connect()
+    now = utcnow()
+    if bars is None or bars.empty:
+        return 0
+    et_index = _to_exchange_index(bars.index)
+    # Resolution-independent epoch-ms (pandas may use us- or ns-precision dtypes).
+    epochs = (et_index.tz_convert("UTC") - pd.Timestamp(0, tz="UTC")) // pd.Timedelta(milliseconds=1)
+
+    existing = {
+        row["epoch_ms"]: (row["open"], row["high"], row["low"], row["close"], row["volume"])
+        for row in conn.execute(
+            "SELECT epoch_ms, open, high, low, close, volume FROM intraday_bars"
+            " WHERE symbol=? AND interval_min=? AND source=? ORDER BY fetched_at, id",
+            (symbol, interval_min, source),
+        )
+    }
+
+    to_insert = []
+    for pos in range(len(bars)):
+        row = bars.iloc[pos]
+        epoch_ms = int(epochs[pos])
+        vals = tuple(
+            None if pd.isna(row[c]) else round(float(row[c]), 6)
+            for c in ("Open", "High", "Low", "Close", "Volume")
+        )
+        if vals[3] is None:
+            continue
+        prev = existing.get(epoch_ms)
+        if prev is not None and all(_close_enough(a, b) for a, b in zip(prev, vals)):
+            continue
+        ts = et_index[pos]
+        to_insert.append((
+            symbol, ts.strftime("%Y-%m-%d"), ts.strftime("%H:%M"), epoch_ms,
+            interval_min, *vals, source, now,
+        ))
+
+    if to_insert:
+        with conn:
+            conn.executemany(
+                "INSERT INTO intraday_bars"
+                " (symbol, date, time, epoch_ms, interval_min, open, high, low, close, volume, source, fetched_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                to_insert,
+            )
+    return len(to_insert)
+
+
+def get_intraday_bars(symbol: str, start_date: str, end_date: str,
+                      interval_min: int = 5) -> pd.DataFrame | None:
+    """Canonical intraday series for [start_date, end_date] (inclusive, ET dates).
+
+    Per candle epoch, the best source (priority) then newest fetch wins. Returns
+    a DataFrame with Open/High/Low/Close/Volume indexed by tz-naive ET
+    timestamps (exchange wall-clock), or None when nothing is stored.
+    """
+    conn = connect()
+    rows = conn.execute(
+        "SELECT epoch_ms, time, date, open, high, low, close, volume, source, fetched_at"
+        " FROM intraday_bars WHERE symbol=? AND interval_min=? AND date BETWEEN ? AND ?"
+        " ORDER BY epoch_ms, fetched_at, id",
+        (symbol, interval_min, start_date, end_date),
+    ).fetchall()
+    if not rows:
+        return None
+    best: dict[int, sqlite3.Row] = {}
+    for row in rows:
+        cur = best.get(row["epoch_ms"])
+        if cur is None or _beats(row, cur):
+            best[row["epoch_ms"]] = row
+    ordered = [best[e] for e in sorted(best)]
+    index = pd.to_datetime([r["epoch_ms"] for r in ordered], unit="ms", utc=True) \
+        .tz_convert(EXCHANGE_TZ).tz_localize(None)
+    df = pd.DataFrame(
+        {
+            "Open": [r["open"] for r in ordered],
+            "High": [r["high"] for r in ordered],
+            "Low": [r["low"] for r in ordered],
+            "Close": [r["close"] for r in ordered],
+            "Volume": [r["volume"] for r in ordered],
+        },
+        index=index,
+    )
+    df.attrs["source"] = ordered[-1]["source"]
+    df.attrs["fetched_at"] = ordered[-1]["fetched_at"]
+    return df
+
+
+def intraday_coverage(symbol: str, start_date: str, end_date: str,
+                      interval_min: int = 5) -> set[str]:
+    """Set of ET dates (YYYY-MM-DD) that have any intraday bar in the range."""
+    conn = connect()
+    return {
+        row["date"]
+        for row in conn.execute(
+            "SELECT DISTINCT date FROM intraday_bars"
+            " WHERE symbol=? AND interval_min=? AND date BETWEEN ? AND ?",
+            (symbol, interval_min, start_date, end_date),
+        )
+    }
 
 
 # ---------------------------------------------------------------------------

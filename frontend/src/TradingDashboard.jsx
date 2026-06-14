@@ -1,4 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import { C, SIG } from "./theme.js";
+import BacktestView from "./BacktestView.jsx";
 
 /* ============================================================================
    TRAVIS — INSTITUTIONAL ROTATION DASHBOARD  (local app build)
@@ -93,28 +95,7 @@ const store = (() => {
   };
 })();
 
-// ---- Color tokens ----------------------------------------------------------
-const C = {
-  bg: "#0a0e14",
-  panel: "#121821",
-  panel2: "#0f141c",
-  line: "#1f2935",
-  lineSoft: "#19222e",
-  ink: "#e6edf3",
-  inkDim: "#8b97a7",
-  inkFaint: "#5a6573",
-  green: "#3fb950",
-  greenDim: "#1f6f2e",
-  yellow: "#d2a64a",
-  red: "#f0506e",
-  redDim: "#7a2438",
-  blue: "#4493f8",
-  amber: "#e3a008",
-  mono: "'Roboto Mono', ui-monospace, 'SF Mono', Menlo, monospace",
-  sans: "'Inter', -apple-system, system-ui, sans-serif",
-};
-
-const SIG = { GREEN: C.green, YELLOW: C.yellow, RED: C.red };
+// ---- Color tokens: C + SIG are imported from ./theme.js (top of file) ------
 
 // ---- Staleness (Phase 4) ----------------------------------------------------
 // Every backend value carries staleness: fresh = covers the last completed
@@ -717,7 +698,7 @@ function CheckRow({ label, ok }) {
 // ============================================================================
 // MAIN APP
 // ============================================================================
-const TABS = ["Command", "Rotation", "Entry Watch", "Positions", "Indicators"];
+const TABS = ["Command", "Rotation", "Entry Watch", "Positions", "Indicators", "Backtest"];
 const DEFAULT_ENTRY_WATCH_SYMBOLS = [];
 
 // Hydration gate: load persisted state from the backend before the dashboard
@@ -1000,6 +981,9 @@ function TradingDashboard({ backendOffline }) {
             instXLV={instXLV} setInstXLV={setInstXLV} flowXLV={flowXLV} setFlowXLV={setFlowXLV} techXLV={techXLV} setTechXLV={setTechXLV}
             instAAPL={instAAPL} setInstAAPL={setInstAAPL} flowAAPL={flowAAPL} setFlowAAPL={setFlowAAPL} techAAPL={techAAPL} setTechAAPL={setTechAAPL}
           />
+        )}
+        {tab === "Backtest" && (
+          <BacktestView store={store} />
         )}
       </div>
     </div>
