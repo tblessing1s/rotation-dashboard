@@ -159,8 +159,11 @@ export default function BacktestView({ store }) {
       return;
     }
     if (msgs.length) setErrors(msgs);
-    setStatus(`Backfilled ${bf.rowsWritten ?? 0} intraday candles and ${bf.dailyWritten ?? 0} daily bars` +
-      (bf.providers ? ` via ${bf.providers.join(" → ")}.` : "."));
+    const wrote = (bf.rowsWritten ?? 0) + (bf.dailyWritten ?? 0);
+    const via = bf.providers ? ` via ${bf.providers.join(" → ")}` : "";
+    setStatus(wrote === 0 && !msgs.length
+      ? `Already up to date — no new bars to pull${via}.`
+      : `Backfilled ${bf.rowsWritten ?? 0} intraday candles and ${bf.dailyWritten ?? 0} daily bars${via}.`);
   }, [form]);
 
   const saveConfig = useCallback(async () => {
@@ -342,6 +345,7 @@ export default function BacktestView({ store }) {
               </div>
             </details>
           )}
+          {result.diagnostics && <Diagnostics d={result.diagnostics} cov={result.coverage} />}
         </Card>
       )}
 
@@ -487,6 +491,33 @@ function Chip({ children, onClick }) {
       background: C.panel2, color: C.inkDim, border: `1px solid ${C.line}`, borderRadius: 20,
       padding: "3px 10px", font: `500 11px ${C.mono}`, cursor: "pointer",
     }}>{children}</button>
+  );
+}
+
+// Explains why a run produced the trades it did — especially a 0-trade run.
+function Diagnostics({ d, cov }) {
+  const tip = (() => {
+    if (d.setups_detected === 0 && d.level_touches === 0)
+      return "Price never reached yesterday's level in the time window. Widen the time window or raise proximity %.";
+    if (d.setups_detected === 0 && d.volume_spikes === 0)
+      return "Levels were touched but no candle hit the volume multiplier. Lower the volume multiplier (try 1.5 or 1.0, or 0 to disable).";
+    if (d.setups_detected === 0)
+      return "Touches and volume spikes occurred, but never on the same candle. Loosen proximity % or the volume multiplier.";
+    if (d.setups_skipped > 0)
+      return `${d.setups_skipped} setup(s) were filtered out by skip conditions.`;
+    return null;
+  })();
+  return (
+    <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.lineSoft}` }}>
+      <div style={{ font: `400 11px ${C.mono}`, color: C.inkFaint }}>
+        Scanned {d.candles_evaluated} candles across {cov?.covered ?? "?"} session(s)
+        {" · "}{d.level_touches} level touch{d.level_touches === 1 ? "" : "es"}
+        {" · "}{d.volume_spikes} volume spike{d.volume_spikes === 1 ? "" : "s"}
+        {" · "}{d.setups_detected} setup{d.setups_detected === 1 ? "" : "s"}
+        {d.setups_skipped ? ` · ${d.setups_skipped} skipped` : ""}
+      </div>
+      {tip && <div style={{ marginTop: 5, font: `400 12px ${C.sans}`, color: C.yellow }}>💡 {tip}</div>}
+    </div>
   );
 }
 

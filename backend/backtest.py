@@ -37,7 +37,8 @@ DEFAULT_CONFIG = {
         "proximity_pct": 0.30,        # how close (%) price must come to the level
     },
     "entry_rules": {
-        "volume_multiplier": 2.0,     # candle volume must exceed N x the session average
+        "volume_multiplier": 2.0,     # candle volume must exceed N x the recent average
+        "vol_lookback": 12,           # candles in the trailing volume average (~1h of 5m bars)
         "entry_timing": "candle_close",  # or "immediate_touch"
     },
     "skip_conditions": {
@@ -184,27 +185,40 @@ def _detect_sr_bounce(candle, *, levels, avg_volume, cfg) -> dict | None:
     """
     prox = float(cfg["setup_conditions"].get("proximity_pct", 0.30)) / 100.0
     mult = float(cfg["entry_rules"].get("volume_multiplier", 0) or 0)
-    vol = float(candle["Volume"] or 0)
-    volume_spike = avg_volume > 0 and vol >= mult * avg_volume
+    volume_spike = _volume_spike(candle, avg_volume, mult)
     # A volume spike is part of this setup; when a multiplier is configured it
     # must be met for the setup to qualify.
     if mult > 0 and not volume_spike:
         return None
 
+    hit = _sr_level_touch(candle, levels, prox)
+    if hit is None:
+        return None
+    direction, level, level_type = hit
+    return {"direction": direction, "level": level, "level_type": level_type,
+            "volume_spike": volume_spike}
+
+
+def _volume_spike(candle, avg_volume, mult) -> bool:
+    vol = float(candle["Volume"] or 0)
+    return avg_volume > 0 and vol >= mult * avg_volume
+
+
+def _sr_level_touch(candle, levels, prox):
+    """(direction, level, level_type) when the candle reaches and *holds* a
+    yesterday level, else None. Volume is not considered here.
+
+    Long: the wick reached down into yesterday's low zone — within `prox` above
+    the level, or through it — and closed back *above* the level (support held).
+    With prox=0 this is a clean touch, not an exact-equality match. Short is the
+    mirror at yesterday's high.
+    """
     y_high, y_low = levels.get("y_high"), levels.get("y_low")
     high, low, close = float(candle["High"]), float(candle["Low"]), float(candle["Close"])
-
-    # Long: the candle's wick reached down into yesterday's low zone — within
-    # `prox` above the level, or through it — and closed back *above* the level,
-    # i.e. support held. With prox=0 this is a clean touch (low at/through the
-    # level, close above), not an exact-equality match.
     if y_low is not None and low <= y_low * (1 + prox) and close >= y_low:
-        return {"direction": "Long", "level": y_low, "level_type": "Y-Low",
-                "volume_spike": volume_spike}
-    # Short: the wick pushed up into yesterday's high zone and closed back below it.
+        return ("Long", y_low, "Y-Low")
     if y_high is not None and high >= y_high * (1 - prox) and close <= y_high:
-        return {"direction": "Short", "level": y_high, "level_type": "Y-High",
-                "volume_spike": volume_spike}
+        return ("Short", y_high, "Y-High")
     return None
 
 
@@ -324,12 +338,18 @@ def _simulate(direction, entry, stop, target, forward: pd.DataFrame):
 # Core engine
 # ---------------------------------------------------------------------------
 def _session_dates(start: str, end: str) -> list[str]:
-    """Weekday dates in [start, end] (holidays simply have no intraday data)."""
+    """NYSE trading days in [start, end] — weekends and full holidays excluded so
+    a closed day (e.g. Memorial Day) never shows up as a missing session."""
+    try:
+        import market_calendar as mcal
+        is_trading = mcal.is_trading_day
+    except Exception:  # noqa: BLE001 — fall back to plain weekday logic
+        is_trading = lambda d: d.weekday() < 5
     out = []
     d = pd.Timestamp(start).date()
     last = pd.Timestamp(end).date()
     while d <= last:
-        if d.weekday() < 5:
+        if is_trading(d):
             out.append(d.strftime("%Y-%m-%d"))
         d += timedelta(days=1)
     return out
@@ -394,6 +414,9 @@ def run_backtest(config: dict, *, get_intraday, get_daily) -> dict:
     trades: list[dict] = []
     warnings: list[str] = []
     coverage = {"requested_sessions": 0, "missing": [], "covered": 0}
+    # Why a run produced the trades it did — so "0 trades" is never a black box.
+    diag = {"candles_evaluated": 0, "level_touches": 0, "volume_spikes": 0,
+            "setups_detected": 0, "setups_skipped": 0}
 
     for ticker in cfg["tickers"]:
         proxy = sector_map.get(ticker)
@@ -421,6 +444,7 @@ def run_backtest(config: dict, *, get_intraday, get_daily) -> dict:
                 ticker, day, session, window, levels, atr_val, proxy,
                 cfg=cfg, rr=rr, interval=interval, detect=detect, place_stop=place_stop,
                 skip=skip, get_intraday=get_intraday, get_daily=daily, warnings=warnings,
+                diag=diag,
             )
             if trade:
                 trades.append(trade)
@@ -431,23 +455,38 @@ def run_backtest(config: dict, *, get_intraday, get_daily) -> dict:
         "trades": trades,
         "coverage": coverage,
         "warnings": warnings,
+        "diagnostics": diag,
         "config": cfg,
     }
 
 
 def _scan_day(ticker, day, session, window, levels, atr_val, proxy, *, cfg, rr,
-              interval, detect, place_stop, skip, get_intraday, get_daily, warnings):
+              interval, detect, place_stop, skip, get_intraday, get_daily, warnings, diag):
     """Find the first qualifying setup of the day and resolve it to a trade/skip."""
     vols = session["Volume"].astype(float).fillna(0.0)
+    lookback = int(cfg["entry_rules"].get("vol_lookback", 12) or 12)
+    is_sr = cfg["setup_conditions"]["type"] == "support_resistance_bounce"
+    prox = float(cfg["setup_conditions"].get("proximity_pct", 0.30)) / 100.0
+    mult = float(cfg["entry_rules"].get("volume_multiplier", 0) or 0)
     for ts, candle in window.iterrows():
         prior_vols = vols[session.index < ts]
         if len(prior_vols) < _MIN_VOL_LOOKBACK:
             continue
-        avg_volume = float(prior_vols.mean())
+        # Trailing-window average so the (almost always largest) opening candle
+        # ages out and a genuine later spike can still clear the multiplier.
+        avg_volume = float(prior_vols.tail(lookback).mean())
+
+        diag["candles_evaluated"] += 1
+        if is_sr:
+            if _sr_level_touch(candle, levels, prox) is not None:
+                diag["level_touches"] += 1
+            if _volume_spike(candle, avg_volume, mult):
+                diag["volume_spikes"] += 1
 
         setup = detect(candle, levels=levels, avg_volume=avg_volume, cfg=cfg)
         if not setup:
             continue
+        diag["setups_detected"] += 1
 
         direction = setup["direction"]
         spy_dir = _context_direction("SPY", day, ts, get_intraday=get_intraday,
@@ -464,10 +503,12 @@ def _scan_day(ticker, day, session, window, levels, atr_val, proxy, *, cfg, rr,
 
         # Skip conditions: a real setup blocked by market context is a logged skip.
         if skip.get("skip_if_spy_down") and spy_dir == "Down":
+            diag["setups_skipped"] += 1
             return {**base, "entry_price": None, "stop_price": None, "target_price": None,
                     "exit_price": None, "outcome": "Skip", "r_result": 0.0,
                     "exit_time": None, "notes": "skipped: SPY direction down"}
         if skip.get("skip_if_sector_down") and sector_dir == "Down":
+            diag["setups_skipped"] += 1
             return {**base, "entry_price": None, "stop_price": None, "target_price": None,
                     "exit_price": None, "outcome": "Skip", "r_result": 0.0,
                     "exit_time": None, "notes": "skipped: sector direction down"}

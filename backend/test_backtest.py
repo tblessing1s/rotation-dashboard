@@ -160,6 +160,31 @@ def test_proximity_zero_is_a_touch_not_exact_equality():
     assert len(out["trades"]) == 1 and out["trades"][0]["direction"] == "Long"
 
 
+def test_diagnostics_explain_a_zero_trade_run():
+    # Levels are touched but the volume multiplier is never met -> 0 trades, and
+    # diagnostics show touches > 0, spikes == 0 so the cause is visible.
+    day = "2026-06-01"
+    bars = [
+        ("09:30", 105, 106, 104, 105, 1000), ("09:35", 105, 106, 104, 105, 1000),
+        ("09:40", 105, 106, 104, 105, 1000),
+        ("09:45", 101, 102, 99.9, 101, 1000),   # touches Y-Low but no volume spike
+        ("09:50", 101, 102, 99.9, 101, 1000),
+    ]
+    loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
+    out = engine.run_backtest(base_config(), get_intraday=loaders[0], get_daily=loaders[1])
+    assert out["trades"] == []
+    diag = out["diagnostics"]
+    assert diag["candles_evaluated"] >= 1
+    assert diag["level_touches"] >= 1 and diag["volume_spikes"] == 0
+    assert diag["setups_detected"] == 0
+
+
+def test_memorial_day_holiday_is_not_a_session():
+    # 2026-05-25 is Memorial Day (NYSE closed) — it must not appear as a session.
+    assert "2026-05-25" not in engine._session_dates("2026-05-22", "2026-05-27")
+    assert "2026-05-22" in engine._session_dates("2026-05-22", "2026-05-27")  # Friday
+
+
 def test_skip_first_n_candles_blocks_setup():
     day = "2026-06-01"
     bars = [
