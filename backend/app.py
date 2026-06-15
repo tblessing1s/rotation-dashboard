@@ -618,6 +618,29 @@ def api_executor_playback():
     return jsonify(out), 200 if out.get("ok") else 400
 
 
+@app.route("/api/executor/replay", methods=["POST"])
+def api_executor_replay():
+    """Replay a date (or range) through the full executor engine and return
+    completed trades with outcomes (entry/stop/target/exit/R).
+
+    This is the offline validation path: REPLAY binds the historical data source +
+    ReplayExecutionAdapter and resolves each setup's exit over stored candles using
+    the same rules as the backtester — so the trades here reproduce backtest
+    results exactly. Detection/sizing live in the shared StrategyCore; switching to
+    PAPER/LIVE later changes only the bound adapter + data source.
+    """
+    import executor_engine as ee
+
+    body = request.get_json(silent=True) or {}
+    config = body.get("config") if "config" in body else body
+    try:
+        out = ee.run_replay(config, date=body.get("date"),
+                            date_range=body.get("date_range"))
+    except Exception as e:  # noqa: BLE001 — surface the cause to the UI + logs
+        return _executor_error("Replay", e)
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
 @app.route("/api/executor/signals", methods=["GET"])
 def api_executor_signals():
     body_date = request.args.get("date")

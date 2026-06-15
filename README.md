@@ -260,6 +260,7 @@ per request.
 | `GET /api/executor/config` | The default monitor config. |
 | `POST /api/executor/monitor` | Detect on today's latest closed candle + per-ticker status (incl. window candles for charting). `{"refresh": true}` first pulls today's 5-minute bars from Schwab/Yahoo. |
 | `POST /api/executor/playback` | Replay stored candles over a `date` or `date_range` and return every signal — validates detection against historical data. `{"autoBackfill": true}` pulls missing bars first. |
+| `POST /api/executor/replay` | Replay a `date`/`date_range` through the full **engine** and return completed trades *with outcomes* (entry/stop/target/exit/R) — reproduces backtest results exactly. |
 | `GET /api/executor/signals?date=YYYY-MM-DD` | The logged signals (one row per detected candle; idempotent). |
 | `POST /api/executor/paper/execute` | Log a detected signal as a simulated paper bracket trade. This does **not** call Schwab. |
 | `GET /api/executor/paper/trades?date=YYYY-MM-DD` | Return logged paper trades for the session. |
@@ -275,6 +276,26 @@ Live trading remains intentionally disabled until the paper workflow is proven.
 
 Real-time is polling-based here (Schwab `pricehistory`), matching the rest of
 the stack; a WebSocket tick feed is a future enhancement.
+
+### Execution engine — one core, swappable adapters (`backend/executor_engine.py`)
+
+The forward-testing engine is built around a single shared **`StrategyCore`**
+(detection + order/position sizing) and three **execution adapters** bound by one
+`MODE` flag, so going live is a one-line binding change — never a rewrite:
+
+| MODE | Data source | Execution adapter | Status |
+| --- | --- | --- | --- |
+| `REPLAY` | `ReplayDataSource` (historical candles) | `ReplayExecutionAdapter` | **complete** — resolves exits over stored candles with the backtester's own simulator, so REPLAY reproduces backtest trades exactly. |
+| `PAPER` | `LiveDataSource` (Schwab real-time) | `SimulatedExecutionAdapter` | honest fill/exit math implemented + unit-tested offline (adverse entry slippage, bid/ask spread capture, real-sequence exit resolution, pessimistic stop fills); live-feed driver is build step 2. |
+| `LIVE` | `LiveDataSource` | `LiveExecutionAdapter` | guarded scaffold — builds the real Schwab bracket but never transmits. |
+
+`StrategyCore` reuses the backtest engine's registered rules (`SETUP_TYPES` /
+`STOP_LOGIC`) and exit simulator (`_simulate`), so detection/sizing exist in
+exactly one place and never drift from the backtester. The one-trade-per-day
+selection and the gap rule live in `StrategyCore`. Build step 1 (REPLAY +
+architecture) is validated in `backend/test_executor_engine.py`, which runs the
+same synthetic sessions through both `run_backtest` and `run_replay` and asserts
+identical entry/stop/target/outcome/R.
 
 ## Configuration
 
