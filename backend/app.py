@@ -628,6 +628,35 @@ def api_executor_signals():
     return jsonify({"ok": True, "signals": db.recent_setup_signals(body_date, limit)})
 
 
+@app.route("/api/executor/paper/execute", methods=["POST"])
+def api_executor_paper_execute():
+    """Paper-only execution: logs the signal as an OPEN simulated bracket trade.
+
+    No live/Schwab order placement is performed from this endpoint.
+    """
+    import intraday_executor as ix
+
+    body = request.get_json(silent=True) or {}
+    out = ix.execute_paper_order(body.get("signal") or body, notes=body.get("notes"))
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
+@app.route("/api/executor/paper/trades", methods=["GET"])
+def api_executor_paper_trades():
+    import intraday_executor as ix
+
+    try:
+        limit = int(request.args.get("limit", 100))
+    except (TypeError, ValueError):
+        limit = 100
+    out = ix.list_paper_trades(
+        date=request.args.get("date"),
+        status=request.args.get("status"),
+        limit=limit,
+    )
+    return jsonify(out)
+
+
 # ---------------------------------------------------------------------------
 # State persistence (manual inputs, positions) — lives on the data volume
 # ---------------------------------------------------------------------------

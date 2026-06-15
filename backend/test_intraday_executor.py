@@ -170,3 +170,29 @@ def test_record_setup_signal_is_idempotent(fresh_db):
     stored = db.recent_setup_signals(DAY)
     assert len(stored) == 1
     assert stored[0]["ticker"] == "HOOD" and stored[0]["entry_price"] == 111.0
+
+
+def test_execute_paper_order_logs_open_trade_and_dedupes(fresh_db):
+    sig = {"date": DAY, "ticker": "HOOD", "candle_time": "08:45", "direction": "Long",
+           "level_type": "Y-High", "entry_price": 111.0, "stop_price": 90.0,
+           "target_price": 153.0, "position_size": 4, "volume_ratio": 2.5}
+
+    first = ix.execute_paper_order(sig)
+    second = ix.execute_paper_order(sig)
+
+    assert first["ok"] is True and first["mode"] == "PAPER"
+    assert second["ok"] is True
+    assert first["trade"]["id"] == second["trade"]["id"]
+    assert first["trade"]["account_type"] == "PAPER"
+    assert first["trade"]["outcome"] == "OPEN"
+    assert first["trade"]["order_id"] == "PAPER-2026-06-15-HOOD-08:45"
+
+    trades = db.list_intraday_trades(DAY)
+    assert len(trades) == 1
+    assert trades[0]["ticker"] == "HOOD" and trades[0]["direction"] == "LONG"
+
+
+def test_execute_paper_order_rejects_invalid_signal(fresh_db):
+    out = ix.execute_paper_order({"ticker": "HOOD", "direction": "Long"})
+    assert out["ok"] is False
+    assert any("entry_price" in e for e in out["errors"])

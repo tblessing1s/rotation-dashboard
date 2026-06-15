@@ -16,8 +16,8 @@ What this module does (Phase 1):
                           pulled and replayed.
 
 What it intentionally does NOT do yet (later phases): desktop/Slack alerts,
-bracket-order placement, the React dashboard. The signal payload is shaped so
-those phases can consume it directly.
+live bracket-order placement. The signal payload is shaped so a paper order can
+be logged now and a real broker adapter can consume it in a later phase.
 
 Real-time data note: the existing stack is pull-based (Schwab pricehistory),
 so "real-time" here means polling — refresh today's 5-minute bars, then detect
@@ -467,3 +467,76 @@ def run_playback(raw_config, *, date=None, date_range=None, auto_backfill=False)
     if backfill_result is not None:
         out["backfill"] = backfill_result
     return out
+
+
+# ---------------------------------------------------------------------------
+# Paper execution only — no Schwab/live order placement
+# ---------------------------------------------------------------------------
+def _signal_key(signal: dict) -> str:
+    return "|".join(str(signal.get(k) or "") for k in ("date", "ticker", "candle_time"))
+
+
+def validate_signal_for_paper_order(signal: dict) -> list[str]:
+    """Validate the signal payload needed to create a simulated paper trade."""
+    required = ["date", "ticker", "candle_time", "direction", "entry_price",
+                "stop_price", "target_price", "position_size"]
+    errors = [f"{k} is required." for k in required if signal.get(k) in (None, "")]
+    if str(signal.get("direction") or "").lower() not in {"long", "short"}:
+        errors.append("direction must be Long or Short.")
+    try:
+        if float(signal.get("entry_price", 0)) <= 0:
+            errors.append("entry_price must be greater than 0.")
+        if float(signal.get("stop_price", 0)) <= 0:
+            errors.append("stop_price must be greater than 0.")
+        if float(signal.get("target_price", 0)) <= 0:
+            errors.append("target_price must be greater than 0.")
+        if int(signal.get("position_size", 0)) <= 0:
+            errors.append("position_size must be greater than 0.")
+    except (TypeError, ValueError):
+        errors.append("entry, stop, target, and position_size must be numeric.")
+    return errors
+
+
+def execute_paper_order(signal: dict, *, notes: str | None = None) -> dict:
+    """Log a simulated bracket order as a paper trade.
+
+    This intentionally does **not** call Schwab or any broker API. It records the
+    exact entry/stop/target/size computed by detection, marks the trade OPEN,
+    and generates a deterministic paper order id for traceability.
+    """
+    signal = dict(signal or {})
+    errors = validate_signal_for_paper_order(signal)
+    if errors:
+        return {"ok": False, "errors": errors}
+
+    direction = "LONG" if str(signal["direction"]).lower() == "long" else "SHORT"
+    order_id = f"PAPER-{_signal_key(signal).replace('|', '-')}"
+    trade = {
+        "date": signal["date"],
+        "ticker": str(signal["ticker"]).upper(),
+        "direction": direction,
+        "level_type": signal.get("level_type"),
+        "entry_price": float(signal["entry_price"]),
+        "stop_price": float(signal["stop_price"]),
+        "target_price": float(signal["target_price"]),
+        "exit_price": None,
+        "position_size": int(signal["position_size"]),
+        "entry_time": signal["candle_time"],
+        "exit_time": None,
+        "outcome": "OPEN",
+        "r_result": None,
+        "account_type": "PAPER",
+        "order_id": order_id,
+        "notes": notes,
+        "signal": signal,
+    }
+
+    import db
+    saved = db.record_intraday_trade(trade)
+    return {"ok": True, "mode": "PAPER", "trade": saved}
+
+
+def list_paper_trades(*, date=None, status=None, limit=100) -> dict:
+    """Return logged paper trades; defaults to all statuses for the session."""
+    import db
+    return {"ok": True, "trades": db.list_intraday_trades(date=date, status=status, limit=limit)}
