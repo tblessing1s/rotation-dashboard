@@ -48,8 +48,8 @@ const DEFAULT_FORM = {
   bufferPct: 0.1,
   atrPeriod: 14,
   atrTimeframe: "intraday",
-  startTime: "09:30",
-  endTime: "11:00",
+  startTime: "08:30",
+  endTime: "10:00",
   refineWith1m: true,
 };
 
@@ -311,8 +311,8 @@ export default function BacktestView({ store }) {
             <Field label="Buffer beyond level (%)"><Input type="number" step="0.05" value={form.bufferPct} onChange={(e) => set("bufferPct", e.target.value)} /></Field>
           )}
 
-          <Field label="Time window — start"><Input type="time" value={form.startTime} onChange={(e) => set("startTime", e.target.value)} /></Field>
-          <Field label="Time window — end"><Input type="time" value={form.endTime} onChange={(e) => set("endTime", e.target.value)} /></Field>
+          <Field label="Time window — start (CT)" hint="US Central time; CST/CDT is handled automatically."><Input type="time" value={form.startTime} onChange={(e) => set("startTime", e.target.value)} /></Field>
+          <Field label="Time window — end (CT)" hint="US Central time; CST/CDT is handled automatically."><Input type="time" value={form.endTime} onChange={(e) => set("endTime", e.target.value)} /></Field>
           <Field label="Skip first N candles"><Input type="number" value={form.skipFirstN} onChange={(e) => set("skipFirstN", e.target.value)} /></Field>
 
           <Field label="Skip conditions">
