@@ -237,13 +237,13 @@ below.)
 revisions, valuation, credit, chart-reading toggles — and any Level 1 field
 you choose to override (marked MANUAL with its timestamp until cleared).
 
-## Intraday Setup Executor (Phase 1 — detection)
+## Intraday Setup Executor (Phases 1–2)
 
-Real-time setup *detection* for day trading, built on the same rules as the
-backtester (`backend/intraday_executor.py`). It evaluates each **closed**
-5-minute candle against yesterday's high/low and a volume spike, and — when a
-setup fires — emits a *signal* carrying the entry, ATR-based stop, R:R target,
-and position size the backtester would have traded. Detection reuses the
+Real-time setup *detection* and alerting for day trading, built on the same
+rules as the backtester (`backend/intraday_executor.py`). It evaluates each
+**closed** 5-minute candle against yesterday's high/low and a volume spike, and
+— when a setup fires — emits a *signal* carrying the entry, ATR-based stop, R:R
+target, and position size the backtester would have traded. Detection reuses the
 backtest engine's detectors, volume MA, and Wilder ATR, so a live signal and a
 backtested trade apply byte-for-byte identical logic.
 
@@ -253,15 +253,21 @@ beyond the level, a 2:1 target, an 08:30–10:00 Central window, and `$20` fixed
 risk per trade — across `CRWV, HIMS, CVNA, HOOD, TOST`. Override any of these
 per request.
 
-Endpoints (detection only — no alerts or order placement yet, those are later
-phases):
+**Backend** (detection — no order placement yet, that's a later phase):
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /api/executor/config` | The default monitor config. |
-| `POST /api/executor/monitor` | Detect on today's latest closed candle + per-ticker status. `{"refresh": true}` first pulls today's 5-minute bars from Schwab/Yahoo. |
+| `POST /api/executor/monitor` | Detect on today's latest closed candle + per-ticker status (incl. window candles for charting). `{"refresh": true}` first pulls today's 5-minute bars from Schwab/Yahoo. |
 | `POST /api/executor/playback` | Replay stored candles over a `date` or `date_range` and return every signal — validates detection against historical data. `{"autoBackfill": true}` pulls missing bars first. |
 | `GET /api/executor/signals?date=YYYY-MM-DD` | The logged signals (one row per detected candle; idempotent). |
+
+**Frontend** — the **Executor** tab (`frontend/src/ExecutorView.jsx`): a live
+monitor card per ticker (inline SVG 5-minute candle chart with Y-High/Y-Low
+lines + volume histogram, current price, volume ratio, distance to levels), an
+auto-refresh poll, a blinking alert + modal (entry/stop/target/position size)
+when a setup triggers, opt-in desktop notifications (deduped per candle), a
+today's-signals log, and a playback panel to validate alerts on a past session.
 
 Real-time is polling-based here (Schwab `pricehistory`), matching the rest of
 the stack; a WebSocket tick feed is a future enhancement.

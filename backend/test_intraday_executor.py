@@ -131,6 +131,10 @@ def test_monitor_status_reports_levels_and_volume():
     assert row["y_high"] == 110.0 and row["y_low"] == 100.0
     assert row["last_close"] == 111.0
     assert row["volume_ratio"] == 2.5
+    # Candle series is included for charting (window candles in Central time).
+    assert len(row["candles"]) == 4
+    last = row["candles"][-1]
+    assert last["close"] == 111.0 and last["high"] == 112.0 and last["volume"] == 1000
 
 
 # ---------------------------------------------------------------------------

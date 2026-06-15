@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { C, SIG } from "./theme.js";
 import BacktestView from "./BacktestView.jsx";
+import ExecutorView from "./ExecutorView.jsx";
 
 /* ============================================================================
    TRAVIS — INSTITUTIONAL ROTATION DASHBOARD  (local app build)
@@ -698,7 +699,7 @@ function CheckRow({ label, ok }) {
 // ============================================================================
 // MAIN APP
 // ============================================================================
-const TABS = ["Command", "Rotation", "Entry Watch", "Positions", "Indicators", "Backtest"];
+const TABS = ["Command", "Rotation", "Entry Watch", "Positions", "Indicators", "Backtest", "Executor"];
 const DEFAULT_ENTRY_WATCH_SYMBOLS = [];
 
 // Hydration gate: load persisted state from the backend before the dashboard
@@ -984,6 +985,9 @@ function TradingDashboard({ backendOffline }) {
         )}
         {tab === "Backtest" && (
           <BacktestView store={store} />
+        )}
+        {tab === "Executor" && (
+          <ExecutorView store={store} />
         )}
       </div>
     </div>
