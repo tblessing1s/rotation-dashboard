@@ -773,7 +773,7 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
                 "outcome": "Unresolved", "r_result": None, "exit_time": None, "notes": note,
             }
 
-        r_result = (exit_price - entry) / risk if direction == "Long" else (entry - exit_price) / risk
+        r_result = _binary_r_result(outcome, rr)
         return {
             **base,
             "entry_price": round(entry, 2),
@@ -781,12 +781,23 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
             "target_price": round(target, 2),
             "exit_price": round(exit_price, 2),
             "outcome": outcome,
-            "r_result": round(r_result, 2),
+            "r_result": r_result,
             "exit_time": exit_ts.strftime("%H:%M") if exit_ts is not None else None,
             "notes": note,
         }
     return None
 
+
+def _binary_r_result(outcome: str, risk_reward: float) -> float:
+    """Return the table R multiple for resolved trades.
+
+    The trade table reports strategy outcomes as fixed risk units: every loss is
+    one unit of risk (-1R) and every win is the configured reward multiple. This
+    keeps rows aligned with the selected Risk:Reward setting across every stop
+    placement, even when a trade is closed at the session end instead of printing
+    the exact stop/target price.
+    """
+    return round(float(risk_reward), 2) if outcome == "Win" else -1.0
 
 def summarize(trades: list[dict]) -> dict:
     """Win rate, average R, and expectancy over the resolved (non-skip) trades."""
