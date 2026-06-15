@@ -61,6 +61,10 @@ DEFAULT_CONFIG = {
     },
     "time_window": {"start_time": "09:30", "end_time": "11:00"},
     "interval_min": 5,
+    # When a 5-minute bar's range contains BOTH the stop and the target, resolve
+    # which was hit first using bars of this finer interval (1 minute). 0 = off
+    # (fall back to the conservative "stop first" assumption).
+    "refine_interval_min": 1,
     "sector_map": {},                  # ticker -> sector proxy symbol (e.g. AMD -> XLK)
 }
 
@@ -375,30 +379,69 @@ def intraday_history_start(start: str, length: int) -> str:
 # ---------------------------------------------------------------------------
 # Trade simulation
 # ---------------------------------------------------------------------------
-def _simulate(direction, entry, stop, target, forward: pd.DataFrame):
+def _simulate(direction, entry, stop, target, forward, *, refine=None, interval_min=5, diag=None):
     """Step through `forward` candles; return (outcome, exit_price, exit_ts, note).
 
-    If the stop and target are both touched within one candle we assume the stop
-    filled first (the conservative read for a 5-minute bar).
+    When a single candle's range contains BOTH the stop and the target, the
+    order they were hit is ambiguous at this timeframe. If `refine` is provided
+    it returns the finer (1-minute) bars inside that candle and we walk those to
+    decide; otherwise we fall back to the conservative "stop filled first" read.
     """
-    risk = abs(entry - stop)
     for ts, c in forward.iterrows():
         hi, lo = float(c["High"]), float(c["Low"])
         if direction == "Long":
             hit_stop, hit_target = lo <= stop, hi >= target
         else:
             hit_stop, hit_target = hi >= stop, lo <= target
+
+        if hit_stop and hit_target:
+            if diag is not None:
+                diag["ambiguous_bars"] = diag.get("ambiguous_bars", 0) + 1
+            fine = refine(ts, ts + pd.Timedelta(minutes=interval_min)) if refine else None
+            res = _resolve_fine(direction, stop, target, fine)
+            if res is not None:
+                outcome, price = res
+                if diag is not None:
+                    diag["refined_bars"] = diag.get("refined_bars", 0) + 1
+                note = ("target hit first on 1m" if outcome == "Win" else "stop hit first on 1m")
+                return outcome, price, ts, note
+            # No finer data — keep the conservative assumption.
+            return "Loss", stop, ts, "stop & target in one bar — assumed stop (no 1m data)"
+
         if hit_stop:
             return "Loss", stop, ts, ""
         if hit_target:
             return "Win", target, ts, ""
+
     # Neither level reached during the session: mark to the last close.
     if forward.empty:
         return "Loss", entry, None, "no candles after entry"
     last_ts = forward.index[-1]
     exit_price = float(forward.iloc[-1]["Close"])
+    risk = abs(entry - stop)
     r = (exit_price - entry) / risk if direction == "Long" else (entry - exit_price) / risk
     return ("Win" if r > 0 else "Loss"), exit_price, last_ts, "closed at session end"
+
+
+def _resolve_fine(direction, stop, target, fine):
+    """Walk finer bars to see whether the target or the stop printed first.
+    Returns ("Win", target) / ("Loss", stop), or None when the finer bars are
+    unavailable (so the caller can fall back)."""
+    if fine is None or len(fine) == 0:
+        return None
+    for _, c in fine.iterrows():
+        hi, lo = float(c["High"]), float(c["Low"])
+        if direction == "Long":
+            hs, ht = lo <= stop, hi >= target
+        else:
+            hs, ht = hi >= stop, lo <= target
+        if hs and ht:
+            return ("Loss", stop)   # still both in one 1m bar — conservative
+        if hs:
+            return ("Loss", stop)
+        if ht:
+            return ("Win", target)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -476,9 +519,11 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
     series_cache: dict[str, pd.DataFrame | None] = {}
     volavg_cache: dict[str, pd.Series | None] = {}
     iatr_cache: dict[str, pd.Series | None] = {}
+    fine_cache: dict[str, pd.DataFrame | None] = {}
 
     atr_period = int(cfg["stop_params"].get("atr_period", 14))
     atr_mode = str(cfg["stop_params"].get("atr_timeframe", "intraday")).lower()
+    refine_interval = int(cfg.get("refine_interval_min", 1) or 0)
 
     def daily(sym):
         if sym not in daily_cache:
@@ -495,6 +540,22 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
             s = get_intraday_range(sym, hist_start, end, interval)
             series_cache[sym] = s.sort_index() if s is not None and not s.empty else None
         return series_cache[sym]
+
+    def fine_series(sym):
+        # Finer-interval bars (e.g. 1-minute) used only to resolve ambiguous
+        # exits. Loaded over the trade range; absent data just disables refining.
+        if not refine_interval or refine_interval >= interval:
+            return None
+        if sym not in fine_cache:
+            s = get_intraday_range(sym, start, end, refine_interval)
+            fine_cache[sym] = s.sort_index() if s is not None and not s.empty else None
+        return fine_cache[sym]
+
+    def make_refiner(sym):
+        fine = fine_series(sym)
+        if fine is None:
+            return None
+        return lambda ts0, ts1: fine[(fine.index >= ts0) & (fine.index < ts1)]
 
     def vol_avg(sym):
         # thinkorswim Average(volume, length): simple MA including the current
@@ -546,11 +607,12 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
     coverage = {"requested_sessions": 0, "missing": [], "covered": 0}
     # Why a run produced the trades it did — so "0 trades" is never a black box.
     diag = {"candles_evaluated": 0, "level_touches": 0, "volume_spikes": 0,
-            "setups_detected": 0, "setups_skipped": 0}
+            "setups_detected": 0, "setups_skipped": 0, "ambiguous_bars": 0, "refined_bars": 0}
 
     for ticker in cfg["tickers"]:
         proxy = sector_map.get(ticker)
         ticker_vol_avg = vol_avg(ticker)
+        refine = make_refiner(ticker)
         for day in dates:
             coverage["requested_sessions"] += 1
             session = day_session(ticker, day)
@@ -574,6 +636,7 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
                 ticker, day, session, window, levels, resolve_atr, proxy, ticker_vol_avg,
                 cfg=cfg, rr=rr, detect=detect, place_stop=place_stop, skip=skip,
                 day_session=day_session, get_daily=daily, warnings=warnings, diag=diag,
+                refine=refine, interval=interval,
             )
             if trade:
                 trades.append(trade)
@@ -590,7 +653,7 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
 
 
 def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_series, *, cfg, rr,
-              detect, place_stop, skip, day_session, get_daily, warnings, diag):
+              detect, place_stop, skip, day_session, get_daily, warnings, diag, refine=None, interval=5):
     """Find the first qualifying setup of the day and resolve it to a trade/skip.
 
     `vol_avg_series` is the ticker's thinkorswim-style volume MA (continuous,
@@ -681,7 +744,10 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
         target = entry + risk * rr if direction == "Long" else entry - risk * rr
 
         forward = session[session.index > ts]
-        outcome, exit_price, exit_ts, note = _simulate(direction, entry, stop, target, forward)
+        outcome, exit_price, exit_ts, note = _simulate(
+            direction, entry, stop, target, forward,
+            refine=refine, interval_min=interval, diag=diag,
+        )
         r_result = (exit_price - entry) / risk if direction == "Long" else (entry - exit_price) / risk
 
         return {

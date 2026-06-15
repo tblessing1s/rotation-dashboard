@@ -50,6 +50,7 @@ const DEFAULT_FORM = {
   atrTimeframe: "intraday",
   startTime: "09:30",
   endTime: "11:00",
+  refineWith1m: true,
 };
 
 // Form state -> the JSON config shape the backend validates.
@@ -81,6 +82,7 @@ function buildConfig(f) {
       atr_timeframe: f.atrTimeframe,
     },
     time_window: { start_time: f.startTime, end_time: f.endTime },
+    refine_interval_min: f.refineWith1m ? 1 : 0,
   };
 }
 
@@ -204,6 +206,7 @@ export default function BacktestView({ store }) {
       atrTimeframe: c.stop_params?.atr_timeframe ?? DEFAULT_FORM.atrTimeframe,
       startTime: c.time_window?.start_time || DEFAULT_FORM.startTime,
       endTime: c.time_window?.end_time || DEFAULT_FORM.endTime,
+      refineWith1m: (c.refine_interval_min ?? 1) > 0,
     });
     setStatus(`Loaded configuration "${name}".`);
   }, [savedConfigs]);
@@ -300,6 +303,9 @@ export default function BacktestView({ store }) {
           <Field label="Skip conditions">
             <Toggle checked={form.skipIfSpyDown} onChange={(v) => set("skipIfSpyDown", v)} label="Skip if SPY direction down" />
             <Toggle checked={form.skipIfSectorDown} onChange={(v) => set("skipIfSectorDown", v)} label="Skip if sector direction down" />
+          </Field>
+          <Field label="Exit resolution" hint="When a 5-min bar hits both stop and target, use 1-min bars to see which came first.">
+            <Toggle checked={form.refineWith1m} onChange={(v) => set("refineWith1m", v)} label="Resolve ambiguous exits on 1-min data" />
           </Field>
         </Grid>
 
@@ -545,6 +551,7 @@ function Diagnostics({ d, cov }) {
         {" · "}{d.volume_spikes} volume spike{d.volume_spikes === 1 ? "" : "s"}
         {" · "}{d.setups_detected} setup{d.setups_detected === 1 ? "" : "s"}
         {d.setups_skipped ? ` · ${d.setups_skipped} skipped` : ""}
+        {d.ambiguous_bars ? ` · ${d.refined_bars}/${d.ambiguous_bars} ambiguous exits resolved on 1m` : ""}
       </div>
       {tip && <div style={{ marginTop: 5, font: `400 12px ${C.sans}`, color: C.yellow }}>💡 {tip}</div>}
     </div>

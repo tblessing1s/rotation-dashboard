@@ -510,6 +510,8 @@ def api_backtest_backfill():
     result = backtest_service.backfill(
         symbols, config["date_range"]["start"], config["date_range"]["end"],
         int(config.get("interval_min", 5)), engine._vol_avg_length(config),
+        fine_symbols=config["tickers"],
+        refine_interval_min=int(config.get("refine_interval_min", 1) or 0),
     )
     return jsonify({"ok": result["ok"], "backfill": result,
                     "coverage": backtest_service.coverage_report(config)})

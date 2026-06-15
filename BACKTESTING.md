@@ -33,8 +33,12 @@ For each ticker × trading day in the range:
 4. **Entry** = candle close (or the level itself on "immediate touch").
    **Stop** = per the stop-placement rule. **Target** = `entry ± risk × R`.
 5. Later candles are stepped through to see whether the **target or stop** is
-   hit first (if both are touched in one 5-minute candle, the stop is assumed to
-   fill first — the conservative read).
+   hit first. When a single 5-minute bar's range contains **both** levels, the
+   order is ambiguous at that timeframe, so the engine drops to **1-minute bars**
+   inside that candle to resolve which printed first (`refine_interval_min`,
+   default 1; backfill pulls 1-minute bars for the traded tickers). With no
+   1-minute data it falls back to the conservative "stop first" read. The
+   diagnostics line reports how many ambiguous exits were resolved on 1-minute.
 6. The trade is logged with **market context**: SPY direction and the ticker's
    sector-proxy direction at entry (price-so-far vs the session open).
 

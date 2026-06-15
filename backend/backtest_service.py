@@ -103,51 +103,62 @@ def coverage_report(config: dict) -> dict:
 
 
 def backfill(symbols: list[str], start: str, end: str, interval_min: int = 5,
-             vol_avg_length: int = 50) -> dict:
+             vol_avg_length: int = 50, fine_symbols: list[str] | None = None,
+             refine_interval_min: int = 1) -> dict:
     """Pull daily *and* intraday bars for `symbols` over [start, end] and store them.
 
     The engine needs both: daily bars supply yesterday's high/low and ATR, while
     intraday bars are what the candles are walked over. Arbitrary backtest
     tickers (e.g. CRWV) are usually outside the scheduled-ingestion universe, so
     their daily history must be pulled here too — otherwise every session is
-    skipped with "no prior daily bar". Tries each provider in priority order
-    (Schwab first, Yahoo last); returns a per-symbol status for both feeds."""
+    skipped with "no prior daily bar". For the traded tickers (`fine_symbols`) we
+    also pull finer (1-minute) bars so ambiguous 5-minute exits can be resolved.
+    Tries each provider in priority order (Schwab first, Yahoo last)."""
     chain = [p for p in build_chain()]
     daily = _backfill_daily(symbols, start, chain)
     # Pull a buffer of prior intraday sessions so the volume MA is fully formed
     # from the first requested day (matches thinkorswim, which carries the window
     # across days).
     intraday_start = engine.intraday_history_start(start, vol_avg_length)
+    fine_symbols = fine_symbols if fine_symbols is not None else symbols
+    fine_on = refine_interval_min and refine_interval_min < interval_min
+
     results = {}
     total_written = 0
+    fine_written = 0
     for sym in symbols:
-        errors = []
-        wrote = 0
-        source = None
-        for provider in chain:
-            try:
-                bars = with_retries(
-                    lambda: provider.get_intraday_bars(sym, intraday_start, end, interval_min),
-                    attempts=2, base_delay=2.0, label=f"{provider.name} {sym} intraday",
-                )
-                wrote = db.append_intraday_bars(sym, bars, provider.name, interval_min)
-                source = provider.name
-                break
-            except NotImplementedError:
-                continue
-            except Exception as e:  # noqa: BLE001 — fall through to the next provider
-                errors.append(f"{provider.name}: {e}")
+        wrote, source, error = _pull_intraday(sym, intraday_start, end, interval_min, chain)
         total_written += wrote
-        results[sym] = {
-            "rowsWritten": wrote, "source": source,
-            "error": None if source else ("; ".join(errors) or "no intraday provider"),
-            "daily": daily.get(sym, {}),
-        }
+        entry = {"rowsWritten": wrote, "source": source, "error": error,
+                 "daily": daily.get(sym, {})}
+        if fine_on and sym in set(fine_symbols):
+            fw, fsrc, ferr = _pull_intraday(sym, start, end, refine_interval_min, chain)
+            fine_written += fw
+            entry["fine"] = {"rowsWritten": fw, "source": fsrc, "error": ferr,
+                             "interval": refine_interval_min}
+        results[sym] = entry
         time.sleep(0.1)  # be gentle with rate limits
     ok = any(r["source"] for r in results.values())
-    return {"ok": ok, "rowsWritten": total_written,
+    return {"ok": ok, "rowsWritten": total_written, "fineWritten": fine_written,
             "dailyWritten": sum(d.get("rowsWritten", 0) for d in daily.values()),
             "perSymbol": results, "providers": [p.name for p in chain]}
+
+
+def _pull_intraday(sym: str, start: str, end: str, interval_min: int, chain):
+    """Pull intraday bars for one symbol at `interval_min`; return (wrote, source, error)."""
+    errors = []
+    for provider in chain:
+        try:
+            bars = with_retries(
+                lambda: provider.get_intraday_bars(sym, start, end, interval_min),
+                attempts=2, base_delay=2.0, label=f"{provider.name} {sym} {interval_min}m",
+            )
+            return db.append_intraday_bars(sym, bars, provider.name, interval_min), provider.name, None
+        except NotImplementedError:
+            continue
+        except Exception as e:  # noqa: BLE001 — fall through to the next provider
+            errors.append(f"{provider.name}: {e}")
+    return 0, None, ("; ".join(errors) or "no intraday provider")
 
 
 def _backfill_daily(symbols: list[str], start: str, chain) -> dict:
@@ -195,7 +206,9 @@ def run(raw_config: dict, auto_backfill: bool = False) -> dict:
         symbols = sorted({m["symbol"] for m in coverage["missing"]})
         backfill_result = backfill(symbols, config["date_range"]["start"],
                                    config["date_range"]["end"], int(config.get("interval_min", 5)),
-                                   engine._vol_avg_length(config))
+                                   engine._vol_avg_length(config),
+                                   fine_symbols=config["tickers"],
+                                   refine_interval_min=int(config.get("refine_interval_min", 1) or 0))
         coverage = coverage_report(config)
 
     get_intraday_range, get_daily = _make_loaders()
