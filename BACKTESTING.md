@@ -66,8 +66,9 @@ average loss (R), and expectancy per trade.
    date, and **Export CSV** for the filtered rows.
 5. Optionally **Save config** under a name and reload it later.
 
-Times are **exchange-local (America/New_York)**. `09:30–11:00` is the first 90
-minutes of the regular session.
+Backtest time windows are **US Central time** (`America/Chicago`). Daylight
+saving time is handled automatically, so `08:30–10:00` covers the first 90
+minutes of the regular NYSE session when the market opens at 9:30 Eastern.
 
 ---
 
@@ -96,7 +97,7 @@ All endpoints accept/return JSON. The config can be sent bare or wrapped as
   "risk_reward": 2,
   "stop_logic": "atr_divided_by_2",
   "stop_params": { "fixed_distance": 0.5, "buffer_pct": 0.1, "atr_period": 14 },
-  "time_window": { "start_time": "09:30", "end_time": "11:00" }
+  "time_window": { "start_time": "08:30", "end_time": "10:00" }
 }
 ```
 

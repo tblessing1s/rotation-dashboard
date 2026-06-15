@@ -56,7 +56,7 @@ def base_config(**over):
     cfg = {
         "tickers": ["AMD"],
         "date_range": {"start": "2026-06-01", "end": "2026-06-01"},
-        "time_window": {"start_time": "09:30", "end_time": "11:00"},
+        "time_window": {"start_time": "08:30", "end_time": "10:00"},
         "risk_reward": 2,
         "stop_logic": "atr_divided_by_2",
         # Daily ATR (== 10 from daily_frame) keeps the hand-computed stops; small
@@ -86,6 +86,23 @@ def test_validate_config_defaults_and_errors():
     joined = " ".join(errs)
     assert "ticker" in joined and "risk_reward" in joined and "stop_logic" in joined
     assert "on or before" in joined
+
+
+def test_time_window_is_interpreted_in_central_time():
+    day = "2026-06-01"  # CDT, so 08:30 CT == 09:30 ET.
+    bars = [
+        ("09:25", 101, 102, 99.9, 101, 5000),  # before the 08:30 CT window
+        ("09:30", 105, 106, 104, 105, 1000),
+        ("09:35", 105, 106, 104, 105, 1000),
+        ("09:40", 101, 102, 99.9, 101, 5000),
+        ("09:45", 111, 114, 110, 113, 1200),
+    ]
+    loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
+
+    out = run(base_config(), loaders)
+
+    assert len(out["trades"]) == 1
+    assert out["trades"][0]["entry_time"] == "09:40"
 
 
 # ---------------------------------------------------------------------------

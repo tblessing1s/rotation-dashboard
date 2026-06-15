@@ -22,6 +22,7 @@ Design
 from __future__ import annotations
 
 from datetime import date as _date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 
@@ -59,7 +60,9 @@ DEFAULT_CONFIG = {
         # (proportional to a 5-minute day-trade); "daily" = N-day ATR.
         "atr_timeframe": "intraday",
     },
-    "time_window": {"start_time": "09:30", "end_time": "11:00"},
+    # Backtest time windows are entered and evaluated in US Central time.
+    # America/Chicago handles CST/CDT automatically across daylight saving time.
+    "time_window": {"start_time": "08:30", "end_time": "10:00"},
     "interval_min": 5,
     # When a 5-minute bar's range contains BOTH the stop and the target, resolve
     # which was hit first using bars of this finer interval (1 minute). 0 = off
@@ -69,6 +72,8 @@ DEFAULT_CONFIG = {
 }
 
 ENTRY_TIMINGS = {"candle_close", "immediate_touch"}
+EXCHANGE_TZ = ZoneInfo("America/New_York")
+BACKTEST_WINDOW_TZ = ZoneInfo("America/Chicago")
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -469,13 +474,25 @@ def _session_dates(start: str, end: str) -> list[str]:
 
 def _window_candles(intraday: pd.DataFrame, start_time: str, end_time: str,
                     skip_first_n: int) -> pd.DataFrame:
-    """Session candles inside the time window, after dropping the first N of the day."""
+    """Session candles inside the Central Time window, after dropping the first N of the day.
+
+    Stored intraday data is indexed as tz-naive exchange wall-clock (Eastern)
+    timestamps. The backtest UI/config time window is intentionally Central
+    Time, so localize each session timestamp to the exchange timezone, convert
+    to America/Chicago (CST/CDT as appropriate), and compare wall-clock times
+    there.
+    """
     if intraday is None or intraday.empty:
         return intraday
     session = intraday.sort_index()
     if skip_first_n > 0:
         session = session.iloc[skip_first_n:]
-    t = session.index.time
+    central_index = (
+        pd.DatetimeIndex(session.index)
+        .tz_localize(EXCHANGE_TZ, nonexistent="shift_forward", ambiguous="NaT")
+        .tz_convert(BACKTEST_WINDOW_TZ)
+    )
+    t = central_index.time
     st = datetime.strptime(start_time, "%H:%M").time()
     et = datetime.strptime(end_time, "%H:%M").time()
     mask = [(x >= st) and (x <= et) for x in t]
@@ -491,7 +508,8 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily, manual_resoluti
         A validated config (see ``validate_config``).
     get_intraday_range : callable(symbol, start, end, interval_min) -> DataFrame | None
         Continuous intraday OHLCV for [start, end] (tz-naive ET index, may span
-        multiple sessions). Loaded with a buffer before the requested range so
+        multiple sessions). The configured time_window is evaluated in US
+        Central time (America/Chicago, CST/CDT). Loaded with a buffer before the requested range so
         the volume MA matches thinkorswim from the first session.
     get_daily : callable(symbol) -> DataFrame | None
         Daily OHLCV (date index) for yesterday's levels and ATR.
