@@ -233,8 +233,10 @@ export default function BacktestView({ store }) {
   ), [trades, fTicker, fOutcome, fFrom, fTo]);
 
   const exportCsv = useCallback(() => {
+    const usesAtrStop = ranConfig?.stop_logic === "atr_divided_by_2";
     const cols = ["date", "ticker", "level_type", "volume_spike", "entry_volume", "avg_volume",
       "volume_ratio", "direction", "entry_time", "entry_price", "stop_price", "target_price",
+      ...(usesAtrStop ? ["risk_amount", "reward_amount"] : []),
       "exit_time", "exit_price", "outcome", "r_result", "spy_direction", "sector_direction", "notes"];
     const esc = (v) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     const rows = [cols.join(","), ...filtered.map((t) => cols.map((c) => esc(t[c])).join(","))];
@@ -243,9 +245,10 @@ export default function BacktestView({ store }) {
     const a = document.createElement("a");
     a.href = url; a.download = `backtest_${form.start}_${form.end}.csv`; a.click();
     URL.revokeObjectURL(url);
-  }, [filtered, form.start, form.end]);
+  }, [filtered, form.start, form.end, ranConfig?.stop_logic]);
 
   const summary = result?.summary;
+  const usesAtrStop = ranConfig?.stop_logic === "atr_divided_by_2";
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -411,14 +414,14 @@ export default function BacktestView({ store }) {
             <table style={{ width: "100%", borderCollapse: "collapse", font: `400 12px ${C.mono}` }}>
               <thead>
                 <tr>
-                  {["Date", "Ticker", "Level", "Vol↑", "Volume", "Avg vol", "RVOL", "Dir", "Entry time", "Entry", "Stop", "Target", "Exit time", "Exit", "Outcome", "R", "SPY", "Sector", "Notes"].map((h) => (
+                  {["Date", "Ticker", "Level", "Vol↑", "Volume", "Avg vol", "RVOL", "Dir", "Entry time", "Entry", "Stop", "Target", ...(usesAtrStop ? ["Risk amt", "Reward amt"] : []), "Exit time", "Exit", "Outcome", "R", "SPY", "Sector", "Notes"].map((h) => (
                     <th key={h} style={thStyle}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 && (
-                  <tr><td colSpan={19} style={{ ...tdStyle, color: C.inkFaint, textAlign: "center", padding: 18 }}>No trades match the filters.</td></tr>
+                  <tr><td colSpan={usesAtrStop ? 21 : 19} style={{ ...tdStyle, color: C.inkFaint, textAlign: "center", padding: 18 }}>No trades match the filters.</td></tr>
                 )}
                 {filtered.map((t, i) => (
                   <tr key={i} style={{ borderTop: `1px solid ${C.lineSoft}` }}>
@@ -434,6 +437,8 @@ export default function BacktestView({ store }) {
                     <td style={tdStyle}>{fmt(t.entry_price)}</td>
                     <td style={tdStyle}>{fmt(t.stop_price)}</td>
                     <td style={tdStyle}>{fmt(t.target_price)}</td>
+                    {usesAtrStop && <td style={tdStyle}>{fmt(t.risk_amount)}</td>}
+                    {usesAtrStop && <td style={tdStyle}>{fmt(t.reward_amount)}</td>}
                     <td style={tdStyle}>{t.exit_time || "—"}</td>
                     <td style={tdStyle}>{fmt(t.exit_price)}</td>
                     <td style={{ ...tdStyle, color: OUTCOME_COLOR[t.outcome] || C.ink, fontWeight: 600 }}>

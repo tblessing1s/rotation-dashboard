@@ -117,6 +117,7 @@ def test_long_bounce_win_matches_manual_calc():
     assert t["entry_volume"] == 5000 and t["avg_volume"] == 2333
     assert t["volume_ratio"] == 2.14
     assert (t["entry_price"], t["stop_price"], t["target_price"]) == (101.0, 95.0, 113.0)
+    assert (t["risk_amount"], t["reward_amount"]) == (6.0, 12.0)
     assert t["outcome"] == "Win" and t["exit_price"] == 113.0 and t["r_result"] == 2.0
     assert out["summary"]["win_rate_percent"] == 100.0
     assert out["summary"]["expectancy_per_trade"] == 2.0
@@ -148,6 +149,7 @@ def test_short_rejection_loss_and_summary_math():
     outcomes = {t["date"]: t for t in out["trades"]}
     assert outcomes[loss_day]["direction"] == "Short"
     assert (outcomes[loss_day]["entry_price"], outcomes[loss_day]["stop_price"]) == (109.0, 115.0)
+    assert (outcomes[loss_day]["risk_amount"], outcomes[loss_day]["reward_amount"]) == (6.0, 12.0)
     assert outcomes[loss_day]["outcome"] == "Loss" and outcomes[loss_day]["r_result"] == -1.0
 
     s = out["summary"]
