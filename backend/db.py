@@ -366,7 +366,7 @@ def get_intraday_bars(symbol: str, start_date: str, end_date: str,
     """
     conn = connect()
     rows = conn.execute(
-        "SELECT epoch_ms, time, date, open, high, low, close, volume, source, fetched_at"
+        "SELECT id, epoch_ms, time, date, open, high, low, close, volume, source, fetched_at"
         " FROM intraday_bars WHERE symbol=? AND interval_min=? AND date BETWEEN ? AND ?"
         " ORDER BY epoch_ms, fetched_at, id",
         (symbol, interval_min, start_date, end_date),
