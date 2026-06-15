@@ -722,11 +722,13 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
         if skip.get("skip_if_spy_down") and spy_dir == "Down":
             diag["setups_skipped"] += 1
             return {**base, "entry_price": None, "stop_price": None, "target_price": None,
+                    "risk_amount": None, "reward_amount": None,
                     "exit_price": None, "outcome": "Skip", "r_result": 0.0,
                     "exit_time": None, "notes": "skipped: SPY direction down"}
         if skip.get("skip_if_sector_down") and sector_dir == "Down":
             diag["setups_skipped"] += 1
             return {**base, "entry_price": None, "stop_price": None, "target_price": None,
+                    "risk_amount": None, "reward_amount": None,
                     "exit_price": None, "outcome": "Skip", "r_result": 0.0,
                     "exit_time": None, "notes": "skipped: sector direction down"}
 
@@ -745,7 +747,8 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
         if risk <= 0:
             warnings.append(f"{ticker} {day}: zero risk distance — setup skipped.")
             return None
-        target = entry + risk * rr if direction == "Long" else entry - risk * rr
+        reward = risk * rr
+        target = entry + reward if direction == "Long" else entry - reward
 
         forward = session[session.index > ts]
         outcome, exit_price, exit_ts, note = _simulate(
@@ -769,8 +772,9 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
         if outcome == "Unresolved" or exit_price is None:
             return {
                 **base, "entry_price": round(entry, 2), "stop_price": round(stop, 2),
-                "target_price": round(target, 2), "exit_price": None,
-                "outcome": "Unresolved", "r_result": None, "exit_time": None, "notes": note,
+                "target_price": round(target, 2),
+                "risk_amount": round(risk, 2), "reward_amount": round(reward, 2),
+                "exit_price": None, "outcome": "Unresolved", "r_result": None, "exit_time": None, "notes": note,
             }
 
         r_result = _binary_r_result(outcome, rr)
@@ -779,6 +783,8 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
             "entry_price": round(entry, 2),
             "stop_price": round(stop, 2),
             "target_price": round(target, 2),
+            "risk_amount": round(risk, 2),
+            "reward_amount": round(reward, 2),
             "exit_price": round(exit_price, 2),
             "outcome": outcome,
             "r_result": r_result,
