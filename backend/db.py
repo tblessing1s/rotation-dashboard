@@ -148,6 +148,31 @@ CREATE TABLE IF NOT EXISTS setup_signals (
 -- candle is idempotent (mirrors the append-only/dedup pattern used elsewhere).
 CREATE UNIQUE INDEX IF NOT EXISTS idx_setup_signals_dedup
     ON setup_signals(date, ticker, candle_time);
+
+CREATE TABLE IF NOT EXISTS intraday_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,
+    ticker TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    level_type TEXT,
+    entry_price REAL NOT NULL,
+    stop_price REAL NOT NULL,
+    target_price REAL NOT NULL,
+    exit_price REAL,
+    position_size INTEGER NOT NULL,
+    entry_time TEXT NOT NULL,
+    exit_time TEXT,
+    outcome TEXT NOT NULL DEFAULT 'OPEN', -- OPEN | WIN | LOSS | CLOSED | SKIP
+    r_result REAL,
+    account_type TEXT NOT NULL DEFAULT 'PAPER',
+    order_id TEXT,
+    payload TEXT NOT NULL,
+    notes TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_intraday_trades_signal
+    ON intraday_trades(date, ticker, entry_time, account_type);
 """
 
 
@@ -713,6 +738,86 @@ def recent_setup_signals(date: str | None = None, limit: int = 100) -> list[dict
         payload = json.loads(row["payload"])
         payload["_recordedAt"] = row["created_at"]
         out.append(payload)
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Intraday paper trades
+# ---------------------------------------------------------------------------
+def record_intraday_trade(trade: dict) -> dict:
+    """Insert one paper intraday trade from an executor signal.
+
+    The unique key is the signal candle (date/ticker/entry_time/account_type), so
+    clicking "execute" twice returns the already logged paper trade instead of
+    creating a duplicate fill.
+    """
+    account_type = str(trade.get("account_type") or "PAPER").upper()
+    now = utcnow()
+    payload = json.dumps(trade, default=str)
+    conn = connect()
+    with conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO intraday_trades"
+            " (date, ticker, direction, level_type, entry_price, stop_price, target_price,"
+            "  exit_price, position_size, entry_time, exit_time, outcome, r_result,"
+            "  account_type, order_id, payload, notes, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                trade.get("date"), trade.get("ticker"), trade.get("direction"),
+                trade.get("level_type"), trade.get("entry_price"), trade.get("stop_price"),
+                trade.get("target_price"), trade.get("exit_price"), trade.get("position_size"),
+                trade.get("entry_time"), trade.get("exit_time"), trade.get("outcome", "OPEN"),
+                trade.get("r_result"), account_type, trade.get("order_id"), payload,
+                trade.get("notes"), now, now,
+            ),
+        )
+        inserted = cur.rowcount > 0
+        if inserted:
+            trade_id = cur.lastrowid
+        else:
+            row = conn.execute(
+                "SELECT id FROM intraday_trades WHERE date=? AND ticker=? AND entry_time=? AND account_type=?",
+                (trade.get("date"), trade.get("ticker"), trade.get("entry_time"), account_type),
+            ).fetchone()
+            trade_id = row["id"] if row else None
+    return get_intraday_trade(trade_id) if trade_id else {}
+
+
+def get_intraday_trade(trade_id: int | None) -> dict | None:
+    if trade_id is None:
+        return None
+    conn = connect()
+    row = conn.execute("SELECT * FROM intraday_trades WHERE id=?", (trade_id,)).fetchone()
+    return _trade_row(row) if row else None
+
+
+def list_intraday_trades(date: str | None = None, status: str | None = None,
+                         limit: int = 100) -> list[dict]:
+    """Return paper intraday trades newest first, optionally by date/status."""
+    conn = connect()
+    clauses = ["account_type='PAPER'"]
+    params: list[object] = []
+    if date:
+        clauses.append("date=?")
+        params.append(date)
+    if status:
+        clauses.append("outcome=?")
+        params.append(status)
+    params.append(limit)
+    rows = conn.execute(
+        "SELECT * FROM intraday_trades WHERE " + " AND ".join(clauses) +
+        " ORDER BY id DESC LIMIT ?",
+        params,
+    ).fetchall()
+    return [_trade_row(row) for row in rows]
+
+
+def _trade_row(row: sqlite3.Row) -> dict:
+    out = dict(row)
+    try:
+        out["payload"] = json.loads(out.get("payload") or "{}")
+    except json.JSONDecodeError:
+        out["payload"] = {}
     return out
 
 

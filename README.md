@@ -237,7 +237,7 @@ below.)
 revisions, valuation, credit, chart-reading toggles — and any Level 1 field
 you choose to override (marked MANUAL with its timestamp until cleared).
 
-## Intraday Setup Executor (Phases 1–2)
+## Intraday Setup Executor (Phases 1–3, paper trading only)
 
 Real-time setup *detection* and alerting for day trading, built on the same
 rules as the backtester (`backend/intraday_executor.py`). It evaluates each
@@ -253,7 +253,7 @@ beyond the level, a 2:1 target, an 08:30–10:00 Central window, and `$20` fixed
 risk per trade — across `CRWV, HIMS, CVNA, HOOD, TOST`. Override any of these
 per request.
 
-**Backend** (detection — no order placement yet, that's a later phase):
+**Backend** (detection + paper execution only — no live Schwab order placement):
 
 | Endpoint | Purpose |
 | --- | --- |
@@ -261,13 +261,17 @@ per request.
 | `POST /api/executor/monitor` | Detect on today's latest closed candle + per-ticker status (incl. window candles for charting). `{"refresh": true}` first pulls today's 5-minute bars from Schwab/Yahoo. |
 | `POST /api/executor/playback` | Replay stored candles over a `date` or `date_range` and return every signal — validates detection against historical data. `{"autoBackfill": true}` pulls missing bars first. |
 | `GET /api/executor/signals?date=YYYY-MM-DD` | The logged signals (one row per detected candle; idempotent). |
+| `POST /api/executor/paper/execute` | Log a detected signal as a simulated paper bracket trade. This does **not** call Schwab. |
+| `GET /api/executor/paper/trades?date=YYYY-MM-DD` | Return logged paper trades for the session. |
 
 **Frontend** — the **Executor** tab (`frontend/src/ExecutorView.jsx`): a live
 monitor card per ticker (inline SVG 5-minute candle chart with Y-High/Y-Low
 lines + volume histogram, current price, volume ratio, distance to levels), an
 auto-refresh poll, a blinking alert + modal (entry/stop/target/position size)
 when a setup triggers, opt-in desktop notifications (deduped per candle), a
-today's-signals log, and a playback panel to validate alerts on a past session.
+today's-signals log, an **Execute Paper** button that logs simulated trades, a
+paper-trades panel, and a playback panel to validate alerts on a past session.
+Live trading remains intentionally disabled until the paper workflow is proven.
 
 Real-time is polling-based here (Schwab `pricehistory`), matching the rest of
 the stack; a WebSocket tick feed is a future enhancement.

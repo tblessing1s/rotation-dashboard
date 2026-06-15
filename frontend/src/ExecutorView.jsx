@@ -15,8 +15,11 @@ import { C } from "./theme.js";
      POST /api/executor/monitor   {config, refresh, date?}
      POST /api/executor/playback  {config, date, autoBackfill}
      GET  /api/executor/signals?date=YYYY-MM-DD
+     POST /api/executor/paper/execute {signal}
+     GET  /api/executor/paper/trades?date=YYYY-MM-DD
 
-   Order *execution* is a later phase — the alert modal acknowledges/skips only.
+   Paper execution is supported by logging simulated bracket trades only. No
+   live Schwab order placement is called from this UI.
    ============================================================================ */
 
 const API = "";
@@ -88,6 +91,8 @@ export default function ExecutorView({ store }) {
   const [status, setStatus] = useState("");
   const [errors, setErrors] = useState([]);
   const [scanning, setScanning] = useState(false);
+  const [paperTrades, setPaperTrades] = useState([]);
+  const [executingKey, setExecutingKey] = useState(null);
 
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [pollSec, setPollSec] = useState(30);
@@ -147,6 +152,14 @@ export default function ExecutorView({ store }) {
     } catch (e) { /* log is best-effort */ }
   }, []);
 
+  const refreshPaperTrades = useCallback(async (date) => {
+    try {
+      const r = await fetch(`${API}/api/executor/paper/trades?date=${encodeURIComponent(date)}`);
+      const data = await r.json().catch(() => ({}));
+      if (data.ok) setPaperTrades(data.trades || []);
+    } catch (e) { /* paper trade log is best-effort */ }
+  }, []);
+
   const scan = useCallback(async (refresh) => {
     setScanning(true); setErrors([]);
     setStatus(refresh ? "Pulling today's 5-minute bars, then scanning…" : "Scanning latest closed candles…");
@@ -162,9 +175,10 @@ export default function ExecutorView({ store }) {
     setScanAt(new Date());
     ingestSignals(data.signals);
     refreshLog(data.date || today());
+    refreshPaperTrades(data.date || today());
     const live = (data.monitors || []).filter((m) => m.state === "monitoring").length;
     setStatus(`Scanned ${data.monitors?.length || 0} ticker(s) · ${live} live · ${data.signals?.length || 0} active signal(s).`);
-  }, [form, ingestSignals, refreshLog]);
+  }, [form, ingestSignals, refreshLog, refreshPaperTrades]);
 
   // Auto-refresh polling.
   useEffect(() => {
@@ -184,6 +198,21 @@ export default function ExecutorView({ store }) {
     const next = new Set(ackedRef.current); next.add(signalKey(sig)); persistAcked(next);
     setAlertQueue((q) => q.filter((s) => signalKey(s) !== signalKey(sig)));
   }, [persistAcked]);
+
+  const executePaper = useCallback(async (sig) => {
+    const key = signalKey(sig);
+    setExecutingKey(key);
+    setErrors([]);
+    const { ok, data } = await postJson("/api/executor/paper/execute", { signal: sig });
+    setExecutingKey(null);
+    if (!ok || data.ok === false) {
+      setErrors(data.errors || [data.error || "Paper execution failed."]);
+      return;
+    }
+    setStatus(`Paper trade logged for ${data.trade?.ticker || sig.ticker} (${data.trade?.order_id || "simulated order"}).`);
+    await refreshPaperTrades(sig.date || today());
+    ackAlert(sig);
+  }, [ackAlert, refreshPaperTrades]);
 
   const runPlayback = useCallback(async () => {
     setPbRunning(true); setPbStatus("Replaying session…"); setPbSignals(null);
@@ -270,6 +299,8 @@ export default function ExecutorView({ store }) {
         </Card>
       )}
 
+      <PaperTradesPanel trades={paperTrades} />
+
       {/* ---- Playback (validate alerts on historical data) ---- */}
       <Card>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
@@ -286,7 +317,13 @@ export default function ExecutorView({ store }) {
       </Card>
 
       {activeAlert && (
-        <AlertModal sig={activeAlert} queued={alertQueue.length} onAck={() => ackAlert(activeAlert)} />
+        <AlertModal
+          sig={activeAlert}
+          queued={alertQueue.length}
+          executing={executingKey === signalKey(activeAlert)}
+          onExecute={() => executePaper(activeAlert)}
+          onAck={() => ackAlert(activeAlert)}
+        />
       )}
     </div>
   );
@@ -386,7 +423,7 @@ function MiniChart({ candles, yHigh, yLow }) {
 // ---------------------------------------------------------------------------
 // Setup alert modal
 // ---------------------------------------------------------------------------
-function AlertModal({ sig, queued, onAck }) {
+function AlertModal({ sig, queued, executing, onExecute, onAck }) {
   const dirColor = sig.direction === "Long" ? C.green : C.red;
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(3,6,10,0.72)", display: "grid", placeItems: "center", zIndex: 1000 }}>
@@ -412,13 +449,57 @@ function AlertModal({ sig, queued, onAck }) {
           <Row label="Level" value={`${sig.level_type} ${fmt(sig.level)}`} />
         </div>
         <div style={{ padding: "12px 18px", borderTop: `1px solid ${C.line}`, display: "flex", gap: 10 }}>
-          <Button primary onClick={onAck}>Acknowledge</Button>
+          <Button primary disabled={executing} onClick={onExecute}>{executing ? "Logging…" : "Execute Paper"}</Button>
           <Button onClick={onAck}>Skip</Button>
           <span style={{ flex: 1 }} />
-          <span style={{ font: `400 10px ${C.sans}`, color: C.inkFaint, alignSelf: "center", maxWidth: 130, textAlign: "right" }}>Order execution arrives in a later phase.</span>
+          <span style={{ font: `400 10px ${C.sans}`, color: C.inkFaint, alignSelf: "center", maxWidth: 130, textAlign: "right" }}>Paper only — no live Schwab order.</span>
         </div>
       </div>
     </div>
+  );
+}
+
+function PaperTradesPanel({ trades }) {
+  const open = (trades || []).filter((t) => t.outcome === "OPEN");
+  return (
+    <Card>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+        <strong style={{ font: `600 13px ${C.sans}`, color: C.ink }}>Paper trades</strong>
+        <span style={{ font: `400 12px ${C.mono}`, color: C.inkFaint }}>{open.length} open · {(trades || []).length} total today</span>
+        <span style={{ flex: 1 }} />
+        <span style={{ font: `600 10px ${C.sans}`, color: C.yellow, textTransform: "uppercase", letterSpacing: 0.3 }}>Simulated only</span>
+      </div>
+      {!trades?.length ? (
+        <div style={{ font: `400 12px ${C.sans}`, color: C.inkFaint }}>
+          Confirm a setup with <b>Execute Paper</b> to log a simulated bracket trade here. Live Schwab execution is intentionally disabled.
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", font: `400 12px ${C.mono}` }}>
+            <thead>
+              <tr>
+                {["Status", "Ticker", "Dir", "Entry", "Stop", "Target", "Size", "Signal", "Order"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {trades.map((t) => (
+                <tr key={t.id} style={{ borderTop: `1px solid ${C.lineSoft}` }}>
+                  <td style={{ ...tdStyle, color: t.outcome === "OPEN" ? C.green : C.inkDim }}>{t.outcome}</td>
+                  <td style={{ ...tdStyle, color: C.ink }}>{t.ticker}</td>
+                  <td style={{ ...tdStyle, color: t.direction === "LONG" ? C.green : C.red }}>{t.direction}</td>
+                  <td style={tdStyle}>{fmt(t.entry_price)}</td>
+                  <td style={tdStyle}>{fmt(t.stop_price)}</td>
+                  <td style={tdStyle}>{fmt(t.target_price)}</td>
+                  <td style={tdStyle}>{t.position_size}</td>
+                  <td style={tdStyle}>{t.date} {t.entry_time} CT</td>
+                  <td style={tdStyle}>{t.order_id}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
   );
 }
 
