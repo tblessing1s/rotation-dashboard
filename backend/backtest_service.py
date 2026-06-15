@@ -32,18 +32,18 @@ _CONFIG_KV_KEY = "backtest_configs"
 # ---------------------------------------------------------------------------
 # Datastore-backed loaders
 # ---------------------------------------------------------------------------
-def _make_loaders(interval_min: int):
+def _make_loaders():
     daily_cache: dict[str, object] = {}
 
-    def get_intraday(symbol, date_str, interval=interval_min):
-        return db.get_intraday_bars(symbol, date_str, date_str, interval)
+    def get_intraday_range(symbol, start, end, interval):
+        return db.get_intraday_bars(symbol, start, end, interval)
 
     def get_daily(symbol):
         if symbol not in daily_cache:
             daily_cache[symbol] = db.get_bars(symbol)
         return daily_cache[symbol]
 
-    return get_intraday, get_daily
+    return get_intraday_range, get_daily
 
 
 def _apply_default_sector_map(config: dict) -> dict:
@@ -102,7 +102,8 @@ def coverage_report(config: dict) -> dict:
             "complete": not missing and not missing_daily}
 
 
-def backfill(symbols: list[str], start: str, end: str, interval_min: int = 5) -> dict:
+def backfill(symbols: list[str], start: str, end: str, interval_min: int = 5,
+             vol_avg_length: int = 50) -> dict:
     """Pull daily *and* intraday bars for `symbols` over [start, end] and store them.
 
     The engine needs both: daily bars supply yesterday's high/low and ATR, while
@@ -113,6 +114,10 @@ def backfill(symbols: list[str], start: str, end: str, interval_min: int = 5) ->
     (Schwab first, Yahoo last); returns a per-symbol status for both feeds."""
     chain = [p for p in build_chain()]
     daily = _backfill_daily(symbols, start, chain)
+    # Pull a buffer of prior intraday sessions so the volume MA is fully formed
+    # from the first requested day (matches thinkorswim, which carries the window
+    # across days).
+    intraday_start = engine.intraday_history_start(start, vol_avg_length)
     results = {}
     total_written = 0
     for sym in symbols:
@@ -122,7 +127,7 @@ def backfill(symbols: list[str], start: str, end: str, interval_min: int = 5) ->
         for provider in chain:
             try:
                 bars = with_retries(
-                    lambda: provider.get_intraday_bars(sym, start, end, interval_min),
+                    lambda: provider.get_intraday_bars(sym, intraday_start, end, interval_min),
                     attempts=2, base_delay=2.0, label=f"{provider.name} {sym} intraday",
                 )
                 wrote = db.append_intraday_bars(sym, bars, provider.name, interval_min)
@@ -189,11 +194,12 @@ def run(raw_config: dict, auto_backfill: bool = False) -> dict:
     if auto_backfill and not coverage["complete"]:
         symbols = sorted({m["symbol"] for m in coverage["missing"]})
         backfill_result = backfill(symbols, config["date_range"]["start"],
-                                   config["date_range"]["end"], int(config.get("interval_min", 5)))
+                                   config["date_range"]["end"], int(config.get("interval_min", 5)),
+                                   engine._vol_avg_length(config))
         coverage = coverage_report(config)
 
-    get_intraday, get_daily = _make_loaders(int(config.get("interval_min", 5)))
-    result = engine.run_backtest(config, get_intraday=get_intraday, get_daily=get_daily)
+    get_intraday_range, get_daily = _make_loaders()
+    result = engine.run_backtest(config, get_intraday_range=get_intraday_range, get_daily=get_daily)
     out = {"ok": True, "result": result, "coverage": coverage}
     if backfill_result is not None:
         out["backfill"] = backfill_result

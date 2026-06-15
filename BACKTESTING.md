@@ -77,7 +77,7 @@ All endpoints accept/return JSON. The config can be sent bare or wrapped as
   "tickers": ["AMD", "HOOD", "HIMS", "CVNA"],
   "date_range": { "start": "2026-05-15", "end": "2026-06-14" },
   "setup_conditions": { "type": "support_resistance_bounce", "use_yesterday_levels": true, "proximity_pct": 0.3 },
-  "entry_rules": { "volume_multiplier": 2.0, "entry_timing": "candle_close" },
+  "entry_rules": { "volume_multiplier": 2.0, "vol_avg_length": 50, "entry_timing": "candle_close" },
   "skip_conditions": { "skip_first_n_candles": 0, "skip_if_spy_down": false, "skip_if_sector_down": false },
   "risk_reward": 2,
   "stop_logic": "atr_divided_by_2",
@@ -88,6 +88,13 @@ All endpoints accept/return JSON. The config can be sent bare or wrapped as
 
 `entry_timing`: `candle_close` | `immediate_touch`.
 `stop_logic`: `atr_divided_by_2` | `fixed_distance` | `just_beyond_level`.
+`vol_avg_length`: bars in the volume moving average. This matches thinkorswim's
+**Volume Avg** study — `Average(volume, length)` — a simple MA that *includes the
+current bar* and runs continuously across days (TOS default 50). The volume spike
+test is `candle volume ≥ volume_multiplier × that MA`; each trade reports
+`entry_volume`, `avg_volume`, and `volume_ratio` so the decision is auditable.
+Backfill automatically pulls a buffer of prior sessions so the MA is fully formed
+from the first day of the range.
 `sector_map` (optional) overrides the per-ticker sector proxy; otherwise it
 defaults from `config.ENTRY_CANDIDATE_PROXY` (e.g. AMD → XLK).
 

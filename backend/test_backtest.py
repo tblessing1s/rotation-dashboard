@@ -37,13 +37,18 @@ def intraday(date, rows):
 
 
 def make_loaders(intraday_map, daily_map):
-    def get_intraday(sym, date, interval=5):
-        return intraday_map.get((sym, date))
+    def get_intraday_range(sym, start, end, interval=5):
+        frames = [df for (s, d), df in intraday_map.items() if s == sym and start <= d <= end]
+        return pd.concat(frames).sort_index() if frames else None
 
     def get_daily(sym):
         return daily_map.get(sym)
 
-    return get_intraday, get_daily
+    return get_intraday_range, get_daily
+
+
+def run(cfg, loaders):
+    return engine.run_backtest(cfg, get_intraday_range=loaders[0], get_daily=loaders[1])
 
 
 def base_config(**over):
@@ -53,6 +58,8 @@ def base_config(**over):
         "time_window": {"start_time": "09:30", "end_time": "11:00"},
         "risk_reward": 2,
         "stop_logic": "atr_divided_by_2",
+        # Small MA so the short worked-example sessions form a full window.
+        "entry_rules": {"volume_multiplier": 2, "vol_avg_length": 3, "entry_timing": "candle_close"},
     }
     cfg.update(over)
     c, errors = engine.validate_config(cfg)
@@ -96,15 +103,16 @@ def test_long_bounce_win_matches_manual_calc():
         ("10:00", 111, 114, 110, 113, 1200),    # tags the 113 target
     ]
     loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
-    out = engine.run_backtest(base_config(), get_intraday=loaders[0], get_daily=loaders[1])
+    out = run(base_config(), loaders)
 
     assert len(out["trades"]) == 1
     t = out["trades"][0]
     assert t["direction"] == "Long" and t["level_type"] == "Y-Low"
     assert t["volume_spike"] is True
-    # Entry-candle volume vs the trailing average is exposed for auditing.
-    assert t["entry_volume"] == 5000 and t["avg_volume"] == 1000
-    assert t["volume_ratio"] == 5.0
+    # Entry-candle volume vs the TOS-style volume MA (length 3, includes the
+    # current bar): (1000 + 1000 + 5000) / 3 = 2333, ratio 5000/2333 = 2.14.
+    assert t["entry_volume"] == 5000 and t["avg_volume"] == 2333
+    assert t["volume_ratio"] == 2.14
     assert (t["entry_price"], t["stop_price"], t["target_price"]) == (101.0, 95.0, 113.0)
     assert t["outcome"] == "Win" and t["exit_price"] == 113.0 and t["r_result"] == 2.0
     assert out["summary"]["win_rate_percent"] == 100.0
@@ -132,7 +140,7 @@ def test_short_rejection_loss_and_summary_math():
         {"AMD": daily_frame()},
     )
     cfg = base_config(date_range={"start": win_day, "end": loss_day})
-    out = engine.run_backtest(cfg, get_intraday=loaders[0], get_daily=loaders[1])
+    out = run(cfg, loaders)
 
     outcomes = {t["date"]: t for t in out["trades"]}
     assert outcomes[loss_day]["direction"] == "Short"
@@ -159,7 +167,7 @@ def test_proximity_zero_is_a_touch_not_exact_equality():
     loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
     cfg = base_config(setup_conditions={"type": "support_resistance_bounce",
                                         "use_yesterday_levels": True, "proximity_pct": 0})
-    out = engine.run_backtest(cfg, get_intraday=loaders[0], get_daily=loaders[1])
+    out = run(cfg, loaders)
     assert len(out["trades"]) == 1 and out["trades"][0]["direction"] == "Long"
 
 
@@ -174,7 +182,7 @@ def test_diagnostics_explain_a_zero_trade_run():
         ("09:50", 101, 102, 99.9, 101, 1000),
     ]
     loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
-    out = engine.run_backtest(base_config(), get_intraday=loaders[0], get_daily=loaders[1])
+    out = run(base_config(), loaders)
     assert out["trades"] == []
     diag = out["diagnostics"]
     assert diag["candles_evaluated"] >= 1
@@ -198,7 +206,7 @@ def test_skip_first_n_candles_blocks_setup():
     loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
     # Dropping the first 4 candles removes the 09:45 setup entirely.
     cfg = base_config(skip_conditions={"skip_first_n_candles": 4})
-    out = engine.run_backtest(cfg, get_intraday=loaders[0], get_daily=loaders[1])
+    out = run(cfg, loaders)
     assert out["trades"] == []
 
 
@@ -217,7 +225,7 @@ def test_skip_if_spy_down_logs_a_skip():
         {"AMD": daily_frame()},
     )
     cfg = base_config(skip_conditions={"skip_if_spy_down": True})
-    out = engine.run_backtest(cfg, get_intraday=loaders[0], get_daily=loaders[1])
+    out = run(cfg, loaders)
     assert len(out["trades"]) == 1
     t = out["trades"][0]
     assert t["outcome"] == "Skip" and t["spy_direction"] == "Down"
@@ -226,7 +234,7 @@ def test_skip_if_spy_down_logs_a_skip():
 
 def test_missing_intraday_reported_as_coverage_gap():
     loaders = make_loaders({}, {"AMD": daily_frame()})
-    out = engine.run_backtest(base_config(), get_intraday=loaders[0], get_daily=loaders[1])
+    out = run(base_config(), loaders)
     assert out["trades"] == []
     assert out["coverage"]["missing"] == [{"ticker": "AMD", "date": "2026-06-01"}]
 
@@ -240,11 +248,11 @@ def test_fixed_distance_and_just_beyond_stops():
     ]
     loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
     cfg = base_config(stop_logic="fixed_distance", stop_params={"fixed_distance": 2.0})
-    t = engine.run_backtest(cfg, get_intraday=loaders[0], get_daily=loaders[1])["trades"][0]
+    t = run(cfg, loaders)["trades"][0]
     assert t["stop_price"] == 99.0 and t["target_price"] == 105.0  # entry 101 -2 stop, +2*2 target
 
     cfg2 = base_config(stop_logic="just_beyond_level", stop_params={"buffer_pct": 1.0})
-    t2 = engine.run_backtest(cfg2, get_intraday=loaders[0], get_daily=loaders[1])["trades"][0]
+    t2 = run(cfg2, loaders)["trades"][0]
     assert t2["stop_price"] == 99.0  # level 100 * (1 - 0.01)
 
 

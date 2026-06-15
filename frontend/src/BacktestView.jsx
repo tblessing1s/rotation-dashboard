@@ -34,6 +34,7 @@ const DEFAULT_FORM = {
   useYesterdayLevels: true,
   proximityPct: 0.3,
   volumeMultiplier: 2,
+  volAvgLength: 50,
   entryTiming: "candle_close",
   skipFirstN: 0,
   skipIfSpyDown: false,
@@ -59,6 +60,7 @@ function buildConfig(f) {
     },
     entry_rules: {
       volume_multiplier: Number(f.volumeMultiplier),
+      vol_avg_length: Number(f.volAvgLength) || 50,
       entry_timing: f.entryTiming,
     },
     skip_conditions: {
@@ -184,6 +186,7 @@ export default function BacktestView({ store }) {
       useYesterdayLevels: c.setup_conditions?.use_yesterday_levels ?? true,
       proximityPct: c.setup_conditions?.proximity_pct ?? DEFAULT_FORM.proximityPct,
       volumeMultiplier: c.entry_rules?.volume_multiplier ?? DEFAULT_FORM.volumeMultiplier,
+      volAvgLength: c.entry_rules?.vol_avg_length ?? DEFAULT_FORM.volAvgLength,
       entryTiming: c.entry_rules?.entry_timing || DEFAULT_FORM.entryTiming,
       skipFirstN: c.skip_conditions?.skip_first_n_candles ?? 0,
       skipIfSpyDown: c.skip_conditions?.skip_if_spy_down ?? false,
@@ -254,8 +257,11 @@ export default function BacktestView({ store }) {
             <Toggle checked={form.useYesterdayLevels} onChange={(v) => set("useYesterdayLevels", v)} label="Y-High / Y-Low" />
           </Field>
 
-          <Field label="Volume spike (×average)" hint="Candle volume must exceed N× the session average. 0 disables.">
+          <Field label="Volume spike (×average)" hint="Candle volume must exceed N× the volume average. 0 disables.">
             <Input type="number" step="0.1" value={form.volumeMultiplier} onChange={(e) => set("volumeMultiplier", e.target.value)} />
+          </Field>
+          <Field label="Volume avg length (bars)" hint="Bars in the volume MA. Matches TOS Average(volume, length); default 50.">
+            <Input type="number" value={form.volAvgLength} onChange={(e) => set("volAvgLength", e.target.value)} />
           </Field>
           <Field label="Entry timing"><Select value={form.entryTiming} onChange={(e) => set("entryTiming", e.target.value)} options={ENTRY_TIMINGS} /></Field>
           <Field label="Risk : reward" hint="Target = entry + R×risk.">
