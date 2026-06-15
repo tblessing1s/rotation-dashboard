@@ -36,13 +36,12 @@ For each ticker × trading day in the range:
    hit first. When a single 5-minute bar's range contains **both** levels, the
    order is ambiguous at that timeframe, so the engine drops to **1-minute bars**
    inside that candle to resolve which printed first (`refine_interval_min`,
-   default 1; backfill pulls 1-minute bars for the traded tickers). With no
-   1-minute data it falls back to the conservative "stop first" read. The
-   diagnostics line reports how many ambiguous exits were resolved on 1-minute.
-   If even the 1-minute bar can't settle it (stop and target inside one
-   1-minute bar), the trade is marked **Unresolved** — the trade log shows
-   **W / L** buttons so you can check the chart and record which hit first; the
-   choice is saved (`/api/backtest/resolve`) and applied on every later run.
+   default 1; backfill pulls 1-minute bars for the traded tickers). When the
+   order still can't be determined — no 1-minute data, or stop and target inside
+   one 1-minute bar — the trade is marked **Unresolved** rather than guessed: the
+   trade log shows **W / L** buttons so you can check the chart and record which
+   hit first; the choice is saved (`/api/backtest/resolve`) and applied on every
+   later run. Unresolved trades are excluded from win/loss/expectancy until set.
 6. The trade is logged with **market context**: SPY direction and the ticker's
    sector-proxy direction at entry (price-so-far vs the session open).
 

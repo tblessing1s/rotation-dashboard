@@ -227,10 +227,12 @@ def test_ambiguous_5m_bar_is_refined_with_1m_data():
     ]
     cfg = base_config(setup_conditions={"type": "support_resistance_break"})
 
-    # No 1-minute data -> conservative "stop first" -> Loss.
+    # No 1-minute data -> we can't tell which hit first, so flag for review
+    # (don't silently assume a loss).
     out5 = run(cfg, make_loaders({("AMD", day): intraday(day, five)}, {"AMD": daily_frame()}))
-    assert out5["trades"][0]["outcome"] == "Loss"
+    assert out5["trades"][0]["outcome"] == "Unresolved"
     assert out5["diagnostics"]["ambiguous_bars"] == 1 and out5["diagnostics"]["refined_bars"] == 0
+    assert out5["summary"]["unresolved"] == 1 and out5["summary"]["total_trades"] == 0
 
     # With 1-minute data showing the target first -> Win.
     out1 = run(cfg, make_loaders({("AMD", day): intraday(day, five)}, {"AMD": daily_frame()},
