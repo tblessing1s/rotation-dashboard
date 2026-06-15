@@ -223,7 +223,13 @@ export default function ExecutorView({ store }) {
     setPbStatus(`${data.count} signal(s) would have fired on ${pbDate}.`);
   }, [form, pbDate]);
 
-  const activeSignalTickers = useMemo(() => new Set(liveSignals.map((s) => s.ticker)), [liveSignals]);
+  const activeSignalsByTicker = useMemo(() => {
+    const byTicker = new Map();
+    liveSignals.forEach((s) => {
+      if (!byTicker.has(s.ticker)) byTicker.set(s.ticker, s);
+    });
+    return byTicker;
+  }, [liveSignals]);
   const activeAlert = alertQueue[0] || null;
 
   return (
@@ -279,7 +285,14 @@ export default function ExecutorView({ store }) {
       {monitors.length > 0 ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14 }}>
           {monitors.map((m) => (
-            <MonitorCard key={m.ticker} m={m} hasSignal={activeSignalTickers.has(m.ticker)} />
+            <MonitorCard
+              key={m.ticker}
+              m={m}
+              signal={activeSignalsByTicker.get(m.ticker)}
+              executing={executingKey === (activeSignalsByTicker.get(m.ticker) ? signalKey(activeSignalsByTicker.get(m.ticker)) : null)}
+              onExecute={executePaper}
+              onAck={ackAlert}
+            />
           ))}
         </div>
       ) : (
@@ -332,7 +345,8 @@ export default function ExecutorView({ store }) {
 // ---------------------------------------------------------------------------
 // Per-ticker monitor card: chart + live stats
 // ---------------------------------------------------------------------------
-function MonitorCard({ m, hasSignal }) {
+function MonitorCard({ m, signal, executing, onExecute, onAck }) {
+  const hasSignal = Boolean(signal);
   const label = STATE_LABEL[m.state] || STATE_LABEL["no-data"];
   return (
     <div style={{
@@ -358,6 +372,23 @@ function MonitorCard({ m, hasSignal }) {
         <Mini label="→ Y-High" value={m.pct_to_high == null ? "—" : `${m.pct_to_high > 0 ? "+" : ""}${m.pct_to_high}%`} />
         <Mini label="→ Y-Low" value={m.pct_to_low == null ? "—" : `${m.pct_to_low > 0 ? "+" : ""}${m.pct_to_low}%`} />
       </div>
+      {signal && (
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.lineSoft}` }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 10 }}>
+            <Mini label="Entry" value={fmt(signal.entry_price)} color={C.ink} />
+            <Mini label="Stop" value={fmt(signal.stop_price)} color={C.red} />
+            <Mini label="Target" value={fmt(signal.target_price)} color={C.green} />
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <Button primary disabled={executing} onClick={() => onExecute(signal)}>{executing ? "Logging…" : "Execute Paper"}</Button>
+            <Button onClick={() => onAck(signal)}>Skip</Button>
+            <span style={{ flex: 1 }} />
+            <span style={{ font: `400 10px ${C.sans}`, color: C.inkFaint, textAlign: "right" }}>
+              {signal.position_size} sh · paper only
+            </span>
+          </div>
+        </div>
+      )}
       {m.note && <div style={{ marginTop: 8, font: `400 11px ${C.sans}`, color: C.inkFaint }}>{m.note}</div>}
     </div>
   );
