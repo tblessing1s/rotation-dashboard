@@ -47,6 +47,7 @@ const DEFAULT_FORM = {
   fixedDistance: 0.5,
   bufferPct: 0.1,
   atrPeriod: 14,
+  atrTimeframe: "intraday",
   startTime: "09:30",
   endTime: "11:00",
 };
@@ -77,6 +78,7 @@ function buildConfig(f) {
       fixed_distance: Number(f.fixedDistance),
       buffer_pct: Number(f.bufferPct),
       atr_period: Number(f.atrPeriod) || 14,
+      atr_timeframe: f.atrTimeframe,
     },
     time_window: { start_time: f.startTime, end_time: f.endTime },
   };
@@ -199,6 +201,7 @@ export default function BacktestView({ store }) {
       fixedDistance: c.stop_params?.fixed_distance ?? DEFAULT_FORM.fixedDistance,
       bufferPct: c.stop_params?.buffer_pct ?? DEFAULT_FORM.bufferPct,
       atrPeriod: c.stop_params?.atr_period ?? DEFAULT_FORM.atrPeriod,
+      atrTimeframe: c.stop_params?.atr_timeframe ?? DEFAULT_FORM.atrTimeframe,
       startTime: c.time_window?.start_time || DEFAULT_FORM.startTime,
       endTime: c.time_window?.end_time || DEFAULT_FORM.endTime,
     });
@@ -273,7 +276,15 @@ export default function BacktestView({ store }) {
 
           <Field label="Stop placement"><Select value={form.stopLogic} onChange={(e) => set("stopLogic", e.target.value)} options={STOP_LOGICS} /></Field>
           {form.stopLogic === "atr_divided_by_2" && (
-            <Field label="ATR period (days)"><Input type="number" value={form.atrPeriod} onChange={(e) => set("atrPeriod", e.target.value)} /></Field>
+            <Field label="ATR period (bars)" hint="Number of bars in the ATR.">
+              <Input type="number" value={form.atrPeriod} onChange={(e) => set("atrPeriod", e.target.value)} />
+            </Field>
+          )}
+          {form.stopLogic === "atr_divided_by_2" && (
+            <Field label="ATR timeframe" hint="Intraday = last N candles (proportional to the trade); Daily = N-day ATR.">
+              <Select value={form.atrTimeframe} onChange={(e) => set("atrTimeframe", e.target.value)}
+                options={[{ value: "intraday", label: "Intraday candles" }, { value: "daily", label: "Daily" }]} />
+            </Field>
           )}
           {form.stopLogic === "fixed_distance" && (
             <Field label="Fixed distance ($)"><Input type="number" step="0.05" value={form.fixedDistance} onChange={(e) => set("fixedDistance", e.target.value)} /></Field>

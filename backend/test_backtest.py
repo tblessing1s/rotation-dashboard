@@ -58,7 +58,9 @@ def base_config(**over):
         "time_window": {"start_time": "09:30", "end_time": "11:00"},
         "risk_reward": 2,
         "stop_logic": "atr_divided_by_2",
-        # Small MA so the short worked-example sessions form a full window.
+        # Daily ATR (== 10 from daily_frame) keeps the hand-computed stops; small
+        # MA so the short worked-example sessions form a full volume window.
+        "stop_params": {"atr_period": 14, "atr_timeframe": "daily"},
         "entry_rules": {"volume_multiplier": 2, "vol_avg_length": 3, "entry_timing": "candle_close"},
     }
     cfg.update(over)
@@ -181,6 +183,29 @@ def test_breakout_direction_high_is_long_low_is_short():
     by_date = {t["date"]: t for t in out["trades"]}
     assert by_date[up_day]["level_type"] == "Y-High" and by_date[up_day]["direction"] == "Long"
     assert by_date[down_day]["level_type"] == "Y-Low" and by_date[down_day]["direction"] == "Short"
+
+
+def test_atr_timeframe_intraday_is_tighter_than_daily():
+    # Same breakout, two ATR timeframes. Daily ATR = 10 -> stop 110 - 5 = 105.
+    # Intraday ATR over gentle 5-minute bars is far smaller, so the stop sits
+    # much closer to the broken level (proportional to the trade's timeframe).
+    day = "2026-06-01"
+    bars = [
+        ("09:30", 105, 105.5, 104.5, 105, 1000), ("09:35", 105, 105.5, 104.5, 105, 1000),
+        ("09:40", 105, 105.5, 104.5, 105, 1000),
+        ("09:45", 109, 111, 108.8, 110.5, 5000),  # closes 110.5 > Y-High 110 -> Long
+        ("10:00", 111, 112, 110, 111.5, 1200),
+    ]
+    loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
+    setup = {"type": "support_resistance_break"}
+    cfg_i = base_config(setup_conditions=setup, stop_params={"atr_period": 14, "atr_timeframe": "intraday"})
+    cfg_d = base_config(setup_conditions=setup, stop_params={"atr_period": 14, "atr_timeframe": "daily"})
+    ti = run(cfg_i, loaders)["trades"][0]
+    td = run(cfg_d, loaders)["trades"][0]
+
+    assert td["stop_price"] == 105.0                       # daily ATR 10 -> level - 5
+    assert ti["stop_price"] > td["stop_price"]             # intraday ATR is tighter
+    assert abs(ti["entry_price"] - ti["stop_price"]) < abs(td["entry_price"] - td["stop_price"])
 
 
 def test_breakout_gap_open_is_no_trade_until_back_in_range():

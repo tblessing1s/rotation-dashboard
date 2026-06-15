@@ -95,6 +95,9 @@ All endpoints accept/return JSON. The config can be sent bare or wrapped as
 
 `entry_timing`: `candle_close` | `immediate_touch`.
 `stop_logic`: `atr_divided_by_2` | `fixed_distance` | `just_beyond_level`.
+`stop_params.atr_timeframe`: `intraday` *(default)* uses ATR over the last
+`atr_period` **candles** of the trade's own timeframe (proportional to a
+5-minute day-trade); `daily` uses the `atr_period`-day ATR.
 `vol_avg_length`: bars in the volume moving average. This matches thinkorswim's
 **Volume Avg** study — `Average(volume, length)` — a simple MA that *includes the
 current bar* and runs continuously across days (TOS default 50). The volume spike

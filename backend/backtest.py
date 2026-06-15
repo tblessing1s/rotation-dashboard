@@ -55,6 +55,9 @@ DEFAULT_CONFIG = {
         "fixed_distance": 0.50,        # used by fixed_distance
         "buffer_pct": 0.10,            # used by just_beyond_level (% beyond the level)
         "atr_period": 14,
+        # "intraday" = ATR over the last N candles of the trade's timeframe
+        # (proportional to a 5-minute day-trade); "daily" = N-day ATR.
+        "atr_timeframe": "intraday",
     },
     "time_window": {"start_time": "09:30", "end_time": "11:00"},
     "interval_min": 5,
@@ -472,6 +475,10 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
     atr_cache: dict[str, pd.Series | None] = {}
     series_cache: dict[str, pd.DataFrame | None] = {}
     volavg_cache: dict[str, pd.Series | None] = {}
+    iatr_cache: dict[str, pd.Series | None] = {}
+
+    atr_period = int(cfg["stop_params"].get("atr_period", 14))
+    atr_mode = str(cfg["stop_params"].get("atr_timeframe", "intraday")).lower()
 
     def daily(sym):
         if sym not in daily_cache:
@@ -480,7 +487,7 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
 
     def atr_series(sym):
         if sym not in atr_cache:
-            atr_cache[sym] = wilder_atr(daily(sym), int(cfg["stop_params"].get("atr_period", 14)))
+            atr_cache[sym] = wilder_atr(daily(sym), atr_period)
         return atr_cache[sym]
 
     def series(sym):
@@ -500,12 +507,38 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
             )
         return volavg_cache[sym]
 
+    def intraday_atr(sym):
+        # Wilder ATR over the continuous intraday series — ATR of the last N
+        # candles, relative to the trade's own timeframe.
+        if sym not in iatr_cache:
+            s = series(sym)
+            iatr_cache[sym] = wilder_atr(s, atr_period) if s is not None else None
+        return iatr_cache[sym]
+
     def day_session(sym, day):
         s = series(sym)
         if s is None:
             return None
         d = s[s.index.normalize() == pd.Timestamp(day).normalize()]
         return d if not d.empty else None
+
+    def make_atr_resolver(ticker, day):
+        """Resolve ATR at an entry timestamp per the configured timeframe.
+
+        Intraday: the value of the rolling intraday ATR at the entry candle
+        (no look-ahead — the candle has closed). Daily: the prior session's
+        N-day ATR, constant through the day."""
+        if atr_mode == "daily":
+            value = _atr_as_of(atr_series(ticker), day)
+            return lambda ts: value
+        iatr = intraday_atr(ticker)
+
+        def resolve(ts):
+            if iatr is None:
+                return None
+            v = iatr.get(ts)
+            return float(v) if v is not None and v == v else None
+        return resolve
 
     dates = _session_dates(start, end)
     trades: list[dict] = []
@@ -531,14 +564,14 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
                 warnings.append(f"{ticker} {day}: no prior daily bar for yesterday's levels — skipped.")
                 continue
             levels = {"y_high": float(prior["High"]), "y_low": float(prior["Low"])}
-            atr_val = _atr_as_of(atr_series(ticker), day)
+            resolve_atr = make_atr_resolver(ticker, day)
 
             window = _window_candles(session, tw["start_time"], tw["end_time"], skip_n)
             if window is None or window.empty:
                 continue
 
             trade = _scan_day(
-                ticker, day, session, window, levels, atr_val, proxy, ticker_vol_avg,
+                ticker, day, session, window, levels, resolve_atr, proxy, ticker_vol_avg,
                 cfg=cfg, rr=rr, detect=detect, place_stop=place_stop, skip=skip,
                 day_session=day_session, get_daily=daily, warnings=warnings, diag=diag,
             )
@@ -556,7 +589,7 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
     }
 
 
-def _scan_day(ticker, day, session, window, levels, atr_val, proxy, vol_avg_series, *, cfg, rr,
+def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_series, *, cfg, rr,
               detect, place_stop, skip, day_session, get_daily, warnings, diag):
     """Find the first qualifying setup of the day and resolve it to a trade/skip.
 
@@ -636,6 +669,7 @@ def _scan_day(ticker, day, session, window, levels, atr_val, proxy, vol_avg_seri
         else:
             entry = float(candle["Close"])
 
+        atr_val = resolve_atr(ts)
         stop = place_stop(direction, level=level, entry=entry, atr=atr_val, cfg=cfg)
         if stop is None:
             warnings.append(f"{ticker} {day}: ATR unavailable for stop placement — setup skipped.")
