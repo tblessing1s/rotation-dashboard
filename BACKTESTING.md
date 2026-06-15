@@ -21,8 +21,15 @@ For each ticker × trading day in the range:
    look-ahead).
 2. The day's 5-minute candles are walked in order, inside the configured **time
    window**, after dropping the first *N* candles if asked.
-3. The first candle that matches the **setup** (e.g. price dips to Y-Low and
-   closes back above it, with a volume spike) becomes a signal.
+3. The first candle that matches the **setup** (with a volume spike) becomes a
+   signal. Two setup types ship:
+   - **`support_resistance_break`** *(breakout / momentum, default)* — a candle
+     **closes beyond** a level: **above Y-High → Long**, **below Y-Low → Short**.
+     A day that *gaps* open outside yesterday's range is a no-trade until price
+     returns into [Y-Low, Y-High].
+   - **`support_resistance_bounce`** *(fade / mean-reversion)* — a candle wicks
+     **into** a level and **closes back inside**: **Y-Low held → Long**,
+     **Y-High rejected → Short** (the opposite direction mapping).
 4. **Entry** = candle close (or the level itself on "immediate touch").
    **Stop** = per the stop-placement rule. **Target** = `entry ± risk × R`.
 5. Later candles are stepped through to see whether the **target or stop** is

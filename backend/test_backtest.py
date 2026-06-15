@@ -154,6 +154,50 @@ def test_short_rejection_loss_and_summary_math():
     assert s["expectancy_per_trade"] == 0.5
 
 
+def test_breakout_direction_high_is_long_low_is_short():
+    # Breakout setup: close ABOVE Y-High -> Long; close BELOW Y-Low -> Short
+    # (the opposite mapping from the bounce/fade setup). Y-High=110, Y-Low=100.
+    up_day, down_day = "2026-06-01", "2026-06-02"
+    up_bars = [  # opens inside the range, then closes above Y-High -> Long
+        ("09:30", 105, 106, 104, 105, 1000), ("09:35", 105, 106, 104, 105, 1000),
+        ("09:40", 105, 106, 104, 105, 1000),
+        ("09:45", 108, 112, 108, 111, 5000),   # closes 111 > 110 -> breakout Long
+        ("10:00", 113, 118, 112, 117, 1200),   # runs up
+    ]
+    down_bars = [  # opens inside the range, then closes below Y-Low -> Short
+        ("09:30", 105, 106, 104, 105, 1000), ("09:35", 105, 106, 104, 105, 1000),
+        ("09:40", 105, 106, 104, 105, 1000),
+        ("09:45", 101, 102, 98, 99, 5000),     # closes 99 < 100 -> breakdown Short
+        ("10:00", 97, 98, 92, 93, 1200),       # runs down
+    ]
+    loaders = make_loaders(
+        {("AMD", up_day): intraday(up_day, up_bars),
+         ("AMD", down_day): intraday(down_day, down_bars)},
+        {"AMD": daily_frame()},
+    )
+    cfg = base_config(setup_conditions={"type": "support_resistance_break"},
+                      date_range={"start": up_day, "end": down_day})
+    out = run(cfg, loaders)
+    by_date = {t["date"]: t for t in out["trades"]}
+    assert by_date[up_day]["level_type"] == "Y-High" and by_date[up_day]["direction"] == "Long"
+    assert by_date[down_day]["level_type"] == "Y-Low" and by_date[down_day]["direction"] == "Short"
+
+
+def test_breakout_gap_open_is_no_trade_until_back_in_range():
+    # Gaps above Y-High (110) at the open -> no trade, even though it keeps
+    # closing above 110, because price never returns into yesterday's range.
+    day = "2026-06-01"
+    bars = [
+        ("09:30", 115, 116, 114, 115, 1000), ("09:35", 115, 116, 114, 115, 1000),
+        ("09:40", 115, 116, 114, 115, 1000), ("09:45", 116, 118, 114, 117, 5000),
+        ("10:00", 118, 120, 116, 119, 5000),
+    ]
+    loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
+    cfg = base_config(setup_conditions={"type": "support_resistance_break"})
+    out = run(cfg, loaders)
+    assert out["trades"] == []
+
+
 def test_proximity_zero_is_a_touch_not_exact_equality():
     # A trader setting proximity_pct=0 means "wick must touch the level," not
     # "match it to the penny." Candle wicks exactly to Y-Low (100) and closes above.
