@@ -143,6 +143,23 @@ def test_short_rejection_loss_and_summary_math():
     assert s["expectancy_per_trade"] == 0.5
 
 
+def test_proximity_zero_is_a_touch_not_exact_equality():
+    # A trader setting proximity_pct=0 means "wick must touch the level," not
+    # "match it to the penny." Candle wicks exactly to Y-Low (100) and closes above.
+    day = "2026-06-01"
+    bars = [
+        ("09:30", 105, 106, 104, 105, 1000), ("09:35", 105, 106, 104, 105, 1000),
+        ("09:40", 105, 106, 104, 105, 1000),
+        ("09:45", 101, 102, 100.0, 101, 5000),  # low == Y-Low exactly, closes above
+        ("10:00", 111, 114, 110, 113, 1200),
+    ]
+    loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
+    cfg = base_config(setup_conditions={"type": "support_resistance_bounce",
+                                        "use_yesterday_levels": True, "proximity_pct": 0})
+    out = engine.run_backtest(cfg, get_intraday=loaders[0], get_daily=loaders[1])
+    assert len(out["trades"]) == 1 and out["trades"][0]["direction"] == "Long"
+
+
 def test_skip_first_n_candles_blocks_setup():
     day = "2026-06-01"
     bars = [

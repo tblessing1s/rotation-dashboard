@@ -194,18 +194,17 @@ def _detect_sr_bounce(candle, *, levels, avg_volume, cfg) -> dict | None:
     y_high, y_low = levels.get("y_high"), levels.get("y_low")
     high, low, close = float(candle["High"]), float(candle["Low"]), float(candle["Close"])
 
-    # Long: dipped to yesterday's low and closed back above it.
-    if y_low is not None:
-        near = low <= y_low * (1 + prox) and low >= y_low * (1 - prox)
-        if near and close >= y_low:
-            return {"direction": "Long", "level": y_low, "level_type": "Y-Low",
-                    "volume_spike": volume_spike}
-    # Short: poked yesterday's high and closed back below it.
-    if y_high is not None:
-        near = high >= y_high * (1 - prox) and high <= y_high * (1 + prox)
-        if near and close <= y_high:
-            return {"direction": "Short", "level": y_high, "level_type": "Y-High",
-                    "volume_spike": volume_spike}
+    # Long: the candle's wick reached down into yesterday's low zone — within
+    # `prox` above the level, or through it — and closed back *above* the level,
+    # i.e. support held. With prox=0 this is a clean touch (low at/through the
+    # level, close above), not an exact-equality match.
+    if y_low is not None and low <= y_low * (1 + prox) and close >= y_low:
+        return {"direction": "Long", "level": y_low, "level_type": "Y-Low",
+                "volume_spike": volume_spike}
+    # Short: the wick pushed up into yesterday's high zone and closed back below it.
+    if y_high is not None and high >= y_high * (1 - prox) and close <= y_high:
+        return {"direction": "Short", "level": y_high, "level_type": "Y-High",
+                "volume_spike": volume_spike}
     return None
 
 
