@@ -75,6 +75,7 @@ async function postJson(path, body) {
 }
 
 const signalKey = (s) => `${s.date}|${s.ticker}|${s.candle_time}`;
+const tradeSignalKey = (t) => `${t.date}|${t.ticker}|${t.entry_time}`;
 const STATE_LABEL = {
   monitoring: { text: "Monitoring", color: C.green },
   waiting: { text: "Waiting for window", color: C.yellow },
@@ -93,6 +94,7 @@ export default function ExecutorView({ store }) {
   const [scanning, setScanning] = useState(false);
   const [paperTrades, setPaperTrades] = useState([]);
   const [executingKey, setExecutingKey] = useState(null);
+  const [dismissedCardSignals, setDismissedCardSignals] = useState(() => new Set());
 
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [pollSec, setPollSec] = useState(30);
@@ -199,6 +201,14 @@ export default function ExecutorView({ store }) {
     setAlertQueue((q) => q.filter((s) => signalKey(s) !== signalKey(sig)));
   }, [persistAcked]);
 
+  const dismissCardSignal = useCallback((sig) => {
+    setDismissedCardSignals((prev) => {
+      const next = new Set(prev);
+      next.add(signalKey(sig));
+      return next;
+    });
+  }, []);
+
   const executePaper = useCallback(async (sig) => {
     const key = signalKey(sig);
     setExecutingKey(key);
@@ -211,8 +221,9 @@ export default function ExecutorView({ store }) {
     }
     setStatus(`Paper trade logged for ${data.trade?.ticker || sig.ticker} (${data.trade?.order_id || "simulated order"}).`);
     await refreshPaperTrades(sig.date || today());
+    dismissCardSignal(sig);
     ackAlert(sig);
-  }, [ackAlert, refreshPaperTrades]);
+  }, [ackAlert, dismissCardSignal, refreshPaperTrades]);
 
   const runPlayback = useCallback(async () => {
     setPbRunning(true); setPbStatus("Replaying session…"); setPbSignals(null);
@@ -223,6 +234,27 @@ export default function ExecutorView({ store }) {
     setPbStatus(`${data.count} signal(s) would have fired on ${pbDate}.`);
   }, [form, pbDate]);
 
+  const executedSignalKeys = useMemo(() => new Set((paperTrades || []).map(tradeSignalKey)), [paperTrades]);
+  const cardSignalsByTicker = useMemo(() => {
+    const byTicker = new Map();
+
+    // Prefer active signals from the latest scan so the card still blinks while
+    // the setup is live. Fall back to today's signal log so traders can execute
+    // from the watchlist card even after the latest scan no longer reports the
+    // signal as active.
+    liveSignals.forEach((s) => {
+      if (!executedSignalKeys.has(signalKey(s)) && !acked.has(signalKey(s))) byTicker.set(s.ticker, s);
+    });
+
+    [...logSignals]
+      .filter((s) => !executedSignalKeys.has(signalKey(s)) && !dismissedCardSignals.has(signalKey(s)))
+      .sort((a, b) => `${b.date || ""} ${b.candle_time || ""}`.localeCompare(`${a.date || ""} ${a.candle_time || ""}`))
+      .forEach((s) => {
+        if (!byTicker.has(s.ticker)) byTicker.set(s.ticker, s);
+      });
+
+    return byTicker;
+  }, [acked, dismissedCardSignals, executedSignalKeys, liveSignals, logSignals]);
   const activeSignalTickers = useMemo(() => new Set(liveSignals.map((s) => s.ticker)), [liveSignals]);
   const activeAlert = alertQueue[0] || null;
 
@@ -279,7 +311,15 @@ export default function ExecutorView({ store }) {
       {monitors.length > 0 ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14 }}>
           {monitors.map((m) => (
-            <MonitorCard key={m.ticker} m={m} hasSignal={activeSignalTickers.has(m.ticker)} />
+            <MonitorCard
+              key={m.ticker}
+              m={m}
+              signal={cardSignalsByTicker.get(m.ticker)}
+              signalIsActive={activeSignalTickers.has(m.ticker)}
+              executing={executingKey === (cardSignalsByTicker.get(m.ticker) ? signalKey(cardSignalsByTicker.get(m.ticker)) : null)}
+              onExecute={executePaper}
+              onAck={dismissCardSignal}
+            />
           ))}
         </div>
       ) : (
@@ -332,19 +372,20 @@ export default function ExecutorView({ store }) {
 // ---------------------------------------------------------------------------
 // Per-ticker monitor card: chart + live stats
 // ---------------------------------------------------------------------------
-function MonitorCard({ m, hasSignal }) {
+function MonitorCard({ m, signal, signalIsActive, executing, onExecute, onAck }) {
+  const hasSignal = Boolean(signal);
   const label = STATE_LABEL[m.state] || STATE_LABEL["no-data"];
   return (
     <div style={{
       background: C.panel, border: `1px solid ${hasSignal ? C.red : C.line}`, borderRadius: 10, padding: 14,
-      animation: hasSignal ? "execBlink 1.1s ease-in-out infinite" : "none",
+      animation: signalIsActive ? "execBlink 1.1s ease-in-out infinite" : "none",
     }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
         <strong style={{ font: `700 15px ${C.sans}`, color: C.ink }}>{m.ticker}</strong>
         {m.last_close != null && <span style={{ font: `600 14px ${C.mono}`, color: C.ink }}>{m.last_close.toFixed(2)}</span>}
         <span style={{ flex: 1 }} />
         <span style={{ font: `600 10px ${C.sans}`, color: label.color, textTransform: "uppercase", letterSpacing: 0.4 }}>
-          {hasSignal ? "⚡ Setup!" : label.text}
+          {signalIsActive ? "⚡ Setup!" : hasSignal ? "Setup logged" : label.text}
         </span>
       </div>
 
@@ -358,6 +399,23 @@ function MonitorCard({ m, hasSignal }) {
         <Mini label="→ Y-High" value={m.pct_to_high == null ? "—" : `${m.pct_to_high > 0 ? "+" : ""}${m.pct_to_high}%`} />
         <Mini label="→ Y-Low" value={m.pct_to_low == null ? "—" : `${m.pct_to_low > 0 ? "+" : ""}${m.pct_to_low}%`} />
       </div>
+      {signal && (
+        <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.lineSoft}` }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 10 }}>
+            <Mini label="Entry" value={fmt(signal.entry_price)} color={C.ink} />
+            <Mini label="Stop" value={fmt(signal.stop_price)} color={C.red} />
+            <Mini label="Target" value={fmt(signal.target_price)} color={C.green} />
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <Button primary disabled={executing} onClick={() => onExecute(signal)}>{executing ? "Logging…" : "Execute Paper"}</Button>
+            <Button onClick={() => onAck(signal)}>Skip</Button>
+            <span style={{ flex: 1 }} />
+            <span style={{ font: `400 10px ${C.sans}`, color: C.inkFaint, textAlign: "right" }}>
+              {signal.position_size} sh · paper only
+            </span>
+          </div>
+        </div>
+      )}
       {m.note && <div style={{ marginTop: 8, font: `400 11px ${C.sans}`, color: C.inkFaint }}>{m.note}</div>}
     </div>
   );
