@@ -486,6 +486,23 @@ def test_intraday_db_roundtrip(fresh_db):
     assert db.intraday_coverage("AMD", "2026-06-01", "2026-06-01", 5) == {"2026-06-01"}
 
 
+def test_intraday_roundtrip_resolves_duplicate_epochs(fresh_db):
+    """A re-fetched candle whose values changed (e.g. a still-forming bar whose
+    volume grew) lands as a second row for the same epoch; reads must resolve to
+    the newest without crashing. Regression: get_intraday_bars omitted `id`,
+    which _beats() reads, raising sqlite3 'No item with that key'."""
+    idx = pd.to_datetime(["2026-06-01 09:30"]).tz_localize("America/New_York")
+    first = pd.DataFrame({"Open": [1.0], "High": [2.0], "Low": [0.5], "Close": [1.5], "Volume": [100.0]}, index=idx)
+    grown = pd.DataFrame({"Open": [1.0], "High": [3.0], "Low": [0.5], "Close": [2.5], "Volume": [250.0]}, index=idx)
+    assert db.append_intraday_bars("AMD", first, "schwab", 5) == 1
+    assert db.append_intraday_bars("AMD", grown, "schwab", 5) == 1   # different values -> new row
+
+    got = db.get_intraday_bars("AMD", "2026-06-01", "2026-06-01", 5)
+    assert len(got) == 1                       # one canonical candle per epoch
+    assert list(got["Close"]) == [2.5]         # newest fetch wins
+    assert list(got["Volume"]) == [250.0]
+
+
 # ---------------------------------------------------------------------------
 # Service: backfill pulls *daily* too, and coverage flags missing daily history
 # ---------------------------------------------------------------------------
