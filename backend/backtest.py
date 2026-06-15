@@ -823,7 +823,7 @@ def summarize(trades: list[dict]) -> dict:
 CSV_COLUMNS = [
     "date", "ticker", "level_type", "volume_spike", "entry_volume", "avg_volume",
     "volume_ratio", "direction", "entry_time", "entry_price", "stop_price",
-    "target_price", "exit_price", "exit_time", "outcome", "r_result",
+    "target_price", "exit_time", "exit_price", "outcome", "r_result",
     "spy_direction", "sector_direction", "notes",
 ]
 
