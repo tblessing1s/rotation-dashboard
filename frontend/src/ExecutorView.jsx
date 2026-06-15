@@ -81,6 +81,38 @@ async function postJson(path, body) {
 
 const signalKey = (s) => `${s.date}|${s.ticker}|${s.candle_time}`;
 const tradeSignalKey = (t) => `${t.date}|${t.ticker}|${t.entry_time}`;
+
+// Test-orders mode: synthesize a signal from a card's price data so the execute /
+// preview buttons appear on every watchlist card without waiting for a real setup
+// to trigger — lets the order flow be exercised end-to-end. Off by default and
+// gated behind the "Test orders" switch. Params are synthetic (0.3% risk off the
+// last close / yesterday's level) and the signal is flagged __test so the UI
+// labels it; real detected signals are unaffected.
+function buildTestSignal(m, form) {
+  const entry = m?.last_close ?? m?.y_high ?? m?.y_low;
+  if (entry == null) return null;
+  const rr = Number(form?.riskReward) || 2;
+  const fixedRisk = Number(form?.fixedRisk) || 20;
+  const risk = Math.max(0.01, Math.round(entry * 0.003 * 100) / 100);
+  const round2 = (v) => Math.round(v * 100) / 100;
+  return {
+    date: m.date || today(),
+    ticker: m.ticker,
+    candle_time: m.last_candle_time || "TEST",
+    direction: "Long",
+    level_type: "TEST",
+    level: round2(m.y_high ?? entry),
+    entry_price: round2(entry),
+    stop_price: round2(entry - risk),
+    target_price: round2(entry + rr * risk),
+    risk,
+    reward: round2(rr * risk),
+    risk_reward_ratio: rr,
+    position_size: Math.max(1, Math.floor(fixedRisk / risk)),
+    volume_ratio: m.volume_ratio ?? null,
+    __test: true,
+  };
+}
 const STATE_LABEL = {
   monitoring: { text: "Monitoring", color: C.green },
   waiting: { text: "Waiting for window", color: C.yellow },
@@ -105,6 +137,12 @@ export default function ExecutorView({ store }) {
 
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [pollSec, setPollSec] = useState(30);
+  // Test-orders switch: show execute/preview on every card for flow testing.
+  const [testOrders, setTestOrders] = useState(() => Boolean(store?.get("executorTestOrders", false)));
+  const toggleTestOrders = useCallback((v) => {
+    setTestOrders(v);
+    store?.set("executorTestOrders", v);
+  }, [store]);
   const [notify, setNotify] = useState(typeof Notification !== "undefined" && Notification.permission === "granted");
 
   // Alerts the trader has already seen/dismissed (sticky across refreshes).
@@ -318,6 +356,8 @@ export default function ExecutorView({ store }) {
               {POLL_CHOICES.map((p) => <option key={p.value} value={p.value}>every {p.label}</option>)}
             </select>
           )}
+          <Toggle checked={testOrders} onChange={toggleTestOrders} label="Test orders" />
+          {testOrders && <span style={{ font: `500 11px ${C.mono}`, color: C.yellow }}>⚙ Execute/preview on every card (synthetic params)</span>}
           <span style={{ flex: 1 }} />
           {notify
             ? <span style={{ font: `500 12px ${C.mono}`, color: C.green }}>🔔 Desktop alerts on</span>
@@ -335,19 +375,26 @@ export default function ExecutorView({ store }) {
       {/* ---- Live monitor grid ---- */}
       {monitors.length > 0 ? (
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(300px, 1fr))", gap: 14 }}>
-          {monitors.map((m) => (
-            <MonitorCard
-              key={m.ticker}
-              m={m}
-              signal={cardSignalsByTicker.get(m.ticker)}
-              signalIsActive={activeSignalTickers.has(m.ticker)}
-              executing={executingKey === (cardSignalsByTicker.get(m.ticker) ? signalKey(cardSignalsByTicker.get(m.ticker)) : null)}
-              previewing={previewingKey === (cardSignalsByTicker.get(m.ticker) ? signalKey(cardSignalsByTicker.get(m.ticker)) : null)}
-              onExecute={executePaper}
-              onPreview={previewSchwab}
-              onAck={dismissCardSignal}
-            />
-          ))}
+          {monitors.map((m) => {
+            const realSig = cardSignalsByTicker.get(m.ticker);
+            const testSig = (!realSig && testOrders) ? buildTestSignal(m, form) : null;
+            const orderSig = realSig || testSig;
+            const orderKey = orderSig ? signalKey(orderSig) : null;
+            return (
+              <MonitorCard
+                key={m.ticker}
+                m={m}
+                signal={realSig}
+                testSignal={testSig}
+                signalIsActive={activeSignalTickers.has(m.ticker)}
+                executing={executingKey === orderKey}
+                previewing={previewingKey === orderKey}
+                onExecute={executePaper}
+                onPreview={previewSchwab}
+                onAck={dismissCardSignal}
+              />
+            );
+          })}
         </div>
       ) : (
         <div style={{ padding: 24, textAlign: "center", font: `400 13px ${C.sans}`, color: C.inkFaint, border: `1px dashed ${C.line}`, borderRadius: 10 }}>
@@ -403,8 +450,10 @@ export default function ExecutorView({ store }) {
 // ---------------------------------------------------------------------------
 // Per-ticker monitor card: chart + live stats
 // ---------------------------------------------------------------------------
-function MonitorCard({ m, signal, signalIsActive, executing, previewing, onExecute, onPreview, onAck }) {
+function MonitorCard({ m, signal, testSignal, signalIsActive, executing, previewing, onExecute, onPreview, onAck }) {
   const hasSignal = Boolean(signal);
+  const orderSignal = signal || testSignal;   // test signal lets the flow be exercised without a real setup
+  const isTest = !signal && Boolean(testSignal);
   const label = STATE_LABEL[m.state] || STATE_LABEL["no-data"];
   return (
     <div style={{
@@ -430,20 +479,25 @@ function MonitorCard({ m, signal, signalIsActive, executing, previewing, onExecu
         <Mini label="→ Y-High" value={m.pct_to_high == null ? "—" : `${m.pct_to_high > 0 ? "+" : ""}${m.pct_to_high}%`} />
         <Mini label="→ Y-Low" value={m.pct_to_low == null ? "—" : `${m.pct_to_low > 0 ? "+" : ""}${m.pct_to_low}%`} />
       </div>
-      {signal && (
+      {orderSignal && (
         <div style={{ marginTop: 12, paddingTop: 10, borderTop: `1px solid ${C.lineSoft}` }}>
+          {isTest && (
+            <div style={{ font: `600 9px ${C.sans}`, color: C.yellow, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 6 }}>
+              ⚙ Test order — synthetic params for flow testing
+            </div>
+          )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 10 }}>
-            <Mini label="Entry" value={fmt(signal.entry_price)} color={C.ink} />
-            <Mini label="Stop" value={fmt(signal.stop_price)} color={C.red} />
-            <Mini label="Target" value={fmt(signal.target_price)} color={C.green} />
+            <Mini label="Entry" value={fmt(orderSignal.entry_price)} color={C.ink} />
+            <Mini label="Stop" value={fmt(orderSignal.stop_price)} color={C.red} />
+            <Mini label="Target" value={fmt(orderSignal.target_price)} color={C.green} />
           </div>
           <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <Button primary disabled={executing} onClick={() => onExecute(signal)}>{executing ? "Logging…" : "Execute Paper"}</Button>
-            <Button disabled={previewing} onClick={() => onPreview(signal)} title="Dry-run the bracket against Schwab's previewOrder endpoint — validates the order without placing it.">{previewing ? "Previewing…" : "Preview on Schwab"}</Button>
-            <Button onClick={() => onAck(signal)}>Skip</Button>
+            <Button primary disabled={executing} onClick={() => onExecute(orderSignal)}>{executing ? "Logging…" : "Execute Paper"}</Button>
+            <Button disabled={previewing} onClick={() => onPreview(orderSignal)} title="Dry-run the bracket against Schwab's previewOrder endpoint — validates the order without placing it.">{previewing ? "Previewing…" : "Preview on Schwab"}</Button>
+            {!isTest && <Button onClick={() => onAck(signal)}>Skip</Button>}
             <span style={{ flex: 1 }} />
             <span style={{ font: `400 10px ${C.sans}`, color: C.inkFaint, textAlign: "right" }}>
-              {signal.position_size} sh · paper / dry-run
+              {orderSignal.position_size} sh · paper / dry-run
             </span>
           </div>
         </div>
