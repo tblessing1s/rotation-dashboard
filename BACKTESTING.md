@@ -33,8 +33,16 @@ For each ticker × trading day in the range:
 4. **Entry** = candle close (or the level itself on "immediate touch").
    **Stop** = per the stop-placement rule. **Target** = `entry ± risk × R`.
 5. Later candles are stepped through to see whether the **target or stop** is
-   hit first (if both are touched in one 5-minute candle, the stop is assumed to
-   fill first — the conservative read).
+   hit first. When a single 5-minute bar's range contains **both** levels, the
+   order is ambiguous at that timeframe, so the engine drops to **1-minute bars**
+   inside that candle to resolve which printed first (`refine_interval_min`,
+   default 1; backfill pulls 1-minute bars for the traded tickers). With no
+   1-minute data it falls back to the conservative "stop first" read. The
+   diagnostics line reports how many ambiguous exits were resolved on 1-minute.
+   If even the 1-minute bar can't settle it (stop and target inside one
+   1-minute bar), the trade is marked **Unresolved** — the trade log shows
+   **W / L** buttons so you can check the chart and record which hit first; the
+   choice is saved (`/api/backtest/resolve`) and applied on every later run.
 6. The trade is logged with **market context**: SPY direction and the ticker's
    sector-proxy direction at entry (price-so-far vs the session open).
 
@@ -95,6 +103,9 @@ All endpoints accept/return JSON. The config can be sent bare or wrapped as
 
 `entry_timing`: `candle_close` | `immediate_touch`.
 `stop_logic`: `atr_divided_by_2` | `fixed_distance` | `just_beyond_level`.
+`stop_params.atr_timeframe`: `intraday` *(default)* uses ATR over the last
+`atr_period` **candles** of the trade's own timeframe (proportional to a
+5-minute day-trade); `daily` uses the `atr_period`-day ATR.
 `vol_avg_length`: bars in the volume moving average. This matches thinkorswim's
 **Volume Avg** study — `Average(volume, length)` — a simple MA that *includes the
 current bar* and runs continuously across days (TOS default 50). The volume spike

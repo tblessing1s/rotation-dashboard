@@ -47,8 +47,10 @@ const DEFAULT_FORM = {
   fixedDistance: 0.5,
   bufferPct: 0.1,
   atrPeriod: 14,
+  atrTimeframe: "intraday",
   startTime: "09:30",
   endTime: "11:00",
+  refineWith1m: true,
 };
 
 // Form state -> the JSON config shape the backend validates.
@@ -77,8 +79,10 @@ function buildConfig(f) {
       fixed_distance: Number(f.fixedDistance),
       buffer_pct: Number(f.bufferPct),
       atr_period: Number(f.atrPeriod) || 14,
+      atr_timeframe: f.atrTimeframe,
     },
     time_window: { start_time: f.startTime, end_time: f.endTime },
+    refine_interval_min: f.refineWith1m ? 1 : 0,
   };
 }
 
@@ -91,7 +95,7 @@ async function postJson(path, body) {
   return { ok: r.ok, status: r.status, data };
 }
 
-const OUTCOME_COLOR = { Win: C.green, Loss: C.red, Skip: C.yellow };
+const OUTCOME_COLOR = { Win: C.green, Loss: C.red, Skip: C.yellow, Unresolved: C.amber };
 const DIR_COLOR = { Up: C.green, Down: C.red, Unknown: C.inkFaint };
 
 export default function BacktestView({ store }) {
@@ -100,6 +104,7 @@ export default function BacktestView({ store }) {
   const [backfilling, setBackfilling] = useState(false);
   const [errors, setErrors] = useState([]);
   const [result, setResult] = useState(null);
+  const [ranConfig, setRanConfig] = useState(null);
   const [coverage, setCoverage] = useState(null);
   const [savedConfigs, setSavedConfigs] = useState({});
   const [configName, setConfigName] = useState("");
@@ -121,9 +126,9 @@ export default function BacktestView({ store }) {
     fetch(`${API}/api/backtest/configs`).then((r) => r.json()).then(setSavedConfigs).catch(() => {});
   }, []);
 
-  const run = useCallback(async (autoBackfill = false) => {
+  const runWith = useCallback(async (config, autoBackfill = false, resetFilters = true) => {
     setRunning(true); setErrors([]); setStatus(autoBackfill ? "Pulling missing data, then running…" : "Running backtest…");
-    const { ok, data } = await postJson("/api/backtest/run", { config: buildConfig(form), autoBackfill });
+    const { ok, data } = await postJson("/api/backtest/run", { config, autoBackfill });
     setRunning(false);
     if (!ok || data.ok === false) {
       setErrors(data.errors || [data.error || "Backtest failed."]);
@@ -131,10 +136,21 @@ export default function BacktestView({ store }) {
       return;
     }
     setResult(data.result);
+    setRanConfig(data.result.config || config);
     setCoverage(data.coverage || null);
-    setFTicker("all"); setFOutcome("all"); setFFrom(""); setFTo("");
-    setStatus(`Done — ${data.result.summary.total_trades} trades.`);
-  }, [form, store]);
+    if (resetFilters) { setFTicker("all"); setFOutcome("all"); setFFrom(""); setFTo(""); }
+    const s = data.result.summary;
+    setStatus(`Done — ${s.total_trades} trades${s.unresolved ? `, ${s.unresolved} need manual review` : ""}.`);
+  }, []);
+
+  const run = useCallback((autoBackfill = false) => runWith(buildConfig(form), autoBackfill), [form, runWith]);
+
+  // Record which way an Unresolved trade actually went (from the chart), then
+  // re-run with the same config so the resolution is applied to the stats.
+  const resolveTrade = useCallback(async (t, outcome) => {
+    await postJson("/api/backtest/resolve", { ticker: t.ticker, date: t.date, entry_time: t.entry_time, outcome });
+    if (ranConfig) await runWith(ranConfig, false, false);
+  }, [ranConfig, runWith]);
 
   const checkCoverage = useCallback(async () => {
     setStatus("Checking data coverage…"); setErrors([]);
@@ -199,8 +215,10 @@ export default function BacktestView({ store }) {
       fixedDistance: c.stop_params?.fixed_distance ?? DEFAULT_FORM.fixedDistance,
       bufferPct: c.stop_params?.buffer_pct ?? DEFAULT_FORM.bufferPct,
       atrPeriod: c.stop_params?.atr_period ?? DEFAULT_FORM.atrPeriod,
+      atrTimeframe: c.stop_params?.atr_timeframe ?? DEFAULT_FORM.atrTimeframe,
       startTime: c.time_window?.start_time || DEFAULT_FORM.startTime,
       endTime: c.time_window?.end_time || DEFAULT_FORM.endTime,
+      refineWith1m: (c.refine_interval_min ?? 1) > 0,
     });
     setStatus(`Loaded configuration "${name}".`);
   }, [savedConfigs]);
@@ -273,7 +291,15 @@ export default function BacktestView({ store }) {
 
           <Field label="Stop placement"><Select value={form.stopLogic} onChange={(e) => set("stopLogic", e.target.value)} options={STOP_LOGICS} /></Field>
           {form.stopLogic === "atr_divided_by_2" && (
-            <Field label="ATR period (days)"><Input type="number" value={form.atrPeriod} onChange={(e) => set("atrPeriod", e.target.value)} /></Field>
+            <Field label="ATR period (bars)" hint="Number of bars in the ATR.">
+              <Input type="number" value={form.atrPeriod} onChange={(e) => set("atrPeriod", e.target.value)} />
+            </Field>
+          )}
+          {form.stopLogic === "atr_divided_by_2" && (
+            <Field label="ATR timeframe" hint="Intraday = last N candles (proportional to the trade); Daily = N-day ATR.">
+              <Select value={form.atrTimeframe} onChange={(e) => set("atrTimeframe", e.target.value)}
+                options={[{ value: "intraday", label: "Intraday candles" }, { value: "daily", label: "Daily" }]} />
+            </Field>
           )}
           {form.stopLogic === "fixed_distance" && (
             <Field label="Fixed distance ($)"><Input type="number" step="0.05" value={form.fixedDistance} onChange={(e) => set("fixedDistance", e.target.value)} /></Field>
@@ -289,6 +315,9 @@ export default function BacktestView({ store }) {
           <Field label="Skip conditions">
             <Toggle checked={form.skipIfSpyDown} onChange={(v) => set("skipIfSpyDown", v)} label="Skip if SPY direction down" />
             <Toggle checked={form.skipIfSectorDown} onChange={(v) => set("skipIfSectorDown", v)} label="Skip if sector direction down" />
+          </Field>
+          <Field label="Exit resolution" hint="When a 5-min bar hits both stop and target, use 1-min bars to see which came first.">
+            <Toggle checked={form.refineWith1m} onChange={(v) => set("refineWith1m", v)} label="Resolve ambiguous exits on 1-min data" />
           </Field>
         </Grid>
 
@@ -341,6 +370,7 @@ export default function BacktestView({ store }) {
             <Stat label="Wins" value={summary.wins} color={C.green} />
             <Stat label="Losses" value={summary.losses} color={C.red} />
             <Stat label="Skips" value={summary.skips} color={C.yellow} />
+            {summary.unresolved > 0 && <Stat label="Review" value={summary.unresolved} color={C.amber} />}
             <Stat label="Win rate" value={`${summary.win_rate_percent}%`} color={summary.win_rate_percent >= 50 ? C.green : C.ink} />
             <Stat label="Avg win" value={`${summary.avg_win_r}R`} color={C.green} />
             <Stat label="Avg loss" value={`${summary.avg_loss_r}R`} color={C.red} />
@@ -370,7 +400,7 @@ export default function BacktestView({ store }) {
               {tickerOptions.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
             <select value={fOutcome} onChange={(e) => setFOutcome(e.target.value)} style={selectStyle}>
-              {["all", "Win", "Loss", "Skip"].map((o) => <option key={o} value={o}>{o === "all" ? "All outcomes" : o}</option>)}
+              {["all", "Win", "Loss", "Skip", "Unresolved"].map((o) => <option key={o} value={o}>{o === "all" ? "All outcomes" : o}</option>)}
             </select>
             <Input type="date" style={{ width: 140 }} value={fFrom} onChange={(e) => setFFrom(e.target.value)} title="From date" />
             <Input type="date" style={{ width: 140 }} value={fTo} onChange={(e) => setFTo(e.target.value)} title="To date" />
@@ -404,8 +434,16 @@ export default function BacktestView({ store }) {
                     <td style={tdStyle}>{fmt(t.stop_price)}</td>
                     <td style={tdStyle}>{fmt(t.target_price)}</td>
                     <td style={tdStyle}>{fmt(t.exit_price)}</td>
-                    <td style={{ ...tdStyle, color: OUTCOME_COLOR[t.outcome] || C.ink, fontWeight: 600 }}>{t.outcome}</td>
-                    <td style={{ ...tdStyle, color: t.r_result > 0 ? C.green : t.r_result < 0 ? C.red : C.inkDim }}>{t.r_result > 0 ? "+" : ""}{t.r_result}</td>
+                    <td style={{ ...tdStyle, color: OUTCOME_COLOR[t.outcome] || C.ink, fontWeight: 600 }}>
+                      {t.outcome === "Unresolved" ? (
+                        <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                          <span title="Check the chart: stop and target printed inside one 1-minute bar.">review</span>
+                          <ResolveBtn color={C.green} onClick={() => resolveTrade(t, "Win")}>W</ResolveBtn>
+                          <ResolveBtn color={C.red} onClick={() => resolveTrade(t, "Loss")}>L</ResolveBtn>
+                        </span>
+                      ) : t.outcome}
+                    </td>
+                    <td style={{ ...tdStyle, color: t.r_result > 0 ? C.green : t.r_result < 0 ? C.red : C.inkDim }}>{t.r_result == null ? "—" : `${t.r_result > 0 ? "+" : ""}${t.r_result}`}</td>
                     <td style={{ ...tdStyle, color: DIR_COLOR[t.spy_direction] || C.inkFaint }}>{t.spy_direction}</td>
                     <td style={{ ...tdStyle, color: DIR_COLOR[t.sector_direction] || C.inkFaint }}>{t.sector_direction}</td>
                     <td style={{ ...tdStyle, color: C.inkFaint, maxWidth: 160, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={t.notes}>{t.notes}</td>
@@ -504,6 +542,16 @@ function Button({ children, primary, ...props }) {
   );
 }
 
+function ResolveBtn({ children, color, onClick }) {
+  return (
+    <button onClick={onClick} title={children === "W" ? "Mark as Win" : "Mark as Loss"} style={{
+      background: "transparent", color, border: `1px solid ${color}`, borderRadius: 4,
+      width: 18, height: 18, lineHeight: "16px", padding: 0, cursor: "pointer",
+      font: `700 10px ${C.mono}`,
+    }}>{children}</button>
+  );
+}
+
 function Chip({ children, onClick }) {
   return (
     <button onClick={onClick} style={{
@@ -534,6 +582,7 @@ function Diagnostics({ d, cov }) {
         {" · "}{d.volume_spikes} volume spike{d.volume_spikes === 1 ? "" : "s"}
         {" · "}{d.setups_detected} setup{d.setups_detected === 1 ? "" : "s"}
         {d.setups_skipped ? ` · ${d.setups_skipped} skipped` : ""}
+        {d.ambiguous_bars ? ` · ${d.refined_bars}/${d.ambiguous_bars} ambiguous exits resolved on 1m` : ""}
       </div>
       {tip && <div style={{ marginTop: 5, font: `400 12px ${C.sans}`, color: C.yellow }}>💡 {tip}</div>}
     </div>

@@ -36,9 +36,10 @@ def intraday(date, rows):
     return pd.DataFrame(data, index=idx)
 
 
-def make_loaders(intraday_map, daily_map):
+def make_loaders(intraday_map, daily_map, fine_map=None):
     def get_intraday_range(sym, start, end, interval=5):
-        frames = [df for (s, d), df in intraday_map.items() if s == sym and start <= d <= end]
+        src = intraday_map if interval >= 5 else (fine_map or {})
+        frames = [df for (s, d), df in src.items() if s == sym and start <= d <= end]
         return pd.concat(frames).sort_index() if frames else None
 
     def get_daily(sym):
@@ -58,7 +59,9 @@ def base_config(**over):
         "time_window": {"start_time": "09:30", "end_time": "11:00"},
         "risk_reward": 2,
         "stop_logic": "atr_divided_by_2",
-        # Small MA so the short worked-example sessions form a full window.
+        # Daily ATR (== 10 from daily_frame) keeps the hand-computed stops; small
+        # MA so the short worked-example sessions form a full volume window.
+        "stop_params": {"atr_period": 14, "atr_timeframe": "daily"},
         "entry_rules": {"volume_multiplier": 2, "vol_avg_length": 3, "entry_timing": "candle_close"},
     }
     cfg.update(over)
@@ -181,6 +184,91 @@ def test_breakout_direction_high_is_long_low_is_short():
     by_date = {t["date"]: t for t in out["trades"]}
     assert by_date[up_day]["level_type"] == "Y-High" and by_date[up_day]["direction"] == "Long"
     assert by_date[down_day]["level_type"] == "Y-Low" and by_date[down_day]["direction"] == "Short"
+
+
+def test_atr_timeframe_intraday_is_tighter_than_daily():
+    # Same breakout, two ATR timeframes. Daily ATR = 10 -> stop 110 - 5 = 105.
+    # Intraday ATR over gentle 5-minute bars is far smaller, so the stop sits
+    # much closer to the broken level (proportional to the trade's timeframe).
+    day = "2026-06-01"
+    bars = [
+        ("09:30", 105, 105.5, 104.5, 105, 1000), ("09:35", 105, 105.5, 104.5, 105, 1000),
+        ("09:40", 105, 105.5, 104.5, 105, 1000),
+        ("09:45", 109, 111, 108.8, 110.5, 5000),  # closes 110.5 > Y-High 110 -> Long
+        ("10:00", 111, 112, 110, 111.5, 1200),
+    ]
+    loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
+    setup = {"type": "support_resistance_break"}
+    cfg_i = base_config(setup_conditions=setup, stop_params={"atr_period": 14, "atr_timeframe": "intraday"})
+    cfg_d = base_config(setup_conditions=setup, stop_params={"atr_period": 14, "atr_timeframe": "daily"})
+    ti = run(cfg_i, loaders)["trades"][0]
+    td = run(cfg_d, loaders)["trades"][0]
+
+    assert td["stop_price"] == 105.0                       # daily ATR 10 -> level - 5
+    assert ti["stop_price"] > td["stop_price"]             # intraday ATR is tighter
+    assert abs(ti["entry_price"] - ti["stop_price"]) < abs(td["entry_price"] - td["stop_price"])
+
+
+def test_ambiguous_5m_bar_is_refined_with_1m_data():
+    # Breakout Long: entry 111, stop 105, target 123. A later 5-minute bar's
+    # range straddles BOTH stop and target, so order-of-hit is ambiguous.
+    day = "2026-06-01"
+    five = [
+        ("09:30", 105, 106, 104, 105, 1000), ("09:35", 105, 106, 104, 105, 1000),
+        ("09:40", 105, 106, 104, 105, 1000),
+        ("09:45", 109, 111, 108, 111, 5000),   # breakout Long (close 111 > Y-High 110)
+        ("10:00", 112, 124, 104, 110, 1200),   # straddles stop 105 AND target 123
+    ]
+    one = [  # 1-minute path inside 10:00: target prints before the stop
+        ("10:00", 121, 124, 120, 123, 300),    # tags target 123 first
+        ("10:01", 123, 123, 104, 105, 300),    # only later tags stop 105
+        ("10:02", 105, 106, 104, 105, 300), ("10:03", 105, 106, 104, 105, 300),
+        ("10:04", 105, 106, 104, 105, 300),
+    ]
+    cfg = base_config(setup_conditions={"type": "support_resistance_break"})
+
+    # No 1-minute data -> conservative "stop first" -> Loss.
+    out5 = run(cfg, make_loaders({("AMD", day): intraday(day, five)}, {"AMD": daily_frame()}))
+    assert out5["trades"][0]["outcome"] == "Loss"
+    assert out5["diagnostics"]["ambiguous_bars"] == 1 and out5["diagnostics"]["refined_bars"] == 0
+
+    # With 1-minute data showing the target first -> Win.
+    out1 = run(cfg, make_loaders({("AMD", day): intraday(day, five)}, {"AMD": daily_frame()},
+                                 fine_map={("AMD", day): intraday(day, one)}))
+    t = out1["trades"][0]
+    assert t["outcome"] == "Win" and t["exit_price"] == 123.0 and "1m" in t["notes"]
+    assert out1["diagnostics"]["refined_bars"] == 1
+
+
+def test_unresolved_when_1m_ambiguous_then_manual_override():
+    # Even the 1-minute bar that does the damage has BOTH stop and target inside
+    # it -> outcome "Unresolved" (needs manual review). A saved manual resolution
+    # then settles it on the next run.
+    day = "2026-06-01"
+    five = [
+        ("09:30", 105, 106, 104, 105, 1000), ("09:35", 105, 106, 104, 105, 1000),
+        ("09:40", 105, 106, 104, 105, 1000),
+        ("09:45", 109, 111, 108, 111, 5000),   # breakout Long: entry 111, stop 105, target 123
+        ("10:00", 112, 124, 104, 110, 1200),   # 5m straddles both
+    ]
+    one = [  # first 1m bar to touch anything hits BOTH 105 and 123
+        ("10:00", 110, 124, 104, 108, 300), ("10:01", 108, 110, 106, 109, 300),
+        ("10:02", 109, 110, 107, 108, 300), ("10:03", 108, 110, 107, 109, 300),
+        ("10:04", 109, 110, 107, 108, 300),
+    ]
+    cfg = base_config(setup_conditions={"type": "support_resistance_break"})
+    gir, gd = make_loaders({("AMD", day): intraday(day, five)}, {"AMD": daily_frame()},
+                           fine_map={("AMD", day): intraday(day, one)})
+
+    out = engine.run_backtest(cfg, get_intraday_range=gir, get_daily=gd)
+    t = out["trades"][0]
+    assert t["outcome"] == "Unresolved" and t["exit_price"] is None and t["r_result"] is None
+    assert out["summary"]["unresolved"] == 1 and out["summary"]["total_trades"] == 0
+
+    out2 = engine.run_backtest(cfg, get_intraday_range=gir, get_daily=gd,
+                               manual_resolutions={f"AMD|{day}|09:45": "Win"})
+    t2 = out2["trades"][0]
+    assert t2["outcome"] == "Win" and t2["exit_price"] == 123.0 and "manual" in t2["notes"]
 
 
 def test_breakout_gap_open_is_no_trade_until_back_in_range():

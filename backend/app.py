@@ -510,6 +510,8 @@ def api_backtest_backfill():
     result = backtest_service.backfill(
         symbols, config["date_range"]["start"], config["date_range"]["end"],
         int(config.get("interval_min", 5)), engine._vol_avg_length(config),
+        fine_symbols=config["tickers"],
+        refine_interval_min=int(config.get("refine_interval_min", 1) or 0),
     )
     return jsonify({"ok": result["ok"], "backfill": result,
                     "coverage": backtest_service.coverage_report(config)})
@@ -525,6 +527,22 @@ def api_backtest_export():
         csv_text, mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=backtest_trades.csv"},
     )
+
+
+@app.route("/api/backtest/resolve", methods=["GET", "POST"])
+def api_backtest_resolve():
+    import backtest_service
+
+    if request.method == "GET":
+        return jsonify(backtest_service.list_resolutions())
+    body = request.get_json(silent=True) or {}
+    ticker = str(body.get("ticker") or "").strip()
+    date = str(body.get("date") or "").strip()
+    entry_time = str(body.get("entry_time") or "").strip()
+    if not (ticker and date and entry_time):
+        return jsonify({"error": "ticker, date and entry_time are required"}), 400
+    store = backtest_service.set_resolution(ticker, date, entry_time, body.get("outcome"))
+    return jsonify({"ok": True, "resolutions": store})
 
 
 @app.route("/api/backtest/configs", methods=["GET", "POST", "DELETE"])
