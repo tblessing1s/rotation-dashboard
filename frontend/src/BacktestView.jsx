@@ -209,9 +209,9 @@ export default function BacktestView({ store }) {
   ), [trades, fTicker, fOutcome, fFrom, fTo]);
 
   const exportCsv = useCallback(() => {
-    const cols = ["date", "ticker", "level_type", "volume_spike", "direction", "entry_time",
-      "entry_price", "stop_price", "target_price", "exit_price", "exit_time", "outcome",
-      "r_result", "spy_direction", "sector_direction", "notes"];
+    const cols = ["date", "ticker", "level_type", "volume_spike", "entry_volume", "avg_volume",
+      "volume_ratio", "direction", "entry_time", "entry_price", "stop_price", "target_price",
+      "exit_price", "exit_time", "outcome", "r_result", "spy_direction", "sector_direction", "notes"];
     const esc = (v) => { const s = v == null ? "" : String(v); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
     const rows = [cols.join(","), ...filtered.map((t) => cols.map((c) => esc(t[c])).join(","))];
     const blob = new Blob([rows.join("\n")], { type: "text/csv" });
@@ -372,21 +372,24 @@ export default function BacktestView({ store }) {
             <table style={{ width: "100%", borderCollapse: "collapse", font: `400 12px ${C.mono}` }}>
               <thead>
                 <tr>
-                  {["Date", "Ticker", "Level", "Vol↑", "Dir", "Entry", "Stop", "Target", "Exit", "Outcome", "R", "SPY", "Sector", "Notes"].map((h) => (
+                  {["Date", "Ticker", "Level", "Vol↑", "Volume", "Avg vol", "RVOL", "Dir", "Entry", "Stop", "Target", "Exit", "Outcome", "R", "SPY", "Sector", "Notes"].map((h) => (
                     <th key={h} style={thStyle}>{h}</th>
                   ))}
                 </tr>
               </thead>
               <tbody>
                 {filtered.length === 0 && (
-                  <tr><td colSpan={14} style={{ ...tdStyle, color: C.inkFaint, textAlign: "center", padding: 18 }}>No trades match the filters.</td></tr>
+                  <tr><td colSpan={17} style={{ ...tdStyle, color: C.inkFaint, textAlign: "center", padding: 18 }}>No trades match the filters.</td></tr>
                 )}
                 {filtered.map((t, i) => (
                   <tr key={i} style={{ borderTop: `1px solid ${C.lineSoft}` }}>
                     <td style={tdStyle}>{t.date}</td>
                     <td style={{ ...tdStyle, color: C.ink }}>{t.ticker}</td>
                     <td style={tdStyle}>{t.level_type}</td>
-                    <td style={tdStyle}>{t.volume_spike ? "✓" : "·"}</td>
+                    <td style={{ ...tdStyle, color: t.volume_spike ? C.green : C.inkFaint }}>{t.volume_spike ? "✓" : "·"}</td>
+                    <td style={tdStyle}>{fmtVol(t.entry_volume)}</td>
+                    <td style={tdStyle}>{fmtVol(t.avg_volume)}</td>
+                    <td style={{ ...tdStyle, color: t.volume_ratio >= 2 ? C.green : C.inkDim }}>{t.volume_ratio == null ? "—" : `${t.volume_ratio}×`}</td>
                     <td style={tdStyle}>{t.direction}</td>
                     <td style={tdStyle}>{fmt(t.entry_price)}</td>
                     <td style={tdStyle}>{fmt(t.stop_price)}</td>
@@ -416,6 +419,13 @@ export default function BacktestView({ store }) {
 
 // ---- Small styled primitives (match the dashboard palette) -----------------
 const fmt = (v) => (v == null ? "—" : Number(v).toFixed(2));
+const fmtVol = (v) => {
+  if (v == null) return "—";
+  const n = Number(v);
+  if (n >= 1e6) return `${(n / 1e6).toFixed(2)}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1)}k`;
+  return String(n);
+};
 
 const selectStyle = {
   background: C.panel2, color: C.ink, border: `1px solid ${C.line}`, borderRadius: 6,
