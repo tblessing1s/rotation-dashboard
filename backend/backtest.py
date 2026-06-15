@@ -806,8 +806,21 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
                 exit_price = target if manual == "Win" else stop
                 exit_ts = None
                 note = "manually resolved (1m ambiguous)"
+            elif manual == "Skip":
+                outcome = "Skip"
+                exit_price = None
+                exit_ts = None
+                note = "manually skipped (1m ambiguous)"
             else:
                 diag["unresolved"] = diag.get("unresolved", 0) + 1
+
+        if outcome == "Skip":
+            return {
+                **base, "entry_price": round(entry, 2), "stop_price": round(stop, 2),
+                "target_price": round(target, 2),
+                "risk_amount": round(risk, 2), "reward_amount": round(reward, 2),
+                "exit_price": None, "outcome": "Skip", "r_result": 0.0, "exit_time": None, "notes": note,
+            }
 
         if outcome == "Unresolved" or exit_price is None:
             return {

@@ -261,7 +261,7 @@ def list_resolutions() -> dict:
 def set_resolution(ticker: str, date: str, entry_time: str, outcome) -> dict:
     key = resolution_key(ticker, date, entry_time)
     store = list_resolutions()
-    if outcome in ("Win", "Loss"):
+    if outcome in ("Win", "Loss", "Skip"):
         store[key] = outcome
     else:
         store.pop(key, None)  # anything else clears it (back to needs-review)

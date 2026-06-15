@@ -447,6 +447,7 @@ export default function BacktestView({ store }) {
                           <span title="Check the chart: stop and target printed inside one 1-minute bar.">review</span>
                           <ResolveBtn color={C.green} onClick={() => resolveTrade(t, "Win")}>W</ResolveBtn>
                           <ResolveBtn color={C.red} onClick={() => resolveTrade(t, "Loss")}>L</ResolveBtn>
+                          <ResolveBtn color={C.yellow} onClick={() => resolveTrade(t, "Skip")}>S</ResolveBtn>
                         </span>
                       ) : t.outcome}
                     </td>
@@ -551,7 +552,7 @@ function Button({ children, primary, ...props }) {
 
 function ResolveBtn({ children, color, onClick }) {
   return (
-    <button onClick={onClick} title={children === "W" ? "Mark as Win" : "Mark as Loss"} style={{
+    <button onClick={onClick} title={children === "W" ? "Mark as Win" : children === "L" ? "Mark as Loss" : "Skip trade"} style={{
       background: "transparent", color, border: `1px solid ${color}`, borderRadius: 4,
       width: 18, height: 18, lineHeight: "16px", padding: 0, cursor: "pointer",
       font: `700 10px ${C.mono}`,

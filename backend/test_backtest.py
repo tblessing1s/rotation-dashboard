@@ -334,6 +334,12 @@ def test_unresolved_when_1m_ambiguous_then_manual_override():
     t2 = out2["trades"][0]
     assert t2["outcome"] == "Win" and t2["exit_price"] == 123.0 and "manual" in t2["notes"]
 
+    out3 = engine.run_backtest(cfg, get_intraday_range=gir, get_daily=gd,
+                               manual_resolutions={f"AMD|{day}|09:45": "Skip"})
+    t3 = out3["trades"][0]
+    assert t3["outcome"] == "Skip" and t3["exit_price"] is None and t3["r_result"] == 0.0
+    assert out3["summary"]["skips"] == 1 and out3["summary"]["unresolved"] == 0
+
 
 def test_breakout_gap_open_is_no_trade_until_back_in_range():
     # Gaps above Y-High (110) at the open -> no trade, even though it keeps
