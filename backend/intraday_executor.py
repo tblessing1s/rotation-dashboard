@@ -327,8 +327,24 @@ def monitor_status(config, *, get_intraday_range, get_daily,
                              if avg_volume == avg_volume and avg_volume > 0 else None),
             "pct_to_high": round((status["y_high"] - close) / close * 100, 2) if close else None,
             "pct_to_low": round((close - status["y_low"]) / close * 100, 2) if close else None,
+            "candles": _candle_series(window),
         })
         out.append(status)
+    return out
+
+
+def _candle_series(window) -> list[dict]:
+    """Window candles as plain OHLCV dicts (Central-time labels) for charting."""
+    out = []
+    for ts, r in window.iterrows():
+        out.append({
+            "time": engine._central_time_label(ts),
+            "open": round(float(r["Open"]), 2),
+            "high": round(float(r["High"]), 2),
+            "low": round(float(r["Low"]), 2),
+            "close": round(float(r["Close"]), 2),
+            "volume": int(round(float(r["Volume"] or 0))),
+        })
     return out
 
 
