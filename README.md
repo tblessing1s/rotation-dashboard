@@ -237,6 +237,35 @@ below.)
 revisions, valuation, credit, chart-reading toggles — and any Level 1 field
 you choose to override (marked MANUAL with its timestamp until cleared).
 
+## Intraday Setup Executor (Phase 1 — detection)
+
+Real-time setup *detection* for day trading, built on the same rules as the
+backtester (`backend/intraday_executor.py`). It evaluates each **closed**
+5-minute candle against yesterday's high/low and a volume spike, and — when a
+setup fires — emits a *signal* carrying the entry, ATR-based stop, R:R target,
+and position size the backtester would have traded. Detection reuses the
+backtest engine's detectors, volume MA, and Wilder ATR, so a live signal and a
+backtested trade apply byte-for-byte identical logic.
+
+Defaults mirror the spec: a close at/through yesterday's level
+(`support_resistance_break`) on ≥2× the 50-bar volume average, an ATR×2 stop
+beyond the level, a 2:1 target, an 08:30–10:00 Central window, and `$20` fixed
+risk per trade — across `CRWV, HIMS, CVNA, HOOD, TOST`. Override any of these
+per request.
+
+Endpoints (detection only — no alerts or order placement yet, those are later
+phases):
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/executor/config` | The default monitor config. |
+| `POST /api/executor/monitor` | Detect on today's latest closed candle + per-ticker status. `{"refresh": true}` first pulls today's 5-minute bars from Schwab/Yahoo. |
+| `POST /api/executor/playback` | Replay stored candles over a `date` or `date_range` and return every signal — validates detection against historical data. `{"autoBackfill": true}` pulls missing bars first. |
+| `GET /api/executor/signals?date=YYYY-MM-DD` | The logged signals (one row per detected candle; idempotent). |
+
+Real-time is polling-based here (Schwab `pricehistory`), matching the rest of
+the stack; a WebSocket tick feed is a future enhancement.
+
 ## Configuration
 
 `backend/config.py`: tracked symbols (XLV + AAPL), benchmark (SPY), breadth

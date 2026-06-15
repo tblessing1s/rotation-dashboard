@@ -127,6 +127,27 @@ CREATE TABLE IF NOT EXISTS kv (
     k TEXT PRIMARY KEY,
     v TEXT
 );
+
+CREATE TABLE IF NOT EXISTS setup_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    date TEXT NOT NULL,          -- YYYY-MM-DD, exchange-local trading session
+    ticker TEXT NOT NULL,
+    candle_time TEXT NOT NULL,   -- HH:MM of the closed candle (Central, matches backtest)
+    direction TEXT,              -- Long | Short
+    level_type TEXT,             -- Y-HIGH | Y-LOW
+    level REAL,
+    entry_price REAL,
+    stop_price REAL,
+    target_price REAL,
+    position_size INTEGER,
+    volume_ratio REAL,
+    payload TEXT NOT NULL,       -- full signal dict as JSON
+    created_at TEXT NOT NULL
+);
+-- One row per detected setup candle: re-running detection on the same closed
+-- candle is idempotent (mirrors the append-only/dedup pattern used elsewhere).
+CREATE UNIQUE INDEX IF NOT EXISTS idx_setup_signals_dedup
+    ON setup_signals(date, ticker, candle_time);
 """
 
 
@@ -646,6 +667,53 @@ def last_successful_ingest() -> dict | None:
         " ORDER BY id DESC LIMIT 1"
     ).fetchone()
     return dict(row) if row else None
+
+
+# ---------------------------------------------------------------------------
+# Setup signals (intraday executor — Phase 1 detection log)
+# ---------------------------------------------------------------------------
+def record_setup_signal(signal: dict) -> bool:
+    """Append a detected setup signal. Idempotent per (date, ticker, candle_time):
+    re-detecting the same closed candle does not write a duplicate row. Returns
+    True when a new row was written."""
+    conn = connect()
+    with conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO setup_signals"
+            " (date, ticker, candle_time, direction, level_type, level, entry_price,"
+            "  stop_price, target_price, position_size, volume_ratio, payload, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                signal.get("date"), signal.get("ticker"), signal.get("candle_time"),
+                signal.get("direction"), signal.get("level_type"), signal.get("level"),
+                signal.get("entry_price"), signal.get("stop_price"), signal.get("target_price"),
+                signal.get("position_size"), signal.get("volume_ratio"),
+                json.dumps(signal, default=str), utcnow(),
+            ),
+        )
+    return cur.rowcount > 0
+
+
+def recent_setup_signals(date: str | None = None, limit: int = 100) -> list[dict]:
+    """Stored signals (newest first), optionally scoped to one ET session date."""
+    conn = connect()
+    if date:
+        rows = conn.execute(
+            "SELECT payload, created_at FROM setup_signals WHERE date=?"
+            " ORDER BY id DESC LIMIT ?",
+            (date, limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT payload, created_at FROM setup_signals ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    out = []
+    for row in rows:
+        payload = json.loads(row["payload"])
+        payload["_recordedAt"] = row["created_at"]
+        out.append(payload)
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -55,6 +55,7 @@ DEFAULT_CONFIG = {
     "stop_params": {
         "fixed_distance": 0.50,        # used by fixed_distance
         "buffer_pct": 0.10,            # used by just_beyond_level (% beyond the level)
+        "atr_multiplier": 2.0,         # used by atr_beyond_level (ATR x N past the level)
         "atr_period": 14,
         # "intraday" = ATR over the last N candles of the trade's timeframe
         # (proportional to a 5-minute day-trade); "daily" = N-day ATR.
@@ -299,6 +300,16 @@ def _stop_fixed(direction, *, level, entry, atr, cfg):
 def _stop_just_beyond(direction, *, level, entry, atr, cfg):
     buf = abs(float(cfg["stop_params"].get("buffer_pct", 0.10))) / 100.0
     return level * (1 - buf) if direction == "Long" else level * (1 + buf)
+
+
+@register_stop("atr_beyond_level")
+def _stop_atr_beyond(direction, *, level, entry, atr, cfg):
+    """Stop placed ATR x multiplier *beyond* the level (the intraday-executor
+    default: a long stops below Y-Low, a short stops above Y-High, by N ATRs)."""
+    if atr is None or atr <= 0:
+        return None
+    pad = abs(float(cfg["stop_params"].get("atr_multiplier", 2.0))) * atr
+    return level - pad if direction == "Long" else level + pad
 
 
 # ---------------------------------------------------------------------------
