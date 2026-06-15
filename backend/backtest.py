@@ -407,8 +407,8 @@ def _simulate(direction, entry, stop, target, forward, *, refine=None, interval_
                     diag["refined_bars"] = diag.get("refined_bars", 0) + 1
                 note = ("target hit first on 1m" if outcome == "Win" else "stop hit first on 1m")
                 return outcome, price, ts, note
-            # No finer data — keep the conservative assumption.
-            return "Loss", stop, ts, "stop & target in one bar — assumed stop (no 1m data)"
+            # No finer data to settle the order — don't guess; flag for review.
+            return "Unresolved", None, ts, "stop & target in one bar, no 1m data — needs manual review"
 
         if hit_stop:
             return "Loss", stop, ts, ""
