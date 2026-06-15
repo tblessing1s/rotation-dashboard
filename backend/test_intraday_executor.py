@@ -111,6 +111,26 @@ def test_live_mode_waits_for_candle_close():
     assert len(fired) == 1 and fired[0]["entry_price"] == 111.0
 
 
+def test_monitor_survives_null_candle_fields():
+    """SQLite NULLs surface as NaN in pandas; a forming/partial candle with a
+    null open/volume must not crash the monitor (regression for a prod 500)."""
+    import numpy as np
+    rows = [
+        ("09:30", 105, 106, 104, 105, 100),
+        ("09:35", 105, 106, 104, 105, 100),
+        ("09:40", 105, 106, 104, 105, 100),
+        ("09:45", np.nan, np.nan, np.nan, 106, np.nan),  # only close prints
+    ]
+    loaders = make_loaders({("HOOD", DAY): intraday(DAY, rows)}, DAILY)
+    rows_out = ix.monitor_status(monitor_config(), get_intraday_range=loaders[0],
+                                get_daily=loaders[1], on_date=DAY)
+    assert rows_out[0]["state"] == "monitoring"
+    assert rows_out[0]["last_close"] == 106.0
+    assert rows_out[0]["last_volume"] == 0          # null volume -> 0, no crash
+    last = rows_out[0]["candles"][-1]
+    assert last["open"] == 106.0 and last["volume"] == 0   # OHLC fall back to close
+
+
 def test_no_signal_without_prior_daily_levels():
     loaders = make_loaders(breakout_session(), {})   # no daily bars → no Y-High/Low
     signals = ix.detect_signals(monitor_config(), get_intraday_range=loaders[0],
