@@ -567,6 +567,53 @@ def api_backtest_configs():
 
 
 # ---------------------------------------------------------------------------
+# Intraday Setup Executor — Phase 1 (detection only). Reuses the backtest
+# engine's setup rules to evaluate today's closed 5-minute candles for setups
+# (price breaks yesterday's level on a volume spike) and emit signals. Refresh
+# pulls today's bars from Schwab/Yahoo; playback replays stored candles to
+# validate detection against historical data. No alerts/order execution yet.
+# ---------------------------------------------------------------------------
+@app.route("/api/executor/config", methods=["GET"])
+def api_executor_config():
+    import intraday_executor as ix
+
+    return jsonify({"ok": True, "config": ix.DEFAULT_MONITOR_CONFIG})
+
+
+@app.route("/api/executor/monitor", methods=["POST"])
+def api_executor_monitor():
+    import intraday_executor as ix
+
+    body = request.get_json(silent=True) or {}
+    config = body.get("config") if "config" in body else body
+    out = ix.run_monitor(config, refresh=bool(body.get("refresh")),
+                         on_date=body.get("date"), as_of=body.get("asOf"))
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
+@app.route("/api/executor/playback", methods=["POST"])
+def api_executor_playback():
+    import intraday_executor as ix
+
+    body = request.get_json(silent=True) or {}
+    config = body.get("config") if "config" in body else body
+    out = ix.run_playback(config, date=body.get("date"),
+                         date_range=body.get("date_range"),
+                         auto_backfill=bool(body.get("autoBackfill")))
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
+@app.route("/api/executor/signals", methods=["GET"])
+def api_executor_signals():
+    body_date = request.args.get("date")
+    try:
+        limit = int(request.args.get("limit", 100))
+    except (TypeError, ValueError):
+        limit = 100
+    return jsonify({"ok": True, "signals": db.recent_setup_signals(body_date, limit)})
+
+
+# ---------------------------------------------------------------------------
 # State persistence (manual inputs, positions) — lives on the data volume
 # ---------------------------------------------------------------------------
 def load_state() -> dict:
