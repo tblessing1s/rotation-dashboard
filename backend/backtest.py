@@ -499,6 +499,24 @@ def _window_candles(intraday: pd.DataFrame, start_time: str, end_time: str,
     return session[mask]
 
 
+def _central_time_label(ts) -> str | None:
+    """Format an exchange-local timestamp as HH:MM in Central Time.
+
+    Intraday frames keep their index in tz-naive Eastern wall-clock time, while
+    the backtest setup and trade review workflow are Central Time. Convert the
+    timestamp the same way the time-window filter does so entry/exit table
+    values match the configured CST/CDT window.
+    """
+    if ts is None:
+        return None
+    return (
+        pd.Timestamp(ts)
+        .tz_localize(EXCHANGE_TZ, nonexistent="shift_forward", ambiguous="NaT")
+        .tz_convert(BACKTEST_WINDOW_TZ)
+        .strftime("%H:%M")
+    )
+
+
 def run_backtest(config: dict, *, get_intraday_range, get_daily, manual_resolutions=None) -> dict:
     """Run a backtest.
 
@@ -729,7 +747,7 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
         base = {
             "date": day, "ticker": ticker, "level_type": setup["level_type"],
             "volume_spike": bool(setup.get("volume_spike")), "direction": direction,
-            "entry_time": ts.strftime("%H:%M"), "spy_direction": spy_dir,
+            "entry_time": _central_time_label(ts), "spy_direction": spy_dir,
             "sector_direction": sector_dir,
             "entry_volume": int(round(entry_volume)),
             "avg_volume": int(round(avg_volume)),
@@ -779,6 +797,10 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
         if outcome == "Unresolved":
             key = f"{ticker}|{day}|{base['entry_time']}"
             manual = (manual_resolutions or {}).get(key)
+            # Backward compatibility for manual resolutions saved before the
+            # trade table reported entry/exit times in Central Time.
+            if manual is None:
+                manual = (manual_resolutions or {}).get(f"{ticker}|{day}|{ts.strftime('%H:%M')}")
             if manual in ("Win", "Loss"):
                 outcome = manual
                 exit_price = target if manual == "Win" else stop
@@ -806,7 +828,7 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
             "exit_price": round(exit_price, 2),
             "outcome": outcome,
             "r_result": r_result,
-            "exit_time": exit_ts.strftime("%H:%M") if exit_ts is not None else None,
+            "exit_time": _central_time_label(exit_ts),
             "notes": note,
         }
     return None

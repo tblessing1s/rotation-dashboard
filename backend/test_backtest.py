@@ -102,7 +102,7 @@ def test_time_window_is_interpreted_in_central_time():
     out = run(base_config(), loaders)
 
     assert len(out["trades"]) == 1
-    assert out["trades"][0]["entry_time"] == "09:40"
+    assert out["trades"][0]["entry_time"] == "08:40"
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +136,7 @@ def test_long_bounce_win_matches_manual_calc():
     assert (t["entry_price"], t["stop_price"], t["target_price"]) == (101.0, 95.0, 113.0)
     assert (t["risk_amount"], t["reward_amount"]) == (6.0, 12.0)
     assert t["outcome"] == "Win" and t["exit_price"] == 113.0 and t["r_result"] == 2.0
+    assert (t["entry_time"], t["exit_time"]) == ("08:45", "09:00")
     assert out["summary"]["win_rate_percent"] == 100.0
     assert out["summary"]["expectancy_per_trade"] == 2.0
 
