@@ -15,11 +15,16 @@ import { C } from "./theme.js";
      POST /api/executor/monitor   {config, refresh, date?}
      POST /api/executor/playback  {config, date, autoBackfill}
      GET  /api/executor/signals?date=YYYY-MM-DD
-     POST /api/executor/paper/execute {signal}
+     POST /api/executor/paper/execute  {signal}
+     POST /api/executor/schwab/preview {signal}
      GET  /api/executor/paper/trades?date=YYYY-MM-DD
 
-   Paper execution is supported by logging simulated bracket trades only. No
-   live Schwab order placement is called from this UI.
+   Two execution paths, neither of which fills with money:
+     • Execute Paper      — logs a simulated bracket trade in-app.
+     • Preview on Schwab  — dry-runs the bracket against Schwab's previewOrder
+                            endpoint (validates buying power / pricing / fees on
+                            the real account, but NOTHING is placed). Schwab has
+                            no paper-trading API, so this is the safe equivalent.
    ============================================================================ */
 
 const API = "";
@@ -94,6 +99,8 @@ export default function ExecutorView({ store }) {
   const [scanning, setScanning] = useState(false);
   const [paperTrades, setPaperTrades] = useState([]);
   const [executingKey, setExecutingKey] = useState(null);
+  const [previewingKey, setPreviewingKey] = useState(null);
+  const [preview, setPreview] = useState(null);   // last Schwab dry-run result
   const [dismissedCardSignals, setDismissedCardSignals] = useState(() => new Set());
 
   const [autoRefresh, setAutoRefresh] = useState(false);
@@ -225,6 +232,24 @@ export default function ExecutorView({ store }) {
     ackAlert(sig);
   }, [ackAlert, dismissCardSignal, refreshPaperTrades]);
 
+  // Dry-run the bracket against Schwab's previewOrder endpoint. This validates
+  // the order against the real account (buying power / pricing / fees) but never
+  // fills — Schwab has no paper-trading API, so this is the safe equivalent.
+  const previewSchwab = useCallback(async (sig) => {
+    const key = signalKey(sig);
+    setPreviewingKey(key);
+    setErrors([]);
+    const { ok, data } = await postJson("/api/executor/schwab/preview", { signal: sig });
+    setPreviewingKey(null);
+    if (!ok || data.ok === false) {
+      setErrors(data.errors || [data.error || "Schwab preview failed."]);
+      return;
+    }
+    setPreview({ signal: sig, ...data });
+    const p = data.preview || {};
+    setStatus(`Schwab preview for ${sig.ticker}: ${p.status || "OK"}${p.account || data.account ? ` on ${data.account}` : ""} — nothing was placed.`);
+  }, []);
+
   const runPlayback = useCallback(async () => {
     setPbRunning(true); setPbStatus("Replaying session…"); setPbSignals(null);
     const { ok, data } = await postJson("/api/executor/playback", { config: buildConfig(form), date: pbDate, autoBackfill: true });
@@ -317,7 +342,9 @@ export default function ExecutorView({ store }) {
               signal={cardSignalsByTicker.get(m.ticker)}
               signalIsActive={activeSignalTickers.has(m.ticker)}
               executing={executingKey === (cardSignalsByTicker.get(m.ticker) ? signalKey(cardSignalsByTicker.get(m.ticker)) : null)}
+              previewing={previewingKey === (cardSignalsByTicker.get(m.ticker) ? signalKey(cardSignalsByTicker.get(m.ticker)) : null)}
               onExecute={executePaper}
+              onPreview={previewSchwab}
               onAck={dismissCardSignal}
             />
           ))}
@@ -338,6 +365,8 @@ export default function ExecutorView({ store }) {
           <SignalTable signals={logSignals} />
         </Card>
       )}
+
+      {preview && <SchwabPreviewPanel preview={preview} onClose={() => setPreview(null)} />}
 
       <PaperTradesPanel trades={paperTrades} />
 
@@ -361,7 +390,9 @@ export default function ExecutorView({ store }) {
           sig={activeAlert}
           queued={alertQueue.length}
           executing={executingKey === signalKey(activeAlert)}
+          previewing={previewingKey === signalKey(activeAlert)}
           onExecute={() => executePaper(activeAlert)}
+          onPreview={() => previewSchwab(activeAlert)}
           onAck={() => ackAlert(activeAlert)}
         />
       )}
@@ -372,7 +403,7 @@ export default function ExecutorView({ store }) {
 // ---------------------------------------------------------------------------
 // Per-ticker monitor card: chart + live stats
 // ---------------------------------------------------------------------------
-function MonitorCard({ m, signal, signalIsActive, executing, onExecute, onAck }) {
+function MonitorCard({ m, signal, signalIsActive, executing, previewing, onExecute, onPreview, onAck }) {
   const hasSignal = Boolean(signal);
   const label = STATE_LABEL[m.state] || STATE_LABEL["no-data"];
   return (
@@ -406,12 +437,13 @@ function MonitorCard({ m, signal, signalIsActive, executing, onExecute, onAck })
             <Mini label="Stop" value={fmt(signal.stop_price)} color={C.red} />
             <Mini label="Target" value={fmt(signal.target_price)} color={C.green} />
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
             <Button primary disabled={executing} onClick={() => onExecute(signal)}>{executing ? "Logging…" : "Execute Paper"}</Button>
+            <Button disabled={previewing} onClick={() => onPreview(signal)} title="Dry-run the bracket against Schwab's previewOrder endpoint — validates the order without placing it.">{previewing ? "Previewing…" : "Preview on Schwab"}</Button>
             <Button onClick={() => onAck(signal)}>Skip</Button>
             <span style={{ flex: 1 }} />
             <span style={{ font: `400 10px ${C.sans}`, color: C.inkFaint, textAlign: "right" }}>
-              {signal.position_size} sh · paper only
+              {signal.position_size} sh · paper / dry-run
             </span>
           </div>
         </div>
@@ -481,7 +513,7 @@ function MiniChart({ candles, yHigh, yLow }) {
 // ---------------------------------------------------------------------------
 // Setup alert modal
 // ---------------------------------------------------------------------------
-function AlertModal({ sig, queued, executing, onExecute, onAck }) {
+function AlertModal({ sig, queued, executing, previewing, onExecute, onPreview, onAck }) {
   const dirColor = sig.direction === "Long" ? C.green : C.red;
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(3,6,10,0.72)", display: "grid", placeItems: "center", zIndex: 1000 }}>
@@ -506,14 +538,61 @@ function AlertModal({ sig, queued, executing, onExecute, onAck }) {
           <Row label="Volume ratio" value={sig.volume_ratio == null ? "—" : `${sig.volume_ratio}× ${sig.volume_ratio >= 2 ? "✓" : ""}`} color={sig.volume_ratio >= 2 ? C.green : C.inkDim} />
           <Row label="Level" value={`${sig.level_type} ${fmt(sig.level)}`} />
         </div>
-        <div style={{ padding: "12px 18px", borderTop: `1px solid ${C.line}`, display: "flex", gap: 10 }}>
+        <div style={{ padding: "12px 18px", borderTop: `1px solid ${C.line}`, display: "flex", gap: 10, flexWrap: "wrap" }}>
           <Button primary disabled={executing} onClick={onExecute}>{executing ? "Logging…" : "Execute Paper"}</Button>
+          <Button disabled={previewing} onClick={onPreview} title="Dry-run the bracket against Schwab's previewOrder endpoint — validates the order without placing it.">{previewing ? "Previewing…" : "Preview on Schwab"}</Button>
           <Button onClick={onAck}>Skip</Button>
           <span style={{ flex: 1 }} />
-          <span style={{ font: `400 10px ${C.sans}`, color: C.inkFaint, alignSelf: "center", maxWidth: 130, textAlign: "right" }}>Paper only — no live Schwab order.</span>
+          <span style={{ font: `400 10px ${C.sans}`, color: C.inkFaint, alignSelf: "center", maxWidth: 150, textAlign: "right" }}>Paper logs in-app; Schwab preview is a dry-run — neither fills.</span>
         </div>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Schwab preview (dry-run) result — proves the bracket would be accepted,
+// without placing it. Schwab has no paper account API, so this is the safe path.
+// ---------------------------------------------------------------------------
+function SchwabPreviewPanel({ preview, onClose }) {
+  const { signal = {}, account, preview: p = {} } = preview || {};
+  const statusColor = p.status === "REJECTED" ? C.red : p.status === "WARNING" ? C.yellow : C.green;
+  return (
+    <Card>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
+        <strong style={{ font: `600 13px ${C.sans}`, color: C.ink }}>Schwab order preview</strong>
+        <span style={{ font: `600 11px ${C.sans}`, color: statusColor, textTransform: "uppercase", letterSpacing: 0.4 }}>{p.status || "OK"}</span>
+        <span style={{ font: `400 12px ${C.mono}`, color: C.inkFaint }}>
+          {signal.ticker} {signal.direction} · {signal.position_size} sh{account ? ` · ${account}` : ""}
+        </span>
+        <span style={{ flex: 1 }} />
+        <span style={{ font: `600 10px ${C.sans}`, color: C.yellow, textTransform: "uppercase", letterSpacing: 0.3 }}>Dry-run · not placed</span>
+        <Button onClick={onClose}>Dismiss</Button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(120px, 1fr))", gap: 10 }}>
+        <Mini label="Entry" value={fmt(signal.entry_price)} color={C.ink} />
+        <Mini label="Stop" value={fmt(signal.stop_price)} color={C.red} />
+        <Mini label="Target" value={fmt(signal.target_price)} color={C.green} />
+        <Mini label="Order value" value={p.orderValue == null ? "—" : `$${Number(p.orderValue).toFixed(2)}`} />
+        <Mini label="Est. fees" value={p.estimatedCost == null ? "—" : `$${Number(p.estimatedCost).toFixed(2)}`} />
+      </div>
+
+      {p.rejects?.length > 0 && (
+        <div style={{ marginTop: 12, padding: 10, border: `1px solid ${C.redDim}`, borderRadius: 8, background: "#1a0e14" }}>
+          {p.rejects.map((r, i) => <div key={i} style={{ font: `400 12px ${C.sans}`, color: C.red }}>✕ {r}</div>)}
+        </div>
+      )}
+      {p.alerts?.length > 0 && (
+        <div style={{ marginTop: 10 }}>
+          {p.alerts.map((a, i) => <div key={i} style={{ font: `400 11px ${C.sans}`, color: C.yellow }}>⚠ {a}</div>)}
+        </div>
+      )}
+
+      <div style={{ marginTop: 12, font: `400 11px ${C.sans}`, color: C.inkFaint }}>
+        Validated against the live Schwab account via <code>previewOrder</code> — no order was placed. Schwab has no paper-trading API; this confirms the bracket would be accepted.
+      </div>
+    </Card>
   );
 }
 

@@ -279,6 +279,12 @@ class SchwabProvider(Provider):
     # market-data feed above). The same app key / secret / refresh token are
     # used, but the Schwab app must also be approved for the "Accounts and
     # Trading Production" product or these return HTTP 401/403.
+    _ACCOUNT_ACCESS_HINT = (
+        " — the token lacks account access; confirm the Schwab app is "
+        "approved for 'Accounts and Trading Production' and the refresh "
+        "token is current (`python cli.py schwab-auth`)"
+    )
+
     def _get_json(self, url: str, params: dict | None = None):
         try:
             resp = requests.get(
@@ -291,14 +297,32 @@ class SchwabProvider(Provider):
             raise ProviderError(f"schwab account request failed: {e}") from e
         if resp.status_code == 200:
             return resp.json()
-        hint = ""
-        if resp.status_code in (401, 403):
-            hint = (
-                " — the token lacks account access; confirm the Schwab app is "
-                "approved for 'Accounts and Trading Production' and the refresh "
-                "token is current (`python cli.py schwab-auth`)"
-            )
+        hint = self._ACCOUNT_ACCESS_HINT if resp.status_code in (401, 403) else ""
         raise ProviderError(f"schwab account: HTTP {resp.status_code} {resp.text[:200]}{hint}")
+
+    def _post_json(self, url: str, payload: dict):
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self._token()}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab order request failed: {e}") from e
+        if resp.status_code in (200, 201):
+            if not resp.text:
+                return {}
+            try:
+                return resp.json()
+            except ValueError:
+                return {}
+        hint = self._ACCOUNT_ACCESS_HINT if resp.status_code in (401, 403) else ""
+        raise ProviderError(f"schwab order: HTTP {resp.status_code} {resp.text[:300]}{hint}")
 
     def account_numbers(self) -> list[dict]:
         """Plain account number -> encrypted hashValue used by other endpoints."""
@@ -315,3 +339,15 @@ class SchwabProvider(Provider):
             f"{ACCOUNTS_BASE}/accounts/{account_hash}/transactions",
             params={"startDate": start, "endDate": end, "types": types},
         ) or []
+
+    def preview_order(self, account_hash: str, order: dict) -> dict:
+        """Dry-run an order: validate it against the account WITHOUT placing it.
+
+        Schwab has no paper-trading environment, so previewOrder is the closest
+        safe equivalent — it returns the projected order value, commission/fees,
+        and any validation rejects/alerts, but never fills. A real fill would use
+        a (deliberately unimplemented here) POST to .../orders instead.
+        """
+        return self._post_json(
+            f"{ACCOUNTS_BASE}/accounts/{account_hash}/previewOrder", order
+        ) or {}

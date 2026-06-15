@@ -641,6 +641,25 @@ def api_executor_paper_execute():
     return jsonify(out), 200 if out.get("ok") else 400
 
 
+@app.route("/api/executor/schwab/preview", methods=["POST"])
+def api_executor_schwab_preview():
+    """Dry-run a signal's bracket order against Schwab's previewOrder endpoint.
+
+    Schwab has no paper-trading API, so this validates the order against the real
+    account (buying power, pricing, tradeability) and returns the projected cost /
+    fees and any rejects — but NOTHING is filled. It never places a live order.
+    """
+    import schwab_orders
+
+    body = request.get_json(silent=True) or {}
+    try:
+        out = schwab_orders.preview_bracket(body.get("signal") or body,
+                                            account_hash=body.get("accountHash"))
+    except Exception as e:  # noqa: BLE001 — surface the cause to the UI + logs
+        return _executor_error("Schwab preview", e)
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
 @app.route("/api/executor/paper/trades", methods=["GET"])
 def api_executor_paper_trades():
     import intraday_executor as ix
