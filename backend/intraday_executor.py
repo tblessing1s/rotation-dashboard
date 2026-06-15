@@ -107,6 +107,21 @@ def _to_et_naive(ts) -> pd.Timestamp:
     return t
 
 
+def _finite(x, default=None):
+    """Coerce to a finite float, treating None and NaN as missing.
+
+    SQLite NULLs surface as NaN in pandas float columns, and ``x or 0`` does not
+    catch NaN (NaN is truthy) — so a forming/partial candle with a null field
+    would otherwise blow up an ``int(round(float(...)))``. This is the one safe
+    numeric gate for everything that touches candle values.
+    """
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return default
+    return default if v != v else v   # NaN -> default
+
+
 # ---------------------------------------------------------------------------
 # Per-ticker data assembly (reuses engine indicators so rules never diverge)
 # ---------------------------------------------------------------------------
@@ -185,7 +200,7 @@ def _build_signal(ticker, ts, candle, setup, *, levels, avg_volume, atr, config)
     reward = risk * rr
     target = entry + reward if direction == "Long" else entry - reward
 
-    entry_volume = float(candle["Volume"] or 0)
+    entry_volume = _finite(candle["Volume"], 0.0)
     volume_ratio = round(entry_volume / avg_volume, 2) if avg_volume > 0 else None
     risk_per_trade = float(config.get("fixed_risk_per_trade", 0) or 0)
     position_size = int(risk_per_trade // risk) if risk > 0 and risk_per_trade > 0 else 0
@@ -315,16 +330,17 @@ def monitor_status(config, *, get_intraday_range, get_daily,
 
         ts = window.index[-1]
         candle = window.loc[ts]
-        close = float(candle["Close"])
-        avg_volume = float(ctx["vol_avg"].get(ts, float("nan")))
+        close = _finite(candle["Close"])
+        last_vol = _finite(candle["Volume"], 0.0)
+        avg_volume = _finite(ctx["vol_avg"].get(ts))
         status.update({
             "state": "monitoring",
             "last_candle_time": engine._central_time_label(ts),
-            "last_close": round(close, 2),
-            "last_volume": int(round(float(candle["Volume"] or 0))),
-            "avg_volume": int(round(avg_volume)) if avg_volume == avg_volume else None,
-            "volume_ratio": (round(float(candle["Volume"] or 0) / avg_volume, 2)
-                             if avg_volume == avg_volume and avg_volume > 0 else None),
+            "last_close": round(close, 2) if close is not None else None,
+            "last_volume": int(round(last_vol)),
+            "avg_volume": int(round(avg_volume)) if avg_volume is not None else None,
+            "volume_ratio": (round(last_vol / avg_volume, 2)
+                             if avg_volume and avg_volume > 0 else None),
             "pct_to_high": round((status["y_high"] - close) / close * 100, 2) if close else None,
             "pct_to_low": round((close - status["y_low"]) / close * 100, 2) if close else None,
             "candles": _candle_series(window),
@@ -334,16 +350,23 @@ def monitor_status(config, *, get_intraday_range, get_daily,
 
 
 def _candle_series(window) -> list[dict]:
-    """Window candles as plain OHLCV dicts (Central-time labels) for charting."""
+    """Window candles as plain OHLCV dicts (Central-time labels) for charting.
+
+    OHLC fall back to the close when a field is null (a forming/partial candle)
+    so the chart never receives a NaN; volume defaults to 0. Candles without a
+    usable close are dropped."""
     out = []
     for ts, r in window.iterrows():
+        close = _finite(r["Close"])
+        if close is None:
+            continue
         out.append({
             "time": engine._central_time_label(ts),
-            "open": round(float(r["Open"]), 2),
-            "high": round(float(r["High"]), 2),
-            "low": round(float(r["Low"]), 2),
-            "close": round(float(r["Close"]), 2),
-            "volume": int(round(float(r["Volume"] or 0))),
+            "open": round(_finite(r["Open"], close), 2),
+            "high": round(_finite(r["High"], close), 2),
+            "low": round(_finite(r["Low"], close), 2),
+            "close": round(close, 2),
+            "volume": int(round(_finite(r["Volume"], 0.0))),
         })
     return out
 

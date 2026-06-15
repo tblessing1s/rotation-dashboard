@@ -16,6 +16,7 @@ import secrets
 import shutil
 import tempfile
 import time
+import traceback
 
 from flask import Flask, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
@@ -580,14 +581,25 @@ def api_executor_config():
     return jsonify({"ok": True, "config": ix.DEFAULT_MONITOR_CONFIG})
 
 
+def _executor_error(label: str, exc: Exception):
+    """Turn an unexpected executor failure into a structured JSON error (logged
+    with a traceback) instead of an opaque HTML 500, so the UI can show why."""
+    print(f"[executor] {label} failed: {exc}")
+    traceback.print_exc()
+    return jsonify({"ok": False, "error": f"{label} failed: {exc}"}), 500
+
+
 @app.route("/api/executor/monitor", methods=["POST"])
 def api_executor_monitor():
     import intraday_executor as ix
 
     body = request.get_json(silent=True) or {}
     config = body.get("config") if "config" in body else body
-    out = ix.run_monitor(config, refresh=bool(body.get("refresh")),
-                         on_date=body.get("date"), as_of=body.get("asOf"))
+    try:
+        out = ix.run_monitor(config, refresh=bool(body.get("refresh")),
+                             on_date=body.get("date"), as_of=body.get("asOf"))
+    except Exception as e:  # noqa: BLE001 — surface the cause to the UI + logs
+        return _executor_error("Scan", e)
     return jsonify(out), 200 if out.get("ok") else 400
 
 
@@ -597,9 +609,12 @@ def api_executor_playback():
 
     body = request.get_json(silent=True) or {}
     config = body.get("config") if "config" in body else body
-    out = ix.run_playback(config, date=body.get("date"),
-                         date_range=body.get("date_range"),
-                         auto_backfill=bool(body.get("autoBackfill")))
+    try:
+        out = ix.run_playback(config, date=body.get("date"),
+                             date_range=body.get("date_range"),
+                             auto_backfill=bool(body.get("autoBackfill")))
+    except Exception as e:  # noqa: BLE001 — surface the cause to the UI + logs
+        return _executor_error("Playback", e)
     return jsonify(out), 200 if out.get("ok") else 400
 
 
