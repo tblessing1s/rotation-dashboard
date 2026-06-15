@@ -37,8 +37,11 @@ DEFAULT_CONFIG = {
         "proximity_pct": 0.30,        # how close (%) price must come to the level
     },
     "entry_rules": {
-        "volume_multiplier": 2.0,     # candle volume must exceed N x the recent average
-        "vol_lookback": 12,           # candles in the trailing volume average (~1h of 5m bars)
+        "volume_multiplier": 2.0,     # candle volume must exceed N x the volume average
+        # Bars in the volume moving average. Matches thinkorswim's Volume Avg study,
+        # Average(volume, length): a simple MA that *includes the current bar* and
+        # runs continuously across days. TOS default is 50.
+        "vol_avg_length": 50,
         "entry_timing": "candle_close",  # or "immediate_touch"
     },
     "skip_conditions": {
@@ -59,8 +62,6 @@ DEFAULT_CONFIG = {
 }
 
 ENTRY_TIMINGS = {"candle_close", "immediate_touch"}
-# Minimum session candles needed before we trust the rolling volume average.
-_MIN_VOL_LOOKBACK = 3
 
 
 def _deep_merge(base: dict, override: dict) -> dict:
@@ -291,10 +292,10 @@ def _direction_from_intraday(intraday: pd.DataFrame | None, at_ts) -> str | None
     return "Up" if cur >= day_open else "Down"
 
 
-def _context_direction(symbol, day, at_ts, *, get_intraday, get_daily, interval_min) -> str:
+def _context_direction(symbol, day, at_ts, *, day_session, get_daily) -> str:
     if not symbol:
         return "Unknown"
-    intraday = get_intraday(symbol, day, interval_min)
+    intraday = day_session(symbol, day)
     direction = _direction_from_intraday(intraday, at_ts)
     if direction:
         return direction
@@ -303,6 +304,23 @@ def _context_direction(symbol, day, at_ts, *, get_intraday, get_daily, interval_
     if prior is not None and prior.get("Open") is not None:
         return "Up" if float(prior["Close"]) >= float(prior["Open"]) else "Down"
     return "Unknown"
+
+
+def _vol_avg_length(cfg) -> int:
+    """Bars in the volume MA. Honors vol_avg_length, with vol_lookback kept as a
+    back-compat alias for configs saved before the rename."""
+    er = cfg.get("entry_rules", {})
+    return int(er.get("vol_avg_length") or er.get("vol_lookback") or 50)
+
+
+def intraday_history_start(start: str, length: int) -> str:
+    """Earliest ET date whose intraday bars must be loaded so the first requested
+    session's volume MA(length) is already fully formed — i.e. the MA matches
+    thinkorswim, which carries the window across the prior day(s). A regular
+    session is ~78 five-minute bars; buffer enough trading days for `length`."""
+    sessions = max(1, -(-int(length) // 78) + 1)  # ceil(length/78) + 1
+    cal_days = sessions * 2 + 5                    # generous weekday->calendar pad
+    return (pd.Timestamp(start) - pd.Timedelta(days=cal_days)).strftime("%Y-%m-%d")
 
 
 # ---------------------------------------------------------------------------
@@ -370,25 +388,29 @@ def _window_candles(intraday: pd.DataFrame, start_time: str, end_time: str,
     return session[mask]
 
 
-def run_backtest(config: dict, *, get_intraday, get_daily) -> dict:
+def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
     """Run a backtest.
 
     Parameters
     ----------
     config : dict
         A validated config (see ``validate_config``).
-    get_intraday : callable(symbol, date_str, interval_min) -> DataFrame | None
-        Intraday OHLCV for one ET session (tz-naive ET index).
+    get_intraday_range : callable(symbol, start, end, interval_min) -> DataFrame | None
+        Continuous intraday OHLCV for [start, end] (tz-naive ET index, may span
+        multiple sessions). Loaded with a buffer before the requested range so
+        the volume MA matches thinkorswim from the first session.
     get_daily : callable(symbol) -> DataFrame | None
         Daily OHLCV (date index) for yesterday's levels and ATR.
 
     Returns
     -------
-    dict with keys ``summary``, ``trades``, ``coverage``, ``warnings``, ``config``.
+    dict with keys ``summary``, ``trades``, ``coverage``, ``warnings``,
+    ``diagnostics``, ``config``.
     """
     cfg = config
     rr = float(cfg["risk_reward"])
     interval = int(cfg.get("interval_min", 5))
+    length = _vol_avg_length(cfg)
     detect = SETUP_TYPES[cfg["setup_conditions"]["type"]]
     place_stop = STOP_LOGIC[cfg["stop_logic"]]
     tw = cfg["time_window"]
@@ -396,9 +418,14 @@ def run_backtest(config: dict, *, get_intraday, get_daily) -> dict:
     skip_n = int(skip.get("skip_first_n_candles", 0) or 0)
     sector_map = {k.upper(): v for k, v in (cfg.get("sector_map") or {}).items()}
 
-    # Cache daily bars + ATR per symbol across the whole run.
+    start, end = cfg["date_range"]["start"], cfg["date_range"]["end"]
+    hist_start = intraday_history_start(start, length)
+
+    # Cache daily bars + ATR + the continuous intraday series & its volume MA.
     daily_cache: dict[str, pd.DataFrame | None] = {}
     atr_cache: dict[str, pd.Series | None] = {}
+    series_cache: dict[str, pd.DataFrame | None] = {}
+    volavg_cache: dict[str, pd.Series | None] = {}
 
     def daily(sym):
         if sym not in daily_cache:
@@ -410,7 +437,31 @@ def run_backtest(config: dict, *, get_intraday, get_daily) -> dict:
             atr_cache[sym] = wilder_atr(daily(sym), int(cfg["stop_params"].get("atr_period", 14)))
         return atr_cache[sym]
 
-    dates = _session_dates(cfg["date_range"]["start"], cfg["date_range"]["end"])
+    def series(sym):
+        if sym not in series_cache:
+            s = get_intraday_range(sym, hist_start, end, interval)
+            series_cache[sym] = s.sort_index() if s is not None and not s.empty else None
+        return series_cache[sym]
+
+    def vol_avg(sym):
+        # thinkorswim Average(volume, length): simple MA including the current
+        # bar, continuous across days. A full window is required (NaN until then).
+        if sym not in volavg_cache:
+            s = series(sym)
+            volavg_cache[sym] = (
+                s["Volume"].astype(float).rolling(length, min_periods=length).mean()
+                if s is not None else None
+            )
+        return volavg_cache[sym]
+
+    def day_session(sym, day):
+        s = series(sym)
+        if s is None:
+            return None
+        d = s[s.index.normalize() == pd.Timestamp(day).normalize()]
+        return d if not d.empty else None
+
+    dates = _session_dates(start, end)
     trades: list[dict] = []
     warnings: list[str] = []
     coverage = {"requested_sessions": 0, "missing": [], "covered": 0}
@@ -420,10 +471,11 @@ def run_backtest(config: dict, *, get_intraday, get_daily) -> dict:
 
     for ticker in cfg["tickers"]:
         proxy = sector_map.get(ticker)
+        ticker_vol_avg = vol_avg(ticker)
         for day in dates:
             coverage["requested_sessions"] += 1
-            intraday = get_intraday(ticker, day, interval)
-            if intraday is None or intraday.empty:
+            session = day_session(ticker, day)
+            if session is None:
                 coverage["missing"].append({"ticker": ticker, "date": day})
                 continue
             coverage["covered"] += 1
@@ -435,16 +487,14 @@ def run_backtest(config: dict, *, get_intraday, get_daily) -> dict:
             levels = {"y_high": float(prior["High"]), "y_low": float(prior["Low"])}
             atr_val = _atr_as_of(atr_series(ticker), day)
 
-            session = intraday.sort_index()
             window = _window_candles(session, tw["start_time"], tw["end_time"], skip_n)
             if window is None or window.empty:
                 continue
 
             trade = _scan_day(
-                ticker, day, session, window, levels, atr_val, proxy,
-                cfg=cfg, rr=rr, interval=interval, detect=detect, place_stop=place_stop,
-                skip=skip, get_intraday=get_intraday, get_daily=daily, warnings=warnings,
-                diag=diag,
+                ticker, day, session, window, levels, atr_val, proxy, ticker_vol_avg,
+                cfg=cfg, rr=rr, detect=detect, place_stop=place_stop, skip=skip,
+                day_session=day_session, get_daily=daily, warnings=warnings, diag=diag,
             )
             if trade:
                 trades.append(trade)
@@ -460,21 +510,20 @@ def run_backtest(config: dict, *, get_intraday, get_daily) -> dict:
     }
 
 
-def _scan_day(ticker, day, session, window, levels, atr_val, proxy, *, cfg, rr,
-              interval, detect, place_stop, skip, get_intraday, get_daily, warnings, diag):
-    """Find the first qualifying setup of the day and resolve it to a trade/skip."""
-    vols = session["Volume"].astype(float).fillna(0.0)
-    lookback = int(cfg["entry_rules"].get("vol_lookback", 12) or 12)
+def _scan_day(ticker, day, session, window, levels, atr_val, proxy, vol_avg_series, *, cfg, rr,
+              detect, place_stop, skip, day_session, get_daily, warnings, diag):
+    """Find the first qualifying setup of the day and resolve it to a trade/skip.
+
+    `vol_avg_series` is the ticker's thinkorswim-style volume MA (continuous,
+    includes the current bar) indexed by the same timestamps as the candles.
+    """
     is_sr = cfg["setup_conditions"]["type"] == "support_resistance_bounce"
     prox = float(cfg["setup_conditions"].get("proximity_pct", 0.30)) / 100.0
     mult = float(cfg["entry_rules"].get("volume_multiplier", 0) or 0)
     for ts, candle in window.iterrows():
-        prior_vols = vols[session.index < ts]
-        if len(prior_vols) < _MIN_VOL_LOOKBACK:
+        avg_volume = float(vol_avg_series.get(ts, float("nan"))) if vol_avg_series is not None else float("nan")
+        if avg_volume != avg_volume:  # NaN — MA window not yet full at this bar
             continue
-        # Trailing-window average so the (almost always largest) opening candle
-        # ages out and a genuine later spike can still clear the multiplier.
-        avg_volume = float(prior_vols.tail(lookback).mean())
 
         diag["candles_evaluated"] += 1
         if is_sr:
@@ -489,10 +538,8 @@ def _scan_day(ticker, day, session, window, levels, atr_val, proxy, *, cfg, rr,
         diag["setups_detected"] += 1
 
         direction = setup["direction"]
-        spy_dir = _context_direction("SPY", day, ts, get_intraday=get_intraday,
-                                     get_daily=get_daily, interval_min=interval)
-        sector_dir = _context_direction(proxy, day, ts, get_intraday=get_intraday,
-                                        get_daily=get_daily, interval_min=interval)
+        spy_dir = _context_direction("SPY", day, ts, day_session=day_session, get_daily=get_daily)
+        sector_dir = _context_direction(proxy, day, ts, day_session=day_session, get_daily=get_daily)
 
         entry_volume = float(candle["Volume"] or 0)
         volume_ratio = round(entry_volume / avg_volume, 2) if avg_volume > 0 else None
