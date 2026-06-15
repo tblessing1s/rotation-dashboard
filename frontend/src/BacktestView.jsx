@@ -12,7 +12,10 @@ import { C } from "./theme.js";
 const API = "";
 const QUICK_TICKERS = ["AMD", "HOOD", "HIMS", "CVNA"];
 
-const SETUP_TYPES = [{ value: "support_resistance_bounce", label: "Support / Resistance bounce (yesterday's levels)" }];
+const SETUP_TYPES = [
+  { value: "support_resistance_break", label: "S/R breakout — close beyond yesterday's level (High→Long, Low→Short)" },
+  { value: "support_resistance_bounce", label: "S/R bounce — fade yesterday's level (Low→Long, High→Short)" },
+];
 const ENTRY_TIMINGS = [
   { value: "candle_close", label: "Candle close" },
   { value: "immediate_touch", label: "Immediate touch" },
@@ -30,7 +33,7 @@ const DEFAULT_FORM = {
   tickers: "AMD, HOOD, HIMS, CVNA",
   start: daysAgo(30),
   end: today(),
-  setupType: "support_resistance_bounce",
+  setupType: "support_resistance_break",
   useYesterdayLevels: true,
   proximityPct: 0.3,
   volumeMultiplier: 2,

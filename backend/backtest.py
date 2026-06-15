@@ -223,6 +223,52 @@ def _sr_level_touch(candle, levels, prox):
     return None
 
 
+@register_setup("support_resistance_break")
+def _detect_sr_break(candle, *, levels, avg_volume, cfg) -> dict | None:
+    """Breakout/momentum: price *closes beyond* yesterday's level, on a volume
+    spike, and continues in that direction.
+
+    Direction follows the break (the opposite of the bounce/fade setup):
+      * close **above** yesterday's **high** → **Long** (breakout)
+      * close **below** yesterday's **low**  → **Short** (breakdown)
+
+    The gap filter (don't trade a day that opened outside yesterday's range
+    until price returns to it) is enforced by the day scanner, not here.
+    """
+    mult = float(cfg["entry_rules"].get("volume_multiplier", 0) or 0)
+    volume_spike = _volume_spike(candle, avg_volume, mult)
+    if mult > 0 and not volume_spike:
+        return None
+
+    hit = _sr_level_break(candle, levels)
+    if hit is None:
+        return None
+    direction, level, level_type = hit
+    return {"direction": direction, "level": level, "level_type": level_type,
+            "volume_spike": volume_spike}
+
+
+def _sr_level_break(candle, levels):
+    """(direction, level, level_type) when the candle closes beyond a yesterday
+    level — above Y-High (Long) or below Y-Low (Short) — else None."""
+    y_high, y_low = levels.get("y_high"), levels.get("y_low")
+    close = float(candle["Close"])
+    if y_high is not None and close > y_high:
+        return ("Long", y_high, "Y-High")
+    if y_low is not None and close < y_low:
+        return ("Short", y_low, "Y-Low")
+    return None
+
+
+def _in_yesterday_range(candle, levels) -> bool:
+    """True when the candle trades inside [Y-Low, Y-High] — used to re-enable a
+    gapped day once price returns to yesterday's range."""
+    y_high, y_low = levels.get("y_high"), levels.get("y_low")
+    if y_high is None or y_low is None:
+        return True
+    return float(candle["Low"]) <= y_high and float(candle["High"]) >= y_low
+
+
 @register_stop("atr_divided_by_2")
 def _stop_atr_half(direction, *, level, entry, atr, cfg):
     if atr is None or atr <= 0:
@@ -517,20 +563,39 @@ def _scan_day(ticker, day, session, window, levels, atr_val, proxy, vol_avg_seri
     `vol_avg_series` is the ticker's thinkorswim-style volume MA (continuous,
     includes the current bar) indexed by the same timestamps as the candles.
     """
-    is_sr = cfg["setup_conditions"]["type"] == "support_resistance_bounce"
+    setup_type = cfg["setup_conditions"]["type"]
+    is_sr = setup_type == "support_resistance_bounce"
+    is_break = setup_type == "support_resistance_break"
     prox = float(cfg["setup_conditions"].get("proximity_pct", 0.30)) / 100.0
     mult = float(cfg["entry_rules"].get("volume_multiplier", 0) or 0)
+
+    # Gap filter (breakout only): a day that opened *outside* yesterday's range
+    # is a no-trade until price returns into [Y-Low, Y-High]. A day that opened
+    # inside the range is eligible immediately.
+    gap_eligible = True
+    if is_break and len(session):
+        day_open = float(session.iloc[0]["Open"])
+        gap_eligible = levels["y_low"] <= day_open <= levels["y_high"]
+
     for ts, candle in window.iterrows():
         avg_volume = float(vol_avg_series.get(ts, float("nan"))) if vol_avg_series is not None else float("nan")
         if avg_volume != avg_volume:  # NaN — MA window not yet full at this bar
             continue
 
+        if is_break and not gap_eligible:
+            # Wait for price to drop back between yesterday's high and low; the
+            # re-entry bar itself isn't a breakout entry, so move on.
+            if _in_yesterday_range(candle, levels):
+                gap_eligible = True
+            continue
+
         diag["candles_evaluated"] += 1
-        if is_sr:
-            if _sr_level_touch(candle, levels, prox) is not None:
-                diag["level_touches"] += 1
-            if _volume_spike(candle, avg_volume, mult):
-                diag["volume_spikes"] += 1
+        if is_sr and _sr_level_touch(candle, levels, prox) is not None:
+            diag["level_touches"] += 1
+        if is_break and _sr_level_break(candle, levels) is not None:
+            diag["level_touches"] += 1
+        if _volume_spike(candle, avg_volume, mult):
+            diag["volume_spikes"] += 1
 
         setup = detect(candle, levels=levels, avg_volume=avg_volume, cfg=cfg)
         if not setup:
