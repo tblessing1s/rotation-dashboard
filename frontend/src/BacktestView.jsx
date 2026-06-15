@@ -414,7 +414,7 @@ export default function BacktestView({ store }) {
             <table style={{ width: "100%", borderCollapse: "collapse", font: `400 12px ${C.mono}` }}>
               <thead>
                 <tr>
-                  {["Date", "Ticker", "Level", "Vol↑", "Volume", "Avg vol", "RVOL", "Dir", "Entry time", "Entry", "Stop", "Target", ...(usesAtrStop ? ["Risk amt", "Reward amt"] : []), "Exit time", "Exit", "Outcome", "R", "SPY", "Sector", "Notes"].map((h) => (
+                  {["Date", "Ticker", "Level", "Vol↑", "Volume", "Avg vol", "RVOL", "Dir", "Entry time (CT)", "Entry", "Stop", "Target", ...(usesAtrStop ? ["Risk amt", "Reward amt"] : []), "Exit time (CT)", "Exit", "Outcome", "R", "SPY", "Sector", "Notes"].map((h) => (
                     <th key={h} style={thStyle}>{h}</th>
                   ))}
                 </tr>
