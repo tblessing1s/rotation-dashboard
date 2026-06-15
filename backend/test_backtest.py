@@ -209,6 +209,48 @@ def test_atr_timeframe_intraday_is_tighter_than_daily():
     assert abs(ti["entry_price"] - ti["stop_price"]) < abs(td["entry_price"] - td["stop_price"])
 
 
+def test_fixed_distance_session_end_uses_binary_r_multiple():
+    # With fixed-distance stops, a trade that has not hit the target by the end
+    # of the test window should still report table R as one full risk unit lost
+    # instead of a fractional mark-to-close value.
+    day = "2026-06-01"
+    bars = [
+        ("09:30", 105, 106, 104, 105, 1000),
+        ("09:35", 105, 106, 104, 105, 1000),
+        ("09:40", 105, 106, 104, 105, 1000),
+        ("09:45", 101, 102, 99.9, 101, 5000),
+        ("10:00", 101, 101.2, 100.4, 100.5, 1200),
+    ]
+    loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
+    cfg = base_config(stop_logic="fixed_distance", stop_params={"fixed_distance": 1})
+    out = run(cfg, loaders)
+
+    t = out["trades"][0]
+    assert t["outcome"] == "Loss"
+    assert t["exit_price"] == 100.5
+    assert t["r_result"] == -1.0
+    assert out["summary"]["avg_loss_r"] == -1.0
+
+
+def test_fixed_distance_target_hit_uses_configured_reward_multiple():
+    day = "2026-06-01"
+    bars = [
+        ("09:30", 105, 106, 104, 105, 1000),
+        ("09:35", 105, 106, 104, 105, 1000),
+        ("09:40", 105, 106, 104, 105, 1000),
+        ("09:45", 101, 102, 99.9, 101, 5000),
+        ("10:00", 102, 104, 101.5, 103, 1200),
+    ]
+    loaders = make_loaders({("AMD", day): intraday(day, bars)}, {"AMD": daily_frame()})
+    cfg = base_config(stop_logic="fixed_distance", stop_params={"fixed_distance": 1})
+    out = run(cfg, loaders)
+
+    t = out["trades"][0]
+    assert t["outcome"] == "Win"
+    assert t["r_result"] == 2.0
+    assert out["summary"]["avg_win_r"] == 2.0
+
+
 def test_ambiguous_5m_bar_is_refined_with_1m_data():
     # Breakout Long: entry 111, stop 105, target 123. A later 5-minute bar's
     # range straddles BOTH stop and target, so order-of-hit is ambiguous.
