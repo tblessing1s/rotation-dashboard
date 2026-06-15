@@ -27,6 +27,7 @@ from providers import build_chain
 from providers.base import ProviderError, with_retries
 
 _CONFIG_KV_KEY = "backtest_configs"
+_RESOLUTIONS_KV_KEY = "backtest_resolutions"
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +213,8 @@ def run(raw_config: dict, auto_backfill: bool = False) -> dict:
         coverage = coverage_report(config)
 
     get_intraday_range, get_daily = _make_loaders()
-    result = engine.run_backtest(config, get_intraday_range=get_intraday_range, get_daily=get_daily)
+    result = engine.run_backtest(config, get_intraday_range=get_intraday_range,
+                                 get_daily=get_daily, manual_resolutions=list_resolutions())
     out = {"ok": True, "result": result, "coverage": coverage}
     if backfill_result is not None:
         out["backfill"] = backfill_result
@@ -240,4 +242,28 @@ def delete_config(name: str) -> dict:
     store = list_configs()
     store.pop(name, None)
     db.kv_set(_CONFIG_KV_KEY, store)
+    return store
+
+
+# ---------------------------------------------------------------------------
+# Manual exit resolutions — for trades the 1-minute data still can't settle
+# (stop and target inside one 1-minute bar). Keyed by ticker|date|HH:MM so the
+# decision sticks across re-runs.
+# ---------------------------------------------------------------------------
+def resolution_key(ticker: str, date: str, entry_time: str) -> str:
+    return f"{str(ticker).upper()}|{date}|{entry_time}"
+
+
+def list_resolutions() -> dict:
+    return db.kv_get(_RESOLUTIONS_KV_KEY) or {}
+
+
+def set_resolution(ticker: str, date: str, entry_time: str, outcome) -> dict:
+    key = resolution_key(ticker, date, entry_time)
+    store = list_resolutions()
+    if outcome in ("Win", "Loss"):
+        store[key] = outcome
+    else:
+        store.pop(key, None)  # anything else clears it (back to needs-review)
+    db.kv_set(_RESOLUTIONS_KV_KEY, store)
     return store

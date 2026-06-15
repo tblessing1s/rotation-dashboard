@@ -529,6 +529,22 @@ def api_backtest_export():
     )
 
 
+@app.route("/api/backtest/resolve", methods=["GET", "POST"])
+def api_backtest_resolve():
+    import backtest_service
+
+    if request.method == "GET":
+        return jsonify(backtest_service.list_resolutions())
+    body = request.get_json(silent=True) or {}
+    ticker = str(body.get("ticker") or "").strip()
+    date = str(body.get("date") or "").strip()
+    entry_time = str(body.get("entry_time") or "").strip()
+    if not (ticker and date and entry_time):
+        return jsonify({"error": "ticker, date and entry_time are required"}), 400
+    store = backtest_service.set_resolution(ticker, date, entry_time, body.get("outcome"))
+    return jsonify({"ok": True, "resolutions": store})
+
+
 @app.route("/api/backtest/configs", methods=["GET", "POST", "DELETE"])
 def api_backtest_configs():
     import backtest_service

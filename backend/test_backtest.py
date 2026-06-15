@@ -240,6 +240,37 @@ def test_ambiguous_5m_bar_is_refined_with_1m_data():
     assert out1["diagnostics"]["refined_bars"] == 1
 
 
+def test_unresolved_when_1m_ambiguous_then_manual_override():
+    # Even the 1-minute bar that does the damage has BOTH stop and target inside
+    # it -> outcome "Unresolved" (needs manual review). A saved manual resolution
+    # then settles it on the next run.
+    day = "2026-06-01"
+    five = [
+        ("09:30", 105, 106, 104, 105, 1000), ("09:35", 105, 106, 104, 105, 1000),
+        ("09:40", 105, 106, 104, 105, 1000),
+        ("09:45", 109, 111, 108, 111, 5000),   # breakout Long: entry 111, stop 105, target 123
+        ("10:00", 112, 124, 104, 110, 1200),   # 5m straddles both
+    ]
+    one = [  # first 1m bar to touch anything hits BOTH 105 and 123
+        ("10:00", 110, 124, 104, 108, 300), ("10:01", 108, 110, 106, 109, 300),
+        ("10:02", 109, 110, 107, 108, 300), ("10:03", 108, 110, 107, 109, 300),
+        ("10:04", 109, 110, 107, 108, 300),
+    ]
+    cfg = base_config(setup_conditions={"type": "support_resistance_break"})
+    gir, gd = make_loaders({("AMD", day): intraday(day, five)}, {"AMD": daily_frame()},
+                           fine_map={("AMD", day): intraday(day, one)})
+
+    out = engine.run_backtest(cfg, get_intraday_range=gir, get_daily=gd)
+    t = out["trades"][0]
+    assert t["outcome"] == "Unresolved" and t["exit_price"] is None and t["r_result"] is None
+    assert out["summary"]["unresolved"] == 1 and out["summary"]["total_trades"] == 0
+
+    out2 = engine.run_backtest(cfg, get_intraday_range=gir, get_daily=gd,
+                               manual_resolutions={f"AMD|{day}|09:45": "Win"})
+    t2 = out2["trades"][0]
+    assert t2["outcome"] == "Win" and t2["exit_price"] == 123.0 and "manual" in t2["notes"]
+
+
 def test_breakout_gap_open_is_no_trade_until_back_in_range():
     # Gaps above Y-High (110) at the open -> no trade, even though it keeps
     # closing above 110, because price never returns into yesterday's range.

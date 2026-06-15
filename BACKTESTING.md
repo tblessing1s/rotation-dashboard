@@ -39,6 +39,10 @@ For each ticker × trading day in the range:
    default 1; backfill pulls 1-minute bars for the traded tickers). With no
    1-minute data it falls back to the conservative "stop first" read. The
    diagnostics line reports how many ambiguous exits were resolved on 1-minute.
+   If even the 1-minute bar can't settle it (stop and target inside one
+   1-minute bar), the trade is marked **Unresolved** — the trade log shows
+   **W / L** buttons so you can check the chart and record which hit first; the
+   choice is saved (`/api/backtest/resolve`) and applied on every later run.
 6. The trade is logged with **market context**: SPY direction and the ticker's
    sector-proxy direction at entry (price-so-far vs the session open).
 

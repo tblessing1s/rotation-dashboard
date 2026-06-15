@@ -401,6 +401,8 @@ def _simulate(direction, entry, stop, target, forward, *, refine=None, interval_
             res = _resolve_fine(direction, stop, target, fine)
             if res is not None:
                 outcome, price = res
+                if outcome == "Unresolved":
+                    return "Unresolved", None, ts, "stop & target within one 1m bar — needs manual review"
                 if diag is not None:
                     diag["refined_bars"] = diag.get("refined_bars", 0) + 1
                 note = ("target hit first on 1m" if outcome == "Win" else "stop hit first on 1m")
@@ -436,7 +438,7 @@ def _resolve_fine(direction, stop, target, fine):
         else:
             hs, ht = hi >= stop, lo <= target
         if hs and ht:
-            return ("Loss", stop)   # still both in one 1m bar — conservative
+            return ("Unresolved", None)  # both inside one 1m bar — needs manual review
         if hs:
             return ("Loss", stop)
         if ht:
@@ -480,7 +482,7 @@ def _window_candles(intraday: pd.DataFrame, start_time: str, end_time: str,
     return session[mask]
 
 
-def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
+def run_backtest(config: dict, *, get_intraday_range, get_daily, manual_resolutions=None) -> dict:
     """Run a backtest.
 
     Parameters
@@ -607,7 +609,8 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
     coverage = {"requested_sessions": 0, "missing": [], "covered": 0}
     # Why a run produced the trades it did — so "0 trades" is never a black box.
     diag = {"candles_evaluated": 0, "level_touches": 0, "volume_spikes": 0,
-            "setups_detected": 0, "setups_skipped": 0, "ambiguous_bars": 0, "refined_bars": 0}
+            "setups_detected": 0, "setups_skipped": 0, "ambiguous_bars": 0,
+            "refined_bars": 0, "unresolved": 0}
 
     for ticker in cfg["tickers"]:
         proxy = sector_map.get(ticker)
@@ -636,7 +639,7 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
                 ticker, day, session, window, levels, resolve_atr, proxy, ticker_vol_avg,
                 cfg=cfg, rr=rr, detect=detect, place_stop=place_stop, skip=skip,
                 day_session=day_session, get_daily=daily, warnings=warnings, diag=diag,
-                refine=refine, interval=interval,
+                refine=refine, interval=interval, manual_resolutions=manual_resolutions,
             )
             if trade:
                 trades.append(trade)
@@ -653,7 +656,8 @@ def run_backtest(config: dict, *, get_intraday_range, get_daily) -> dict:
 
 
 def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_series, *, cfg, rr,
-              detect, place_stop, skip, day_session, get_daily, warnings, diag, refine=None, interval=5):
+              detect, place_stop, skip, day_session, get_daily, warnings, diag, refine=None,
+              interval=5, manual_resolutions=None):
     """Find the first qualifying setup of the day and resolve it to a trade/skip.
 
     `vol_avg_series` is the ticker's thinkorswim-style volume MA (continuous,
@@ -748,8 +752,28 @@ def _scan_day(ticker, day, session, window, levels, resolve_atr, proxy, vol_avg_
             direction, entry, stop, target, forward,
             refine=refine, interval_min=interval, diag=diag,
         )
-        r_result = (exit_price - entry) / risk if direction == "Long" else (entry - exit_price) / risk
 
+        # 1-minute data couldn't disambiguate: honor a saved manual resolution if
+        # the user has reviewed the chart, otherwise leave it for review.
+        if outcome == "Unresolved":
+            key = f"{ticker}|{day}|{base['entry_time']}"
+            manual = (manual_resolutions or {}).get(key)
+            if manual in ("Win", "Loss"):
+                outcome = manual
+                exit_price = target if manual == "Win" else stop
+                exit_ts = None
+                note = "manually resolved (1m ambiguous)"
+            else:
+                diag["unresolved"] = diag.get("unresolved", 0) + 1
+
+        if outcome == "Unresolved" or exit_price is None:
+            return {
+                **base, "entry_price": round(entry, 2), "stop_price": round(stop, 2),
+                "target_price": round(target, 2), "exit_price": None,
+                "outcome": "Unresolved", "r_result": None, "exit_time": None, "notes": note,
+            }
+
+        r_result = (exit_price - entry) / risk if direction == "Long" else (entry - exit_price) / risk
         return {
             **base,
             "entry_price": round(entry, 2),
@@ -768,6 +792,7 @@ def summarize(trades: list[dict]) -> dict:
     """Win rate, average R, and expectancy over the resolved (non-skip) trades."""
     resolved = [t for t in trades if t["outcome"] in ("Win", "Loss")]
     skips = sum(1 for t in trades if t["outcome"] == "Skip")
+    unresolved = sum(1 for t in trades if t["outcome"] == "Unresolved")
     wins = [t for t in resolved if t["outcome"] == "Win"]
     losses = [t for t in resolved if t["outcome"] == "Loss"]
     n = len(resolved)
@@ -784,6 +809,7 @@ def summarize(trades: list[dict]) -> dict:
         "wins": len(wins),
         "losses": len(losses),
         "skips": skips,
+        "unresolved": unresolved,
         "win_rate_percent": win_rate,
         "avg_win_r": avg_win,
         "avg_loss_r": avg_loss,

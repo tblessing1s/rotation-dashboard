@@ -95,7 +95,7 @@ async function postJson(path, body) {
   return { ok: r.ok, status: r.status, data };
 }
 
-const OUTCOME_COLOR = { Win: C.green, Loss: C.red, Skip: C.yellow };
+const OUTCOME_COLOR = { Win: C.green, Loss: C.red, Skip: C.yellow, Unresolved: C.amber };
 const DIR_COLOR = { Up: C.green, Down: C.red, Unknown: C.inkFaint };
 
 export default function BacktestView({ store }) {
@@ -104,6 +104,7 @@ export default function BacktestView({ store }) {
   const [backfilling, setBackfilling] = useState(false);
   const [errors, setErrors] = useState([]);
   const [result, setResult] = useState(null);
+  const [ranConfig, setRanConfig] = useState(null);
   const [coverage, setCoverage] = useState(null);
   const [savedConfigs, setSavedConfigs] = useState({});
   const [configName, setConfigName] = useState("");
@@ -125,9 +126,9 @@ export default function BacktestView({ store }) {
     fetch(`${API}/api/backtest/configs`).then((r) => r.json()).then(setSavedConfigs).catch(() => {});
   }, []);
 
-  const run = useCallback(async (autoBackfill = false) => {
+  const runWith = useCallback(async (config, autoBackfill = false, resetFilters = true) => {
     setRunning(true); setErrors([]); setStatus(autoBackfill ? "Pulling missing data, then running…" : "Running backtest…");
-    const { ok, data } = await postJson("/api/backtest/run", { config: buildConfig(form), autoBackfill });
+    const { ok, data } = await postJson("/api/backtest/run", { config, autoBackfill });
     setRunning(false);
     if (!ok || data.ok === false) {
       setErrors(data.errors || [data.error || "Backtest failed."]);
@@ -135,10 +136,21 @@ export default function BacktestView({ store }) {
       return;
     }
     setResult(data.result);
+    setRanConfig(data.result.config || config);
     setCoverage(data.coverage || null);
-    setFTicker("all"); setFOutcome("all"); setFFrom(""); setFTo("");
-    setStatus(`Done — ${data.result.summary.total_trades} trades.`);
-  }, [form, store]);
+    if (resetFilters) { setFTicker("all"); setFOutcome("all"); setFFrom(""); setFTo(""); }
+    const s = data.result.summary;
+    setStatus(`Done — ${s.total_trades} trades${s.unresolved ? `, ${s.unresolved} need manual review` : ""}.`);
+  }, []);
+
+  const run = useCallback((autoBackfill = false) => runWith(buildConfig(form), autoBackfill), [form, runWith]);
+
+  // Record which way an Unresolved trade actually went (from the chart), then
+  // re-run with the same config so the resolution is applied to the stats.
+  const resolveTrade = useCallback(async (t, outcome) => {
+    await postJson("/api/backtest/resolve", { ticker: t.ticker, date: t.date, entry_time: t.entry_time, outcome });
+    if (ranConfig) await runWith(ranConfig, false, false);
+  }, [ranConfig, runWith]);
 
   const checkCoverage = useCallback(async () => {
     setStatus("Checking data coverage…"); setErrors([]);
@@ -358,6 +370,7 @@ export default function BacktestView({ store }) {
             <Stat label="Wins" value={summary.wins} color={C.green} />
             <Stat label="Losses" value={summary.losses} color={C.red} />
             <Stat label="Skips" value={summary.skips} color={C.yellow} />
+            {summary.unresolved > 0 && <Stat label="Review" value={summary.unresolved} color={C.amber} />}
             <Stat label="Win rate" value={`${summary.win_rate_percent}%`} color={summary.win_rate_percent >= 50 ? C.green : C.ink} />
             <Stat label="Avg win" value={`${summary.avg_win_r}R`} color={C.green} />
             <Stat label="Avg loss" value={`${summary.avg_loss_r}R`} color={C.red} />
@@ -387,7 +400,7 @@ export default function BacktestView({ store }) {
               {tickerOptions.map((t) => <option key={t} value={t}>{t}</option>)}
             </select>
             <select value={fOutcome} onChange={(e) => setFOutcome(e.target.value)} style={selectStyle}>
-              {["all", "Win", "Loss", "Skip"].map((o) => <option key={o} value={o}>{o === "all" ? "All outcomes" : o}</option>)}
+              {["all", "Win", "Loss", "Skip", "Unresolved"].map((o) => <option key={o} value={o}>{o === "all" ? "All outcomes" : o}</option>)}
             </select>
             <Input type="date" style={{ width: 140 }} value={fFrom} onChange={(e) => setFFrom(e.target.value)} title="From date" />
             <Input type="date" style={{ width: 140 }} value={fTo} onChange={(e) => setFTo(e.target.value)} title="To date" />
@@ -421,8 +434,16 @@ export default function BacktestView({ store }) {
                     <td style={tdStyle}>{fmt(t.stop_price)}</td>
                     <td style={tdStyle}>{fmt(t.target_price)}</td>
                     <td style={tdStyle}>{fmt(t.exit_price)}</td>
-                    <td style={{ ...tdStyle, color: OUTCOME_COLOR[t.outcome] || C.ink, fontWeight: 600 }}>{t.outcome}</td>
-                    <td style={{ ...tdStyle, color: t.r_result > 0 ? C.green : t.r_result < 0 ? C.red : C.inkDim }}>{t.r_result > 0 ? "+" : ""}{t.r_result}</td>
+                    <td style={{ ...tdStyle, color: OUTCOME_COLOR[t.outcome] || C.ink, fontWeight: 600 }}>
+                      {t.outcome === "Unresolved" ? (
+                        <span style={{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+                          <span title="Check the chart: stop and target printed inside one 1-minute bar.">review</span>
+                          <ResolveBtn color={C.green} onClick={() => resolveTrade(t, "Win")}>W</ResolveBtn>
+                          <ResolveBtn color={C.red} onClick={() => resolveTrade(t, "Loss")}>L</ResolveBtn>
+                        </span>
+                      ) : t.outcome}
+                    </td>
+                    <td style={{ ...tdStyle, color: t.r_result > 0 ? C.green : t.r_result < 0 ? C.red : C.inkDim }}>{t.r_result == null ? "—" : `${t.r_result > 0 ? "+" : ""}${t.r_result}`}</td>
                     <td style={{ ...tdStyle, color: DIR_COLOR[t.spy_direction] || C.inkFaint }}>{t.spy_direction}</td>
                     <td style={{ ...tdStyle, color: DIR_COLOR[t.sector_direction] || C.inkFaint }}>{t.sector_direction}</td>
                     <td style={{ ...tdStyle, color: C.inkFaint, maxWidth: 160, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={t.notes}>{t.notes}</td>
@@ -517,6 +538,16 @@ function Button({ children, primary, ...props }) {
       background: primary ? C.blue : C.panel2, color: primary ? "#fff" : C.ink,
       border: `1px solid ${primary ? C.blue : C.line}`, borderRadius: 7, padding: "8px 14px",
       font: `600 12px ${C.sans}`, cursor: props.disabled ? "not-allowed" : "pointer", opacity: props.disabled ? 0.5 : 1,
+    }}>{children}</button>
+  );
+}
+
+function ResolveBtn({ children, color, onClick }) {
+  return (
+    <button onClick={onClick} title={children === "W" ? "Mark as Win" : "Mark as Loss"} style={{
+      background: "transparent", color, border: `1px solid ${color}`, borderRadius: 4,
+      width: 18, height: 18, lineHeight: "16px", padding: 0, cursor: "pointer",
+      font: `700 10px ${C.mono}`,
     }}>{children}</button>
   );
 }
