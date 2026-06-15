@@ -102,6 +102,9 @@ def test_long_bounce_win_matches_manual_calc():
     t = out["trades"][0]
     assert t["direction"] == "Long" and t["level_type"] == "Y-Low"
     assert t["volume_spike"] is True
+    # Entry-candle volume vs the trailing average is exposed for auditing.
+    assert t["entry_volume"] == 5000 and t["avg_volume"] == 1000
+    assert t["volume_ratio"] == 5.0
     assert (t["entry_price"], t["stop_price"], t["target_price"]) == (101.0, 95.0, 113.0)
     assert t["outcome"] == "Win" and t["exit_price"] == 113.0 and t["r_result"] == 2.0
     assert out["summary"]["win_rate_percent"] == 100.0

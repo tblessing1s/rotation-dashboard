@@ -494,11 +494,16 @@ def _scan_day(ticker, day, session, window, levels, atr_val, proxy, *, cfg, rr,
         sector_dir = _context_direction(proxy, day, ts, get_intraday=get_intraday,
                                         get_daily=get_daily, interval_min=interval)
 
+        entry_volume = float(candle["Volume"] or 0)
+        volume_ratio = round(entry_volume / avg_volume, 2) if avg_volume > 0 else None
         base = {
             "date": day, "ticker": ticker, "level_type": setup["level_type"],
             "volume_spike": bool(setup.get("volume_spike")), "direction": direction,
             "entry_time": ts.strftime("%H:%M"), "spy_direction": spy_dir,
             "sector_direction": sector_dir,
+            "entry_volume": int(round(entry_volume)),
+            "avg_volume": int(round(avg_volume)),
+            "volume_ratio": volume_ratio,
         }
 
         # Skip conditions: a real setup blocked by market context is a logged skip.
@@ -578,9 +583,10 @@ def summarize(trades: list[dict]) -> dict:
 # CSV export
 # ---------------------------------------------------------------------------
 CSV_COLUMNS = [
-    "date", "ticker", "level_type", "volume_spike", "direction", "entry_time",
-    "entry_price", "stop_price", "target_price", "exit_price", "exit_time",
-    "outcome", "r_result", "spy_direction", "sector_direction", "notes",
+    "date", "ticker", "level_type", "volume_spike", "entry_volume", "avg_volume",
+    "volume_ratio", "direction", "entry_time", "entry_price", "stop_price",
+    "target_price", "exit_price", "exit_time", "outcome", "r_result",
+    "spy_direction", "sector_direction", "notes",
 ]
 
 
