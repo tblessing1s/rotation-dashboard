@@ -5,6 +5,7 @@ because the average-volume mapping emitted Finviz dropdown labels that don't
 exist. These tests pin the mapping to the *exact* set of labels Finviz accepts
 and assert the minimum-volume semantics (a floor, never a range).
 """
+import pandas as pd
 import pytest
 
 from providers import finviz_screen
@@ -54,6 +55,78 @@ def test_vol_filter_picks_highest_floor_not_exceeding_request():
 def test_vol_filter_below_smallest_floor_applies_no_filter():
     assert finviz_screen.vol_filter(49_999) == "Any"
     assert finviz_screen.vol_filter(0) == "Any"
+
+
+# ---------------------------------------------------------------------------
+# run() — merge of the Technical (ATR) and Custom (avg/rel volume) views.
+# ---------------------------------------------------------------------------
+class _FakeView:
+    def __init__(self, df=None, raises=None):
+        self._df, self._raises = df, raises
+
+    def set_filter(self, *a, **k):
+        pass
+
+    def screener_view(self, *a, **k):
+        if self._raises:
+            raise self._raises
+        return self._df
+
+
+_TECH_DF = pd.DataFrame([
+    {"Ticker": "AAA", "ATR": 3.0, "Price": 50.0},   # atrPct 6.0, in band
+    {"Ticker": "BBB", "ATR": 3.5, "Price": 50.0},   # atrPct 7.0, in band
+    {"Ticker": "CCC", "ATR": 1.5, "Price": 30.0},   # atrPct 5.0, in band
+    {"Ticker": "DDD", "ATR": 10.0, "Price": 200.0},  # price out of $20-100 band
+    {"Ticker": "EEE", "ATR": 0.5, "Price": 50.0},   # atrPct 1.0, below 4
+])
+
+_CUSTOM_DF = pd.DataFrame([
+    {"Ticker": "AAA", "Sector": "Tech", "Avg Volume": 15_000_000.0, "Rel Volume": 1.5, "Price": 50.0},
+    {"Ticker": "BBB", "Sector": "Energy", "Avg Volume": 3_000_000.0, "Rel Volume": 2.0, "Price": 50.0},
+    {"Ticker": "CCC", "Sector": "Health", "Avg Volume": 12_000_000.0, "Rel Volume": 1.1, "Price": 30.0},
+    {"Ticker": "EEE", "Sector": "Tech", "Avg Volume": 20_000_000.0, "Rel Volume": 0.9, "Price": 50.0},
+])
+
+
+def _patch_views(monkeypatch, tech, custom):
+    import finvizfinance.screener.technical as t
+    import finvizfinance.screener.custom as c
+    monkeypatch.setattr(t, "Technical", lambda: tech)
+    monkeypatch.setattr(c, "Custom", lambda: custom)
+
+
+def test_run_enforces_exact_volume_floor_and_attaches_rvol(monkeypatch):
+    _patch_views(monkeypatch, _FakeView(_TECH_DF), _FakeView(_CUSTOM_DF))
+    out = finviz_screen.run(price_min=20, price_max=100, vol_min_shares=10_000_000,
+                            atr_min=4, atr_max=9)
+
+    assert out["volPrecise"] is True
+    # BBB (3M avg vol) is below the 10M floor and must be dropped even though it
+    # has the highest ATR%; DDD/EEE fail price/ATR%. Sorted by ATR% desc.
+    assert [r["symbol"] for r in out["results"]] == ["AAA", "CCC"]
+    aaa = out["results"][0]
+    assert aaa["avgVol"] == 15_000_000 and aaa["rvol"] == 1.5
+    assert aaa["sector"] == "Tech"
+
+
+def test_run_falls_back_to_technical_only_when_enrichment_fails(monkeypatch):
+    _patch_views(monkeypatch, _FakeView(_TECH_DF),
+                 _FakeView(raises=RuntimeError("Finviz 403")))
+    out = finviz_screen.run(price_min=20, price_max=100, vol_min_shares=10_000_000,
+                            atr_min=4, atr_max=9)
+
+    assert out["volPrecise"] is False
+    # No exact floor applied: all price/ATR%-passing names survive, ATR% desc.
+    assert [r["symbol"] for r in out["results"]] == ["BBB", "AAA", "CCC"]
+    assert all(r["avgVol"] is None and r["rvol"] is None for r in out["results"])
+
+
+def test_run_respects_limit(monkeypatch):
+    _patch_views(monkeypatch, _FakeView(_TECH_DF), _FakeView(_CUSTOM_DF))
+    out = finviz_screen.run(price_min=20, price_max=100, vol_min_shares=10_000_000,
+                            atr_min=4, atr_max=9, limit=1)
+    assert [r["symbol"] for r in out["results"]] == ["AAA"]
 
 
 def test_mapping_matches_installed_finvizfinance_options_if_present():

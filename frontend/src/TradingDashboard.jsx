@@ -1018,7 +1018,20 @@ function TradingDashboard({ backendOffline }) {
           <ExecutorView store={store} />
         )}
         {tab === "Screener" && (
-          <DailyScreenerView />
+          <DailyScreenerView
+            store={store}
+            onSendToExecutor={(symbols) => {
+              const prev = store.get("executorForm", {}) || {};
+              const existing = String(prev.tickers || "")
+                .split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+              const merged = Array.from(new Set([
+                ...existing,
+                ...symbols.map((s) => String(s).trim().toUpperCase()).filter(Boolean),
+              ]));
+              store.set("executorForm", { ...prev, tickers: merged.join(", ") });
+              setTab("Executor");
+            }}
+          />
         )}
       </div>
     </div>

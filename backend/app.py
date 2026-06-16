@@ -306,6 +306,7 @@ def api_daily_screener():
             "volMin": vol_min, "atrMin": atr_min, "atrMax": atr_max,
         },
         "volFilterApplied": screen["volFilterApplied"],
+        "volPrecise": screen.get("volPrecise", False),
         "count": len(results),
         "source": "finviz",
     })

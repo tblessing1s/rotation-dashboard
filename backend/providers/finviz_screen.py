@@ -44,18 +44,62 @@ def vol_filter(vol_min_shares: float) -> str:
     return label
 
 
+# finvizfinance Custom-view column ids (see finvizfinance.constants
+# .CUSTOM_SCREENER_COLUMNS): Ticker, Sector, Average Volume, Relative Volume,
+# Price. The Technical view carries ATR but not average/relative volume; the
+# Custom view carries average/relative volume but not ATR — so the two views are
+# merged by ticker to get both.
+_CUSTOM_COLUMNS = [1, 3, 63, 64, 65]
+
+
+def _enrich_volume(applied: str):
+    """Fetch per-ticker average and relative volume from Finviz's Custom view.
+
+    Returns a DataFrame indexed by ticker with ``avgVol`` and ``rvol`` columns,
+    or ``None`` if the request/parse fails (the caller then degrades to the
+    Technical view alone). Kept best-effort on purpose: the screener's core
+    output is price/ATR%, and a flaky enrichment call must never sink the run.
+    """
+    try:
+        from finvizfinance.screener.custom import Custom
+
+        screener = Custom()
+        if applied != "Any":
+            screener.set_filter(filters_dict={"Average Volume": applied})
+        df = screener.screener_view(verbose=0, columns=list(_CUSTOM_COLUMNS))
+        if df is None or df.empty:
+            return None
+
+        ticker_col = "Ticker" if "Ticker" in df.columns else df.columns[0]
+        out = pd.DataFrame({
+            "ticker": df[ticker_col].astype(str),
+            "avgVol": pd.to_numeric(df.get("Avg Volume"), errors="coerce"),
+            "rvol": pd.to_numeric(df.get("Rel Volume"), errors="coerce"),
+        })
+        if "Sector" in df.columns:
+            out["sector"] = df["Sector"].astype(str)
+        return out.dropna(subset=["avgVol"]).set_index("ticker")
+    except Exception as exc:
+        log.warning("Finviz volume enrichment unavailable, "
+                    "falling back to Technical view only: %s", exc)
+        return None
+
+
 def run(price_min: float, price_max: float, vol_min_shares: float,
         atr_min: float, atr_max: float, limit: int = 50) -> dict:
     """Query Finviz for the top `limit` US stocks matching the given criteria.
 
     Pre-filters by average volume via Finviz's server-side dropdown, then
     computes ATR% = ATR(14)$ / Price * 100 on the returned data and applies
-    the remaining price and ATR% bounds. Results are sorted by ATR% descending.
+    the remaining price and ATR% bounds. When the average/relative-volume
+    enrichment is available, the requested volume floor is enforced *exactly*
+    (Finviz's server-side dropdown only floors at "Over 2M"). Results are sorted
+    by ATR% descending.
 
-    Returns a dict with ``results`` (list of matches) and ``volFilterApplied``
-    (the Finviz average-volume option actually used — useful because Finviz
-    caps its floor at "Over 2M", so a larger request can't be enforced
-    server-side).
+    Returns a dict with:
+      ``results``         list of matches (symbol, price, atrPct, avgVol, rvol, sector)
+      ``volFilterApplied`` the Finviz average-volume option used server-side
+      ``volPrecise``      True when the exact share floor was enforced client-side
     """
     try:
         from finvizfinance.screener.technical import Technical
@@ -74,8 +118,11 @@ def run(price_min: float, price_max: float, vol_min_shares: float,
         log.error("Finviz screener request failed: %s", exc)
         raise RuntimeError(f"Finviz screener unavailable: {exc}") from exc
 
+    vol_df = _enrich_volume(applied)
+    vol_precise = vol_df is not None
+
     if df is None or df.empty:
-        return {"results": [], "volFilterApplied": applied}
+        return {"results": [], "volFilterApplied": applied, "volPrecise": vol_precise}
 
     try:
         # Normalize column names — finvizfinance has used "Ticker" and "No." historically
@@ -93,19 +140,38 @@ def run(price_min: float, price_max: float, vol_min_shares: float,
             (df["atrPct"] >= atr_min) &
             (df["atrPct"] <= atr_max)
         )
-        filtered = df[mask].sort_values("atrPct", ascending=False).head(limit)
+        filtered = df[mask].sort_values("atrPct", ascending=False)
 
         results = []
         for _, row in filtered.iterrows():
+            symbol = str(row[ticker_col])
+            avg_vol = rvol = None
+            sector = str(row.get("Sector", "")) if "Sector" in df.columns else ""
+            if vol_df is not None and symbol in vol_df.index:
+                vrow = vol_df.loc[symbol]
+                avg_vol = None if pd.isna(vrow["avgVol"]) else float(vrow["avgVol"])
+                rvol = None if pd.isna(vrow["rvol"]) else round(float(vrow["rvol"]), 2)
+                if not sector and "sector" in vol_df.columns:
+                    sector = str(vrow["sector"])
+
+            # Exact volume floor — only enforceable when enrichment succeeded.
+            if vol_precise:
+                if avg_vol is None or avg_vol < vol_min_shares:
+                    continue
+
             results.append({
-                "symbol": str(row[ticker_col]),
+                "symbol": symbol,
                 "price": round(float(row["Price"]), 2),
                 "atrPct": round(float(row["atrPct"]), 2),
-                "sector": str(row.get("Sector", "")) if "Sector" in df.columns else "",
+                "avgVol": None if avg_vol is None else int(avg_vol),
+                "rvol": rvol,
+                "sector": sector,
                 "source": "finviz",
             })
+            if len(results) >= limit:
+                break
     except Exception as exc:
         log.error("Finviz result processing failed: %s", exc)
         raise RuntimeError(f"Finviz result processing error: {exc}") from exc
 
-    return {"results": results, "volFilterApplied": applied}
+    return {"results": results, "volFilterApplied": applied, "volPrecise": vol_precise}
