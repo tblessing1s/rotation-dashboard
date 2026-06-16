@@ -165,10 +165,15 @@ def cross_check(chain, detail: dict) -> None:
 
 def ingest_fred(detail: dict) -> None:
     ok, failed, written = [], {}, 0
+    now = db.utcnow()
     for series_id in cfg.FRED_SERIES:
         try:
             series = fred.fetch_series(series_id)
             written += db.append_macro_series(series_id, series, "fred")
+            # Record when this series was last successfully fetched so that quarterly
+            # data (GDPC1) doesn't appear stale between releases just because no new
+            # rows were written. Staleness should reflect ingestion health, not data age.
+            db.kv_set(f"fred_ingest_at:{series_id}", now)
             ok.append(series_id)
         except Exception as e:  # noqa: BLE001
             failed[series_id] = str(e)
@@ -218,10 +223,27 @@ def compute_macro_snapshot(detail: dict) -> None:
 
     series = {sid: db.get_macro_series(sid) for sid in cfg.FRED_SERIES}
     missing = [sid for sid, s in series.items() if s is None or s.empty]
-    fred_fetched_at = min(
-        (s.attrs.get("fetched_at") or "" for s in series.values() if s is not None),
-        default=None,
-    )
+
+    # Per-series "last successfully fetched at": prefer the kv heartbeat written by
+    # ingest_fred (updated on every successful fetch, even when no new rows land for
+    # quarterly series like GDPC1) over the fetched_at of the most-recent DB row.
+    def _fred_fetch_ts(sid: str) -> str | None:
+        ts = db.kv_get(f"fred_ingest_at:{sid}")
+        if ts:
+            return ts
+        s = series.get(sid)
+        return s.attrs.get("fetched_at") if s is not None else None
+
+    # Each field's fetchedAt reflects only the series it actually depends on:
+    # growth=GDPC1, inflation=CPIAUCSL, fed=all four (most conservative).
+    field_fetched_at = {
+        "growth": _fred_fetch_ts("GDPC1"),
+        "inflation": _fred_fetch_ts("CPIAUCSL"),
+        "fed": min(
+            filter(None, [_fred_fetch_ts(sid) for sid in ["DFF", "CPIAUCSL", "GDPC1", "UNRATE"]]),
+            default=None,
+        ),
+    }
 
     if missing:
         for key in ("fed", "growth", "inflation"):
@@ -240,7 +262,7 @@ def compute_macro_snapshot(detail: dict) -> None:
                 if result.get("value") is None:
                     errors[key] = result.get("error", "unavailable")
                 else:
-                    result["fetchedAt"] = fred_fetched_at
+                    result["fetchedAt"] = field_fetched_at.get(key)
                     fields[key] = result
             except Exception as e:  # noqa: BLE001
                 errors[key] = str(e)
