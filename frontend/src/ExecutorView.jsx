@@ -216,8 +216,15 @@ export default function ExecutorView({ store }) {
     } catch (e) { /* summary is best-effort */ }
   }, []);
 
-  // Load morning brief on mount.
-  useEffect(() => { refreshSummary(); }, [refreshSummary]);
+  // Load morning brief + today's persisted paper trades and signal log on mount,
+  // so a page refresh re-hydrates open trades from the backend instead of showing
+  // an empty panel until the next scan.
+  useEffect(() => {
+    const date = today();
+    refreshSummary();
+    refreshPaperTrades(date);
+    refreshLog(date);
+  }, [refreshSummary, refreshPaperTrades, refreshLog]);
 
   const closeTrade = useCallback(async (orderId, outcome, exitPrice) => {
     const { ok, data } = await postJson(`/api/executor/paper/trades/${encodeURIComponent(orderId)}`, {
