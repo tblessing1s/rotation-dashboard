@@ -2,10 +2,10 @@ import React, { useState, useCallback } from "react";
 import { C } from "./theme.js";
 
 /* ============================================================================
-   DAILY SCREENER — filter a pasted symbol list by day-trading criteria.
+   DAILY SCREENER — scan the full US market via Finviz by day-trading params.
    Criteria: price $20–$100, avg daily volume ≥ 10M shares, ATR% 4–9%.
-   Results sorted by ATR% descending so the most volatile (but bounded) names
-   appear first for setup selection.
+   Returns top 50 by ATR% descending so the most volatile bounded names appear
+   first for setup selection.
    ============================================================================ */
 
 const API = "";
@@ -39,43 +39,18 @@ function Panel({ title, eyebrow, children, accent }) {
   );
 }
 
-function fmtVol(v) {
-  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `${(v / 1_000).toFixed(0)}K`;
-  return String(v);
-}
-
-function StaleDot({ staleness }) {
-  const color = staleness === "fresh" ? C.green : staleness === "yellow" ? C.yellow : C.red;
-  return <span title={staleness} style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: color, marginRight: 5, flexShrink: 0 }} />;
-}
-
 export default function DailyScreenerView() {
-  const [symbolInput, setSymbolInput] = useState("");
   const [filters, setFilters] = useState({ priceMin: 20, priceMax: 100, volMin: 10, atrMin: 4, atrMax: 9 });
   const [status, setStatus] = useState("idle"); // idle | loading | done | error
   const [results, setResults] = useState(null);
-  const [missing, setMissing] = useState([]);
   const [errorMsg, setErrorMsg] = useState("");
 
-  const parseSymbols = useCallback(() => {
-    return symbolInput
-      .replace(/[\n,;|\t]+/g, ",")
-      .split(",")
-      .map((s) => s.trim().toUpperCase())
-      .filter(Boolean);
-  }, [symbolInput]);
-
   const runScreen = useCallback(async () => {
-    const syms = parseSymbols();
-    if (!syms.length) { setErrorMsg("Paste at least one symbol."); return; }
     setStatus("loading");
     setErrorMsg("");
     setResults(null);
-    setMissing([]);
     try {
       const params = new URLSearchParams({
-        symbols: syms.join(","),
         price_min: filters.priceMin,
         price_max: filters.priceMax,
         vol_min: filters.volMin * 1_000_000,
@@ -89,35 +64,23 @@ export default function DailyScreenerView() {
       }
       const data = await res.json();
       setResults(data.results || []);
-      setMissing(data.missing || []);
       setStatus("done");
     } catch (e) {
       setErrorMsg(e.message || "Fetch failed");
       setStatus("error");
     }
-  }, [parseSymbols, filters]);
+  }, [filters]);
 
   const setF = (k, v) => setFilters((prev) => ({ ...prev, [k]: v }));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      {/* Symbol input */}
-      <Panel title="Daily stock screener" eyebrow="Day trading · TOS filters">
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ font: `500 11px/1.2 'Inter', sans-serif`, color: C.inkDim, marginBottom: 6 }}>
-            Paste symbols from your TOS scan (comma, space, or newline separated)
-          </div>
-          <textarea
-            rows={4}
-            placeholder={"AMD, NVDA, TSLA\nHOOD, HIMS, CVNA"}
-            value={symbolInput}
-            onChange={(e) => setSymbolInput(e.target.value)}
-            style={{ ...inputStyle, resize: "vertical", lineHeight: 1.6 }}
-          />
+      <Panel title="Daily stock screener" eyebrow="Finviz · full US market">
+        <div style={{ font: `400 12px 'Inter', sans-serif`, color: C.inkDim, marginBottom: 14 }}>
+          Set your parameters and run — Finviz scans the full US market and returns the top 50 by ATR%.
         </div>
 
-        {/* Filter row */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end", marginBottom: 16 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end" }}>
           <FilterNum label="Price min ($)" value={filters.priceMin} onChange={(v) => setF("priceMin", v)} />
           <FilterNum label="Price max ($)" value={filters.priceMax} onChange={(v) => setF("priceMax", v)} />
           <FilterNum label="Avg vol min (M)" value={filters.volMin} onChange={(v) => setF("volMin", v)} step={0.5} />
@@ -137,21 +100,14 @@ export default function DailyScreenerView() {
         </div>
 
         {errorMsg && (
-          <div style={{ font: `500 12px 'Inter', sans-serif`, color: C.red, marginBottom: 8 }}>{errorMsg}</div>
-        )}
-
-        {missing.length > 0 && (
-          <div style={{ font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint, marginBottom: 4 }}>
-            No data yet for: {missing.join(", ")} — queued for next ingest.
-          </div>
+          <div style={{ font: `500 12px 'Inter', sans-serif`, color: C.red, marginTop: 10 }}>{errorMsg}</div>
         )}
       </Panel>
 
-      {/* Results */}
       {status === "done" && results !== null && (
         <Panel
-          title={results.length ? `${results.length} stock${results.length !== 1 ? "s" : ""} passed` : "No matches"}
-          eyebrow="sorted by ATR% · highest volatility first"
+          title={results.length ? `Top ${results.length} match${results.length !== 1 ? "es" : ""}` : "No matches"}
+          eyebrow="Finviz · sorted by ATR% · highest volatility first"
           accent={results.length ? C.green : C.inkFaint}
         >
           {results.length === 0 ? (
@@ -160,10 +116,10 @@ export default function DailyScreenerView() {
             </div>
           ) : (
             <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 400 }}>
                 <thead>
                   <tr style={{ borderBottom: `1px solid ${C.line}` }}>
-                    {["Symbol", "Price", "ATR%", "Avg Vol (20d)", "Sector", "As of"].map((h) => (
+                    {["Symbol", "Price", "ATR%"].map((h) => (
                       <th key={h} style={{ textAlign: "left", padding: "6px 10px", font: `600 11px 'Roboto Mono', monospace`, color: C.inkFaint, letterSpacing: 0.5 }}>{h}</th>
                     ))}
                   </tr>
@@ -180,18 +136,6 @@ export default function DailyScreenerView() {
                       <td style={{ padding: "9px 10px" }}>
                         <AtrBadge value={r.atrPct} />
                       </td>
-                      <td style={{ padding: "9px 10px" }}>
-                        <span style={{ font: `400 13px 'Roboto Mono', monospace`, color: C.inkDim }}>{fmtVol(r.avgVolume)}</span>
-                      </td>
-                      <td style={{ padding: "9px 10px" }}>
-                        <span style={{ font: `400 12px 'Inter', sans-serif`, color: C.inkDim }}>{r.sector || "—"}</span>
-                      </td>
-                      <td style={{ padding: "9px 10px" }}>
-                        <span style={{ display: "flex", alignItems: "center" }}>
-                          <StaleDot staleness={r.staleness} />
-                          <span style={{ font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint }}>{r.asOf}</span>
-                        </span>
-                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -200,7 +144,7 @@ export default function DailyScreenerView() {
           )}
 
           <div style={{ marginTop: 12, font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint }}>
-            Filters applied: price ${filters.priceMin}–${filters.priceMax} · avg vol ≥ {filters.volMin}M · ATR% {filters.atrMin}–{filters.atrMax}%
+            Filters: price ${filters.priceMin}–${filters.priceMax} · avg vol ≥ {filters.volMin}M · ATR% {filters.atrMin}–{filters.atrMax}%
           </div>
         </Panel>
       )}
