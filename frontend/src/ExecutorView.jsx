@@ -134,6 +134,7 @@ export default function ExecutorView({ store }) {
   const [previewingKey, setPreviewingKey] = useState(null);
   const [preview, setPreview] = useState(null);   // last Schwab dry-run result
   const [dismissedCardSignals, setDismissedCardSignals] = useState(() => new Set());
+  const [dailySummary, setDailySummary] = useState(null);
 
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [pollSec, setPollSec] = useState(30);
@@ -207,6 +208,31 @@ export default function ExecutorView({ store }) {
     } catch (e) { /* paper trade log is best-effort */ }
   }, []);
 
+  const refreshSummary = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/api/executor/daily-summary`);
+      const data = await r.json().catch(() => ({}));
+      if (data.ok) setDailySummary(data);
+    } catch (e) { /* summary is best-effort */ }
+  }, []);
+
+  // Load morning brief on mount.
+  useEffect(() => { refreshSummary(); }, [refreshSummary]);
+
+  const closeTrade = useCallback(async (orderId, outcome, exitPrice) => {
+    const { ok, data } = await postJson(`/api/executor/paper/trades/${encodeURIComponent(orderId)}`, {
+      outcome,
+      exit_price: exitPrice !== "" ? exitPrice : undefined,
+      exit_time: new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "America/Chicago" }),
+    });
+    if (!ok || data.ok === false) {
+      setErrors(data.errors || [data.error || "Failed to update trade."]);
+      return;
+    }
+    await refreshPaperTrades(data.trade?.date || today());
+    await refreshSummary();
+  }, [refreshPaperTrades, refreshSummary]);
+
   const scan = useCallback(async (refresh) => {
     setScanning(true); setErrors([]);
     setStatus(refresh ? "Pulling today's 5-minute bars, then scanning…" : "Scanning latest closed candles…");
@@ -223,6 +249,7 @@ export default function ExecutorView({ store }) {
     ingestSignals(data.signals);
     refreshLog(data.date || today());
     refreshPaperTrades(data.date || today());
+    refreshSummary();
     const live = (data.monitors || []).filter((m) => m.state === "monitoring").length;
     setStatus(`Scanned ${data.monitors?.length || 0} ticker(s) · ${live} live · ${data.signals?.length || 0} active signal(s).`);
   }, [form, ingestSignals, refreshLog, refreshPaperTrades]);
@@ -330,6 +357,8 @@ export default function ExecutorView({ store }) {
 
       <SectionHeader title="Intraday Executor" subtitle="Live setup detection on 5-minute candles — alerts when price breaks yesterday's level on a volume spike." />
 
+      <MorningBrief summary={dailySummary} watchlistCount={buildConfig(form).tickers.length} />
+
       {/* ---- Controls ---- */}
       <Card>
         <Grid>
@@ -415,7 +444,7 @@ export default function ExecutorView({ store }) {
 
       {preview && <SchwabPreviewPanel preview={preview} onClose={() => setPreview(null)} />}
 
-      <PaperTradesPanel trades={paperTrades} />
+      <PaperTradesPanel trades={paperTrades} onClose={closeTrade} />
 
       {/* ---- Playback (validate alerts on historical data) ---- */}
       <Card>
@@ -650,47 +679,115 @@ function SchwabPreviewPanel({ preview, onClose }) {
   );
 }
 
-function PaperTradesPanel({ trades }) {
+function PaperTradesPanel({ trades, onClose }) {
   const open = (trades || []).filter((t) => t.outcome === "OPEN");
+  const closed = (trades || []).filter((t) => t.outcome !== "OPEN");
+  const rVals = closed.map((t) => t.r_result).filter((r) => r != null);
+  const totalR = rVals.length ? rVals.reduce((a, b) => a + b, 0) : null;
+  const wins = closed.filter((t) => t.outcome === "WIN").length;
+  const losses = closed.filter((t) => t.outcome === "LOSS").length;
+
   return (
     <Card>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
         <strong style={{ font: `600 13px ${C.sans}`, color: C.ink }}>Paper trades</strong>
-        <span style={{ font: `400 12px ${C.mono}`, color: C.inkFaint }}>{open.length} open · {(trades || []).length} total today</span>
+        <span style={{ font: `400 12px ${C.mono}`, color: C.inkFaint }}>
+          {open.length} open · {wins}W / {losses}L
+        </span>
+        {totalR != null && (
+          <span style={{ font: `700 12px ${C.mono}`, color: totalR >= 0 ? C.green : C.red }}>
+            {totalR >= 0 ? "+" : ""}{totalR.toFixed(2)}R
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         <span style={{ font: `600 10px ${C.sans}`, color: C.yellow, textTransform: "uppercase", letterSpacing: 0.3 }}>Simulated only</span>
       </div>
+
       {!trades?.length ? (
         <div style={{ font: `400 12px ${C.sans}`, color: C.inkFaint }}>
           Confirm a setup with <b>Execute Paper</b> to log a simulated bracket trade here. Live Schwab execution is intentionally disabled.
         </div>
       ) : (
-        <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", font: `400 12px ${C.mono}` }}>
-            <thead>
-              <tr>
-                {["Status", "Ticker", "Dir", "Entry", "Stop", "Target", "Size", "Signal", "Order"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
-              </tr>
-            </thead>
-            <tbody>
-              {trades.map((t) => (
-                <tr key={t.id} style={{ borderTop: `1px solid ${C.lineSoft}` }}>
-                  <td style={{ ...tdStyle, color: t.outcome === "OPEN" ? C.green : C.inkDim }}>{t.outcome}</td>
-                  <td style={{ ...tdStyle, color: C.ink }}>{t.ticker}</td>
-                  <td style={{ ...tdStyle, color: t.direction === "LONG" ? C.green : C.red }}>{t.direction}</td>
-                  <td style={tdStyle}>{fmt(t.entry_price)}</td>
-                  <td style={tdStyle}>{fmt(t.stop_price)}</td>
-                  <td style={tdStyle}>{fmt(t.target_price)}</td>
-                  <td style={tdStyle}>{t.position_size}</td>
-                  <td style={tdStyle}>{t.date} {t.entry_time} CT</td>
-                  <td style={tdStyle}>{t.order_id}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div style={{ display: "grid", gap: 10 }}>
+          {open.length > 0 && (
+            <div>
+              <div style={{ font: `700 10px ${C.sans}`, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>Open — close when filled</div>
+              {open.map((t) => <OpenTradeRow key={t.id} trade={t} onClose={onClose} />)}
+            </div>
+          )}
+          {closed.length > 0 && (
+            <div>
+              {open.length > 0 && <div style={{ borderTop: `1px solid ${C.lineSoft}`, marginBottom: 10 }} />}
+              <div style={{ font: `700 10px ${C.sans}`, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>Closed today</div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", font: `400 12px ${C.mono}` }}>
+                  <thead>
+                    <tr>{["Status", "Ticker", "Dir", "Entry", "Exit", "R", "Signal"].map((h) => <th key={h} style={thStyle}>{h}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {closed.map((t) => {
+                      const outColor = t.outcome === "WIN" ? C.green : t.outcome === "LOSS" ? C.red : C.inkDim;
+                      return (
+                        <tr key={t.id} style={{ borderTop: `1px solid ${C.lineSoft}` }}>
+                          <td style={{ ...tdStyle, color: outColor, fontWeight: 700 }}>{t.outcome}</td>
+                          <td style={{ ...tdStyle, color: C.ink }}>{t.ticker}</td>
+                          <td style={{ ...tdStyle, color: t.direction === "LONG" ? C.green : C.red }}>{t.direction}</td>
+                          <td style={tdStyle}>{fmt(t.entry_price)}</td>
+                          <td style={tdStyle}>{fmt(t.exit_price)}</td>
+                          <td style={{ ...tdStyle, color: t.r_result >= 0 ? C.green : C.red }}>
+                            {t.r_result != null ? `${t.r_result >= 0 ? "+" : ""}${t.r_result}R` : "—"}
+                          </td>
+                          <td style={tdStyle}>{t.entry_time} CT</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </Card>
+  );
+}
+
+function OpenTradeRow({ trade: t, onClose }) {
+  const [exitPrice, setExitPrice] = useState(String(t.target_price || ""));
+  const [closing, setClosing] = useState(false);
+
+  const doClose = async (outcome) => {
+    setClosing(true);
+    await onClose(t.order_id, outcome, exitPrice);
+    setClosing(false);
+  };
+
+  return (
+    <div style={{ background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 8, padding: 12, marginBottom: 8 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+        <span style={{ font: `700 14px ${C.sans}`, color: C.ink }}>{t.ticker}</span>
+        <span style={{ font: `600 12px ${C.mono}`, color: t.direction === "LONG" ? C.green : C.red }}>{t.direction}</span>
+        <span style={{ font: `400 12px ${C.mono}`, color: C.inkDim }}>
+          Entry {fmt(t.entry_price)} · Stop {fmt(t.stop_price)} · Target {fmt(t.target_price)}
+        </span>
+        <span style={{ font: `400 11px ${C.mono}`, color: C.inkFaint }}>{t.position_size} sh · {t.entry_time} CT</span>
+      </div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+        <label style={{ font: `700 10px ${C.sans}`, color: C.inkFaint, display: "flex", alignItems: "center", gap: 6 }}>
+          EXIT PRICE
+          <input
+            type="number"
+            step="0.01"
+            value={exitPrice}
+            onChange={(e) => setExitPrice(e.target.value)}
+            style={{ width: 90, background: C.panel, color: C.ink, border: `1px solid ${C.line}`, borderRadius: 6, padding: "5px 8px", font: `400 13px ${C.mono}` }}
+          />
+        </label>
+        <button disabled={closing} onClick={() => doClose("WIN")} style={{ background: C.green, color: "#000", border: "none", borderRadius: 6, padding: "6px 14px", font: `700 12px ${C.sans}`, cursor: closing ? "not-allowed" : "pointer", opacity: closing ? 0.6 : 1 }}>WIN</button>
+        <button disabled={closing} onClick={() => doClose("LOSS")} style={{ background: C.red, color: "#fff", border: "none", borderRadius: 6, padding: "6px 14px", font: `700 12px ${C.sans}`, cursor: closing ? "not-allowed" : "pointer", opacity: closing ? 0.6 : 1 }}>LOSS</button>
+        <button disabled={closing} onClick={() => doClose("SKIP")} style={{ background: C.panel, color: C.inkDim, border: `1px solid ${C.line}`, borderRadius: 6, padding: "6px 14px", font: `700 12px ${C.sans}`, cursor: closing ? "not-allowed" : "pointer", opacity: closing ? 0.6 : 1 }}>Skip</button>
+      </div>
+    </div>
   );
 }
 
@@ -808,5 +905,58 @@ function Button({ children, primary, ...props }) {
       border: `1px solid ${primary ? C.blue : C.line}`, borderRadius: 7, padding: "8px 14px",
       font: `600 12px ${C.sans}`, cursor: props.disabled ? "not-allowed" : "pointer", opacity: props.disabled ? 0.5 : 1,
     }}>{children}</button>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Morning brief — macro gate + today's session stats at a glance
+// ---------------------------------------------------------------------------
+function MorningBrief({ summary, watchlistCount }) {
+  if (!summary) return null;
+  const { macro, trades, signals } = summary;
+  const gateColor = macro?.level === "GREEN" ? C.green : macro?.level === "RED" ? C.red : C.yellow;
+  const gateMsg = {
+    GREEN: "Conditions favor trading. Setup detection is active.",
+    YELLOW: "Mixed conditions — trade selectively and size down.",
+    RED: "Risk-off environment. Consider sitting out today.",
+    UNKNOWN: "Macro data not yet loaded. Run ingest first.",
+  }[macro?.level || "UNKNOWN"];
+
+  const hasActivity = trades?.total > 0 || signals?.total > 0;
+
+  return (
+    <div style={{ background: C.panel, border: `1px solid ${gateColor}33`, borderLeft: `3px solid ${gateColor}`, borderRadius: 10, padding: "12px 16px" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <span style={{ font: `700 11px ${C.sans}`, color: gateColor, textTransform: "uppercase", letterSpacing: 0.6 }}>
+          {macro?.label || "Unknown"} · Level 1 Gate
+        </span>
+        <span style={{ font: `400 12px ${C.sans}`, color: C.inkDim, flex: 1 }}>{gateMsg}</span>
+        {watchlistCount > 0 && (
+          <span style={{ font: `600 11px ${C.mono}`, color: C.inkFaint }}>{watchlistCount} ticker{watchlistCount !== 1 ? "s" : ""} watching</span>
+        )}
+      </div>
+      {hasActivity && (
+        <div style={{ display: "flex", gap: 16, marginTop: 10, flexWrap: "wrap" }}>
+          {signals?.total > 0 && (
+            <span style={{ font: `600 12px ${C.mono}`, color: C.inkDim }}>
+              <span style={{ color: C.ink }}>{signals.total}</span> signal{signals.total !== 1 ? "s" : ""} today
+            </span>
+          )}
+          {trades?.total > 0 && (
+            <>
+              <span style={{ font: `600 12px ${C.mono}`, color: C.inkDim }}>
+                <span style={{ color: C.green }}>{trades.wins}W</span> / <span style={{ color: C.red }}>{trades.losses}L</span>
+                {trades.open > 0 && <span style={{ color: C.inkFaint }}> · {trades.open} open</span>}
+              </span>
+              {trades.total_r != null && (
+                <span style={{ font: `700 12px ${C.mono}`, color: trades.total_r >= 0 ? C.green : C.red }}>
+                  {trades.total_r >= 0 ? "+" : ""}{trades.total_r}R net
+                </span>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
