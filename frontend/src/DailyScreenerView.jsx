@@ -39,16 +39,23 @@ function Panel({ title, eyebrow, children, accent }) {
   );
 }
 
-export default function DailyScreenerView() {
-  const [filters, setFilters] = useState({ priceMin: 20, priceMax: 100, volMin: 10, atrMin: 4, atrMax: 9 });
+const DEFAULT_FILTERS = { priceMin: 20, priceMax: 100, volMin: 10, atrMin: 4, atrMax: 9 };
+
+export default function DailyScreenerView({ store, onSendToExecutor }) {
+  const [filters, setFilters] = useState(() => ({ ...DEFAULT_FILTERS, ...(store?.get("screenerForm", {}) || {}) }));
   const [status, setStatus] = useState("idle"); // idle | loading | done | error
   const [results, setResults] = useState(null);
+  const [volApplied, setVolApplied] = useState("");
+  const [volPrecise, setVolPrecise] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
   const [errorMsg, setErrorMsg] = useState("");
 
   const runScreen = useCallback(async () => {
     setStatus("loading");
     setErrorMsg("");
     setResults(null);
+    setVolApplied("");
+    setSelected(new Set());
     try {
       const params = new URLSearchParams({
         price_min: filters.priceMin,
@@ -63,7 +70,13 @@ export default function DailyScreenerView() {
         throw new Error(j.error || `HTTP ${res.status}`);
       }
       const data = await res.json();
-      setResults(data.results || []);
+      const rows = data.results || [];
+      setResults(rows);
+      setVolApplied(data.volFilterApplied || "");
+      setVolPrecise(Boolean(data.volPrecise));
+      // Pre-select the 5 most volatile names — a sensible starter watchlist the
+      // Executor can poll without being overloaded; the user can adjust before sending.
+      setSelected(new Set(rows.slice(0, 5).map((r) => r.symbol)));
       setStatus("done");
     } catch (e) {
       setErrorMsg(e.message || "Fetch failed");
@@ -71,7 +84,22 @@ export default function DailyScreenerView() {
     }
   }, [filters]);
 
-  const setF = (k, v) => setFilters((prev) => ({ ...prev, [k]: v }));
+  const setF = (k, v) => setFilters((prev) => {
+    const next = { ...prev, [k]: v };
+    store?.set("screenerForm", next);
+    return next;
+  });
+
+  const toggle = (symbol) => setSelected((prev) => {
+    const next = new Set(prev);
+    next.has(symbol) ? next.delete(symbol) : next.add(symbol);
+    return next;
+  });
+
+  const sendSelected = () => {
+    const symbols = (results || []).map((r) => r.symbol).filter((s) => selected.has(s));
+    if (symbols.length && onSendToExecutor) onSendToExecutor(symbols);
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
@@ -115,37 +143,93 @@ export default function DailyScreenerView() {
               No symbols matched all filters. Try widening price, volume, or ATR% ranges.
             </div>
           ) : (
-            <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 400 }}>
-                <thead>
-                  <tr style={{ borderBottom: `1px solid ${C.line}` }}>
-                    {["Symbol", "Price", "ATR%"].map((h) => (
-                      <th key={h} style={{ textAlign: "left", padding: "6px 10px", font: `600 11px 'Roboto Mono', monospace`, color: C.inkFaint, letterSpacing: 0.5 }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {results.map((r, i) => (
-                    <tr key={r.symbol} style={{ background: i % 2 === 0 ? "transparent" : "#0f141c", borderBottom: `1px solid #19222e` }}>
-                      <td style={{ padding: "9px 10px" }}>
-                        <span style={{ font: `700 13px 'Roboto Mono', monospace`, color: C.ink }}>{r.symbol}</span>
-                      </td>
-                      <td style={{ padding: "9px 10px" }}>
-                        <span style={{ font: `500 13px 'Roboto Mono', monospace`, color: C.ink }}>${r.price.toFixed(2)}</span>
-                      </td>
-                      <td style={{ padding: "9px 10px" }}>
-                        <AtrBadge value={r.atrPct} />
-                      </td>
+            <>
+              <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <button
+                  onClick={() => setSelected(new Set(results.map((r) => r.symbol)))}
+                  style={linkBtnStyle}
+                >All</button>
+                <button onClick={() => setSelected(new Set())} style={linkBtnStyle}>None</button>
+                <div style={{ flex: 1 }} />
+                <button
+                  onClick={sendSelected}
+                  disabled={selected.size === 0}
+                  style={{
+                    background: selected.size ? C.amber : "#1a2230", border: "none", borderRadius: 6,
+                    color: selected.size ? "#11161f" : C.inkFaint,
+                    font: `600 12px 'Inter', sans-serif`, padding: "8px 14px",
+                    cursor: selected.size ? "pointer" : "default",
+                  }}
+                  title="Add the checked symbols to the Executor watchlist and switch to that tab"
+                >
+                  Add {selected.size} to Executor →
+                </button>
+              </div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
+                  <thead>
+                    <tr style={{ borderBottom: `1px solid ${C.line}` }}>
+                      {["", "Symbol", "Price", "Chg%", "ATR%", "RVOL", "Avg Vol"].map((h, i) => (
+                        <th key={i} style={{ textAlign: "left", padding: "6px 10px", font: `600 11px 'Roboto Mono', monospace`, color: C.inkFaint, letterSpacing: 0.5 }}>{h}</th>
+                      ))}
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {results.map((r, i) => (
+                      <tr key={r.symbol} style={{ background: i % 2 === 0 ? "transparent" : "#0f141c", borderBottom: `1px solid #19222e` }}>
+                        <td style={{ padding: "9px 10px" }}>
+                          <input
+                            type="checkbox"
+                            checked={selected.has(r.symbol)}
+                            onChange={() => toggle(r.symbol)}
+                            style={{ accentColor: C.amber, cursor: "pointer" }}
+                          />
+                        </td>
+                        <td style={{ padding: "9px 10px" }}>
+                          <span style={{ font: `700 13px 'Roboto Mono', monospace`, color: C.ink }}>{r.symbol}</span>
+                        </td>
+                        <td style={{ padding: "9px 10px" }}>
+                          <span style={{ font: `500 13px 'Roboto Mono', monospace`, color: C.ink }}>${r.price.toFixed(2)}</span>
+                        </td>
+                        <td style={{ padding: "9px 10px" }}>
+                          <ChangePct value={r.changePct} />
+                        </td>
+                        <td style={{ padding: "9px 10px" }}>
+                          <AtrBadge value={r.atrPct} />
+                        </td>
+                        <td style={{ padding: "9px 10px" }}>
+                          <RvolBadge value={r.rvol} />
+                        </td>
+                        <td style={{ padding: "9px 10px" }}>
+                          <span style={{ font: `500 12px 'Roboto Mono', monospace`, color: C.inkDim }}>{fmtVol(r.avgVol)}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
           )}
 
           <div style={{ marginTop: 12, font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint }}>
             Filters: price ${filters.priceMin}–${filters.priceMax} · avg vol ≥ {filters.volMin}M · ATR% {filters.atrMin}–{filters.atrMax}%
           </div>
+          {volApplied && (
+            <div style={{ marginTop: 6, font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint }}>
+              {volPrecise ? (
+                <span>Avg-vol floor enforced exactly at ≥ {filters.volMin}M (Finviz pre-filter: {volApplied}).</span>
+              ) : (
+                <span>
+                  Finviz avg-vol floor applied: <span style={{ color: C.inkDim }}>{volApplied}</span>
+                  {filters.volMin > 2 && volApplied === "Over 2M" && (
+                    <span style={{ color: C.yellow }}>
+                      {" "}— volume enrichment unavailable, so the floor is Finviz's server cap (~2M), not your {filters.volMin}M.
+                    </span>
+                  )}
+                </span>
+              )}
+            </div>
+          )}
         </Panel>
       )}
     </div>
@@ -178,3 +262,33 @@ function AtrBadge({ value }) {
     </span>
   );
 }
+
+// Relative volume: today's volume vs its own average. >1.5x flags unusual
+// participation — a core day-trading "something is happening here" signal.
+function RvolBadge({ value }) {
+  if (value == null) return <span style={{ color: C.inkFaint, font: `400 12px 'Roboto Mono', monospace` }}>—</span>;
+  const color = value >= 1.5 ? C.green : value >= 1 ? C.inkDim : C.inkFaint;
+  return (
+    <span style={{ font: `600 12px 'Roboto Mono', monospace`, color }}>{value.toFixed(2)}×</span>
+  );
+}
+
+// Day-of price change. Green up / red down so movers stand out at a glance.
+function ChangePct({ value }) {
+  if (value == null) return <span style={{ color: C.inkFaint, font: `400 12px 'Roboto Mono', monospace` }}>—</span>;
+  const color = value > 0 ? C.green : value < 0 ? C.red : C.inkDim;
+  const sign = value > 0 ? "+" : "";
+  return <span style={{ font: `500 12px 'Roboto Mono', monospace`, color }}>{sign}{value.toFixed(2)}%</span>;
+}
+
+function fmtVol(n) {
+  if (n == null) return "—";
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return String(n);
+}
+
+const linkBtnStyle = {
+  background: "none", border: `1px solid ${C.line}`, borderRadius: 5, color: C.inkDim,
+  font: `500 11px 'Inter', sans-serif`, padding: "5px 10px", cursor: "pointer",
+};
