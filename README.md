@@ -263,7 +263,8 @@ per request.
 | `POST /api/executor/replay` | Replay a `date`/`date_range` through the full **engine** and return completed trades *with outcomes* (entry/stop/target/exit/R) — reproduces backtest results exactly. |
 | `GET /api/executor/signals?date=YYYY-MM-DD` | The logged signals (one row per detected candle; idempotent). |
 | `POST /api/executor/paper/execute` | Log a detected signal as a simulated paper bracket trade. This does **not** call Schwab. |
-| `GET /api/executor/paper/trades?date=YYYY-MM-DD` | Return logged paper trades for the session. |
+| `POST /api/executor/paper/session` | Run one **PAPER** poll: open newly detected setups at the live Schwab quote (with adverse slippage + captured spread) and resolve open virtual trades against the live feed. Simulated execution only — nothing is placed. |
+| `GET /api/executor/paper/trades?date=YYYY-MM-DD` | Return logged paper trades for the session (incl. entry spread, slippage, resolution granularity, SPY/sector direction). |
 
 **Frontend** — the **Executor** tab (`frontend/src/ExecutorView.jsx`): a live
 monitor card per ticker (inline SVG 5-minute candle chart with Y-High/Y-Low
@@ -286,8 +287,15 @@ The forward-testing engine is built around a single shared **`StrategyCore`**
 | MODE | Data source | Execution adapter | Status |
 | --- | --- | --- | --- |
 | `REPLAY` | `ReplayDataSource` (historical candles) | `ReplayExecutionAdapter` | **complete** — resolves exits over stored candles with the backtester's own simulator, so REPLAY reproduces backtest trades exactly. |
-| `PAPER` | `LiveDataSource` (Schwab real-time) | `SimulatedExecutionAdapter` | honest fill/exit math implemented + unit-tested offline (adverse entry slippage, bid/ask spread capture, real-sequence exit resolution, pessimistic stop fills); live-feed driver is build step 2. |
+| `PAPER` | `LiveDataSource` (Schwab real-time) | `SimulatedExecutionAdapter` | **complete** — `run_paper` opens each setup at the live Schwab quote (adverse slippage + captured bid/ask spread), resolves exits over the 1-minute feed in true sequence (pessimistic stop fills), and closes at the live price once the 10:00 CT window ends. Polls via `POST /api/executor/paper/session`. |
 | `LIVE` | `LiveDataSource` | `LiveExecutionAdapter` | guarded scaffold — builds the real Schwab bracket but never transmits. |
+
+The dashboard's **Executor** tab carries a `MODE` dropdown (blank by default, so
+PAPER/LIVE are never entered by accident) and an always-visible MODE badge. In
+PAPER mode each scan poll also drives `run_paper`; in REPLAY mode the playback
+panel runs the full engine and shows resolved trades + summary stats. Real-time
+quotes come from the existing Schwab connection (`SchwabProvider.get_quotes`,
+`/marketdata/v1/quotes`) — no new auth.
 
 `StrategyCore` reuses the backtest engine's registered rules (`SETUP_TYPES` /
 `STOP_LOGIC`) and exit simulator (`_simulate`), so detection/sizing exist in

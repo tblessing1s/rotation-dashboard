@@ -39,6 +39,22 @@ const POLL_CHOICES = [
   { value: 60, label: "60s" },
 ];
 
+// Execution mode binds the data source + execution adapter on the backend.
+// Default is blank — the trader must consciously pick a mode before running an
+// engine session, so PAPER/LIVE are never entered by accident.
+const MODE_CHOICES = [
+  { value: "", label: "— Select mode —" },
+  { value: "REPLAY", label: "REPLAY — offline historical playback" },
+  { value: "PAPER", label: "PAPER — live data, simulated fills" },
+  { value: "LIVE", label: "LIVE — guarded (no orders placed)" },
+];
+const MODE_META = {
+  "": { label: "No mode", color: "#8a93a6", hint: "Pick a mode to run an engine session." },
+  REPLAY: { label: "REPLAY", color: "#3b82f6", hint: "Offline replay of stored candles — reproduces backtest results." },
+  PAPER: { label: "PAPER", color: "#22c55e", hint: "Real-time Schwab data, simulated execution. Nothing is placed." },
+  LIVE: { label: "LIVE", color: "#ef4444", hint: "Guarded scaffold — live order placement is intentionally disabled." },
+};
+
 const today = () => new Date().toISOString().slice(0, 10);
 
 const DEFAULT_FORM = {
@@ -135,6 +151,12 @@ export default function ExecutorView({ store }) {
   const [preview, setPreview] = useState(null);   // last Schwab dry-run result
   const [dismissedCardSignals, setDismissedCardSignals] = useState(() => new Set());
 
+  // Execution mode (blank by default — see MODE_CHOICES).
+  const [mode, setMode] = useState(() => store?.get("executorMode", "") || "");
+  const changeMode = useCallback((v) => { setMode(v); store?.set("executorMode", v); }, [store]);
+  const modeRef = useRef(mode);
+  modeRef.current = mode;
+
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [pollSec, setPollSec] = useState(30);
   // Test-orders switch: show execute/preview on every card for flow testing.
@@ -155,6 +177,8 @@ export default function ExecutorView({ store }) {
   const [pbDate, setPbDate] = useState(today());
   const [pbRunning, setPbRunning] = useState(false);
   const [pbSignals, setPbSignals] = useState(null);
+  const [pbTrades, setPbTrades] = useState(null);     // REPLAY engine trades (with outcomes)
+  const [pbSummary, setPbSummary] = useState(null);
   const [pbStatus, setPbStatus] = useState("");
 
   const set = useCallback((k, v) => setForm((prev) => {
@@ -207,12 +231,25 @@ export default function ExecutorView({ store }) {
     } catch (e) { /* paper trade log is best-effort */ }
   }, []);
 
+  // PAPER mode: open newly detected setups at the live price and resolve open
+  // virtual trades against the live feed. Detection/sizing are shared with REPLAY
+  // (StrategyCore); only the bound data source + adapter differ. Nothing is placed.
+  const runPaperSession = useCallback(async (refresh) => {
+    const { ok, data } = await postJson("/api/executor/paper/session", { config: buildConfig(form), refresh });
+    if (!ok || data.ok === false) {
+      setErrors((data.errors) || [data.error || "Paper session failed."]);
+      return null;
+    }
+    await refreshPaperTrades(data.date || today());
+    return data;
+  }, [form, refreshPaperTrades]);
+
   const scan = useCallback(async (refresh) => {
     setScanning(true); setErrors([]);
     setStatus(refresh ? "Pulling today's 5-minute bars, then scanning…" : "Scanning latest closed candles…");
     const { ok, data } = await postJson("/api/executor/monitor", { config: buildConfig(form), refresh });
-    setScanning(false);
     if (!ok || data.ok === false) {
+      setScanning(false);
       setErrors(data.errors || [data.error || "Scan failed."]);
       setStatus("");
       return;
@@ -224,8 +261,16 @@ export default function ExecutorView({ store }) {
     refreshLog(data.date || today());
     refreshPaperTrades(data.date || today());
     const live = (data.monitors || []).filter((m) => m.state === "monitoring").length;
-    setStatus(`Scanned ${data.monitors?.length || 0} ticker(s) · ${live} live · ${data.signals?.length || 0} active signal(s).`);
-  }, [form, ingestSignals, refreshLog, refreshPaperTrades]);
+    let note = `Scanned ${data.monitors?.length || 0} ticker(s) · ${live} live · ${data.signals?.length || 0} active signal(s).`;
+
+    // In PAPER mode the same poll also drives the real-time virtual execution.
+    if (modeRef.current === "PAPER") {
+      const paper = await runPaperSession(refresh);
+      if (paper) note += ` · Paper: ${paper.opened?.length || 0} opened, ${paper.resolved?.length || 0} resolved.`;
+    }
+    setScanning(false);
+    setStatus(note);
+  }, [form, ingestSignals, refreshLog, refreshPaperTrades, runPaperSession]);
 
   // Auto-refresh polling.
   useEffect(() => {
@@ -289,12 +334,22 @@ export default function ExecutorView({ store }) {
   }, []);
 
   const runPlayback = useCallback(async () => {
-    setPbRunning(true); setPbStatus("Replaying session…"); setPbSignals(null);
-    const { ok, data } = await postJson("/api/executor/playback", { config: buildConfig(form), date: pbDate, autoBackfill: true });
+    setPbRunning(true); setPbStatus("Replaying session…");
+    setPbSignals(null); setPbTrades(null); setPbSummary(null);
+    // In REPLAY mode, run the full engine so exits resolve to outcomes (the
+    // backtest-equivalent path); otherwise just list the signals that would fire.
+    const replayMode = modeRef.current === "REPLAY";
+    const path = replayMode ? "/api/executor/replay" : "/api/executor/playback";
+    const { ok, data } = await postJson(path, { config: buildConfig(form), date: pbDate, autoBackfill: true });
     setPbRunning(false);
     if (!ok || data.ok === false) { setPbStatus((data.errors || [data.error || "Playback failed."]).join(" ")); return; }
-    setPbSignals(data.signals || []);
-    setPbStatus(`${data.count} signal(s) would have fired on ${pbDate}.`);
+    if (replayMode) {
+      setPbTrades(data.trades || []); setPbSummary(data.summary || null);
+      setPbStatus(`${data.count} trade(s) resolved on ${pbDate}.`);
+    } else {
+      setPbSignals(data.signals || []);
+      setPbStatus(`${data.count} signal(s) would have fired on ${pbDate}.`);
+    }
   }, [form, pbDate]);
 
   const executedSignalKeys = useMemo(() => new Set((paperTrades || []).map(tradeSignalKey)), [paperTrades]);
@@ -328,7 +383,21 @@ export default function ExecutorView({ store }) {
         @keyframes execFade { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
       `}</style>
 
-      <SectionHeader title="Intraday Executor" subtitle="Live setup detection on 5-minute candles — alerts when price breaks yesterday's level on a volume spike." />
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <SectionHeader title="Intraday Executor" subtitle="Live setup detection on 5-minute candles — alerts when price breaks yesterday's level on a volume spike." />
+        <span style={{ flex: 1 }} />
+        <ModeBadge mode={mode} />
+      </div>
+
+      {mode === "LIVE" && (
+        <div style={{ padding: 12, border: `1px solid ${C.red}`, borderRadius: 10, background: "#1a0e14" }}>
+          <div style={{ font: `600 12px ${C.sans}`, color: C.red }}>🔒 LIVE mode is guarded</div>
+          <div style={{ marginTop: 4, font: `400 12px ${C.sans}`, color: C.inkDim }}>
+            Live order placement is intentionally disabled. Detection runs, but no real Schwab order is transmitted —
+            use <b>Execute Paper</b> or <b>Preview on Schwab</b> (dry-run) instead.
+          </div>
+        </div>
+      )}
 
       {/* ---- Controls ---- */}
       <Card>
@@ -348,6 +417,12 @@ export default function ExecutorView({ store }) {
         </Grid>
 
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.lineSoft}` }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 7 }}>
+            <span style={{ font: `600 11px ${C.sans}`, color: C.inkDim, textTransform: "uppercase", letterSpacing: 0.3 }}>Mode</span>
+            <select value={mode} onChange={(e) => changeMode(e.target.value)} style={{ ...selectStyle, borderColor: MODE_META[mode]?.color || C.line }}>
+              {MODE_CHOICES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+            </select>
+          </label>
           <Button primary disabled={scanning} onClick={() => scan(true)}>{scanning ? "Scanning…" : "Refresh + Scan"}</Button>
           <Button disabled={scanning} onClick={() => scan(false)} title="Re-evaluate the latest stored candles without pulling new data.">Scan stored</Button>
           <Toggle checked={autoRefresh} onChange={setAutoRefresh} label="Auto-refresh" />
@@ -430,6 +505,7 @@ export default function ExecutorView({ store }) {
         {pbSignals && pbSignals.length === 0 && (
           <div style={{ marginTop: 12, font: `400 12px ${C.sans}`, color: C.inkFaint }}>No setups fired on that session for the current config.</div>
         )}
+        {pbTrades && <ReplayResults trades={pbTrades} summary={pbSummary} />}
       </Card>
 
       {activeAlert && (
@@ -691,6 +767,70 @@ function PaperTradesPanel({ trades }) {
         </div>
       )}
     </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Always-visible MODE badge — so the trader never confuses which mode they're in
+// ---------------------------------------------------------------------------
+function ModeBadge({ mode }) {
+  const meta = MODE_META[mode] || MODE_META[""];
+  return (
+    <div title={meta.hint} style={{
+      display: "inline-flex", alignItems: "center", gap: 7, padding: "6px 12px",
+      borderRadius: 999, border: `1px solid ${meta.color}`, background: `${meta.color}1a`,
+    }}>
+      <span style={{ width: 8, height: 8, borderRadius: 999, background: meta.color }} />
+      <span style={{ font: `700 11px ${C.sans}`, color: meta.color, letterSpacing: 0.5, textTransform: "uppercase" }}>
+        {meta.label}
+      </span>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// REPLAY engine results — resolved trades (with outcomes) + summary stats
+// ---------------------------------------------------------------------------
+function ReplayResults({ trades, summary }) {
+  return (
+    <div style={{ marginTop: 12 }}>
+      {summary && (
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 10 }}>
+          <Mini label="Trades" value={summary.total_trades} />
+          <Mini label="Wins" value={summary.wins} color={C.green} />
+          <Mini label="Losses" value={summary.losses} color={C.red} />
+          <Mini label="Win rate" value={summary.win_rate_percent == null ? "—" : `${summary.win_rate_percent}%`} />
+          <Mini label="Expectancy" value={summary.expectancy_per_trade == null ? "—" : `${summary.expectancy_per_trade}R`} />
+        </div>
+      )}
+      {trades.length === 0 ? (
+        <div style={{ font: `400 12px ${C.sans}`, color: C.inkFaint }}>No trades resolved on that session for the current config.</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", font: `400 12px ${C.mono}` }}>
+            <thead>
+              <tr>{["Date", "Time", "Ticker", "Dir", "Entry", "Stop", "Target", "Exit", "Outcome", "R"].map((h) => <th key={h} style={thStyle}>{h}</th>)}</tr>
+            </thead>
+            <tbody>
+              {trades.map((t, i) => (
+                <tr key={i} style={{ borderTop: `1px solid ${C.lineSoft}` }}>
+                  <td style={tdStyle}>{t.date}</td>
+                  <td style={tdStyle}>{t.entry_time}</td>
+                  <td style={{ ...tdStyle, color: C.ink }}>{t.ticker}</td>
+                  <td style={{ ...tdStyle, color: t.direction === "Long" ? C.green : C.red }}>{t.direction}</td>
+                  <td style={tdStyle}>{fmt(t.entry_price)}</td>
+                  <td style={tdStyle}>{fmt(t.stop_price)}</td>
+                  <td style={tdStyle}>{fmt(t.target_price)}</td>
+                  <td style={tdStyle}>{fmt(t.exit_price)}</td>
+                  <td style={{ ...tdStyle, color: t.outcome === "Win" ? C.green : t.outcome === "Loss" ? C.red : C.inkDim }}>{t.outcome}</td>
+                  <td style={{ ...tdStyle, color: t.r_result > 0 ? C.green : t.r_result < 0 ? C.red : C.inkDim }}>{t.r_result == null ? "—" : `${t.r_result}R`}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   );
 }
 

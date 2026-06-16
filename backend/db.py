@@ -168,6 +168,13 @@ CREATE TABLE IF NOT EXISTS intraday_trades (
     order_id TEXT,
     payload TEXT NOT NULL,
     notes TEXT,
+    -- Honest-simulation detail (so paper results can be calibrated against live):
+    spy_direction TEXT,
+    sector_direction TEXT,
+    entry_spread REAL,        -- bid/ask spread captured at entry
+    slippage REAL,            -- modeled entry slippage applied (per share)
+    resolution_granularity TEXT, -- tick | 1min — how the exit was resolved
+    mode TEXT,                -- REPLAY | PAPER | LIVE
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
@@ -191,8 +198,28 @@ def connect() -> sqlite3.Connection:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     _local.conn = conn
     return conn
+
+
+# Columns added after the initial release. CREATE TABLE IF NOT EXISTS won't add
+# them to an already-created table, so add them idempotently on connect.
+_MIGRATIONS = {
+    "intraday_trades": [
+        ("spy_direction", "TEXT"), ("sector_direction", "TEXT"),
+        ("entry_spread", "REAL"), ("slippage", "REAL"),
+        ("resolution_granularity", "TEXT"), ("mode", "TEXT"),
+    ],
+}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    for table, columns in _MIGRATIONS.items():
+        have = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        for name, decl in columns:
+            if name not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
 
 # ---------------------------------------------------------------------------
@@ -760,15 +787,18 @@ def record_intraday_trade(trade: dict) -> dict:
             "INSERT OR IGNORE INTO intraday_trades"
             " (date, ticker, direction, level_type, entry_price, stop_price, target_price,"
             "  exit_price, position_size, entry_time, exit_time, outcome, r_result,"
-            "  account_type, order_id, payload, notes, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "  account_type, order_id, payload, notes, spy_direction, sector_direction,"
+            "  entry_spread, slippage, resolution_granularity, mode, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 trade.get("date"), trade.get("ticker"), trade.get("direction"),
                 trade.get("level_type"), trade.get("entry_price"), trade.get("stop_price"),
                 trade.get("target_price"), trade.get("exit_price"), trade.get("position_size"),
                 trade.get("entry_time"), trade.get("exit_time"), trade.get("outcome", "OPEN"),
                 trade.get("r_result"), account_type, trade.get("order_id"), payload,
-                trade.get("notes"), now, now,
+                trade.get("notes"), trade.get("spy_direction"), trade.get("sector_direction"),
+                trade.get("entry_spread"), trade.get("slippage"),
+                trade.get("resolution_granularity"), trade.get("mode"), now, now,
             ),
         )
         inserted = cur.rowcount > 0
@@ -781,6 +811,38 @@ def record_intraday_trade(trade: dict) -> dict:
             ).fetchone()
             trade_id = row["id"] if row else None
     return get_intraday_trade(trade_id) if trade_id else {}
+
+
+def update_intraday_trade_exit(trade_id: int, *, exit_price, exit_time, outcome,
+                               r_result, notes=None,
+                               resolution_granularity=None) -> dict | None:
+    """Resolve an open paper trade: write its exit and outcome.
+
+    The simulator opens a position OPEN and then closes it on a later poll once
+    price touches stop/target (or at the window-end). The full per-trade payload
+    is refreshed so the stored JSON stays the source of truth.
+    """
+    conn = connect()
+    row = conn.execute("SELECT payload FROM intraday_trades WHERE id=?", (trade_id,)).fetchone()
+    if row is None:
+        return None
+    try:
+        payload = json.loads(row["payload"] or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    payload.update({
+        "exit_price": exit_price, "exit_time": exit_time, "outcome": outcome,
+        "r_result": r_result, "notes": notes,
+    })
+    with conn:
+        conn.execute(
+            "UPDATE intraday_trades SET exit_price=?, exit_time=?, outcome=?, r_result=?,"
+            " notes=COALESCE(?, notes), resolution_granularity=COALESCE(?, resolution_granularity),"
+            " payload=?, updated_at=? WHERE id=?",
+            (exit_price, exit_time, outcome, r_result, notes, resolution_granularity,
+             json.dumps(payload, default=str), utcnow(), trade_id),
+        )
+    return get_intraday_trade(trade_id)
 
 
 def get_intraday_trade(trade_id: int | None) -> dict | None:

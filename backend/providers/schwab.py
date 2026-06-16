@@ -16,6 +16,7 @@ from .base import Provider, ProviderError
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 AUTHORIZE_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 PRICE_HISTORY_URL = "https://api.schwabapi.com/marketdata/v1/pricehistory"
+QUOTES_URL = "https://api.schwabapi.com/marketdata/v1/quotes"
 ACCOUNTS_BASE = "https://api.schwabapi.com/trader/v1"
 
 # Schwab refresh tokens are valid for exactly 7 days after they are minted via
@@ -273,6 +274,53 @@ class SchwabProvider(Provider):
         if df.empty:
             raise ProviderError(f"schwab {symbol} intraday: no usable rows")
         return df
+
+    # -- real-time quotes ----------------------------------------------------
+    def get_quotes(self, symbols: list[str]) -> dict:
+        """Real-time last/bid/ask for a basket of symbols (same market-data feed
+        as ``pricehistory``). Returns ``{symbol: {last, bid, ask, asOf}}`` keyed
+        by the *requested* symbol; missing/unknown symbols are simply absent.
+
+        The SimulatedExecutionAdapter uses this to capture a paper entry at the
+        true signal moment (the streaming last/quote), not a candle close pulled
+        later, and to resolve exits / window-end closes against the live price.
+        """
+        symbols = [s for s in (symbols or []) if s]
+        if not symbols:
+            return {}
+        # Schwab prefixes index symbols with $; keep a reverse map so the caller
+        # gets quotes back under the symbol it asked for.
+        mapped = {SYMBOL_MAP.get(s, s): s for s in symbols}
+        try:
+            resp = requests.get(
+                QUOTES_URL,
+                headers={"Authorization": f"Bearer {self._token()}"},
+                params={"symbols": ",".join(mapped.keys()), "fields": "quote", "indicative": "false"},
+                timeout=15,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab quotes: {e}") from e
+        if resp.status_code != 200:
+            raise ProviderError(f"schwab quotes: HTTP {resp.status_code} {resp.text[:200]}")
+        payload = resp.json() or {}
+        out: dict[str, dict] = {}
+        for schwab_sym, body in payload.items():
+            sym = mapped.get(schwab_sym, schwab_sym)
+            q = (body or {}).get("quote") or {}
+            last = q.get("lastPrice", q.get("mark"))
+            if last is None:
+                continue
+            out[sym] = {
+                "last": float(last),
+                "bid": float(q["bidPrice"]) if q.get("bidPrice") is not None else None,
+                "ask": float(q["askPrice"]) if q.get("askPrice") is not None else None,
+                "asOf": q.get("quoteTime"),
+            }
+        return out
+
+    def get_quote(self, symbol: str) -> dict | None:
+        """Single-symbol convenience over ``get_quotes``."""
+        return self.get_quotes([symbol]).get(symbol)
 
     # -- accounts & trading --------------------------------------------------
     # These hit the Trader API's account endpoints (a different product than the

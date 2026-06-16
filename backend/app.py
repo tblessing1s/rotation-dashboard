@@ -664,6 +664,27 @@ def api_executor_paper_execute():
     return jsonify(out), 200 if out.get("ok") else 400
 
 
+@app.route("/api/executor/paper/session", methods=["POST"])
+def api_executor_paper_session():
+    """Run one PAPER poll: open newly detected setups at the live Schwab quote and
+    resolve open virtual trades against the live feed (real-time forward test).
+
+    Reuses the shared StrategyCore for detection/sizing; only the bound data
+    source (Schwab real-time) + execution adapter (simulated) differ from REPLAY.
+    No Schwab order is ever placed. `{"refresh": true}` first pulls today's bars.
+    """
+    import executor_engine as ee
+
+    body = request.get_json(silent=True) or {}
+    config = body.get("config") if "config" in body else body
+    try:
+        out = ee.run_paper(config, on_date=body.get("date"), as_of=body.get("asOf"),
+                          refresh=bool(body.get("refresh")))
+    except Exception as e:  # noqa: BLE001 — surface the cause to the UI + logs
+        return _executor_error("Paper session", e)
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
 @app.route("/api/executor/schwab/preview", methods=["POST"])
 def api_executor_schwab_preview():
     """Dry-run a signal's bracket order against Schwab's previewOrder endpoint.

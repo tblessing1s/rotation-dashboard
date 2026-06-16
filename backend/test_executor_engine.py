@@ -275,6 +275,90 @@ def test_validate_engine_config_defaults():
     assert cfg["entry_slippage"] == {"type": "cents", "value": 0.02}
 
 
+# ---------------------------------------------------------------------------
+# PAPER session runner — real-time virtual execution (offline, injected feed)
+# ---------------------------------------------------------------------------
+def _paper_source(intraday_map, quotes, fine_map=None):
+    """A PAPER (live) data source with synthetic 5m/1m bars + a quote table.
+
+    ``quotes`` maps ticker -> {last, bid, ask}, standing in for the Schwab feed.
+    """
+    loaders = make_loaders(intraday_map, DAILY, fine_map=fine_map)
+    return ee.LiveDataSource(get_intraday_range=loaders[0], get_daily=loaders[1],
+                             quote_fn=lambda sym: quotes.get(sym))
+
+
+def _one_min(date, rows):
+    """1-minute bars (HH:MM, open, high, low, close, volume) for exit resolution."""
+    return {("HOOD", date): intraday(date, rows)}
+
+
+def test_paper_opens_at_live_price_with_slippage(fresh_db):
+    # Breakout at 09:45 closes 111; the live quote at signal time is 111.20.
+    quotes = {"HOOD": {"last": 111.20, "bid": 111.18, "ask": 111.22}}
+    data = _paper_source(win_session(), quotes)
+    out = ee.run_paper(engine_config(), on_date=DAY, as_of="2026-06-15 09:51",
+                       data_source=data)
+    assert out["ok"] and len(out["opened"]) == 1
+    t = out["opened"][0]
+    assert t["account_type"] == "PAPER" and t["outcome"] == "OPEN"
+    # Entry captured at the LIVE price (111.20) + adverse slippage (0.02), not the
+    # candle close (111.00).
+    assert t["entry_price"] == 111.22
+    assert t["entry_spread"] == 0.04 and t["slippage"] == 0.02
+    assert t["mode"] == "PAPER"
+
+
+def test_paper_resolves_target_from_one_minute_feed(fresh_db):
+    quotes = {"HOOD": {"last": 111.20, "bid": 111.18, "ask": 111.22}}
+    # 1-minute bars after entry: price climbs and prints the target (153) cleanly.
+    fine = _one_min(DAY, [
+        ("09:50", 111, 140, 111, 139, 50),
+        ("09:51", 139, 153, 139, 152, 50),   # high 153 -> target hit
+    ])
+    data = _paper_source(win_session(), quotes, fine_map=fine)
+    out = ee.run_paper(engine_config(), on_date=DAY, as_of="2026-06-15 09:52",
+                       data_source=data)
+    assert len(out["resolved"]) == 1
+    t = out["resolved"][0]
+    assert t["outcome"] == "WIN" and t["exit_price"] == 153.0
+    # Persisted: a follow-up poll sees it already resolved (no duplicate open).
+    again = ee.run_paper(engine_config(), on_date=DAY, as_of="2026-06-15 09:53",
+                         data_source=data)
+    assert again["opened"] == [] and again["resolved"] == []
+
+
+def test_paper_stop_fills_pessimistically(fresh_db):
+    quotes = {"HOOD": {"last": 111.0, "bid": 110.98, "ask": 111.02}}
+    fine = _one_min(DAY, [("09:50", 111, 112, 90, 91, 50)])   # low 90 -> stop hit
+    data = _paper_source(win_session(), quotes, fine_map=fine)
+    out = ee.run_paper(engine_config(), on_date=DAY, as_of="2026-06-15 09:51",
+                       data_source=data)
+    assert len(out["resolved"]) == 1
+    t = out["resolved"][0]
+    assert t["outcome"] == "LOSS"
+    assert t["exit_price"] == pytest.approx(90 - 0.02)   # stop slippage, pessimistic
+
+
+def test_paper_stays_open_until_a_level_is_touched(fresh_db):
+    quotes = {"HOOD": {"last": 120.0, "bid": 119.98, "ask": 120.02}}
+    fine = _one_min(DAY, [("09:50", 111, 119, 111, 118, 50)])  # neither stop nor target
+    data = _paper_source(win_session(), quotes, fine_map=fine)
+    out = ee.run_paper(engine_config(), on_date=DAY, as_of="2026-06-15 09:51",
+                       data_source=data)
+    assert len(out["opened"]) == 1 and out["resolved"] == []
+    assert len(out["open"]) == 1 and out["open"][0]["outcome"] == "OPEN"
+
+
+def test_paper_falls_back_to_candle_close_without_a_quote(fresh_db):
+    data = _paper_source(win_session(), quotes={})   # quote feed returns nothing
+    out = ee.run_paper(engine_config(), on_date=DAY, as_of="2026-06-15 09:51",
+                       data_source=data)
+    assert len(out["opened"]) == 1
+    # No live quote -> entry falls back to the signal candle close (+slippage).
+    assert out["opened"][0]["entry_price"] == 111.02
+
+
 def test_validate_engine_config_rejects_bad_values():
     _, errors = ee.validate_engine_config({
         "mode": "BOGUS", "exit_resolution_granularity": "hourly",

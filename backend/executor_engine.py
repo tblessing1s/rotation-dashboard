@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import abc
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import pandas as pd
 
@@ -183,9 +184,16 @@ class LiveDataSource(ReplayDataSource):
     def quote(self, symbol):
         if self._quote_fn is not None:
             return self._quote_fn(symbol)
-        # TODO (step 2 / PAPER): call the Schwab real-time quotes endpoint via the
-        # existing SchwabProvider connection and return {last, bid, ask}.
-        return None
+        # Reuse the existing Schwab connection (no new auth) for a real-time quote.
+        # If Schwab isn't configured or the call fails, return None so the caller
+        # can fall back (e.g. to the signal candle's close) rather than crash.
+        try:
+            from providers.schwab import SchwabProvider
+            if not SchwabProvider.configured():
+                return None
+            return SchwabProvider().get_quote(symbol)
+        except Exception:  # noqa: BLE001 — a quote failure must not break detection
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -728,3 +736,167 @@ def run_replay(raw_config: dict, *, date=None, date_range=None,
         "ok": True, "mode": REPLAY, "date_range": {"start": start, "end": end},
         "trades": trades, "count": len(trades), "summary": engine.summarize(trades),
     }
+
+
+# ---------------------------------------------------------------------------
+# PAPER session — real-time virtual execution against the live feed
+# ---------------------------------------------------------------------------
+def _now_et() -> pd.Timestamp:
+    return ix._to_et_naive(datetime.now(ix.EXCHANGE_TZ))
+
+
+def _past_window_end(on_date: str, as_of_ts: pd.Timestamp, config: dict) -> bool:
+    """True once ``as_of`` has passed the configured window end (Central time)."""
+    end = config["time_window"]["end_time"]
+    today = ix._today_et()
+    if on_date < today:
+        return True   # a past session is fully over
+    central = (pd.Timestamp(as_of_ts)
+               .tz_localize(engine.EXCHANGE_TZ, nonexistent="shift_forward", ambiguous="NaT")
+               .tz_convert(engine.BACKTEST_WINDOW_TZ))
+    return central.strftime("%H:%M") >= end
+
+
+def _one_minute_events(data: DataSource, ticker: str, on_date: str,
+                       after_ts: pd.Timestamp, as_of_ts: pd.Timestamp) -> list[dict]:
+    """1-minute bars in (after_ts, as_of_ts], as exit-resolution events.
+
+    The honest exit feed given a pull-based stack: each bar's high/low is walked
+    in real chronological order, so stop-vs-target is settled by the true sequence
+    rather than a candle-close guess. A live tick stream is a future enhancement.
+    """
+    fine = data.intraday(ticker, on_date, on_date, 1)
+    if fine is None or fine.empty:
+        return []
+    fine = fine.sort_index()
+    window = fine[(fine.index >= after_ts) & (fine.index <= as_of_ts)]
+    return [
+        {"high": ix._finite(r["High"], r["Close"]), "low": ix._finite(r["Low"], r["Close"]),
+         "time": engine._central_time_label(ts)}
+        for ts, r in window.iterrows()
+    ]
+
+
+def _open_paper_trade(setup: Setup, fill: dict, config: dict, *, live_price: float) -> dict:
+    """Build the OPEN paper-trade record from a fresh entry fill."""
+    direction_db = "LONG" if setup.direction == "Long" else "SHORT"
+    key = "|".join([setup.date, setup.ticker, setup.entry_time or ""])
+    base = setup.base_trade()
+    base["direction"] = direction_db
+    return {
+        **base,
+        "level_type": setup.level_type,
+        "entry_price": fill["entry_fill"],
+        "stop_price": round(setup.stop, 2), "target_price": round(setup.target, 2),
+        "risk_amount": round(setup.risk, 2), "reward_amount": round(setup.reward, 2),
+        "exit_price": None, "exit_time": None, "outcome": "OPEN", "r_result": None,
+        "account_type": "PAPER", "mode": PAPER,
+        "order_id": f"PAPER-{key.replace('|', '-')}",
+        "entry_spread": fill.get("entry_spread"), "slippage": fill.get("entry_slippage"),
+        "resolution_granularity": config.get("exit_resolution_granularity"),
+        "live_price": fill.get("live_price"), "signal": setup.signal(),
+        "notes": f"paper entry @ {live_price} (slip {fill.get('entry_slippage')})",
+    }
+
+
+def run_paper(raw_config: dict, *, on_date=None, as_of=None, refresh=False,
+              persist=True, data_source: "DataSource | None" = None) -> dict:
+    """Run one PAPER poll: open new setups at the live price, resolve open trades.
+
+    Each call (the dashboard polls it) does three things, all in PAPER mode
+    (LiveDataSource + SimulatedExecutionAdapter):
+
+      1. Detect setups on candles that have *closed* by ``as_of`` (one per ticker).
+      2. For a newly detected setup with no logged trade yet, capture the entry at
+         the live quote *now* (not a candle close), apply adverse slippage, record
+         the bid/ask spread, and log an OPEN trade with full detail.
+      3. For every still-open paper trade, walk 1-minute bars since entry in real
+         sequence; close on the first stop/target touch (stop fills pessimistically),
+         or at the live market price once the window end (10:00 CT) has passed.
+
+    Detection + sizing come from the shared StrategyCore, so PAPER differs from
+    REPLAY only in the bound data source + adapter — no logic changes.
+    """
+    config, errors = validate_engine_config({**(raw_config or {}), "mode": PAPER})
+    if errors:
+        return {"ok": False, "errors": errors}
+    on_date = on_date or ix._today_et()
+    as_of_ts = ix._to_et_naive(as_of) if as_of is not None else _now_et()
+
+    refresh_result = None
+    if refresh:
+        refresh_result = ix.refresh_today(config, on_date)
+        # The exit resolver needs 1-minute bars too; pull them alongside the 5m.
+        import backtest_service
+        backtest_service.backfill(list(config["tickers"]), on_date, on_date, 1,
+                                  engine._vol_avg_length(config),
+                                  fine_symbols=[], refine_interval_min=0)
+
+    eng = build_engine(config, data_source=data_source)
+    adapter = eng.adapter
+    if not isinstance(adapter, SimulatedExecutionAdapter):
+        return {"ok": False, "errors": ["PAPER mode requires the simulated adapter."]}
+
+    import db
+    existing = {(t["ticker"], t.get("entry_time")): t
+                for t in (db.list_intraday_trades(date=on_date) if persist else [])}
+
+    opened, resolved, open_trades = [], [], []
+    for ticker in config["tickers"]:
+        ctx = eng.core.context(ticker, on_date, eng.data)
+        if not ctx or "window" not in ctx:
+            continue
+        setup = eng.core.detect(ticker, on_date, ctx, eng.data, as_of=as_of_ts)
+        if setup is None or setup.kind == "skip":
+            continue
+
+        record = existing.get((ticker, setup.entry_time))
+        if record is None:
+            # New setup → open a virtual position at the live price right now.
+            quote = eng.data.quote(ticker) or {}
+            live_price = quote.get("last")
+            if live_price is None:
+                live_price = setup.entry   # degraded fallback: the signal close
+            fill = adapter.open_position(setup, live_price=float(live_price),
+                                         bid=quote.get("bid"), ask=quote.get("ask"),
+                                         config=config)
+            trade = _open_paper_trade(setup, fill, config, live_price=float(live_price))
+            record = db.record_intraday_trade(trade) if persist else trade
+            opened.append(record)
+        elif str(record.get("outcome")) != "OPEN":
+            continue  # already resolved — nothing to do
+
+        # Resolve (or keep open) the position against the live feed.
+        fill = {"entry_fill": float(record["entry_price"]),
+                "entry_spread": record.get("entry_spread"),
+                "entry_slippage": record.get("slippage")}
+        entry_close_ts = setup.ts + pd.Timedelta(minutes=setup.interval_min)
+        events = _one_minute_events(eng.data, ticker, on_date, entry_close_ts, as_of_ts)
+        window_end_price = None
+        if _past_window_end(on_date, as_of_ts, config):
+            q = eng.data.quote(ticker) or {}
+            window_end_price = q.get("last")
+            if window_end_price is None and events:
+                window_end_price = events[-1].get("high")
+        res = adapter.resolve_exit(setup, fill, events, config=config,
+                                   window_end_price=window_end_price)
+        if res["outcome"] in ("Win", "Loss"):
+            outcome_db = "WIN" if res["outcome"] == "Win" else "LOSS"
+            if persist and record.get("id"):
+                updated = db.update_intraday_trade_exit(
+                    record["id"], exit_price=res["exit_price"],
+                    exit_time=res.get("exit_time") or engine._central_time_label(as_of_ts),
+                    outcome=outcome_db, r_result=res["r_result"], notes=res.get("notes"),
+                    resolution_granularity=config.get("exit_resolution_granularity"))
+                resolved.append(updated or record)
+            else:
+                resolved.append({**(record or {}), **res, "outcome": outcome_db})
+        else:
+            open_trades.append(record)
+
+    out = {"ok": True, "mode": PAPER, "date": on_date,
+           "opened": opened, "resolved": resolved, "open": open_trades,
+           "asOf": engine._central_time_label(as_of_ts)}
+    if refresh_result is not None:
+        out["refresh"] = refresh_result
+    return out
