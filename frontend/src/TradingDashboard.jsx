@@ -987,7 +987,15 @@ function TradingDashboard({ backendOffline }) {
           <RotationView focus={focus} rows={sectorRows} />
         )}
         {tab === "Entry Watch" && (
-          <EntryWatchView app={app} macro={macro} focus={focus} computed={computed} indicatorHistory={indicatorHistory} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchItems} setEntryWatchSymbols={updateEntryWatchSymbols} />
+          <EntryWatchView app={app} macro={macro} focus={focus} computed={computed} indicatorHistory={indicatorHistory} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchItems} setEntryWatchSymbols={updateEntryWatchSymbols}
+            onSendToExecutor={(symbols) => {
+              const prev = store.get("executorForm", {}) || {};
+              const existing = String(prev.tickers || "").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
+              const merged = Array.from(new Set([...existing, ...symbols.map((s) => String(s).trim().toUpperCase()).filter(Boolean)]));
+              store.set("executorForm", { ...prev, tickers: merged.join(", ") });
+              setTab("Executor");
+            }}
+          />
         )}
         {tab === "Positions" && (
           <PositionsView
@@ -1897,7 +1905,7 @@ function genericWatchChecklist(symbol, calc, macro, focus, calcStatus) {
   };
 }
 
-function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcStatus, entryWatchSymbols, setEntryWatchSymbols }) {
+function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcStatus, entryWatchSymbols, setEntryWatchSymbols, onSendToExecutor }) {
   const [draftSymbol, setDraftSymbol] = useState("");
   const [draftStrategyMode, setDraftStrategyMode] = useState("AUTO");
   const [draftSectorProxy, setDraftSectorProxy] = useState("");
@@ -2036,7 +2044,7 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 16 }}>
-        {candidates.length ? candidates.map((candidate) => <EntryWatchCard key={candidate.symbol} {...candidate} onRemove={removeSymbol} onUpdate={updateWatchItem} />) : (
+        {candidates.length ? candidates.map((candidate) => <EntryWatchCard key={candidate.symbol} {...candidate} onRemove={removeSymbol} onUpdate={updateWatchItem} onSendToExecutor={onSendToExecutor} />) : (
           <Panel title="No tickers monitored" eyebrow="Entry watch" accent={C.inkFaint}>
             <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>Add a ticker above to start monitoring entry readiness.</div>
           </Panel>
@@ -2046,7 +2054,7 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
   );
 }
 
-function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWhen, strategyMode, sectorProxy, onRemove, onUpdate }) {
+function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWhen, strategyMode, sectorProxy, onRemove, onUpdate, onSendToExecutor }) {
   const go = data.verdict === "ENTER";
   const readiness = readinessFromChecklist(data);
   const { passed, missing } = splitChecklistItems(data.items);
@@ -2114,6 +2122,15 @@ function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWh
           <div style={{ font: `700 10px ${C.mono}`, color: go ? C.green : C.inkFaint, letterSpacing: 1, marginBottom: 5 }}>{go ? "ENTRY TRIGGER ACTIVE" : "ENTRY TRIGGER TO WATCH"}</div>
           <div style={{ font: `500 12px/1.45 ${C.sans}`, color: C.ink }}>{go ? "All conditions are met. Validate price/action live before placing the trade." : trigger}</div>
         </div>
+
+        {go && onSendToExecutor && (
+          <button
+            onClick={() => onSendToExecutor([symbol])}
+            style={{ width: "100%", background: C.green, color: "#000", border: "none", borderRadius: 7, padding: "9px 0", font: `700 12px ${C.sans}`, cursor: "pointer", letterSpacing: 0.3 }}
+          >
+            → Monitor in Executor
+          </button>
+        )}
 
         <div style={{ borderTop: `1px solid ${C.lineSoft}`, paddingTop: 10 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: levelsState === "idle" ? 0 : 8 }}>

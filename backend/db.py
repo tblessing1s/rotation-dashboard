@@ -821,6 +821,52 @@ def _trade_row(row: sqlite3.Row) -> dict:
     return out
 
 
+def update_paper_trade(
+    order_id: str,
+    *,
+    outcome: str | None = None,
+    exit_price: float | None = None,
+    exit_time: str | None = None,
+    notes: str | None = None,
+) -> dict | None:
+    """Close or update a paper trade's outcome, exit price, and R-result."""
+    conn = connect()
+    row = conn.execute(
+        "SELECT * FROM intraday_trades WHERE order_id = ?", (order_id,)
+    ).fetchone()
+    if not row:
+        return None
+    r_result = row["r_result"]
+    if exit_price is not None:
+        ep = float(row["entry_price"] or 0)
+        sp = float(row["stop_price"] or 0)
+        risk = abs(ep - sp)
+        if risk > 0:
+            direction = str(row["direction"] or "").upper()
+            if direction in ("LONG", "BUY"):
+                r_result = round((float(exit_price) - ep) / risk, 2)
+            elif direction in ("SHORT", "SELL"):
+                r_result = round((ep - float(exit_price)) / risk, 2)
+    with conn:
+        conn.execute(
+            """
+            UPDATE intraday_trades
+               SET outcome    = COALESCE(?, outcome),
+                   exit_price = COALESCE(?, exit_price),
+                   exit_time  = COALESCE(?, exit_time),
+                   notes      = COALESCE(?, notes),
+                   r_result   = ?,
+                   updated_at = ?
+             WHERE order_id = ?
+            """,
+            [outcome, exit_price, exit_time, notes, r_result, utcnow(), order_id],
+        )
+    updated = conn.execute(
+        "SELECT * FROM intraday_trades WHERE order_id = ?", (order_id,)
+    ).fetchone()
+    return _trade_row(updated) if updated else None
+
+
 # ---------------------------------------------------------------------------
 # KV
 # ---------------------------------------------------------------------------

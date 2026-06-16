@@ -783,6 +783,85 @@ def api_executor_paper_trades():
     return jsonify(out)
 
 
+@app.route("/api/executor/paper/trades/<order_id>", methods=["PATCH"])
+def api_paper_trade_update(order_id):
+    """Close a paper trade with an exit price and WIN / LOSS / SKIP outcome."""
+    body = request.get_json(silent=True) or {}
+    outcome = body.get("outcome")
+    if outcome and outcome not in ("OPEN", "WIN", "LOSS", "CLOSED", "SKIP"):
+        return jsonify({"ok": False, "error": f"Invalid outcome: {outcome}"}), 400
+    exit_price_raw = body.get("exit_price")
+    try:
+        exit_price = float(exit_price_raw) if exit_price_raw not in (None, "") else None
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "exit_price must be a number"}), 400
+    updated = db.update_paper_trade(
+        order_id,
+        outcome=outcome or None,
+        exit_price=exit_price,
+        exit_time=body.get("exit_time"),
+        notes=body.get("notes"),
+    )
+    if updated is None:
+        return jsonify({"ok": False, "error": "Trade not found"}), 404
+    return jsonify({"ok": True, "trade": updated})
+
+
+def _macro_gate_level(values: dict) -> str:
+    """Replicate the frontend macroSignal() gate for the daily-summary endpoint."""
+    vix = float(values.get("vix") or 25)
+    breadth = float(values.get("breadth") or 50)
+    fed = str(values.get("fed") or "holding")
+    growth = str(values.get("growth") or "stable")
+    inflation = float(values.get("inflation") or 3)
+    risk_on = sum([vix < 15, breadth >= 60, fed == "dovish",
+                   growth == "accelerating", inflation < 2])
+    risk_off = sum([vix > 20, breadth < 45, fed == "hawkish",
+                    growth == "slowing", inflation > 3])
+    if vix > 30 or breadth < 45:
+        return "RED"
+    if risk_on >= 3 and risk_off == 0 and breadth >= 55:
+        return "GREEN"
+    if risk_off >= 3:
+        return "RED"
+    return "YELLOW"
+
+
+@app.route("/api/executor/daily-summary")
+def api_executor_daily_summary():
+    """Macro gate + today's paper trade P&L in one call for the morning briefing."""
+    import intraday_executor as ix
+    date = request.args.get("date") or db.utcnow()[:10]
+
+    trades = db.list_intraday_trades(date=date, limit=500)
+    signals = db.recent_setup_signals(date=date, limit=500)
+
+    wins = sum(1 for t in trades if t.get("outcome") == "WIN")
+    losses = sum(1 for t in trades if t.get("outcome") == "LOSS")
+    open_count = sum(1 for t in trades if t.get("outcome") == "OPEN")
+    r_vals = [t["r_result"] for t in trades if t.get("r_result") is not None]
+    total_r = round(sum(r_vals), 2) if r_vals else None
+
+    macro_snap = db.latest_snapshot("macro", "macro")
+    macro_values = dict((macro_snap or {}).get("values") or {})
+    gate_level = _macro_gate_level(macro_values) if macro_values else "UNKNOWN"
+    gate_label = {"GREEN": "Risk-On", "YELLOW": "Mixed", "RED": "Risk-Off"}.get(gate_level, "Unknown")
+
+    return jsonify({
+        "ok": True,
+        "date": date,
+        "macro": {"level": gate_level, "label": gate_label},
+        "trades": {
+            "total": len(trades),
+            "wins": wins,
+            "losses": losses,
+            "open": open_count,
+            "total_r": total_r,
+        },
+        "signals": {"total": len(signals)},
+    })
+
+
 # ---------------------------------------------------------------------------
 # State persistence (manual inputs, positions) — lives on the data volume
 # ---------------------------------------------------------------------------
