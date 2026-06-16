@@ -52,6 +52,22 @@ def vol_filter(vol_min_shares: float) -> str:
 _CUSTOM_COLUMNS = [1, 3, 63, 64, 65]
 
 
+def _col(df, *candidates):
+    """Resolve a column name case-insensitively against several candidates.
+
+    Finviz/finvizfinance header text has drifted over releases (e.g. "Avg
+    Volume" vs "Average Volume", "Ticker" vs "No."). Matching loosely keeps the
+    screener working across those variations instead of silently producing an
+    all-empty column.
+    """
+    lookup = {str(c).strip().lower(): c for c in df.columns}
+    for cand in candidates:
+        hit = lookup.get(str(cand).strip().lower())
+        if hit is not None:
+            return hit
+    return None
+
+
 def _enrich_volume(applied: str):
     """Fetch per-ticker average and relative volume from Finviz's Custom view.
 
@@ -70,15 +86,25 @@ def _enrich_volume(applied: str):
         if df is None or df.empty:
             return None
 
-        ticker_col = "Ticker" if "Ticker" in df.columns else df.columns[0]
+        ticker_col = _col(df, "Ticker") or df.columns[0]
+        avgvol_col = _col(df, "Avg Volume", "Average Volume")
+        if avgvol_col is None:
+            log.warning("Finviz Custom view missing an average-volume column "
+                        "(got %s); skipping precise volume enrichment.", list(df.columns))
+            return None
+        rvol_col = _col(df, "Rel Volume", "Relative Volume")
+        sector_col = _col(df, "Sector")
+
         out = pd.DataFrame({
             "ticker": df[ticker_col].astype(str),
-            "avgVol": pd.to_numeric(df.get("Avg Volume"), errors="coerce"),
-            "rvol": pd.to_numeric(df.get("Rel Volume"), errors="coerce"),
+            "avgVol": pd.to_numeric(df[avgvol_col], errors="coerce"),
+            "rvol": pd.to_numeric(df[rvol_col], errors="coerce") if rvol_col else pd.NA,
         })
-        if "Sector" in df.columns:
-            out["sector"] = df["Sector"].astype(str)
-        return out.dropna(subset=["avgVol"]).set_index("ticker")
+        if sector_col:
+            out["sector"] = df[sector_col].astype(str)
+        out = out.dropna(subset=["avgVol"])
+        out = out[~out["ticker"].duplicated()]  # one row per ticker for .loc lookups
+        return out.set_index("ticker")
     except Exception as exc:
         log.warning("Finviz volume enrichment unavailable, "
                     "falling back to Technical view only: %s", exc)
@@ -97,7 +123,8 @@ def run(price_min: float, price_max: float, vol_min_shares: float,
     by ATR% descending.
 
     Returns a dict with:
-      ``results``         list of matches (symbol, price, atrPct, avgVol, rvol, sector)
+      ``results``         list of matches (symbol, price, atrPct, changePct,
+                          avgVol, rvol, sector)
       ``volFilterApplied`` the Finviz average-volume option used server-side
       ``volPrecise``      True when the exact share floor was enforced client-side
     """
@@ -125,10 +152,18 @@ def run(price_min: float, price_max: float, vol_min_shares: float,
         return {"results": [], "volFilterApplied": applied, "volPrecise": vol_precise}
 
     try:
-        # Normalize column names — finvizfinance has used "Ticker" and "No." historically
-        ticker_col = "Ticker" if "Ticker" in df.columns else df.columns[1]
-        df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
-        df["ATR"] = pd.to_numeric(df["ATR"], errors="coerce")
+        # finvizfinance header text has drifted across releases — resolve loosely.
+        ticker_col = _col(df, "Ticker") or df.columns[1]
+        price_col = _col(df, "Price")
+        atr_col = _col(df, "ATR")
+        change_col = _col(df, "Change")
+        sector_col = _col(df, "Sector")
+        if price_col is None or atr_col is None:
+            raise RuntimeError(
+                f"Finviz Technical view missing Price/ATR columns (got {list(df.columns)})")
+
+        df["Price"] = pd.to_numeric(df[price_col], errors="coerce")
+        df["ATR"] = pd.to_numeric(df[atr_col], errors="coerce")
         df = df.dropna(subset=["Price", "ATR"])
         df = df[df["Price"] > 0]
 
@@ -146,7 +181,7 @@ def run(price_min: float, price_max: float, vol_min_shares: float,
         for _, row in filtered.iterrows():
             symbol = str(row[ticker_col])
             avg_vol = rvol = None
-            sector = str(row.get("Sector", "")) if "Sector" in df.columns else ""
+            sector = str(row[sector_col]) if sector_col else ""
             if vol_df is not None and symbol in vol_df.index:
                 vrow = vol_df.loc[symbol]
                 avg_vol = None if pd.isna(vrow["avgVol"]) else float(vrow["avgVol"])
@@ -159,10 +194,18 @@ def run(price_min: float, price_max: float, vol_min_shares: float,
                 if avg_vol is None or avg_vol < vol_min_shares:
                     continue
 
+            # Finviz reports Change as a fraction (0.0234 == +2.34%).
+            change_pct = None
+            if change_col is not None:
+                cv = pd.to_numeric(row.get(change_col), errors="coerce")
+                if pd.notna(cv):
+                    change_pct = round(float(cv) * 100, 2)
+
             results.append({
                 "symbol": symbol,
                 "price": round(float(row["Price"]), 2),
                 "atrPct": round(float(row["atrPct"]), 2),
+                "changePct": change_pct,
                 "avgVol": None if avg_vol is None else int(avg_vol),
                 "rvol": rvol,
                 "sector": sector,

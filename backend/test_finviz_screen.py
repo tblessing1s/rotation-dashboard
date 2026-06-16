@@ -74,11 +74,12 @@ class _FakeView:
 
 
 _TECH_DF = pd.DataFrame([
-    {"Ticker": "AAA", "ATR": 3.0, "Price": 50.0},   # atrPct 6.0, in band
-    {"Ticker": "BBB", "ATR": 3.5, "Price": 50.0},   # atrPct 7.0, in band
-    {"Ticker": "CCC", "ATR": 1.5, "Price": 30.0},   # atrPct 5.0, in band
-    {"Ticker": "DDD", "ATR": 10.0, "Price": 200.0},  # price out of $20-100 band
-    {"Ticker": "EEE", "ATR": 0.5, "Price": 50.0},   # atrPct 1.0, below 4
+    # "Change" is a fraction as Finviz reports it (0.0234 == +2.34%).
+    {"Ticker": "AAA", "ATR": 3.0, "Price": 50.0, "Change": 0.0234},   # atrPct 6.0, in band
+    {"Ticker": "BBB", "ATR": 3.5, "Price": 50.0, "Change": -0.01},    # atrPct 7.0, in band
+    {"Ticker": "CCC", "ATR": 1.5, "Price": 30.0, "Change": 0.05},     # atrPct 5.0, in band
+    {"Ticker": "DDD", "ATR": 10.0, "Price": 200.0, "Change": 0.0},    # price out of $20-100 band
+    {"Ticker": "EEE", "ATR": 0.5, "Price": 50.0, "Change": 0.0},      # atrPct 1.0, below 4
 ])
 
 _CUSTOM_DF = pd.DataFrame([
@@ -108,6 +109,7 @@ def test_run_enforces_exact_volume_floor_and_attaches_rvol(monkeypatch):
     aaa = out["results"][0]
     assert aaa["avgVol"] == 15_000_000 and aaa["rvol"] == 1.5
     assert aaa["sector"] == "Tech"
+    assert aaa["changePct"] == 2.34  # Finviz fraction 0.0234 -> percent
 
 
 def test_run_falls_back_to_technical_only_when_enrichment_fails(monkeypatch):
@@ -120,6 +122,28 @@ def test_run_falls_back_to_technical_only_when_enrichment_fails(monkeypatch):
     # No exact floor applied: all price/ATR%-passing names survive, ATR% desc.
     assert [r["symbol"] for r in out["results"]] == ["BBB", "AAA", "CCC"]
     assert all(r["avgVol"] is None and r["rvol"] is None for r in out["results"])
+
+
+def test_run_tolerates_alternate_custom_header_names(monkeypatch):
+    # finvizfinance has shipped both "Avg Volume" and "Average Volume" headers.
+    alt = _CUSTOM_DF.rename(columns={
+        "Avg Volume": "Average Volume", "Rel Volume": "Relative Volume"})
+    _patch_views(monkeypatch, _FakeView(_TECH_DF), _FakeView(alt))
+    out = finviz_screen.run(price_min=20, price_max=100, vol_min_shares=10_000_000,
+                            atr_min=4, atr_max=9)
+    assert out["volPrecise"] is True
+    assert [r["symbol"] for r in out["results"]] == ["AAA", "CCC"]
+    assert out["results"][0]["rvol"] == 1.5
+
+
+def test_run_degrades_when_custom_view_lacks_volume_column(monkeypatch):
+    no_vol = _CUSTOM_DF.drop(columns=["Avg Volume"])
+    _patch_views(monkeypatch, _FakeView(_TECH_DF), _FakeView(no_vol))
+    out = finviz_screen.run(price_min=20, price_max=100, vol_min_shares=10_000_000,
+                            atr_min=4, atr_max=9)
+    # No usable avg-volume column => treat as enrichment-unavailable, keep all.
+    assert out["volPrecise"] is False
+    assert [r["symbol"] for r in out["results"]] == ["BBB", "AAA", "CCC"]
 
 
 def test_run_respects_limit(monkeypatch):

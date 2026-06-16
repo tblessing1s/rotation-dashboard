@@ -39,8 +39,10 @@ function Panel({ title, eyebrow, children, accent }) {
   );
 }
 
-export default function DailyScreenerView({ onSendToExecutor }) {
-  const [filters, setFilters] = useState({ priceMin: 20, priceMax: 100, volMin: 10, atrMin: 4, atrMax: 9 });
+const DEFAULT_FILTERS = { priceMin: 20, priceMax: 100, volMin: 10, atrMin: 4, atrMax: 9 };
+
+export default function DailyScreenerView({ store, onSendToExecutor }) {
+  const [filters, setFilters] = useState(() => ({ ...DEFAULT_FILTERS, ...(store?.get("screenerForm", {}) || {}) }));
   const [status, setStatus] = useState("idle"); // idle | loading | done | error
   const [results, setResults] = useState(null);
   const [volApplied, setVolApplied] = useState("");
@@ -82,7 +84,11 @@ export default function DailyScreenerView({ onSendToExecutor }) {
     }
   }, [filters]);
 
-  const setF = (k, v) => setFilters((prev) => ({ ...prev, [k]: v }));
+  const setF = (k, v) => setFilters((prev) => {
+    const next = { ...prev, [k]: v };
+    store?.set("screenerForm", next);
+    return next;
+  });
 
   const toggle = (symbol) => setSelected((prev) => {
     const next = new Set(prev);
@@ -160,10 +166,10 @@ export default function DailyScreenerView({ onSendToExecutor }) {
                 </button>
               </div>
               <div style={{ overflowX: "auto" }}>
-                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 460 }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
                   <thead>
                     <tr style={{ borderBottom: `1px solid ${C.line}` }}>
-                      {["", "Symbol", "Price", "ATR%", "RVOL", "Avg Vol"].map((h, i) => (
+                      {["", "Symbol", "Price", "Chg%", "ATR%", "RVOL", "Avg Vol"].map((h, i) => (
                         <th key={i} style={{ textAlign: "left", padding: "6px 10px", font: `600 11px 'Roboto Mono', monospace`, color: C.inkFaint, letterSpacing: 0.5 }}>{h}</th>
                       ))}
                     </tr>
@@ -184,6 +190,9 @@ export default function DailyScreenerView({ onSendToExecutor }) {
                         </td>
                         <td style={{ padding: "9px 10px" }}>
                           <span style={{ font: `500 13px 'Roboto Mono', monospace`, color: C.ink }}>${r.price.toFixed(2)}</span>
+                        </td>
+                        <td style={{ padding: "9px 10px" }}>
+                          <ChangePct value={r.changePct} />
                         </td>
                         <td style={{ padding: "9px 10px" }}>
                           <AtrBadge value={r.atrPct} />
@@ -262,6 +271,14 @@ function RvolBadge({ value }) {
   return (
     <span style={{ font: `600 12px 'Roboto Mono', monospace`, color }}>{value.toFixed(2)}×</span>
   );
+}
+
+// Day-of price change. Green up / red down so movers stand out at a glance.
+function ChangePct({ value }) {
+  if (value == null) return <span style={{ color: C.inkFaint, font: `400 12px 'Roboto Mono', monospace` }}>—</span>;
+  const color = value > 0 ? C.green : value < 0 ? C.red : C.inkDim;
+  const sign = value > 0 ? "+" : "";
+  return <span style={{ font: `500 12px 'Roboto Mono', monospace`, color }}>{sign}{value.toFixed(2)}%</span>;
 }
 
 function fmtVol(n) {
