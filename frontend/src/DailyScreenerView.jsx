@@ -2,7 +2,7 @@ import React, { useState, useCallback } from "react";
 import { C } from "./theme.js";
 
 /* ============================================================================
-   DAILY SCREENER — filter a pasted symbol list by day-trading criteria.
+   DAILY SCREENER — scan all tracked symbols by day-trading parameters.
    Criteria: price $20–$100, avg daily volume ≥ 10M shares, ATR% 4–9%.
    Results sorted by ATR% descending so the most volatile (but bounded) names
    appear first for setup selection.
@@ -51,31 +51,19 @@ function StaleDot({ staleness }) {
 }
 
 export default function DailyScreenerView() {
-  const [symbolInput, setSymbolInput] = useState("");
   const [filters, setFilters] = useState({ priceMin: 20, priceMax: 100, volMin: 10, atrMin: 4, atrMax: 9 });
   const [status, setStatus] = useState("idle"); // idle | loading | done | error
   const [results, setResults] = useState(null);
-  const [missing, setMissing] = useState([]);
+  const [scanned, setScanned] = useState(0);
   const [errorMsg, setErrorMsg] = useState("");
 
-  const parseSymbols = useCallback(() => {
-    return symbolInput
-      .replace(/[\n,;|\t]+/g, ",")
-      .split(",")
-      .map((s) => s.trim().toUpperCase())
-      .filter(Boolean);
-  }, [symbolInput]);
-
   const runScreen = useCallback(async () => {
-    const syms = parseSymbols();
-    if (!syms.length) { setErrorMsg("Paste at least one symbol."); return; }
     setStatus("loading");
     setErrorMsg("");
     setResults(null);
-    setMissing([]);
+    setScanned(0);
     try {
       const params = new URLSearchParams({
-        symbols: syms.join(","),
         price_min: filters.priceMin,
         price_max: filters.priceMax,
         vol_min: filters.volMin * 1_000_000,
@@ -89,35 +77,24 @@ export default function DailyScreenerView() {
       }
       const data = await res.json();
       setResults(data.results || []);
-      setMissing(data.missing || []);
+      setScanned(data.scanned || 0);
       setStatus("done");
     } catch (e) {
       setErrorMsg(e.message || "Fetch failed");
       setStatus("error");
     }
-  }, [parseSymbols, filters]);
+  }, [filters]);
 
   const setF = (k, v) => setFilters((prev) => ({ ...prev, [k]: v }));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      {/* Symbol input */}
-      <Panel title="Daily stock screener" eyebrow="Day trading · TOS filters">
-        <div style={{ marginBottom: 14 }}>
-          <div style={{ font: `500 11px/1.2 'Inter', sans-serif`, color: C.inkDim, marginBottom: 6 }}>
-            Paste symbols from your TOS scan (comma, space, or newline separated)
-          </div>
-          <textarea
-            rows={4}
-            placeholder={"AMD, NVDA, TSLA\nHOOD, HIMS, CVNA"}
-            value={symbolInput}
-            onChange={(e) => setSymbolInput(e.target.value)}
-            style={{ ...inputStyle, resize: "vertical", lineHeight: 1.6 }}
-          />
+      <Panel title="Daily stock screener" eyebrow="Day trading · parameter screen">
+        <div style={{ font: `400 12px 'Inter', sans-serif`, color: C.inkDim, marginBottom: 14 }}>
+          Set your parameters and run — all tracked symbols are scanned automatically.
         </div>
 
-        {/* Filter row */}
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end", marginBottom: 16 }}>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end" }}>
           <FilterNum label="Price min ($)" value={filters.priceMin} onChange={(v) => setF("priceMin", v)} />
           <FilterNum label="Price max ($)" value={filters.priceMax} onChange={(v) => setF("priceMax", v)} />
           <FilterNum label="Avg vol min (M)" value={filters.volMin} onChange={(v) => setF("volMin", v)} step={0.5} />
@@ -137,21 +114,14 @@ export default function DailyScreenerView() {
         </div>
 
         {errorMsg && (
-          <div style={{ font: `500 12px 'Inter', sans-serif`, color: C.red, marginBottom: 8 }}>{errorMsg}</div>
-        )}
-
-        {missing.length > 0 && (
-          <div style={{ font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint, marginBottom: 4 }}>
-            No data yet for: {missing.join(", ")} — queued for next ingest.
-          </div>
+          <div style={{ font: `500 12px 'Inter', sans-serif`, color: C.red, marginTop: 10 }}>{errorMsg}</div>
         )}
       </Panel>
 
-      {/* Results */}
       {status === "done" && results !== null && (
         <Panel
           title={results.length ? `${results.length} stock${results.length !== 1 ? "s" : ""} passed` : "No matches"}
-          eyebrow="sorted by ATR% · highest volatility first"
+          eyebrow={`${scanned} symbols scanned · sorted by ATR% · highest volatility first`}
           accent={results.length ? C.green : C.inkFaint}
         >
           {results.length === 0 ? (
@@ -200,7 +170,7 @@ export default function DailyScreenerView() {
           )}
 
           <div style={{ marginTop: 12, font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint }}>
-            Filters applied: price ${filters.priceMin}–${filters.priceMax} · avg vol ≥ {filters.volMin}M · ATR% {filters.atrMin}–{filters.atrMax}%
+            Filters: price ${filters.priceMin}–${filters.priceMax} · avg vol ≥ {filters.volMin}M · ATR% {filters.atrMin}–{filters.atrMax}%
           </div>
         </Panel>
       )}

@@ -265,23 +265,21 @@ def _build_sector_map() -> dict:
 
 @app.route("/api/daily-screener")
 def api_daily_screener():
-    """Filter a caller-supplied symbol list by day-trading criteria.
+    """Screen tracked symbols by day-trading criteria.
 
     Query params:
-      symbols   comma-separated list (required)
+      symbols   optional comma-separated list; omit to scan all tracked symbols
       price_min default 20
       price_max default 100
       vol_min   default 10000000  (average daily volume in shares)
       atr_min   default 4  (ATR% = ATR14 / close * 100)
       atr_max   default 9
 
-    Returns results sorted by atrPct descending. Symbols missing from the
-    datastore are queued for a background fetch so a later call has data.
+    Returns results sorted by atrPct descending.
     """
     requested = request.args.get("symbols", "")
-    symbols = [s.strip().upper() for s in requested.split(",") if s.strip()]
-    if not symbols:
-        return jsonify({"error": "symbols parameter required"}), 400
+    explicit_symbols = [s.strip().upper() for s in requested.split(",") if s.strip()]
+    symbols = explicit_symbols if explicit_symbols else db.known_symbols()
 
     try:
         price_min = float(request.args.get("price_min", 20))
@@ -293,12 +291,11 @@ def api_daily_screener():
         return jsonify({"error": "invalid filter parameter"}), 400
 
     sector_map = _build_sector_map()
-    results, missing = [], []
+    results = []
 
     for sym in symbols:
         bars = db.get_bars(sym)
         if bars is None or len(bars) < 21:
-            missing.append(sym)
             continue
 
         price = float(bars["Close"].iloc[-1])
@@ -324,19 +321,14 @@ def api_daily_screener():
 
     results.sort(key=lambda r: r["atrPct"], reverse=True)
 
-    known = set(db.known_symbols())
-    new_syms = [s for s in missing if s not in known]
-    if new_syms:
-        ingest.run_in_background("new-symbols", new_syms)
-
     return jsonify({
         "results": results,
-        "missing": missing,
         "filters": {
             "priceMin": price_min, "priceMax": price_max,
             "volMin": vol_min, "atrMin": atr_min, "atrMax": atr_max,
         },
         "count": len(results),
+        "scanned": len(symbols),
     })
 
 
