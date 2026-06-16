@@ -126,6 +126,36 @@ BREADTH_MA_WINDOW = 50
 # returning HTTP 403 to programmatic requests, so a key is strongly recommended.
 FRED_SERIES = ["DFF", "CPIAUCSL", "GDPC1", "UNRATE"]
 
+# ---- Daily screener (Alpha Vantage) -----------------------------------------
+# Alpha Vantage has no server-side market screener, so the screener scans a
+# *universe* and applies the price/volume/ATR% filters locally. The ≥10M-volume
+# floor already collapses the entire US market to a few hundred names, so a
+# curated high-liquidity list — plus the day's TOP_GAINERS_LOSERS most-actives
+# as a discovery layer — covers effectively everything in range. Tune this list
+# freely; symbols that fall out of range are simply filtered out each run.
+SCREENER_UNIVERSE = [
+    # Broad / sector / thematic ETFs that routinely trade heavy volume.
+    "SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLY", "XLI", "XLV",
+    "XLP", "XLU", "XLB", "XLC", "XLRE", "SMH", "SOXL", "SOXS", "TQQQ", "SQQQ",
+    "ARKK", "XBI", "KRE", "GDX", "SLV", "USO", "TLT", "HYG", "FXI", "EEM",
+    # Mega-cap / high-liquidity single names.
+    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA", "AVGO",
+    "AMD", "INTC", "MU", "QCOM", "TXN", "CRM", "ORCL", "ADBE", "NOW", "PLTR",
+    "NFLX", "DIS", "CMCSA", "T", "VZ", "PYPL", "SQ", "SHOP", "UBER", "ABNB",
+    "COIN", "MSTR", "SNOW", "CRWD", "PANW", "DDOG", "NET", "SMCI", "ARM", "DELL",
+    "JPM", "BAC", "WFC", "C", "GS", "MS", "SCHW", "V", "MA", "AXP",
+    "BX", "KKR", "COF", "USB", "PNC",
+    "XOM", "CVX", "COP", "SLB", "OXY", "MRO", "DVN", "HAL", "FANG", "MPC",
+    "UNH", "JNJ", "LLY", "PFE", "MRK", "ABBV", "BMY", "GILD", "AMGN", "CVS",
+    "MRNA", "TMO", "DHR", "ISRG", "VRTX",
+    "WMT", "COST", "HD", "LOW", "TGT", "NKE", "SBUX", "MCD", "PG", "KO",
+    "PEP", "CAT", "DE", "BA", "GE", "HON", "UPS", "FDX", "LMT", "RTX",
+    "F", "GM", "RIVN", "LCID", "NIO", "DAL", "AAL", "UAL", "CCL", "NCLH",
+    "BABA", "PDD", "JD", "MARA", "RIOT", "CLSK", "AFRM", "SOFI", "HOOD", "DKNG",
+    "ROKU", "ZM", "DOCU", "TTD", "ENPH", "FSLR", "RUN", "PLUG", "CHPT", "NEE",
+]
+
+
 # ---- Portfolio defaults (mirrors your framework) ----------------------------
 CAPITAL = 35000
 RESERVE = 13000

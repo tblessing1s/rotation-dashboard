@@ -105,6 +105,7 @@ last ingestion run. The same report is at `GET /api/data-status`.
 | **Schwab Trader API** (primary) | daily OHLCV — same feed as thinkorswim | `SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, `SCHWAB_REFRESH_TOKEN` |
 | **Yahoo Finance** (fallback) | daily OHLCV when Schwab is unavailable | none |
 | **FRED** | Fed funds, CPI, real GDP, unemployment | `FRED_API_KEY` (recommended) |
+| **Alpha Vantage** | daily screener universe + macro fallback | `ALPHAVANTAGE_API_KEY` |
 
 Every stored row is tagged with its source, and the UI shows it in the
 staleness tooltip. Yahoo is explicitly the labeled last resort.
@@ -117,6 +118,22 @@ https://fred.stlouisfed.org/docs/api/api_key.html and set it:
 
 ```sh
 fly secrets set FRED_API_KEY=…
+```
+
+**Alpha Vantage:** powers the Daily Screener and backs up the FRED macro series.
+The screener scans a liquid US universe (`config.SCREENER_UNIVERSE` + the day's
+most-active movers) and applies the price / average-volume / ATR% filters
+locally — Alpha Vantage has no server-side screener, but a ≥10M-volume floor
+already collapses the whole market to a few hundred names, so this is
+effectively a full-market scan without scraping a site that 403s bots (the old
+Finviz path). The universe snapshot is built in a background thread and cached,
+so requests never block on the provider. When FRED fails *and* this key is set,
+the Level 1 macro series (Fed funds / CPI / GDP / unemployment) are pulled from
+Alpha Vantage's economic-indicator endpoints instead, keeping the regime gate
+filled. Get a key at https://www.alphavantage.co/support/#api-key and set it:
+
+```sh
+fly secrets set ALPHAVANTAGE_API_KEY=…
 ```
 
 ### Schwab setup (one-time, ~10 minutes)
@@ -171,6 +188,7 @@ fly launch                  # first time
 fly volume create data --region iad --size 1   # persistent volume for the datastore
 fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=… SCHWAB_REFRESH_TOKEN=…
 fly secrets set FRED_API_KEY=…                         # free key, keeps macro inputs auto-filling
+fly secrets set ALPHAVANTAGE_API_KEY=…                 # powers the daily screener + macro fallback
 fly secrets set INGEST_TOKEN=$(openssl rand -hex 16)   # protects POST /api/ingest
 fly deploy
 fly scale count 1           # one machine — see note below

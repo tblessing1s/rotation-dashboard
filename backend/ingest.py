@@ -163,17 +163,44 @@ def cross_check(chain, detail: dict) -> None:
     detail["crossCheck"] = results
 
 
+def fetch_macro_series(series_id: str):
+    """Fetch one Level 1 macro series, FRED first with an Alpha Vantage fallback.
+
+    Returns (series, source). FRED is the primary source; when it fails (the
+    keyless graph CSV increasingly 403s) and an Alpha Vantage key is configured,
+    the same series is pulled from Alpha Vantage's economic-indicator endpoints
+    at a matching cadence so the regime gate keeps filling. Raises ProviderError
+    only when *both* sources fail.
+    """
+    from providers import alphavantage
+
+    try:
+        return fred.fetch_series(series_id), "fred"
+    except Exception as fred_err:  # noqa: BLE001 — fall through to the AV fallback
+        if not alphavantage.configured():
+            raise
+        try:
+            return alphavantage.economic_series(series_id), "alphavantage"
+        except Exception as av_err:  # noqa: BLE001
+            raise ProviderError(
+                f"FRED failed ({fred_err}); Alpha Vantage fallback failed ({av_err})"
+            ) from av_err
+
+
 def ingest_fred(detail: dict) -> None:
-    ok, failed, written = [], {}, 0
+    ok, failed, written, fallback = [], {}, 0, []
     for series_id in cfg.FRED_SERIES:
         try:
-            series = fred.fetch_series(series_id)
-            written += db.append_macro_series(series_id, series, "fred")
+            series, source = fetch_macro_series(series_id)
+            written += db.append_macro_series(series_id, series, source)
             ok.append(series_id)
+            if source != "fred":
+                fallback.append(series_id)
+                print(f"[ingest] FRED {series_id} via {source} fallback")
         except Exception as e:  # noqa: BLE001
             failed[series_id] = str(e)
-            print(f"[ingest] FRED {series_id} failed: {e}")
-    detail["fred"] = {"ok": ok, "failed": failed, "rowsWritten": written}
+            print(f"[ingest] macro {series_id} failed: {e}")
+    detail["fred"] = {"ok": ok, "failed": failed, "rowsWritten": written, "fallback": fallback}
 
 
 # ---------------------------------------------------------------------------
@@ -273,6 +300,7 @@ def run(trigger: str = "manual", symbols: list[str] | None = None) -> dict:
                 ingest_fred(detail)
             compute_indicator_snapshots(targets, detail)
             compute_macro_snapshot(detail)
+            _prewarm_screener(symbols, detail)
             if detail.get("bars", {}).get("failed") or detail.get("fred", {}).get("failed"):
                 status = "partial"
         except Exception as e:  # noqa: BLE001
@@ -283,6 +311,25 @@ def run(trigger: str = "manual", symbols: list[str] | None = None) -> dict:
         return {"status": status, **detail}
     finally:
         _run_lock.release()
+
+
+def _prewarm_screener(symbols: list[str] | None, detail: dict) -> None:
+    """Rebuild the daily-screener universe snapshot after a full ingest cycle so
+    the first scan of the session is instant instead of reporting "building".
+
+    Only runs on full runs (not targeted symbol re-ingests) and only when an
+    Alpha Vantage key is configured; otherwise the screener simply stays lazy.
+    """
+    if symbols is not None:
+        return
+    try:
+        from providers import alphavantage
+        import screener
+
+        if alphavantage.configured() and screener.refresh_in_background():
+            detail["screenerPrewarm"] = "started"
+    except Exception as e:  # noqa: BLE001 — pre-warming is best-effort
+        detail["screenerPrewarm"] = f"skipped: {e}"
 
 
 def run_in_background(trigger: str, symbols: list[str] | None = None) -> None:
