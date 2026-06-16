@@ -287,7 +287,7 @@ def api_daily_screener():
 
     try:
         from providers import finviz_screen
-        results = finviz_screen.run(
+        screen = finviz_screen.run(
             price_min=price_min, price_max=price_max,
             vol_min_shares=vol_min, atr_min=atr_min, atr_max=atr_max,
             limit=50,
@@ -298,12 +298,14 @@ def api_daily_screener():
         app.logger.exception("Unexpected error in daily-screener")
         return jsonify({"error": f"Internal error: {exc}"}), 500
 
+    results = screen["results"]
     return jsonify({
         "results": results,
         "filters": {
             "priceMin": price_min, "priceMax": price_max,
             "volMin": vol_min, "atrMin": atr_min, "atrMax": atr_max,
         },
+        "volFilterApplied": screen["volFilterApplied"],
         "count": len(results),
         "source": "finviz",
     })

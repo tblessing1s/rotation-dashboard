@@ -43,12 +43,14 @@ export default function DailyScreenerView() {
   const [filters, setFilters] = useState({ priceMin: 20, priceMax: 100, volMin: 10, atrMin: 4, atrMax: 9 });
   const [status, setStatus] = useState("idle"); // idle | loading | done | error
   const [results, setResults] = useState(null);
+  const [volApplied, setVolApplied] = useState("");
   const [errorMsg, setErrorMsg] = useState("");
 
   const runScreen = useCallback(async () => {
     setStatus("loading");
     setErrorMsg("");
     setResults(null);
+    setVolApplied("");
     try {
       const params = new URLSearchParams({
         price_min: filters.priceMin,
@@ -64,6 +66,7 @@ export default function DailyScreenerView() {
       }
       const data = await res.json();
       setResults(data.results || []);
+      setVolApplied(data.volFilterApplied || "");
       setStatus("done");
     } catch (e) {
       setErrorMsg(e.message || "Fetch failed");
@@ -146,6 +149,16 @@ export default function DailyScreenerView() {
           <div style={{ marginTop: 12, font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint }}>
             Filters: price ${filters.priceMin}–${filters.priceMax} · avg vol ≥ {filters.volMin}M · ATR% {filters.atrMin}–{filters.atrMax}%
           </div>
+          {volApplied && (
+            <div style={{ marginTop: 6, font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint }}>
+              Finviz avg-vol floor applied: <span style={{ color: C.inkDim }}>{volApplied}</span>
+              {filters.volMin > 2 && volApplied === "Over 2M" && (
+                <span style={{ color: C.yellow }}>
+                  {" "}— Finviz caps its server-side floor at 2M, so names down to ~2M avg vol may appear.
+                </span>
+              )}
+            </div>
+          )}
         </Panel>
       )}
     </div>
