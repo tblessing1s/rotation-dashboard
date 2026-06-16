@@ -322,6 +322,35 @@ def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
     }
 
 
+def atr_percent(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float | None:
+    """Average True Range expressed as a percentage of the latest close.
+
+    ATR% = ATR(14) / close * 100.  Useful as a day-trading volatility filter
+    (sweet spot: 4–9% matches typical intraday range for liquid large-caps).
+    """
+    if len(close) < period + 1:
+        return None
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    atr = tr.dropna().iloc[-period:].mean()
+    price = float(close.iloc[-1])
+    if price <= 0:
+        return None
+    return float(atr / price * 100)
+
+
+def avg_volume_20d(vols: pd.Series) -> float | None:
+    """20-day simple average of daily volume, in absolute shares."""
+    v = vols.dropna()
+    if len(v) < 20:
+        return None
+    return float(v.iloc[-20:].mean())
+
+
 def _round(v, n=1):
     return None if v is None else round(float(v), n)
 

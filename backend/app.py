@@ -251,6 +251,95 @@ def api_levels():
     return jsonify(result)
 
 
+def _build_sector_map() -> dict:
+    """Map symbol -> sector name using the configured sector universe + entry candidates."""
+    sector_map = {}
+    for s in getattr(cfg, "SECTOR_UNIVERSE", []):
+        sector_map[s["symbol"]] = s["name"]
+    proxy_to_sector = {s["symbol"]: s["name"] for s in getattr(cfg, "SECTOR_UNIVERSE", [])}
+    for sym, proxy in getattr(cfg, "ENTRY_CANDIDATE_PROXY", {}).items():
+        if proxy in proxy_to_sector and sym not in sector_map:
+            sector_map[sym] = proxy_to_sector[proxy]
+    return sector_map
+
+
+@app.route("/api/daily-screener")
+def api_daily_screener():
+    """Filter a caller-supplied symbol list by day-trading criteria.
+
+    Query params:
+      symbols   comma-separated list (required)
+      price_min default 20
+      price_max default 100
+      vol_min   default 10000000  (average daily volume in shares)
+      atr_min   default 4  (ATR% = ATR14 / close * 100)
+      atr_max   default 9
+
+    Returns results sorted by atrPct descending. Symbols missing from the
+    datastore are queued for a background fetch so a later call has data.
+    """
+    requested = request.args.get("symbols", "")
+    symbols = [s.strip().upper() for s in requested.split(",") if s.strip()]
+    if not symbols:
+        return jsonify({"error": "symbols parameter required"}), 400
+
+    try:
+        price_min = float(request.args.get("price_min", 20))
+        price_max = float(request.args.get("price_max", 100))
+        vol_min = float(request.args.get("vol_min", 10_000_000))
+        atr_min = float(request.args.get("atr_min", 4))
+        atr_max = float(request.args.get("atr_max", 9))
+    except (ValueError, TypeError):
+        return jsonify({"error": "invalid filter parameter"}), 400
+
+    sector_map = _build_sector_map()
+    results, missing = [], []
+
+    for sym in symbols:
+        bars = db.get_bars(sym)
+        if bars is None or len(bars) < 21:
+            missing.append(sym)
+            continue
+
+        price = float(bars["Close"].iloc[-1])
+        avg_vol = ind.avg_volume_20d(bars["Volume"])
+        atr_pct = ind.atr_percent(bars["High"], bars["Low"], bars["Close"])
+
+        if price < price_min or price > price_max:
+            continue
+        if avg_vol is None or avg_vol < vol_min:
+            continue
+        if atr_pct is None or atr_pct < atr_min or atr_pct > atr_max:
+            continue
+
+        results.append({
+            "symbol": sym,
+            "price": round(price, 2),
+            "avgVolume": round(avg_vol),
+            "atrPct": round(atr_pct, 2),
+            "sector": sector_map.get(sym, ""),
+            "asOf": str(bars.index[-1].date()),
+            "staleness": _bar_staleness(str(bars.index[-1].date())),
+        })
+
+    results.sort(key=lambda r: r["atrPct"], reverse=True)
+
+    known = set(db.known_symbols())
+    new_syms = [s for s in missing if s not in known]
+    if new_syms:
+        ingest.run_in_background("new-symbols", new_syms)
+
+    return jsonify({
+        "results": results,
+        "missing": missing,
+        "filters": {
+            "priceMin": price_min, "priceMax": price_max,
+            "volMin": vol_min, "atrMin": atr_min, "atrMax": atr_max,
+        },
+        "count": len(results),
+    })
+
+
 @app.route("/api/macro")
 def api_macro():
     snap = db.latest_snapshot("macro", "macro") or {"values": {}, "fields": {}, "errors": {"macro": "no ingested data yet"}}
