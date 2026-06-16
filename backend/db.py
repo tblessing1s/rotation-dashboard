@@ -854,8 +854,8 @@ def get_intraday_trade(trade_id: int | None) -> dict | None:
 
 
 def list_intraday_trades(date: str | None = None, status: str | None = None,
-                         limit: int = 100) -> list[dict]:
-    """Return paper intraday trades newest first, optionally by date/status."""
+                         ticker: str | None = None, limit: int = 100) -> list[dict]:
+    """Return paper intraday trades newest first, optionally by date/status/ticker."""
     conn = connect()
     clauses = ["account_type='PAPER'"]
     params: list[object] = []
@@ -865,6 +865,9 @@ def list_intraday_trades(date: str | None = None, status: str | None = None,
     if status:
         clauses.append("outcome=?")
         params.append(status)
+    if ticker:
+        clauses.append("ticker=?")
+        params.append(str(ticker).upper())
     params.append(limit)
     rows = conn.execute(
         "SELECT * FROM intraday_trades WHERE " + " AND ".join(clauses) +

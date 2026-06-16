@@ -69,7 +69,17 @@ const DEFAULT_FORM = {
   fixedRisk: 20,
   startTime: "08:30",
   endTime: "10:00",
+  // Engine (PAPER/REPLAY) knobs — surfaced so paper assumptions are explicit.
+  entrySlip: 0.02,
+  stopSlip: 0.02,
+  exitGranularity: "tick",
+  gapRule: true,
 };
+
+const GRANULARITY_OPTIONS = [
+  { value: "tick", label: "Tick (live quote)" },
+  { value: "1min", label: "1-minute bars" },
+];
 
 // Form state -> the monitor-config JSON the backend validates (mirrors the
 // executor's DEFAULT_MONITOR_CONFIG so live detection matches the backtester).
@@ -83,6 +93,11 @@ function buildConfig(f) {
     stop_params: { atr_multiplier: Number(f.atrMultiplier), atr_period: Number(f.atrPeriod) || 14, atr_timeframe: "intraday" },
     time_window: { start_time: f.startTime, end_time: f.endTime },
     fixed_risk_per_trade: Number(f.fixedRisk),
+    // Engine adapter knobs (ignored by the detection-only monitor endpoint).
+    entry_slippage: { type: "cents", value: Number(f.entrySlip) || 0 },
+    stop_slippage: { type: "cents", value: Number(f.stopSlip) || 0 },
+    exit_resolution_granularity: f.exitGranularity || "tick",
+    gap_rule: f.gapRule !== false,
   };
 }
 
@@ -375,6 +390,13 @@ export default function ExecutorView({ store }) {
   }, [acked, dismissedCardSignals, executedSignalKeys, liveSignals, logSignals]);
   const activeSignalTickers = useMemo(() => new Set(liveSignals.map((s) => s.ticker)), [liveSignals]);
   const activeAlert = alertQueue[0] || null;
+  // Latest price per ticker (from the monitor scan) for live unrealized P&L.
+  const priceByTicker = useMemo(
+    () => Object.fromEntries((monitors || []).filter((m) => m.last_close != null).map((m) => [m.ticker, m.last_close])),
+    [monitors]);
+  const tickerList = useMemo(
+    () => String(form.tickers || "").split(",").map((t) => t.trim().toUpperCase()).filter(Boolean),
+    [form.tickers]);
 
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -386,6 +408,7 @@ export default function ExecutorView({ store }) {
       <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
         <SectionHeader title="Intraday Executor" subtitle="Live setup detection on 5-minute candles — alerts when price breaks yesterday's level on a volume spike." />
         <span style={{ flex: 1 }} />
+        <SessionClock startTime={form.startTime} endTime={form.endTime} />
         <ModeBadge mode={mode} />
       </div>
 
@@ -414,6 +437,18 @@ export default function ExecutorView({ store }) {
           <Field label="Fixed risk per trade ($)" hint="Sized into share count from the stop distance."><Input type="number" step="1" value={form.fixedRisk} onChange={(e) => set("fixedRisk", e.target.value)} /></Field>
           <Field label="Window start (CT)"><Input type="time" value={form.startTime} onChange={(e) => set("startTime", e.target.value)} /></Field>
           <Field label="Window end (CT)"><Input type="time" value={form.endTime} onChange={(e) => set("endTime", e.target.value)} /></Field>
+          <Field label="Entry slippage ($/sh)" hint="Adverse haircut applied to the live entry fill (PAPER).">
+            <Input type="number" step="0.01" value={form.entrySlip} onChange={(e) => set("entrySlip", e.target.value)} />
+          </Field>
+          <Field label="Stop slippage ($/sh)" hint="Pessimistic extra on stop fills (PAPER).">
+            <Input type="number" step="0.01" value={form.stopSlip} onChange={(e) => set("stopSlip", e.target.value)} />
+          </Field>
+          <Field label="Exit resolution" hint="How PAPER resolves stop-vs-target.">
+            <Select value={form.exitGranularity} onChange={(e) => set("exitGranularity", e.target.value)} options={GRANULARITY_OPTIONS} />
+          </Field>
+          <Field label="Gap rule" hint="Don't trade a gapped-open day until price re-enters yesterday's range.">
+            <div style={{ paddingTop: 6 }}><Toggle checked={form.gapRule} onChange={(v) => set("gapRule", v)} label={form.gapRule ? "On" : "Off"} /></div>
+          </Field>
         </Grid>
 
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.lineSoft}` }}>
@@ -490,7 +525,9 @@ export default function ExecutorView({ store }) {
 
       {preview && <SchwabPreviewPanel preview={preview} onClose={() => setPreview(null)} />}
 
-      <PaperTradesPanel trades={paperTrades} />
+      <ActiveTradesPanel trades={paperTrades} priceByTicker={priceByTicker} />
+
+      <HistoryPanel tickers={tickerList} nonce={paperTrades.length} />
 
       {/* ---- Playback (validate alerts on historical data) ---- */}
       <Card>
@@ -726,40 +763,222 @@ function SchwabPreviewPanel({ preview, onClose }) {
   );
 }
 
-function PaperTradesPanel({ trades }) {
+// ---------------------------------------------------------------------------
+// US Central session clock + countdown to the window close (10:00 CT default)
+// ---------------------------------------------------------------------------
+const parseHM = (s) => { const [h, m] = String(s || "").split(":").map(Number); return (h || 0) * 60 + (m || 0); };
+
+function ctParts() {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago", hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit",
+  }).formatToParts(new Date());
+  const get = (t) => Number(parts.find((p) => p.type === t)?.value);
+  let h = get("hour"); if (h === 24) h = 0;   // some engines emit 24 at midnight
+  return { h, m: get("minute"), s: get("second") };
+}
+
+function useCtClock() {
+  const [, force] = useState(0);
+  useEffect(() => { const id = setInterval(() => force((n) => n + 1), 1000); return () => clearInterval(id); }, []);
+  return ctParts();
+}
+
+const fmtDur = (sec) => {
+  const hh = Math.floor(sec / 3600), mm = Math.floor((sec % 3600) / 60), ss = sec % 60;
+  return (hh > 0 ? `${hh}:` : "") + `${String(mm).padStart(2, "0")}:${String(ss).padStart(2, "0")}`;
+};
+
+function SessionClock({ startTime, endTime }) {
+  const { h, m, s } = useCtClock();
+  const nowSec = h * 3600 + m * 60 + s;
+  const startSec = parseHM(startTime) * 60, endSec = parseHM(endTime) * 60;
+  let status, color, target, prefix;
+  if (nowSec < startSec) { status = "Pre-window"; color = C.yellow; target = startSec; prefix = "opens in"; }
+  else if (nowSec <= endSec) { status = "In window"; color = C.green; target = endSec; prefix = "closes in"; }
+  else { status = "Closed"; color = C.inkFaint; target = null; prefix = null; }
+  const remain = target != null ? Math.max(0, target - nowSec) : null;
+  const clock = `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  return (
+    <div title="US Central session clock" style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+      <div style={{ font: `700 14px ${C.mono}`, color: C.ink }}>{clock} <span style={{ font: `500 10px ${C.sans}`, color: C.inkFaint }}>CT</span></div>
+      <div style={{ font: `600 10px ${C.sans}`, color, textTransform: "uppercase", letterSpacing: 0.4 }}>
+        {status}{remain != null ? ` · ${prefix} ${fmtDur(remain)}` : ""}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Active virtual trades — open sims with live price, unrealized P&L, time in trade
+// ---------------------------------------------------------------------------
+const fmtMoney = (v) => (v == null ? "—" : `${v < 0 ? "-" : ""}$${Math.abs(v).toFixed(2)}`);
+
+function ActiveTradesPanel({ trades, priceByTicker }) {
+  const { h, m } = useCtClock();
+  const nowMin = h * 60 + m;
   const open = (trades || []).filter((t) => t.outcome === "OPEN");
   return (
     <Card>
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12 }}>
-        <strong style={{ font: `600 13px ${C.sans}`, color: C.ink }}>Paper trades</strong>
-        <span style={{ font: `400 12px ${C.mono}`, color: C.inkFaint }}>{open.length} open · {(trades || []).length} total today</span>
+        <strong style={{ font: `600 13px ${C.sans}`, color: C.ink }}>Active virtual trades</strong>
+        <span style={{ font: `400 12px ${C.mono}`, color: C.inkFaint }}>{open.length} open</span>
         <span style={{ flex: 1 }} />
         <span style={{ font: `600 10px ${C.sans}`, color: C.yellow, textTransform: "uppercase", letterSpacing: 0.3 }}>Simulated only</span>
       </div>
-      {!trades?.length ? (
+      {!open.length ? (
         <div style={{ font: `400 12px ${C.sans}`, color: C.inkFaint }}>
-          Confirm a setup with <b>Execute Paper</b> to log a simulated bracket trade here. Live Schwab execution is intentionally disabled.
+          No open sims. In <b>PAPER</b> mode, a detected setup opens a virtual position at the live price; it resolves when price touches the stop or target.
         </div>
       ) : (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", font: `400 12px ${C.mono}` }}>
             <thead>
-              <tr>
-                {["Status", "Ticker", "Dir", "Entry", "Stop", "Target", "Size", "Signal", "Order"].map((h) => <th key={h} style={thStyle}>{h}</th>)}
-              </tr>
+              <tr>{["Ticker", "Dir", "Entry", "Stop", "Target", "Live", "uP&L", "uP&L (R)", "Size", "In trade"].map((x) => <th key={x} style={thStyle}>{x}</th>)}</tr>
             </thead>
             <tbody>
-              {trades.map((t) => (
+              {open.map((t) => {
+                const px = priceByTicker[t.ticker];
+                const dir = t.direction === "LONG" ? 1 : -1;
+                const perShareRisk = Math.abs(t.entry_price - t.stop_price);
+                const upl = px != null ? (px - t.entry_price) * t.position_size * dir : null;
+                const uplR = px != null && perShareRisk > 0 ? ((px - t.entry_price) * dir) / perShareRisk : null;
+                const tit = nowMin - parseHM(t.entry_time);
+                const titLabel = tit < 0 ? "—" : tit >= 60 ? `${Math.floor(tit / 60)}h ${tit % 60}m` : `${tit}m`;
+                const pnlColor = upl == null ? C.inkDim : upl >= 0 ? C.green : C.red;
+                return (
+                  <tr key={t.id} style={{ borderTop: `1px solid ${C.lineSoft}` }}>
+                    <td style={{ ...tdStyle, color: C.ink }}>{t.ticker}</td>
+                    <td style={{ ...tdStyle, color: t.direction === "LONG" ? C.green : C.red }}>{t.direction}</td>
+                    <td style={tdStyle}>{fmt(t.entry_price)}</td>
+                    <td style={tdStyle}>{fmt(t.stop_price)}</td>
+                    <td style={tdStyle}>{fmt(t.target_price)}</td>
+                    <td style={{ ...tdStyle, color: C.ink }}>{fmt(px)}</td>
+                    <td style={{ ...tdStyle, color: pnlColor }}>{fmtMoney(upl)}</td>
+                    <td style={{ ...tdStyle, color: pnlColor }}>{uplR == null ? "—" : `${uplR >= 0 ? "+" : ""}${uplR.toFixed(2)}R`}</td>
+                    <td style={tdStyle}>{t.position_size}</td>
+                    <td style={tdStyle}>{titLabel}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div style={{ marginTop: 8, font: `400 10px ${C.sans}`, color: C.inkFaint }}>
+            Live price from the latest scan; refresh (or auto-refresh) to update unrealized P&L.
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Results / history — summary stats, ticker/outcome/date filters, CSV export
+// ---------------------------------------------------------------------------
+const OUTCOME_FILTERS = [
+  { value: "", label: "All outcomes" },
+  { value: "OPEN", label: "Open" },
+  { value: "WIN", label: "Wins" },
+  { value: "LOSS", label: "Losses" },
+];
+
+function computeStats(rows) {
+  const resolved = rows.filter((t) => t.outcome === "WIN" || t.outcome === "LOSS");
+  const wins = resolved.filter((t) => t.outcome === "WIN");
+  const losses = resolved.filter((t) => t.outcome === "LOSS");
+  const mean = (arr) => (arr.length ? arr.reduce((a, t) => a + (Number(t.r_result) || 0), 0) / arr.length : 0);
+  const r3 = (v) => Math.round(v * 1000) / 1000;
+  return {
+    total: rows.length, open: rows.filter((t) => t.outcome === "OPEN").length, resolved: resolved.length,
+    wins: wins.length, losses: losses.length,
+    winRate: resolved.length ? Math.round((wins.length / resolved.length) * 1000) / 10 : null,
+    avgWinR: wins.length ? r3(mean(wins)) : null, avgLossR: losses.length ? r3(mean(losses)) : null,
+    expectancy: resolved.length ? r3(mean(resolved)) : null,
+  };
+}
+
+function HistoryPanel({ tickers, nonce }) {
+  const [fTicker, setFTicker] = useState("");
+  const [fOutcome, setFOutcome] = useState("");
+  const [fDate, setFDate] = useState("");
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const query = useMemo(() => {
+    const p = new URLSearchParams();
+    if (fTicker) p.set("ticker", fTicker);
+    if (fOutcome) p.set("status", fOutcome);
+    if (fDate) p.set("date", fDate);
+    p.set("limit", "1000");
+    return p.toString();
+  }, [fTicker, fOutcome, fDate]);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = await fetch(`${API}/api/executor/paper/trades?${query}`);
+      const data = await r.json().catch(() => ({}));
+      if (data.ok) setRows(data.trades || []);
+    } catch (e) { /* history is best-effort */ }
+    setLoading(false);
+  }, [query]);
+
+  useEffect(() => { load(); }, [load, nonce]);
+
+  const stats = useMemo(() => computeStats(rows), [rows]);
+
+  return (
+    <Card>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+        <strong style={{ font: `600 13px ${C.sans}`, color: C.ink }}>Results &amp; history</strong>
+        <span style={{ font: `400 12px ${C.mono}`, color: C.inkFaint }}>{rows.length} trade(s){loading ? " · loading…" : ""}</span>
+        <span style={{ flex: 1 }} />
+        <select value={fTicker} onChange={(e) => setFTicker(e.target.value)} style={selectStyle}>
+          <option value="">All tickers</option>
+          {tickers.map((t) => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <select value={fOutcome} onChange={(e) => setFOutcome(e.target.value)} style={selectStyle}>
+          {OUTCOME_FILTERS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+        </select>
+        <input type="date" value={fDate} onChange={(e) => setFDate(e.target.value)} style={{ ...selectStyle, font: `400 12px ${C.mono}` }} title="Filter by session date (blank = all)" />
+        <Button onClick={load}>Refresh</Button>
+        <a href={`${API}/api/executor/paper/trades.csv?${query}`} style={{ textDecoration: "none" }}>
+          <Button>Export CSV</Button>
+        </a>
+      </div>
+
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 12 }}>
+        <Mini label="Trades" value={stats.total} />
+        <Mini label="Open" value={stats.open} color={C.yellow} />
+        <Mini label="Wins" value={stats.wins} color={C.green} />
+        <Mini label="Losses" value={stats.losses} color={C.red} />
+        <Mini label="Win rate" value={stats.winRate == null ? "—" : `${stats.winRate}%`} />
+        <Mini label="Avg win" value={stats.avgWinR == null ? "—" : `${stats.avgWinR}R`} color={C.green} />
+        <Mini label="Avg loss" value={stats.avgLossR == null ? "—" : `${stats.avgLossR}R`} color={C.red} />
+        <Mini label="Expectancy" value={stats.expectancy == null ? "—" : `${stats.expectancy}R`} />
+      </div>
+
+      {!rows.length ? (
+        <div style={{ font: `400 12px ${C.sans}`, color: C.inkFaint }}>No paper trades match these filters yet.</div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", font: `400 12px ${C.mono}` }}>
+            <thead>
+              <tr>{["Date", "Time", "Ticker", "Dir", "Entry", "Exit", "Outcome", "R", "Size", "Spread", "Slip"].map((x) => <th key={x} style={thStyle}>{x}</th>)}</tr>
+            </thead>
+            <tbody>
+              {rows.map((t) => (
                 <tr key={t.id} style={{ borderTop: `1px solid ${C.lineSoft}` }}>
-                  <td style={{ ...tdStyle, color: t.outcome === "OPEN" ? C.green : C.inkDim }}>{t.outcome}</td>
+                  <td style={tdStyle}>{t.date}</td>
+                  <td style={tdStyle}>{t.entry_time}</td>
                   <td style={{ ...tdStyle, color: C.ink }}>{t.ticker}</td>
                   <td style={{ ...tdStyle, color: t.direction === "LONG" ? C.green : C.red }}>{t.direction}</td>
                   <td style={tdStyle}>{fmt(t.entry_price)}</td>
-                  <td style={tdStyle}>{fmt(t.stop_price)}</td>
-                  <td style={tdStyle}>{fmt(t.target_price)}</td>
+                  <td style={tdStyle}>{fmt(t.exit_price)}</td>
+                  <td style={{ ...tdStyle, color: t.outcome === "WIN" ? C.green : t.outcome === "LOSS" ? C.red : t.outcome === "OPEN" ? C.yellow : C.inkDim }}>{t.outcome}</td>
+                  <td style={{ ...tdStyle, color: t.r_result > 0 ? C.green : t.r_result < 0 ? C.red : C.inkDim }}>{t.r_result == null ? "—" : `${t.r_result}R`}</td>
                   <td style={tdStyle}>{t.position_size}</td>
-                  <td style={tdStyle}>{t.date} {t.entry_time} CT</td>
-                  <td style={tdStyle}>{t.order_id}</td>
+                  <td style={tdStyle}>{t.entry_spread == null ? "—" : fmt(t.entry_spread)}</td>
+                  <td style={tdStyle}>{t.slippage == null ? "—" : fmt(t.slippage)}</td>
                 </tr>
               ))}
             </tbody>

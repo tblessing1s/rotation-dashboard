@@ -715,9 +715,45 @@ def api_executor_paper_trades():
     out = ix.list_paper_trades(
         date=request.args.get("date"),
         status=request.args.get("status"),
+        ticker=request.args.get("ticker"),
         limit=limit,
     )
     return jsonify(out)
+
+
+# Columns for the paper-trade CSV export. Mirrors the backtester's trade fields
+# plus the simulator's honesty detail, so paper / backtest analytics line up.
+_PAPER_CSV_COLUMNS = [
+    "date", "ticker", "direction", "level_type", "entry_time", "entry_price",
+    "stop_price", "target_price", "exit_time", "exit_price", "outcome", "r_result",
+    "position_size", "spy_direction", "sector_direction", "entry_spread", "slippage",
+    "resolution_granularity", "mode", "order_id", "notes",
+]
+
+
+@app.route("/api/executor/paper/trades.csv", methods=["GET"])
+def api_executor_paper_trades_csv():
+    """Download paper trades (filtered by date/status/ticker) as CSV."""
+    import csv
+    import io
+
+    import intraday_executor as ix
+
+    out = ix.list_paper_trades(
+        date=request.args.get("date"),
+        status=request.args.get("status"),
+        ticker=request.args.get("ticker"),
+        limit=10000,
+    )
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=_PAPER_CSV_COLUMNS, extrasaction="ignore")
+    writer.writeheader()
+    for t in out.get("trades", []):
+        writer.writerow({k: t.get(k, "") for k in _PAPER_CSV_COLUMNS})
+    return app.response_class(
+        buf.getvalue(), mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=paper_trades.csv"},
+    )
 
 
 # ---------------------------------------------------------------------------

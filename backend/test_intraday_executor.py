@@ -196,3 +196,18 @@ def test_execute_paper_order_rejects_invalid_signal(fresh_db):
     out = ix.execute_paper_order({"ticker": "HOOD", "direction": "Long"})
     assert out["ok"] is False
     assert any("entry_price" in e for e in out["errors"])
+
+
+def test_list_intraday_trades_filters_by_ticker(fresh_db):
+    common = {"date": DAY, "level_type": "Y-High", "stop_price": 90.0,
+              "target_price": 153.0, "position_size": 4}
+    db.record_intraday_trade({**common, "ticker": "HOOD", "direction": "LONG",
+                              "entry_price": 111.0, "entry_time": "08:45", "outcome": "OPEN"})
+    db.record_intraday_trade({**common, "ticker": "CVNA", "direction": "LONG",
+                              "entry_price": 250.0, "entry_time": "08:50", "outcome": "WIN"})
+
+    assert {t["ticker"] for t in db.list_intraday_trades(DAY)} == {"HOOD", "CVNA"}
+    only = db.list_intraday_trades(DAY, ticker="cvna")          # case-insensitive
+    assert len(only) == 1 and only[0]["ticker"] == "CVNA"
+    wins = db.list_intraday_trades(DAY, status="WIN")
+    assert len(wins) == 1 and wins[0]["ticker"] == "CVNA"

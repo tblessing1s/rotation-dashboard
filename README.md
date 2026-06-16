@@ -264,7 +264,8 @@ per request.
 | `GET /api/executor/signals?date=YYYY-MM-DD` | The logged signals (one row per detected candle; idempotent). |
 | `POST /api/executor/paper/execute` | Log a detected signal as a simulated paper bracket trade. This does **not** call Schwab. |
 | `POST /api/executor/paper/session` | Run one **PAPER** poll: open newly detected setups at the live Schwab quote (with adverse slippage + captured spread) and resolve open virtual trades against the live feed. Simulated execution only — nothing is placed. |
-| `GET /api/executor/paper/trades?date=YYYY-MM-DD` | Return logged paper trades for the session (incl. entry spread, slippage, resolution granularity, SPY/sector direction). |
+| `GET /api/executor/paper/trades?date=&status=&ticker=` | Return logged paper trades (incl. entry spread, slippage, resolution granularity, SPY/sector direction), filterable by date/outcome/ticker. |
+| `GET /api/executor/paper/trades.csv?date=&status=&ticker=` | The same trades as a CSV download. |
 
 **Frontend** — the **Executor** tab (`frontend/src/ExecutorView.jsx`): a live
 monitor card per ticker (inline SVG 5-minute candle chart with Y-High/Y-Low
@@ -291,11 +292,19 @@ The forward-testing engine is built around a single shared **`StrategyCore`**
 | `LIVE` | `LiveDataSource` | `LiveExecutionAdapter` | guarded scaffold — builds the real Schwab bracket but never transmits. |
 
 The dashboard's **Executor** tab carries a `MODE` dropdown (blank by default, so
-PAPER/LIVE are never entered by accident) and an always-visible MODE badge. In
-PAPER mode each scan poll also drives `run_paper`; in REPLAY mode the playback
-panel runs the full engine and shows resolved trades + summary stats. Real-time
-quotes come from the existing Schwab connection (`SchwabProvider.get_quotes`,
+PAPER/LIVE are never entered by accident) and an always-visible MODE badge, plus
+a US-Central **session clock with a countdown to the window close**. In PAPER
+mode each scan poll also drives `run_paper`; in REPLAY mode the playback panel
+runs the full engine and shows resolved trades + summary stats. Real-time quotes
+come from the existing Schwab connection (`SchwabProvider.get_quotes`,
 `/marketdata/v1/quotes`) — no new auth.
+
+Below the monitor it shows an **Active virtual trades** panel (open sims with
+live price, unrealized P&L in $ and R, and time in trade) and a **Results &
+history** panel (summary stats — count / wins / losses / win rate / avg win R /
+avg loss R / expectancy — with ticker/outcome/date filters and CSV export). The
+entry/stop slippage models, exit-resolution granularity (tick / 1-minute), and
+the gap rule are all editable in the controls.
 
 `StrategyCore` reuses the backtest engine's registered rules (`SETUP_TYPES` /
 `STOP_LOGIC`) and exit simulator (`_simulate`), so detection/sizing exist in

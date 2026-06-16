@@ -536,7 +536,8 @@ def execute_paper_order(signal: dict, *, notes: str | None = None) -> dict:
     return {"ok": True, "mode": "PAPER", "trade": saved}
 
 
-def list_paper_trades(*, date=None, status=None, limit=100) -> dict:
+def list_paper_trades(*, date=None, status=None, ticker=None, limit=100) -> dict:
     """Return logged paper trades; defaults to all statuses for the session."""
     import db
-    return {"ok": True, "trades": db.list_intraday_trades(date=date, status=status, limit=limit)}
+    return {"ok": True, "trades": db.list_intraday_trades(date=date, status=status,
+                                                          ticker=ticker, limit=limit)}
