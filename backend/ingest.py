@@ -164,27 +164,28 @@ def cross_check(chain, detail: dict) -> None:
 
 
 def fetch_macro_series(series_id: str):
-    """Fetch one Level 1 macro series, FRED first with an Alpha Vantage fallback.
+    """Fetch one Level 1 macro series, Alpha Vantage first with a FRED fallback.
 
-    Returns (series, source). FRED is the primary source; when it fails (the
-    keyless graph CSV increasingly 403s) and an Alpha Vantage key is configured,
-    the same series is pulled from Alpha Vantage's economic-indicator endpoints
-    at a matching cadence so the regime gate keeps filling. Raises ProviderError
-    only when *both* sources fail.
+    Returns (series, source). Alpha Vantage is the primary source for the Level 1
+    macro inputs; when no AV key is configured, or an AV fetch fails, the same
+    series is pulled from FRED's economic graph at a matching cadence so the
+    regime gate keeps filling. Raises ProviderError only when the available
+    source(s) all fail.
     """
     from providers import alphavantage
 
-    try:
+    if not alphavantage.configured():
         return fred.fetch_series(series_id), "fred"
-    except Exception as fred_err:  # noqa: BLE001 — fall through to the AV fallback
-        if not alphavantage.configured():
-            raise
+
+    try:
+        return alphavantage.economic_series(series_id), "alphavantage"
+    except Exception as av_err:  # noqa: BLE001 — fall through to the FRED fallback
         try:
-            return alphavantage.economic_series(series_id), "alphavantage"
-        except Exception as av_err:  # noqa: BLE001
+            return fred.fetch_series(series_id), "fred"
+        except Exception as fred_err:  # noqa: BLE001
             raise ProviderError(
-                f"FRED failed ({fred_err}); Alpha Vantage fallback failed ({av_err})"
-            ) from av_err
+                f"Alpha Vantage failed ({av_err}); FRED fallback failed ({fred_err})"
+            ) from fred_err
 
 
 def ingest_fred(detail: dict) -> None:
@@ -194,9 +195,9 @@ def ingest_fred(detail: dict) -> None:
             series, source = fetch_macro_series(series_id)
             written += db.append_macro_series(series_id, series, source)
             ok.append(series_id)
-            if source != "fred":
+            if source != "alphavantage":
                 fallback.append(series_id)
-                print(f"[ingest] FRED {series_id} via {source} fallback")
+                print(f"[ingest] macro {series_id} via {source} fallback")
         except Exception as e:  # noqa: BLE001
             failed[series_id] = str(e)
             print(f"[ingest] macro {series_id} failed: {e}")
