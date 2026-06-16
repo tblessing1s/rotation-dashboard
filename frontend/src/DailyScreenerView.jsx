@@ -2,10 +2,11 @@ import React, { useState, useCallback } from "react";
 import { C } from "./theme.js";
 
 /* ============================================================================
-   DAILY SCREENER — scan the full US market via Finviz by day-trading params.
-   Criteria: price $20–$100, avg daily volume ≥ 10M shares, ATR% 4–9%.
+   DAILY SCREENER — scan a liquid US universe via Alpha Vantage by day-trading
+   params. Criteria: price $20–$100, avg daily volume ≥ 10M shares, ATR% 4–9%.
    Returns top 50 by ATR% descending so the most volatile bounded names appear
-   first for setup selection.
+   first for setup selection. The backend caches a daily universe snapshot, so
+   the first scan of the day may report "building" for ~1 minute.
    ============================================================================ */
 
 const API = "";
@@ -45,8 +46,7 @@ export default function DailyScreenerView({ store, onSendToExecutor }) {
   const [filters, setFilters] = useState(() => ({ ...DEFAULT_FILTERS, ...(store?.get("screenerForm", {}) || {}) }));
   const [status, setStatus] = useState("idle"); // idle | loading | done | error
   const [results, setResults] = useState(null);
-  const [volApplied, setVolApplied] = useState("");
-  const [volPrecise, setVolPrecise] = useState(false);
+  const [meta, setMeta] = useState({});
   const [selected, setSelected] = useState(() => new Set());
   const [errorMsg, setErrorMsg] = useState("");
 
@@ -54,7 +54,7 @@ export default function DailyScreenerView({ store, onSendToExecutor }) {
     setStatus("loading");
     setErrorMsg("");
     setResults(null);
-    setVolApplied("");
+    setMeta({});
     setSelected(new Set());
     try {
       const params = new URLSearchParams({
@@ -72,8 +72,13 @@ export default function DailyScreenerView({ store, onSendToExecutor }) {
       const data = await res.json();
       const rows = data.results || [];
       setResults(rows);
-      setVolApplied(data.volFilterApplied || "");
-      setVolPrecise(Boolean(data.volPrecise));
+      setMeta({
+        building: Boolean(data.building),
+        builtAt: data.builtAt || null,
+        universeSize: data.universeSize || null,
+        stale: Boolean(data.stale),
+        message: data.message || "",
+      });
       // Pre-select the 5 most volatile names — a sensible starter watchlist the
       // Executor can poll without being overloaded; the user can adjust before sending.
       setSelected(new Set(rows.slice(0, 5).map((r) => r.symbol)));
@@ -103,9 +108,11 @@ export default function DailyScreenerView({ store, onSendToExecutor }) {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-      <Panel title="Daily stock screener" eyebrow="Finviz · full US market">
+      <Panel title="Daily stock screener" eyebrow="Alpha Vantage · liquid US universe">
         <div style={{ font: `400 12px 'Inter', sans-serif`, color: C.inkDim, marginBottom: 14 }}>
-          Set your parameters and run — Finviz scans the full US market and returns the top 50 by ATR%.
+          Set your parameters and run — a liquid US universe (plus the day's most-active movers) is
+          scanned and the top 50 by ATR% are returned. The ≥10M-volume floor already covers the
+          whole tradable market for these criteria.
         </div>
 
         <div style={{ display: "flex", flexWrap: "wrap", gap: 14, alignItems: "flex-end" }}>
@@ -130,12 +137,17 @@ export default function DailyScreenerView({ store, onSendToExecutor }) {
         {errorMsg && (
           <div style={{ font: `500 12px 'Inter', sans-serif`, color: C.red, marginTop: 10 }}>{errorMsg}</div>
         )}
+        {status === "done" && meta.building && (
+          <div style={{ font: `500 12px 'Inter', sans-serif`, color: C.yellow, marginTop: 10 }}>
+            {meta.message || "Building the universe snapshot in the background (~1 min). Re-run shortly for full results."}
+          </div>
+        )}
       </Panel>
 
       {status === "done" && results !== null && (
         <Panel
           title={results.length ? `Top ${results.length} match${results.length !== 1 ? "es" : ""}` : "No matches"}
-          eyebrow="Finviz · sorted by ATR% · highest volatility first"
+          eyebrow="Alpha Vantage · sorted by ATR% · highest volatility first"
           accent={results.length ? C.green : C.inkFaint}
         >
           {results.length === 0 ? (
@@ -214,22 +226,12 @@ export default function DailyScreenerView({ store, onSendToExecutor }) {
           <div style={{ marginTop: 12, font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint }}>
             Filters: price ${filters.priceMin}–${filters.priceMax} · avg vol ≥ {filters.volMin}M · ATR% {filters.atrMin}–{filters.atrMax}%
           </div>
-          {volApplied && (
-            <div style={{ marginTop: 6, font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint }}>
-              {volPrecise ? (
-                <span>Avg-vol floor enforced exactly at ≥ {filters.volMin}M (Finviz pre-filter: {volApplied}).</span>
-              ) : (
-                <span>
-                  Finviz avg-vol floor applied: <span style={{ color: C.inkDim }}>{volApplied}</span>
-                  {filters.volMin > 2 && volApplied === "Over 2M" && (
-                    <span style={{ color: C.yellow }}>
-                      {" "}— volume enrichment unavailable, so the floor is Finviz's server cap (~2M), not your {filters.volMin}M.
-                    </span>
-                  )}
-                </span>
-              )}
-            </div>
-          )}
+          <div style={{ marginTop: 6, font: `400 11px 'Roboto Mono', monospace`, color: C.inkFaint }}>
+            Avg-vol floor enforced exactly at ≥ {filters.volMin}M (20-day average).
+            {meta.universeSize ? <span> · scanned {meta.universeSize} liquid names</span> : null}
+            {meta.builtAt ? <span> · snapshot {fmtBuiltAt(meta.builtAt)}</span> : null}
+            {meta.stale ? <span style={{ color: C.yellow }}> · refreshing in background</span> : null}
+          </div>
         </Panel>
       )}
     </div>
@@ -279,6 +281,12 @@ function ChangePct({ value }) {
   const color = value > 0 ? C.green : value < 0 ? C.red : C.inkDim;
   const sign = value > 0 ? "+" : "";
   return <span style={{ font: `500 12px 'Roboto Mono', monospace`, color }}>{sign}{value.toFixed(2)}%</span>;
+}
+
+function fmtBuiltAt(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function fmtVol(n) {

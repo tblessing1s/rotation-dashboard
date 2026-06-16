@@ -265,16 +265,18 @@ def _build_sector_map() -> dict:
 
 @app.route("/api/daily-screener")
 def api_daily_screener():
-    """Scan the full US market via Finviz for day-trading setups.
+    """Scan a liquid US universe via Alpha Vantage for day-trading setups.
 
     Query params:
       price_min default 20
       price_max default 100
-      vol_min   default 10000000  (average daily volume in shares)
+      vol_min   default 10000000  (20-day average daily volume in shares)
       atr_min   default 4  (ATR% = ATR14 / close * 100)
       atr_max   default 9
+      refresh   "1" forces a background rebuild of the universe snapshot
 
-    Returns the top 50 matches sorted by atrPct descending.
+    Reads from a background-built daily snapshot (never blocks on the provider),
+    then applies the filters locally and returns the top 50 by atrPct descending.
     """
     try:
         price_min = float(request.args.get("price_min", 20))
@@ -285,31 +287,52 @@ def api_daily_screener():
     except (ValueError, TypeError):
         return jsonify({"error": "invalid filter parameter"}), 400
 
-    try:
-        from providers import finviz_screen
-        screen = finviz_screen.run(
-            price_min=price_min, price_max=price_max,
-            vol_min_shares=vol_min, atr_min=atr_min, atr_max=atr_max,
-            limit=50,
-        )
-    except RuntimeError as exc:
-        return jsonify({"error": str(exc)}), 502
-    except Exception as exc:
-        app.logger.exception("Unexpected error in daily-screener")
-        return jsonify({"error": f"Internal error: {exc}"}), 500
+    import screener
 
-    results = screen["results"]
+    if not alphavantage_configured():
+        return jsonify({
+            "error": "Alpha Vantage is not configured. Set ALPHAVANTAGE_API_KEY "
+                     "(e.g. `fly secrets set ALPHAVANTAGE_API_KEY=…`) and redeploy."
+        }), 503
+
+    if request.args.get("refresh") == "1":
+        screener.refresh_in_background()
+
+    snapshot, building = screener.get_snapshot(auto_refresh=True)
+    if snapshot is None:
+        # First-ever call: the universe is being built in the background.
+        return jsonify({
+            "results": [], "count": 0, "building": True, "source": "alphavantage",
+            "filters": {"priceMin": price_min, "priceMax": price_max,
+                        "volMin": vol_min, "atrMin": atr_min, "atrMax": atr_max},
+            "message": "Building the screener universe (first run can take ~1 minute). "
+                       "Re-run shortly.",
+        })
+
+    results = screener.filter_rows(
+        snapshot.get("rows", []),
+        price_min=price_min, price_max=price_max, vol_min=vol_min,
+        atr_min=atr_min, atr_max=atr_max, limit=50,
+    )
     return jsonify({
         "results": results,
         "filters": {
             "priceMin": price_min, "priceMax": price_max,
             "volMin": vol_min, "atrMin": atr_min, "atrMax": atr_max,
         },
-        "volFilterApplied": screen["volFilterApplied"],
-        "volPrecise": screen.get("volPrecise", False),
         "count": len(results),
-        "source": "finviz",
+        "building": building,
+        "universeSize": snapshot.get("universeSize"),
+        "builtAt": snapshot.get("builtAt"),
+        "stale": not screener.is_fresh(snapshot),
+        "source": "alphavantage",
     })
+
+
+def alphavantage_configured() -> bool:
+    from providers import alphavantage
+
+    return alphavantage.configured()
 
 
 @app.route("/api/macro")
