@@ -17,8 +17,9 @@ import shutil
 import tempfile
 import time
 import traceback
+from datetime import timedelta
 
-from flask import Flask, jsonify, redirect, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory, session
 from flask_cors import CORS
 
 import config as cfg
@@ -35,6 +36,138 @@ _LEGACY_STATE_FILE = os.path.join(HERE, "state.json")
 
 app = Flask(__name__, static_folder=None)
 CORS(app)
+
+
+# ---------------------------------------------------------------------------
+# Access protection — single-user password gate
+# ---------------------------------------------------------------------------
+# The whole app (API + SPA) sits behind a password whenever DASHBOARD_PASSWORD
+# is set. This is the prerequisite for any live-trading features: only someone
+# who knows the password (you) can reach the dashboard or its order endpoints.
+# With no password configured the app stays open (local dev) and logs a loud
+# warning, so enabling protection is a single `fly secrets set` away.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=bool(os.environ.get("FLY_APP_NAME")),  # HTTPS in prod
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+)
+
+# Reachable without a session: the login flow, logout, the cron ingest hook
+# (which carries its own INGEST_TOKEN), and a health probe.
+_AUTH_EXEMPT = {"/login", "/logout", "/api/logout", "/healthz", "/api/ingest"}
+
+
+def _load_secret_key() -> str:
+    """Stable Flask session-signing key: env override, else a generated key
+    persisted in the datastore so sessions survive restarts."""
+    env_key = os.environ.get("APP_SECRET_KEY")
+    if env_key:
+        return env_key
+    key = db.kv_get("app_secret_key")
+    if not key:
+        key = secrets.token_hex(32)
+        db.kv_set("app_secret_key", key)
+    return key
+
+
+app.secret_key = _load_secret_key()
+
+
+def _auth_enabled() -> bool:
+    return bool(os.environ.get("DASHBOARD_PASSWORD"))
+
+
+if not _auth_enabled():
+    print("[auth] WARNING: DASHBOARD_PASSWORD is not set — the dashboard is OPEN "
+          "to anyone who can reach it. Set it (e.g. `fly secrets set "
+          "DASHBOARD_PASSWORD=…`) before enabling live trading.")
+
+
+@app.before_request
+def _require_login():
+    """Gate every request behind the session login when a password is set."""
+    if not _auth_enabled():
+        return None
+    path = request.path
+    if path in _AUTH_EXEMPT or session.get("authed"):
+        return None
+    # API/auth calls get a clean 401; page navigations bounce to the login form.
+    if path.startswith("/api/") or path.startswith("/auth/"):
+        return jsonify({"ok": False, "error": "Authentication required."}), 401
+    return redirect("/login")
+
+
+_LOGIN_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rotation Dashboard — Sign in</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #0b0f14; color: #e6edf3;
+         font: 400 14px ui-sans-serif, system-ui, sans-serif; }}
+  form {{ width: 320px; background: #11161d; border: 1px solid #232b36;
+         border-radius: 12px; padding: 28px; box-shadow: 0 18px 60px rgba(0,0,0,.5); }}
+  h1 {{ margin: 0 0 4px; font-size: 18px; }}
+  p  {{ margin: 0 0 18px; color: #8b97a6; font-size: 12px; }}
+  label {{ display: block; font-size: 11px; text-transform: uppercase;
+          letter-spacing: .4px; color: #8b97a6; margin-bottom: 6px; }}
+  input {{ width: 100%; box-sizing: border-box; background: #0b0f14; color: #e6edf3;
+          border: 1px solid #232b36; border-radius: 7px; padding: 10px 11px;
+          font-size: 14px; }}
+  button {{ margin-top: 16px; width: 100%; background: #2f81f7; color: #fff;
+           border: 0; border-radius: 7px; padding: 11px; font-size: 14px;
+           font-weight: 600; cursor: pointer; }}
+  .err {{ margin-top: 14px; color: #f85149; font-size: 12px; }}
+</style></head>
+<body>
+  <form method="post" action="/login">
+    <h1>Rotation Dashboard</h1>
+    <p>This dashboard is private. Enter the access password to continue.</p>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autofocus autocomplete="current-password">
+    <button type="submit">Sign in</button>
+    {error}
+  </form>
+</body></html>"""
+
+
+def _render_login(error: str = "") -> str:
+    block = f'<div class="err">{error}</div>' if error else ""
+    return _LOGIN_PAGE.format(error=block)
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if not _auth_enabled():
+        return redirect("/")
+    if request.method == "POST":
+        supplied = request.form.get("password", "")
+        expected = os.environ.get("DASHBOARD_PASSWORD", "")
+        if expected and secrets.compare_digest(supplied, expected):
+            session.permanent = True
+            session["authed"] = True
+            return redirect("/")
+        time.sleep(0.5)   # throttle brute-force guessing
+        return _render_login("Incorrect password."), 401
+    if session.get("authed"):
+        return redirect("/")
+    return _render_login()
+
+
+@app.route("/logout")
+@app.route("/api/logout", methods=["POST"])
+def logout():
+    session.clear()
+    if request.path.startswith("/api/"):
+        return jsonify({"ok": True})
+    return redirect("/login")
+
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"ok": True}), 200
 
 
 def _migrate_legacy_state() -> None:

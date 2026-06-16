@@ -190,9 +190,23 @@ fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=… SCHWAB_REFRESH_TOKEN=�
 fly secrets set FRED_API_KEY=…                         # free key, keeps macro inputs auto-filling
 fly secrets set ALPHAVANTAGE_API_KEY=…                 # powers the daily screener + macro fallback
 fly secrets set INGEST_TOKEN=$(openssl rand -hex 16)   # protects POST /api/ingest
+fly secrets set DASHBOARD_PASSWORD=…                    # password gate — only you can open the app
+fly secrets set APP_SECRET_KEY=$(openssl rand -hex 32)  # signs the login session cookie (optional; auto-generated + stored if unset)
 fly deploy
 fly scale count 1           # one machine — see note below
 ```
+
+### Access protection
+
+When `DASHBOARD_PASSWORD` is set, the entire app (API **and** UI) sits behind a
+password: unauthenticated page loads bounce to `/login`, and API calls get a
+`401`. A successful login stores a signed, HTTP-only session cookie (30-day
+lifetime, `Secure` in production) so you stay signed in. `/logout` clears it.
+Exempt from the gate: `/login`, `/healthz`, and the `POST /api/ingest` cron hook
+(which enforces its own `INGEST_TOKEN`). **This password gate is a prerequisite
+for any live-trading features** — keep it enabled before wiring real orders. If
+`DASHBOARD_PASSWORD` is unset the app runs open (handy for local dev) and logs a
+loud warning on boot.
 
 Mount the volume at `/data` and set `DATA_DIR=/data` in `fly.toml` so the
 SQLite datastore and your saved inputs survive deploys and machine restarts.
