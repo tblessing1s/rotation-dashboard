@@ -712,13 +712,13 @@ function PaperTradesPanel({ trades, onClose }) {
 
       {!trades?.length ? (
         <div style={{ font: `400 12px ${C.sans}`, color: C.inkFaint }}>
-          Confirm a setup with <b>Execute Paper</b> to log a simulated bracket trade here. Live Schwab execution is intentionally disabled.
+          Confirm a setup with <b>Execute Paper</b> to log a simulated bracket trade here. Open trades close themselves when price hits the stop or target (keep <b>Auto-refresh</b> on so bars stay fresh); Live Schwab execution is intentionally disabled.
         </div>
       ) : (
         <div style={{ display: "grid", gap: 10 }}>
           {open.length > 0 && (
             <div>
-              <div style={{ font: `700 10px ${C.sans}`, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>Open — close when filled</div>
+              <div style={{ font: `700 10px ${C.sans}`, color: C.inkFaint, textTransform: "uppercase", letterSpacing: 0.4, marginBottom: 8 }}>Open — auto-fills when the stop or target is hit · buttons override</div>
               {open.map((t) => <OpenTradeRow key={t.id} trade={t} onClose={onClose} />)}
             </div>
           )}

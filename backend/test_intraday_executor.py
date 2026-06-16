@@ -196,3 +196,101 @@ def test_execute_paper_order_rejects_invalid_signal(fresh_db):
     out = ix.execute_paper_order({"ticker": "HOOD", "direction": "Long"})
     assert out["ok"] is False
     assert any("entry_price" in e for e in out["errors"])
+
+
+# ---------------------------------------------------------------------------
+# Auto-close — resolve open brackets against stored candles
+# ---------------------------------------------------------------------------
+# The entry candle below is ET 09:45 (DAY is in June -> EDT), which is 08:45 in
+# Central time, so the paper trade's entry_time matches the bracket's candle.
+OPEN_SIG = {"date": DAY, "ticker": "HOOD", "candle_time": "08:45", "direction": "Long",
+            "level_type": "Y-High", "entry_price": 111.0, "stop_price": 90.0,
+            "target_price": 153.0, "position_size": 4, "volume_ratio": 2.5}
+
+
+def _store_session(rows):
+    """Persist an ET intraday session for HOOD into the (fresh) datastore."""
+    db.append_intraday_bars("HOOD", intraday(DAY, rows), "test", interval_min=5)
+
+
+def test_auto_close_fills_target(fresh_db):
+    ix.execute_paper_order(OPEN_SIG)
+    _store_session([
+        ("09:45", 109, 112, 109, 111, 1000),   # entry candle
+        ("09:50", 112, 155, 150, 152, 800),    # high 155 reaches target 153
+    ])
+    out = ix.auto_close_open_trades(DAY)
+    assert len(out["closed"]) == 1
+    trade = out["closed"][0]
+    assert trade["outcome"] == "WIN"
+    assert trade["exit_price"] == 153.0        # filled at the target level
+    assert trade["r_result"] == 2.0            # (153-111)/(111-90)
+    assert trade["exit_time"] == "08:50"
+    # Idempotent: a second pass finds nothing open to close.
+    assert ix.auto_close_open_trades(DAY)["closed"] == []
+
+
+def test_auto_close_fills_stop(fresh_db):
+    ix.execute_paper_order(OPEN_SIG)
+    _store_session([
+        ("09:45", 109, 112, 109, 111, 1000),
+        ("09:50", 110, 112, 85, 95, 800),      # low 85 reaches stop 90
+    ])
+    out = ix.auto_close_open_trades(DAY)
+    assert len(out["closed"]) == 1
+    assert out["closed"][0]["outcome"] == "LOSS"
+    assert out["closed"][0]["exit_price"] == 90.0
+    assert out["closed"][0]["r_result"] == -1.0
+
+
+def test_auto_close_gap_through_target_fills_at_open(fresh_db):
+    """A candle that opens above the target gapped through it — the realistic
+    fill is the open, not the target level, so the recorded R reflects the gap."""
+    ix.execute_paper_order(OPEN_SIG)
+    _store_session([
+        ("09:45", 109, 112, 109, 111, 1000),
+        ("09:50", 160, 165, 158, 162, 800),    # opens 160, already past target 153
+    ])
+    out = ix.auto_close_open_trades(DAY)
+    assert len(out["closed"]) == 1
+    assert out["closed"][0]["outcome"] == "WIN"
+    assert out["closed"][0]["exit_price"] == 160.0          # gap fill at the open
+    assert out["closed"][0]["r_result"] == round((160 - 111) / 21, 2)
+
+
+def test_auto_close_gap_through_stop_fills_at_open(fresh_db):
+    """A gap down through the stop fills at the open (adverse slippage)."""
+    ix.execute_paper_order(OPEN_SIG)
+    _store_session([
+        ("09:45", 109, 112, 109, 111, 1000),
+        ("09:50", 80, 85, 78, 82, 800),        # opens 80, already below stop 90
+    ])
+    out = ix.auto_close_open_trades(DAY)
+    assert len(out["closed"]) == 1
+    assert out["closed"][0]["outcome"] == "LOSS"
+    assert out["closed"][0]["exit_price"] == 80.0
+    assert out["closed"][0]["r_result"] == round((80 - 111) / 21, 2)
+
+
+def test_auto_close_leaves_open_when_neither_hit(fresh_db):
+    ix.execute_paper_order(OPEN_SIG)
+    _store_session([
+        ("09:45", 109, 112, 109, 111, 1000),
+        ("09:50", 112, 120, 100, 115, 800),    # stays between stop 90 and target 153
+    ])
+    out = ix.auto_close_open_trades(DAY)
+    assert out["closed"] == []
+    assert db.list_intraday_trades(DAY, status="OPEN")
+
+
+def test_auto_close_leaves_open_when_candle_straddles_both(fresh_db):
+    """One candle reaching both stop and target without a gap is ambiguous at
+    5m resolution, so the trade is left open for manual review."""
+    ix.execute_paper_order(OPEN_SIG)
+    _store_session([
+        ("09:45", 109, 112, 109, 111, 1000),
+        ("09:50", 111, 155, 85, 120, 800),     # opens between; range covers both
+    ])
+    out = ix.auto_close_open_trades(DAY)
+    assert out["closed"] == []
+    assert db.list_intraday_trades(DAY, status="OPEN")

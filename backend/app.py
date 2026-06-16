@@ -775,6 +775,13 @@ def api_executor_paper_trades():
         limit = int(request.args.get("limit", 100))
     except (TypeError, ValueError):
         limit = 100
+    # Auto-resolve open brackets against stored candles before listing, so a page
+    # refresh catches up any trade whose stop/target was hit. Best-effort: a
+    # failure here must never block the listing.
+    try:
+        ix.auto_close_open_trades(request.args.get("date"))
+    except Exception:  # noqa: BLE001 — auto-close is best-effort
+        pass
     out = ix.list_paper_trades(
         date=request.args.get("date"),
         status=request.args.get("status"),
@@ -832,6 +839,12 @@ def api_executor_daily_summary():
     """Macro gate + today's paper trade P&L in one call for the morning briefing."""
     import intraday_executor as ix
     date = request.args.get("date") or db.utcnow()[:10]
+
+    # Keep the brief's W/L tally honest by resolving any open brackets first.
+    try:
+        ix.auto_close_open_trades(date)
+    except Exception:  # noqa: BLE001 — auto-close is best-effort
+        pass
 
     trades = db.list_intraday_trades(date=date, limit=500)
     signals = db.recent_setup_signals(date=date, limit=500)

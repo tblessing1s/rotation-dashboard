@@ -420,14 +420,19 @@ def run_monitor(raw_config, *, refresh=False, on_date=None, as_of=None,
                               get_daily=get_daily, on_date=on_date, as_of=as_of)
 
     new_signals = 0
+    auto_closed = []
     if persist:
         import db
         for sig in signals:
             if db.record_setup_signal(sig):
                 new_signals += 1
+        # Resolve any open paper trades against the (now-refreshed) candles so
+        # brackets fill automatically as price hits the stop or target.
+        auto_closed = auto_close_open_trades(on_date).get("closed", [])
 
     out = {"ok": True, "date": on_date or _today_et(), "signals": signals,
-           "monitors": monitors, "newSignals": new_signals}
+           "monitors": monitors, "newSignals": new_signals,
+           "autoClosed": len(auto_closed)}
     if refresh_result is not None:
         out["refresh"] = refresh_result
     return out
@@ -540,3 +545,102 @@ def list_paper_trades(*, date=None, status=None, limit=100) -> dict:
     """Return logged paper trades; defaults to all statuses for the session."""
     import db
     return {"ok": True, "trades": db.list_intraday_trades(date=date, status=status, limit=limit)}
+
+
+# ---------------------------------------------------------------------------
+# Auto-exit — resolve OPEN paper trades against stored candles (bracket fill)
+# ---------------------------------------------------------------------------
+def _gap_aware_exit(direction, stop, target, forward):
+    """Walk candles after entry; return ``(outcome, exit_price, exit_ts)`` for the
+    first clean stop/target hit, or ``None`` to leave the trade open.
+
+    Mirrors ``backtest._simulate`` (a long exits when a bar's low reaches the stop
+    or its high reaches the target), with one addition: gaps. When a candle *opens*
+    beyond a level — price gapped through it — the realistic fill is that open, not
+    the level, so the recorded exit reflects favorable gaps through the target and
+    adverse slippage through the stop. When a single candle straddles BOTH levels
+    without a gap to settle which printed first, the trade is left open for manual
+    review rather than guessed (the backtester refines this on 1-minute bars; paper
+    trades don't have that feed)."""
+    is_long = direction == "Long"
+    for ts, c in forward.iterrows():
+        hi, lo = _finite(c["High"]), _finite(c["Low"])
+        if hi is None or lo is None:
+            continue
+        o = _finite(c["Open"], _finite(c["Close"], hi))
+        if is_long:
+            if o >= target:                       # gapped up through the target
+                return "Win", o, ts
+            if o <= stop:                         # gapped down through the stop
+                return "Loss", o, ts
+            hit_stop, hit_target = lo <= stop, hi >= target
+        else:
+            if o <= target:                       # gapped down through the target
+                return "Win", o, ts
+            if o >= stop:                         # gapped up through the stop
+                return "Loss", o, ts
+            hit_stop, hit_target = hi >= stop, lo <= target
+        if hit_stop and hit_target:
+            return None                           # straddled both intrabar — manual review
+        if hit_stop:
+            return "Loss", stop, ts
+        if hit_target:
+            return "Win", target, ts
+    return None
+
+
+def auto_close_open_trades(date=None, *, interval_min=5) -> dict:
+    """Resolve OPEN paper trades against stored intraday bars.
+
+    For each open trade on ``date`` (default today, ET), step through the session's
+    candles after the entry candle and close it WIN/LOSS the moment its target or
+    stop is reached. Trades that reach neither level — or that straddle both within
+    one candle with no gap to settle the order — stay OPEN. Returns the trades that
+    were closed plus how many were checked."""
+    import db
+
+    on_date = date or _today_et()
+    open_trades = db.list_intraday_trades(date=on_date, status="OPEN")
+    if not open_trades:
+        return {"ok": True, "closed": [], "checked": 0}
+
+    series_cache: dict[str, object] = {}
+    closed: list[dict] = []
+    for t in open_trades:
+        ticker = t.get("ticker")
+        order_id = t.get("order_id")
+        if not ticker or not order_id:
+            continue
+        if ticker not in series_cache:
+            series_cache[ticker] = db.get_intraday_bars(ticker, on_date, on_date, interval_min)
+        series = series_cache[ticker]
+        if series is None or series.empty:
+            continue
+        series = series.sort_index()
+
+        # Locate the entry candle by its Central-time label; only candles strictly
+        # after it can fill the bracket. If we can't place the entry candle, leave
+        # the trade open rather than risk closing on a pre-entry candle.
+        labels = [engine._central_time_label(ix) for ix in series.index]
+        try:
+            pos = labels.index(t.get("entry_time"))
+        except ValueError:
+            continue
+        forward = series.iloc[pos + 1:]
+        if forward.empty:
+            continue
+
+        direction = "Long" if str(t.get("direction") or "").upper() in ("LONG", "BUY") else "Short"
+        res = _gap_aware_exit(direction, float(t["stop_price"]), float(t["target_price"]), forward)
+        if res is None:
+            continue
+        outcome, exit_price, exit_ts = res
+        updated = db.update_paper_trade(
+            order_id,
+            outcome="WIN" if outcome == "Win" else "LOSS",
+            exit_price=round(float(exit_price), 2),
+            exit_time=engine._central_time_label(exit_ts),
+        )
+        if updated:
+            closed.append(updated)
+    return {"ok": True, "closed": closed, "checked": len(open_trades)}
