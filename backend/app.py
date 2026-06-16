@@ -294,6 +294,9 @@ def api_daily_screener():
         )
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 502
+    except Exception as exc:
+        app.logger.exception("Unexpected error in daily-screener")
+        return jsonify({"error": f"Internal error: {exc}"}), 500
 
     return jsonify({
         "results": results,

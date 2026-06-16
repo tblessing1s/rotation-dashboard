@@ -40,10 +40,9 @@ def run(price_min: float, price_max: float, vol_min_shares: float,
             "finvizfinance is not installed; add it to requirements.txt and redeploy."
         )
 
-    screener = Technical()
-    screener.set_filter(filters_dict={"Average Volume": _vol_filter(vol_min_shares)})
-
     try:
+        screener = Technical()
+        screener.set_filter(filters_dict={"Average Volume": _vol_filter(vol_min_shares)})
         df = screener.screener_view(verbose=0)
     except Exception as exc:
         log.error("Finviz screener request failed: %s", exc)
@@ -52,29 +51,35 @@ def run(price_min: float, price_max: float, vol_min_shares: float,
     if df is None or df.empty:
         return []
 
-    df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
-    df["ATR"] = pd.to_numeric(df["ATR"], errors="coerce")
-    df = df.dropna(subset=["Price", "ATR"])
-    df = df[df["Price"] > 0]
+    try:
+        # Normalize column names — finvizfinance has used "Ticker" and "No." historically
+        ticker_col = "Ticker" if "Ticker" in df.columns else df.columns[1]
+        df["Price"] = pd.to_numeric(df["Price"], errors="coerce")
+        df["ATR"] = pd.to_numeric(df["ATR"], errors="coerce")
+        df = df.dropna(subset=["Price", "ATR"])
+        df = df[df["Price"] > 0]
 
-    df["atrPct"] = (df["ATR"] / df["Price"] * 100).round(2)
+        df["atrPct"] = (df["ATR"] / df["Price"] * 100).round(2)
 
-    mask = (
-        (df["Price"] >= price_min) &
-        (df["Price"] <= price_max) &
-        (df["atrPct"] >= atr_min) &
-        (df["atrPct"] <= atr_max)
-    )
-    filtered = df[mask].sort_values("atrPct", ascending=False).head(limit)
+        mask = (
+            (df["Price"] >= price_min) &
+            (df["Price"] <= price_max) &
+            (df["atrPct"] >= atr_min) &
+            (df["atrPct"] <= atr_max)
+        )
+        filtered = df[mask].sort_values("atrPct", ascending=False).head(limit)
 
-    results = []
-    for _, row in filtered.iterrows():
-        results.append({
-            "symbol": str(row["Ticker"]),
-            "price": round(float(row["Price"]), 2),
-            "atrPct": round(float(row["atrPct"]), 2),
-            "sector": str(row.get("Sector", "")) if "Sector" in df.columns else "",
-            "source": "finviz",
-        })
+        results = []
+        for _, row in filtered.iterrows():
+            results.append({
+                "symbol": str(row[ticker_col]),
+                "price": round(float(row["Price"]), 2),
+                "atrPct": round(float(row["atrPct"]), 2),
+                "sector": str(row.get("Sector", "")) if "Sector" in df.columns else "",
+                "source": "finviz",
+            })
+    except Exception as exc:
+        log.error("Finviz result processing failed: %s", exc)
+        raise RuntimeError(f"Finviz result processing error: {exc}") from exc
 
     return results
