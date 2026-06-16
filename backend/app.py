@@ -265,22 +265,17 @@ def _build_sector_map() -> dict:
 
 @app.route("/api/daily-screener")
 def api_daily_screener():
-    """Screen tracked symbols by day-trading criteria.
+    """Scan the full US market via Finviz for day-trading setups.
 
     Query params:
-      symbols   optional comma-separated list; omit to scan all tracked symbols
       price_min default 20
       price_max default 100
       vol_min   default 10000000  (average daily volume in shares)
       atr_min   default 4  (ATR% = ATR14 / close * 100)
       atr_max   default 9
 
-    Returns results sorted by atrPct descending.
+    Returns the top 50 matches sorted by atrPct descending.
     """
-    requested = request.args.get("symbols", "")
-    explicit_symbols = [s.strip().upper() for s in requested.split(",") if s.strip()]
-    symbols = explicit_symbols if explicit_symbols else db.known_symbols()
-
     try:
         price_min = float(request.args.get("price_min", 20))
         price_max = float(request.args.get("price_max", 100))
@@ -290,36 +285,15 @@ def api_daily_screener():
     except (ValueError, TypeError):
         return jsonify({"error": "invalid filter parameter"}), 400
 
-    sector_map = _build_sector_map()
-    results = []
-
-    for sym in symbols:
-        bars = db.get_bars(sym)
-        if bars is None or len(bars) < 21:
-            continue
-
-        price = float(bars["Close"].iloc[-1])
-        avg_vol = ind.avg_volume_20d(bars["Volume"])
-        atr_pct = ind.atr_percent(bars["High"], bars["Low"], bars["Close"])
-
-        if price < price_min or price > price_max:
-            continue
-        if avg_vol is None or avg_vol < vol_min:
-            continue
-        if atr_pct is None or atr_pct < atr_min or atr_pct > atr_max:
-            continue
-
-        results.append({
-            "symbol": sym,
-            "price": round(price, 2),
-            "avgVolume": round(avg_vol),
-            "atrPct": round(atr_pct, 2),
-            "sector": sector_map.get(sym, ""),
-            "asOf": str(bars.index[-1].date()),
-            "staleness": _bar_staleness(str(bars.index[-1].date())),
-        })
-
-    results.sort(key=lambda r: r["atrPct"], reverse=True)
+    try:
+        from providers import finviz_screen
+        results = finviz_screen.run(
+            price_min=price_min, price_max=price_max,
+            vol_min_shares=vol_min, atr_min=atr_min, atr_max=atr_max,
+            limit=50,
+        )
+    except RuntimeError as exc:
+        return jsonify({"error": str(exc)}), 502
 
     return jsonify({
         "results": results,
@@ -328,7 +302,7 @@ def api_daily_screener():
             "volMin": vol_min, "atrMin": atr_min, "atrMax": atr_max,
         },
         "count": len(results),
-        "scanned": len(symbols),
+        "source": "finviz",
     })
 
 
