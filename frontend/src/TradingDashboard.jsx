@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import { C, SIG } from "./theme.js";
 import BacktestView from "./BacktestView.jsx";
 import ExecutorView from "./ExecutorView.jsx";
+import DailyScreenerView from "./DailyScreenerView.jsx";
 
 /* ============================================================================
    TRAVIS — INSTITUTIONAL ROTATION DASHBOARD  (local app build)
@@ -699,7 +700,9 @@ function CheckRow({ label, ok }) {
 // ============================================================================
 // MAIN APP
 // ============================================================================
-const TABS = ["Command", "Rotation", "Entry Watch", "Positions", "Indicators", "Backtest", "Executor"];
+const CFM_TABS = ["Command", "Rotation", "Entry Watch", "Positions", "Indicators"];
+const DAY_TRADING_TABS = ["Screener", "Backtest", "Executor"];
+const TABS = [...CFM_TABS, ...DAY_TRADING_TABS];
 const DEFAULT_ENTRY_WATCH_SYMBOLS = [];
 
 // Hydration gate: load persisted state from the backend before the dashboard
@@ -939,16 +942,41 @@ function TradingDashboard({ backendOffline }) {
       <div style={{ maxWidth: 1180, margin: "0 auto" }}>
         <Header sig={sig} lastFetch={lastFetch} status={fetchStatus} onRefresh={refreshQuotes} quotes={quotes} macroComputed={macroComputed} />
 
-        {/* Tabs */}
-        <nav style={{ display: "flex", gap: 4, margin: "20px 0 18px", borderBottom: `1px solid ${C.line}` }}>
-          {TABS.map((t) => (
-            <button key={t} onClick={() => setTab(t)} style={{
-              background: "none", border: "none", cursor: "pointer", padding: "10px 14px",
-              font: `600 13px ${C.sans}`, color: tab === t ? C.ink : C.inkFaint,
-              borderBottom: `2px solid ${tab === t ? C.blue : "transparent"}`, marginBottom: -1,
-            }}>{t}</button>
-          ))}
-        </nav>
+        {/* Tabs — two groups: CFM Strategy | Day Trading */}
+        <div style={{ margin: "20px 0 18px" }}>
+          <nav style={{ display: "flex", alignItems: "flex-end", gap: 0, borderBottom: `1px solid ${C.line}` }}>
+            {/* CFM Strategy group */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+              <span style={{ font: `600 9px/1 ${C.mono}`, letterSpacing: 2, color: C.inkFaint, textTransform: "uppercase", padding: "0 14px 5px" }}>CFM Strategy</span>
+              <div style={{ display: "flex" }}>
+                {CFM_TABS.map((t) => (
+                  <button key={t} onClick={() => setTab(t)} style={{
+                    background: "none", border: "none", cursor: "pointer", padding: "8px 14px",
+                    font: `600 13px ${C.sans}`, color: tab === t ? C.ink : C.inkFaint,
+                    borderBottom: `2px solid ${tab === t ? C.blue : "transparent"}`, marginBottom: -1,
+                  }}>{t}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* Divider */}
+            <div style={{ width: 1, height: 32, background: C.line, margin: "0 8px 1px", alignSelf: "flex-end" }} />
+
+            {/* Day Trading group */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
+              <span style={{ font: `600 9px/1 ${C.mono}`, letterSpacing: 2, color: C.amber, textTransform: "uppercase", padding: "0 14px 5px" }}>Day Trading</span>
+              <div style={{ display: "flex" }}>
+                {DAY_TRADING_TABS.map((t) => (
+                  <button key={t} onClick={() => setTab(t)} style={{
+                    background: "none", border: "none", cursor: "pointer", padding: "8px 14px",
+                    font: `600 13px ${C.sans}`, color: tab === t ? C.ink : C.inkFaint,
+                    borderBottom: `2px solid ${tab === t ? C.amber : "transparent"}`, marginBottom: -1,
+                  }}>{t}</button>
+                ))}
+              </div>
+            </div>
+          </nav>
+        </div>
 
         {tab === "Command" && (
           <CommandView sig={sig} focus={focus} sectorRows={sectorRows} positionGuide={positionGuide} cfm={cfm} app={app} macro={macro} setMacro={setMacro}
@@ -988,6 +1016,9 @@ function TradingDashboard({ backendOffline }) {
         )}
         {tab === "Executor" && (
           <ExecutorView store={store} />
+        )}
+        {tab === "Screener" && (
+          <DailyScreenerView />
         )}
       </div>
     </div>
