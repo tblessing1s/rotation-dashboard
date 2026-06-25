@@ -16,6 +16,7 @@ from .base import Provider, ProviderError
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 AUTHORIZE_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 PRICE_HISTORY_URL = "https://api.schwabapi.com/marketdata/v1/pricehistory"
+QUOTES_URL = "https://api.schwabapi.com/marketdata/v1/quotes"
 ACCOUNTS_BASE = "https://api.schwabapi.com/trader/v1"
 
 # Schwab refresh tokens are valid for exactly 7 days after they are minted via
@@ -274,6 +275,56 @@ class SchwabProvider(Provider):
             raise ProviderError(f"schwab {symbol} intraday: no usable rows")
         return df
 
+    def get_quote(self, symbol: str) -> dict:
+        """Real-time quote for one symbol from the market-data feed.
+
+        Returns the live last/bid/ask/mark plus Schwab's quoteTime (epoch ms),
+        normalized into a flat dict. This is the same market-data product the
+        bar feeds use (no extra Schwab approval needed), and it is the price
+        snapshot taken at option-execution time so an option fill can be split
+        into intrinsic/extrinsic against the underlying's price at that instant.
+        """
+        schwab_symbol = SYMBOL_MAP.get(symbol, symbol)
+        try:
+            resp = requests.get(
+                QUOTES_URL,
+                headers={"Authorization": f"Bearer {self._token()}", "Accept": "application/json"},
+                params={"symbols": schwab_symbol, "fields": "quote"},
+                timeout=20,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab quote {symbol}: {e}") from e
+        if resp.status_code != 200:
+            raise ProviderError(f"schwab quote {symbol}: HTTP {resp.status_code} {resp.text[:200]}")
+        try:
+            payload = resp.json()
+        except ValueError as e:
+            raise ProviderError(f"schwab quote {symbol}: non-JSON response") from e
+        node = payload.get(schwab_symbol) or payload.get(symbol)
+        if not node:
+            raise ProviderError(f"schwab quote {symbol}: no quote in response")
+        q = node.get("quote") or {}
+
+        def _n(v):
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        last = _n(q.get("lastPrice"))
+        bid = _n(q.get("bidPrice"))
+        ask = _n(q.get("askPrice"))
+        mark = _n(q.get("mark"))
+        return {
+            "symbol": symbol,
+            "last": last,
+            "bid": bid,
+            "ask": ask,
+            "mark": mark,
+            "quoteTimeMs": q.get("quoteTime"),
+            "raw": node,
+        }
+
     # -- accounts & trading --------------------------------------------------
     # These hit the Trader API's account endpoints (a different product than the
     # market-data feed above). The same app key / secret / refresh token are
@@ -351,3 +402,93 @@ class SchwabProvider(Provider):
         return self._post_json(
             f"{ACCOUNTS_BASE}/accounts/{account_hash}/previewOrder", order
         ) or {}
+
+    def place_order(self, account_hash: str, order: dict) -> dict:
+        """Transmit a REAL order to the live brokerage account (POST .../orders).
+
+        This actually fills against real money — unlike preview_order, nothing
+        is simulated. Schwab returns HTTP 201 with an empty body and the new
+        order's URL in the Location header; the trailing path segment is the
+        order id, which the caller polls via get_order to read the fill.
+
+        Callers must gate this behind their own kill-switch (see
+        option_trades.place_option): this method itself does not check any
+        enable flag, so it can be unit-tested without a live account.
+        """
+        url = f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders"
+        try:
+            resp = requests.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self._token()}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json=order,
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab place order request failed: {e}") from e
+        if resp.status_code in (200, 201):
+            location = resp.headers.get("Location") or resp.headers.get("location") or ""
+            order_id = location.rstrip("/").rsplit("/", 1)[-1] if location else None
+            return {"orderId": order_id, "location": location}
+        hint = self._ACCOUNT_ACCESS_HINT if resp.status_code in (401, 403) else ""
+        raise ProviderError(f"schwab place order: HTTP {resp.status_code} {resp.text[:300]}{hint}")
+
+    def get_order(self, account_hash: str, order_id: str) -> dict:
+        """Fetch one order's current status + execution detail (for fill polling)."""
+        return self._get_json(
+            f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}"
+        ) or {}
+
+    def cancel_order(self, account_hash: str, order_id: str) -> dict:
+        """Cancel a working order (DELETE .../orders/{id}).
+
+        Risk-reducing — it closes exposure rather than opening it — so callers
+        do not gate this behind the live-trading kill-switch. Schwab returns an
+        empty 200/201 on success; a 400 typically means the order already
+        filled or was already canceled (no longer cancelable).
+        """
+        url = f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}"
+        try:
+            resp = requests.delete(
+                url,
+                headers={"Authorization": f"Bearer {self._token()}", "Accept": "application/json"},
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab cancel order request failed: {e}") from e
+        if resp.status_code in (200, 201):
+            return {"orderId": str(order_id), "canceled": True}
+        hint = self._ACCOUNT_ACCESS_HINT if resp.status_code in (401, 403) else ""
+        raise ProviderError(f"schwab cancel order: HTTP {resp.status_code} {resp.text[:300]}{hint}")
+
+    def replace_order(self, account_hash: str, order_id: str, order: dict) -> dict:
+        """Atomically cancel `order_id` and submit `order` in its place (PUT).
+
+        This is the broker-native "work the order" path: re-pricing a resting
+        limit without a naked moment between a separate cancel and a new place.
+        Schwab cancels the original and mints a NEW order id (returned in the
+        Location header), so the caller polls the new id for the fill.
+        """
+        url = f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}"
+        try:
+            resp = requests.put(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self._token()}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json=order,
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab replace order request failed: {e}") from e
+        if resp.status_code in (200, 201):
+            location = resp.headers.get("Location") or resp.headers.get("location") or ""
+            new_id = location.rstrip("/").rsplit("/", 1)[-1] if location else None
+            return {"orderId": new_id, "replacedOrderId": str(order_id), "location": location}
+        hint = self._ACCOUNT_ACCESS_HINT if resp.status_code in (401, 403) else ""
+        raise ProviderError(f"schwab replace order: HTTP {resp.status_code} {resp.text[:300]}{hint}")

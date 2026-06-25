@@ -552,6 +552,92 @@ def api_account_sync():
 
 
 # ---------------------------------------------------------------------------
+# Option execution + theta ledger.
+#
+# Unlike every read-only route, /place can transmit a REAL order against the
+# live Schwab account — but only when the SCHWAB_LIVE_TRADING_ENABLED kill-switch
+# is armed (option_trades.place_option refuses otherwise). /preview is always a
+# safe dry-run, /fills reads the stored intrinsic/extrinsic ledger.
+# ---------------------------------------------------------------------------
+@app.route("/api/options/status")
+def api_options_status():
+    import option_trades
+
+    return jsonify({
+        "configured": option_trades.available(),
+        "liveTradingEnabled": option_trades.live_trading_enabled(),
+    })
+
+
+@app.route("/api/options/preview", methods=["POST"])
+def api_options_preview():
+    import option_trades
+
+    body = request.get_json(silent=True) or {}
+    spec = body.get("spec") if "spec" in body else body
+    out = option_trades.preview_option(spec or {}, account_hash=body.get("accountHash"))
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
+@app.route("/api/options/place", methods=["POST"])
+def api_options_place():
+    import option_trades
+
+    body = request.get_json(silent=True) or {}
+    spec = body.get("spec") if "spec" in body else body
+    out = option_trades.place_option(spec or {}, account_hash=body.get("accountHash"))
+    if out.get("ok"):
+        return jsonify(out), 200
+    # A disabled kill-switch is a deliberate 403 (forbidden by config), not a 400.
+    return jsonify(out), 403 if out.get("liveDisabled") else 400
+
+
+@app.route("/api/options/order/<order_id>")
+def api_options_order_status(order_id):
+    import option_trades
+
+    out = option_trades.order_status(order_id, account_hash=request.args.get("accountHash"))
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
+@app.route("/api/options/cancel", methods=["POST"])
+def api_options_cancel():
+    import option_trades
+
+    body = request.get_json(silent=True) or {}
+    order_id = body.get("orderId") or request.args.get("orderId")
+    if not order_id:
+        return jsonify({"ok": False, "error": "orderId is required."}), 400
+    out = option_trades.cancel_option(str(order_id), account_hash=body.get("accountHash"))
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
+@app.route("/api/options/replace", methods=["POST"])
+def api_options_replace():
+    import option_trades
+
+    body = request.get_json(silent=True) or {}
+    order_id = body.get("orderId")
+    spec = body.get("spec") if "spec" in body else {k: v for k, v in body.items() if k != "orderId"}
+    if not order_id:
+        return jsonify({"ok": False, "error": "orderId is required."}), 400
+    out = option_trades.replace_option(str(order_id), spec or {}, account_hash=body.get("accountHash"))
+    if out.get("ok"):
+        return jsonify(out), 200
+    return jsonify(out), 403 if out.get("liveDisabled") else 400
+
+
+@app.route("/api/options/fills")
+def api_options_fills():
+    underlying = request.args.get("underlying") or request.args.get("symbol")
+    try:
+        limit = int(request.args.get("limit") or 200)
+    except (TypeError, ValueError):
+        limit = 200
+    return jsonify({"fills": db.list_option_fills(underlying=underlying, limit=limit)})
+
+
+# ---------------------------------------------------------------------------
 # Backtesting engine — configure a day-trading setup, run it against stored
 # 5-minute bars, and get a trade log + summary stats. The run path is
 # datastore-only; pulling missing intraday history from Schwab/Yahoo is an
