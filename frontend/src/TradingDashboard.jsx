@@ -392,6 +392,40 @@ async function apiAccountSync(days = 365) {
   return { ...data, ok: r.ok };
 }
 
+// Option execution + theta ledger. /preview is always a safe dry-run; /place can
+// transmit a REAL order, but only when the server's SCHWAB_LIVE_TRADING_ENABLED
+// kill-switch is armed (otherwise the backend returns liveDisabled).
+async function apiOptionsStatus() {
+  const r = await fetch(`${API}/api/options/status`);
+  if (!r.ok) throw new Error("options status failed");
+  return r.json();
+}
+
+async function apiOptionsPreview(spec) {
+  const r = await fetch(`${API}/api/options/preview`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spec }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok };
+}
+
+async function apiOptionsPlace(spec) {
+  const r = await fetch(`${API}/api/options/place`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spec }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok, httpStatus: r.status };
+}
+
+async function apiOptionsFills(underlying = "") {
+  const q = underlying ? `?underlying=${encodeURIComponent(underlying)}` : "";
+  const r = await fetch(`${API}/api/options/fills${q}`);
+  if (!r.ok) throw new Error("option fills failed");
+  return r.json();
+}
+
 // Manual overrides persist server-side with source="manual" and always beat
 // ingested values. value=null clears the override (back to auto).
 async function apiSetOverride(key, value) {
@@ -700,7 +734,7 @@ function CheckRow({ label, ok }) {
 // ============================================================================
 // MAIN APP
 // ============================================================================
-const CFM_TABS = ["Command", "Scan", "Rotation", "Entry Watch", "Positions", "Indicators"];
+const CFM_TABS = ["Command", "Scan", "Rotation", "Entry Watch", "Theta", "Positions", "Indicators"];
 const DAY_TRADING_TABS = ["Screener", "Backtest", "Executor"];
 const TABS = [...CFM_TABS, ...DAY_TRADING_TABS];
 const DEFAULT_ENTRY_WATCH_SYMBOLS = [];
@@ -1000,6 +1034,9 @@ function TradingDashboard({ backendOffline }) {
               setTab("Executor");
             }}
           />
+        )}
+        {tab === "Theta" && (
+          <ThetaView computed={computed} />
         )}
         {tab === "Positions" && (
           <PositionsView
@@ -2881,6 +2918,298 @@ function SchwabAccountPanel({ snapshot }) {
           Read-only snapshot from your last sync. The Open/Closed tables below are built only from Schwab-synced fills, so they keep open/close history and estimated P&L the snapshot alone can't show.
         </div>
       </div>
+    </Panel>
+  );
+}
+
+// ============================================================================
+// THETA LEDGER (Theta tab) — execute a CFM option from the app and split its
+// premium into intrinsic/extrinsic against the underlying price at fill.
+// ============================================================================
+const DEFAULT_OPTION_SPEC = {
+  underlying: "", expiry: "", option_type: "call", strike: "",
+  quantity: 1, side: "buy", order_type: "LIMIT", limit_price: "",
+};
+
+// Client-side mirror of options_math.decompose, for a pre-trade hint only. The
+// authoritative split is computed on the backend from the live Schwab quote at
+// fill; here we use the daily snapshot price just to preview the shape.
+function previewSplit({ option_type, strike, limit_price }, stockPrice) {
+  const k = parseFloat(strike), prem = parseFloat(limit_price), s = parseFloat(stockPrice);
+  if (!isFinite(k) || !isFinite(prem) || !isFinite(s) || prem <= 0) return null;
+  const intrinsic = option_type === "put" ? Math.max(0, k - s) : Math.max(0, s - k);
+  const extrinsic = prem - intrinsic;
+  const moneyness = intrinsic > 0 ? "ITM"
+    : (option_type === "put" ? s <= k : s >= k) ? "ATM" : "OTM";
+  return { intrinsic, extrinsic, moneyness, extrinsicPct: prem ? (extrinsic / prem) * 100 : null };
+}
+
+function MoneyTag({ moneyness }) {
+  const tone = moneyness === "ITM" ? C.green : moneyness === "ATM" ? C.amber : C.inkDim;
+  return <span style={{ font: `700 10px ${C.mono}`, color: tone, letterSpacing: 1 }}>{moneyness}</span>;
+}
+
+function ThetaView({ computed }) {
+  const [spec, setSpec] = useState(() => ({ ...DEFAULT_OPTION_SPEC, ...store.get("optionSpec", {}) }));
+  const [status, setStatus] = useState(null);      // { configured, liveTradingEnabled }
+  const [fills, setFills] = useState([]);
+  const [busy, setBusy] = useState("");            // "preview" | "place" | ""
+  const [preview, setPreview] = useState(null);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+  const [confirmArm, setConfirmArm] = useState(false);
+
+  const setField = (k, v) => {
+    const next = { ...spec, [k]: v };
+    setSpec(next);
+    store.set("optionSpec", next, true).catch(() => {});
+    setPreview(null); setResult(null); setConfirmArm(false);
+  };
+
+  const loadFills = useCallback(() => {
+    apiOptionsFills().then((d) => setFills(d.fills || [])).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    apiOptionsStatus().then(setStatus).catch(() => setStatus({ configured: false, liveTradingEnabled: false }));
+    loadFills();
+  }, [loadFills]);
+
+  const stockPrice = computed?.[String(spec.underlying || "").toUpperCase()]?.price ?? null;
+  const hint = previewSplit(spec, stockPrice);
+
+  const runPreview = async () => {
+    setBusy("preview"); setError(""); setResult(null);
+    try {
+      const out = await apiOptionsPreview(spec);
+      if (out.ok) setPreview(out); else setError(out.error || "Preview failed.");
+    } catch (e) { setError(String(e.message || e)); }
+    setBusy("");
+  };
+
+  const runPlace = async () => {
+    setBusy("place"); setError(""); setResult(null);
+    try {
+      const out = await apiOptionsPlace(spec);
+      setResult(out);
+      if (!out.ok) setError(out.error || "Order failed.");
+      else loadFills();
+    } catch (e) { setError(String(e.message || e)); }
+    setBusy(""); setConfirmArm(false);
+  };
+
+  const live = status?.liveTradingEnabled;
+  const configured = status?.configured;
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <Panel title="Execute option" eyebrow="CFM juice · premium split at fill"
+        accent={live ? C.amber : C.greenDim}
+        right={
+          <span style={{ font: `700 11px ${C.mono}`, padding: "5px 11px", borderRadius: 6,
+            background: live ? `${C.amber}22` : C.greenDim, color: live ? C.amber : C.green, letterSpacing: 1 }}>
+            {!configured ? "NOT LINKED" : live ? "LIVE ARMED" : "PREVIEW ONLY"}
+          </span>
+        }>
+        <div style={{ font: `400 12px/1.5 ${C.sans}`, color: C.inkDim, marginBottom: 14 }}>
+          Build a single-leg option and validate it against Schwab (<b>Preview</b> never fills). When the
+          server kill-switch <code style={{ font: `500 11px ${C.mono}`, color: C.amber }}>SCHWAB_LIVE_TRADING_ENABLED</code> is
+          armed, <b>Place</b> transmits a real order; the instant it fills, the underlying quote is captured and
+          the premium is split into intrinsic / extrinsic — the entry row of the theta ledger below.
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12 }}>
+          <Field label="Underlying"><input value={spec.underlying}
+            onChange={(e) => setField("underlying", e.target.value.toUpperCase())}
+            placeholder="AAPL" style={inputStyle} /></Field>
+          <Field label="Expiry" hint="YYYY-MM-DD"><input value={spec.expiry}
+            onChange={(e) => setField("expiry", e.target.value)} placeholder="2026-06-19" style={inputStyle} /></Field>
+          <Field label="Type"><Sel value={spec.option_type} onChange={(v) => setField("option_type", v)}
+            options={[["call", "Call"], ["put", "Put"]]} /></Field>
+          <Field label="Strike"><NumIn value={spec.strike} onChange={(v) => setField("strike", v)} /></Field>
+          <Field label="Contracts"><NumIn value={spec.quantity} onChange={(v) => setField("quantity", v)} step="1" /></Field>
+          <Field label="Side"><Sel value={spec.side} onChange={(v) => setField("side", v)}
+            options={[["buy", "Buy to open"], ["sell", "Sell to open"]]} /></Field>
+          <Field label="Order type"><Sel value={spec.order_type} onChange={(v) => setField("order_type", v)}
+            options={[["LIMIT", "Limit"], ["MARKET", "Market"]]} /></Field>
+          {spec.order_type === "LIMIT" && (
+            <Field label="Limit (per share)" hint="premium"><NumIn value={spec.limit_price}
+              onChange={(v) => setField("limit_price", v)} /></Field>
+          )}
+        </div>
+
+        {hint && (
+          <div style={{ marginTop: 6, marginBottom: 14, padding: "10px 12px", borderRadius: 8,
+            background: C.panel2, border: `1px solid ${C.lineSoft}`, font: `500 12px ${C.mono}`, color: C.inkDim }}>
+            <MoneyTag moneyness={hint.moneyness} />{" "}
+            <span style={{ color: C.inkFaint }}>at snapshot price ${gnum(stockPrice, 2)}:</span>{" "}
+            intrinsic <b style={{ color: C.ink }}>${gnum(hint.intrinsic, 2)}</b> · extrinsic{" "}
+            <b style={{ color: C.ink }}>${gnum(hint.extrinsic, 2)}</b>
+            {hint.extrinsicPct != null && <span style={{ color: C.inkFaint }}> ({gnum(hint.extrinsicPct, 0)}% time value)</span>}
+            <div style={{ font: `400 10px ${C.sans}`, color: C.inkFaint, marginTop: 4 }}>
+              Daily-snapshot estimate only. The stored split uses the live quote at fill.
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button onClick={runPreview} disabled={!configured || !!busy}
+            style={btn(C.blue, !configured || !!busy)}>
+            {busy === "preview" ? "Previewing…" : "Preview"}
+          </button>
+          {!confirmArm ? (
+            <button onClick={() => { setConfirmArm(true); setResult(null); }} disabled={!configured || !live || !!busy}
+              style={btn(C.amber, !configured || !live || !!busy)}
+              title={!live ? "Server kill-switch is off — preview only." : ""}>
+              Place real order…
+            </button>
+          ) : (
+            <>
+              <button onClick={runPlace} disabled={!!busy} style={btn(C.red, !!busy)}>
+                {busy === "place" ? "Placing…" : "Confirm: transmit live order"}
+              </button>
+              <button onClick={() => setConfirmArm(false)} style={btn(C.line, false, C.inkDim)}>Cancel</button>
+            </>
+          )}
+          {!live && configured && (
+            <span style={{ font: `400 11px ${C.sans}`, color: C.inkFaint }}>
+              Live placement disabled by server config.
+            </span>
+          )}
+        </div>
+
+        {error && (
+          <div style={{ marginTop: 12, padding: "10px 12px", borderRadius: 8, background: `${C.red}14`,
+            border: `1px solid ${C.redDim}`, font: `500 12px ${C.sans}`, color: C.red }}>{error}</div>
+        )}
+
+        {preview && <PreviewBox preview={preview} />}
+        {result && result.ok && <PlaceResultBox result={result} />}
+      </Panel>
+
+      <ThetaLedger fills={fills} onRefresh={loadFills} computed={computed} />
+    </div>
+  );
+}
+
+function btn(color, disabled, textColor) {
+  return {
+    background: disabled ? C.line : color, color: disabled ? C.inkFaint : (textColor || "#06121f"),
+    border: "none", borderRadius: 7, padding: "9px 16px", cursor: disabled ? "default" : "pointer",
+    font: `700 12px ${C.sans}`, letterSpacing: 0.2,
+  };
+}
+
+function PreviewBox({ preview }) {
+  const p = preview.preview || {};
+  const tone = p.status === "OK" ? C.green : p.status === "WARNING" ? C.amber : C.red;
+  return (
+    <div style={{ marginTop: 12, padding: "12px 14px", borderRadius: 8, background: C.panel2, border: `1px solid ${C.line}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <span style={{ font: `700 11px ${C.mono}`, color: C.inkFaint, letterSpacing: 1 }}>SCHWAB PREVIEW</span>
+        <span style={{ font: `700 12px ${C.mono}`, color: tone, letterSpacing: 1 }}>{p.status}</span>
+      </div>
+      <div style={{ display: "flex", gap: 20, flexWrap: "wrap", font: `500 12px ${C.mono}`, color: C.ink }}>
+        <span>Order value <b>${gnum(p.orderValue, 2)}</b></span>
+        <span>Qty <b>{gnum(p.quantity, 0)}</b></span>
+        {p.price != null && <span>Price <b>${gnum(p.price, 2)}</b></span>}
+        {p.estimatedCost != null && <span style={{ color: C.inkDim }}>Fees ~${gnum(p.estimatedCost, 2)}</span>}
+        {preview.account && <span style={{ color: C.inkFaint }}>{preview.account}</span>}
+      </div>
+      {(p.rejects || []).concat(p.alerts || []).map((m, i) => (
+        <div key={i} style={{ marginTop: 6, font: `400 11px ${C.sans}`, color: tone }}>• {m}</div>
+      ))}
+    </div>
+  );
+}
+
+function PlaceResultBox({ result }) {
+  const filled = result.fill && result.split;
+  const tone = filled ? C.green : C.amber;
+  return (
+    <div style={{ marginTop: 12, padding: "12px 14px", borderRadius: 8, background: `${tone}14`, border: `1px solid ${tone}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        <span style={{ font: `700 11px ${C.mono}`, color: tone, letterSpacing: 1 }}>
+          {filled ? "FILLED — THETA SNAPSHOT TAKEN" : `ORDER ${result.status || "PLACED"}`}
+        </span>
+        {result.orderId && <span style={{ font: `500 11px ${C.mono}`, color: C.inkFaint }}>#{result.orderId}</span>}
+      </div>
+      {filled ? (
+        <div style={{ display: "flex", gap: 20, flexWrap: "wrap", font: `500 13px ${C.mono}`, color: C.ink }}>
+          <MoneyTag moneyness={result.split.moneyness} />
+          <span>Premium <b>${gnum(result.split.premium, 2)}</b></span>
+          <span>Stock <b>${gnum(result.split.stockPrice, 2)}</b></span>
+          <span style={{ color: C.green }}>Intrinsic <b>${gnum(result.split.intrinsic, 2)}</b></span>
+          <span style={{ color: C.amber }}>Extrinsic <b>${gnum(result.split.extrinsic, 2)}</b></span>
+          {result.split.extrinsicPct != null && <span style={{ color: C.inkFaint }}>{gnum(result.split.extrinsicPct, 0)}% time value</span>}
+        </div>
+      ) : (
+        <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>
+          {result.note || result.warning || "Order is working; no fill captured yet."}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ThetaLedger({ fills, onRefresh, computed }) {
+  const th = { textAlign: "left", font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, padding: "8px 10px", borderBottom: `1px solid ${C.line}`, textTransform: "uppercase" };
+  const td = { font: `500 12px ${C.mono}`, color: C.ink, padding: "9px 10px", borderBottom: `1px solid ${C.lineSoft}` };
+  return (
+    <Panel title="Theta ledger" eyebrow="filled options · entry split"
+      right={<button onClick={onRefresh} style={{ background: "none", border: `1px solid ${C.line}`, borderRadius: 6, color: C.inkDim, cursor: "pointer", font: `600 11px ${C.sans}`, padding: "5px 10px" }}>↻ Refresh</button>}>
+      {(!fills || fills.length === 0) ? (
+        <div style={{ padding: "14px 16px", borderRadius: 8, background: C.panel2, border: `1px dashed ${C.line}`, font: `400 12px/1.5 ${C.sans}`, color: C.inkDim }}>
+          No option fills logged yet. Execute an option above and its intrinsic / extrinsic entry snapshot lands here.
+        </div>
+      ) : (
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <thead><tr>
+              <th style={th}>Contract</th><th style={th}>Side</th><th style={th}>Qty</th>
+              <th style={th}>Premium</th><th style={th}>Stock@fill</th><th style={th}>Intrinsic</th>
+              <th style={th}>Extrinsic</th><th style={th}>Now</th><th style={th}>θ decay</th>
+            </tr></thead>
+            <tbody>
+              {fills.map((f) => {
+                const live = computed?.[f.underlying]?.price ?? null;
+                const liveIntrinsic = live == null ? null
+                  : f.option_type === "put" ? Math.max(0, f.strike - live) : Math.max(0, live - f.strike);
+                // Extrinsic decay = entry extrinsic minus what's left, assuming premium held to mark.
+                // We don't have the live option mark here, so we show the intrinsic shift the stock has produced.
+                const intrinsicNow = liveIntrinsic;
+                const expiry = f.expiry || "";
+                const dte = expiry ? Math.round((new Date(expiry) - new Date()) / 86400000) : null;
+                return (
+                  <tr key={f.id}>
+                    <td style={td}>
+                      <div>{f.underlying} {gnum(f.strike, f.strike % 1 ? 2 : 0)}{f.option_type === "put" ? "P" : "C"}</div>
+                      <div style={{ font: `400 10px ${C.sans}`, color: C.inkFaint }}>
+                        {expiry}{dte != null && ` · ${dte}d`}
+                      </div>
+                    </td>
+                    <td style={{ ...td, color: f.side === "sell" ? C.amber : C.inkDim }}>{f.side}</td>
+                    <td style={td}>{f.quantity}</td>
+                    <td style={td}>${gnum(f.premium, 2)}</td>
+                    <td style={td}>${gnum(f.stock_price, 2)}</td>
+                    <td style={{ ...td, color: C.green }}>${gnum(f.intrinsic, 2)}</td>
+                    <td style={{ ...td, color: C.amber }}>${gnum(f.extrinsic, 2)}</td>
+                    <td style={{ ...td, color: C.inkDim }}>{intrinsicNow == null ? "—" : `$${gnum(intrinsicNow, 2)} int`}</td>
+                    <td style={{ ...td, color: C.inkFaint }}>
+                      {intrinsicNow == null ? "—" : `${intrinsicNow > f.intrinsic ? "+" : ""}${gnum(intrinsicNow - f.intrinsic, 2)} int Δ`}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+          <div style={{ font: `400 10px/1.4 ${C.sans}`, color: C.inkFaint, marginTop: 10 }}>
+            Entry split is captured at fill from the live Schwab quote. "Now" reflects the intrinsic shift the
+            underlying has produced since (daily snapshot); full extrinsic mark-to-market lands when the option
+            quote feed is wired.
+          </div>
+        </div>
+      )}
     </Panel>
   );
 }

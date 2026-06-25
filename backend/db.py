@@ -173,6 +173,29 @@ CREATE TABLE IF NOT EXISTS intraday_trades (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_intraday_trades_signal
     ON intraday_trades(date, ticker, entry_time, account_type);
+
+CREATE TABLE IF NOT EXISTS option_fills (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    order_id TEXT,                 -- Schwab order id (null for manually logged)
+    underlying TEXT NOT NULL,      -- stock symbol, e.g. AAPL
+    osi_symbol TEXT NOT NULL,      -- 21-char OSI option symbol
+    option_type TEXT NOT NULL,     -- call | put
+    strike REAL NOT NULL,
+    expiry TEXT NOT NULL,          -- YYYY-MM-DD
+    side TEXT NOT NULL,            -- buy | sell (to open)
+    quantity INTEGER NOT NULL,     -- contracts
+    premium REAL NOT NULL,         -- per-share fill price
+    stock_price REAL NOT NULL,     -- underlying price captured at fill instant
+    intrinsic REAL NOT NULL,       -- per-share, at fill
+    extrinsic REAL NOT NULL,       -- per-share, at fill
+    quote_time TEXT,               -- Schwab quoteTime of the captured stock price
+    filled_at TEXT NOT NULL,       -- when we recorded the fill (UTC)
+    payload TEXT NOT NULL,         -- full fill snapshot as JSON
+    created_at TEXT NOT NULL
+);
+-- One row per Schwab fill: re-recording the same order id is idempotent.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_option_fills_order
+    ON option_fills(order_id) WHERE order_id IS NOT NULL;
 """
 
 
@@ -865,6 +888,80 @@ def update_paper_trade(
         "SELECT * FROM intraday_trades WHERE order_id = ?", (order_id,)
     ).fetchone()
     return _trade_row(updated) if updated else None
+
+
+# ---------------------------------------------------------------------------
+# Option fills (theta ledger — premium split into intrinsic/extrinsic at fill)
+# ---------------------------------------------------------------------------
+def record_option_fill(fill: dict) -> dict:
+    """Insert one option fill (the entry snapshot for the theta ledger).
+
+    Idempotent per Schwab ``order_id``: re-recording the same fill (e.g. a retry
+    of the place flow) returns the already-stored row instead of duplicating it.
+    Manually logged fills (no order id) always insert. Returns the stored row.
+    """
+    now = utcnow()
+    order_id = fill.get("order_id") or fill.get("orderId")
+    conn = connect()
+    if order_id:
+        existing = conn.execute(
+            "SELECT id FROM option_fills WHERE order_id=?", (str(order_id),)
+        ).fetchone()
+        if existing:
+            return get_option_fill(existing["id"])
+    payload = json.dumps(fill, default=str)
+    with conn:
+        cur = conn.execute(
+            "INSERT INTO option_fills"
+            " (order_id, underlying, osi_symbol, option_type, strike, expiry, side,"
+            "  quantity, premium, stock_price, intrinsic, extrinsic, quote_time,"
+            "  filled_at, payload, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                str(order_id) if order_id else None,
+                str(fill.get("underlying") or "").upper(),
+                fill.get("osi_symbol") or fill.get("osiSymbol"),
+                fill.get("option_type") or fill.get("optionType"),
+                fill.get("strike"), fill.get("expiry"), fill.get("side"),
+                fill.get("quantity"), fill.get("premium"), fill.get("stock_price") or fill.get("stockPrice"),
+                fill.get("intrinsic"), fill.get("extrinsic"),
+                fill.get("quote_time") or fill.get("quoteTime"),
+                fill.get("filled_at") or now, payload, now,
+            ),
+        )
+    return get_option_fill(cur.lastrowid)
+
+
+def get_option_fill(fill_id: int | None) -> dict | None:
+    if fill_id is None:
+        return None
+    conn = connect()
+    row = conn.execute("SELECT * FROM option_fills WHERE id=?", (fill_id,)).fetchone()
+    return _option_fill_row(row) if row else None
+
+
+def list_option_fills(underlying: str | None = None, limit: int = 200) -> list[dict]:
+    """Stored option fills, newest first, optionally scoped to one underlying."""
+    conn = connect()
+    if underlying:
+        rows = conn.execute(
+            "SELECT * FROM option_fills WHERE underlying=? ORDER BY id DESC LIMIT ?",
+            (str(underlying).upper(), limit),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM option_fills ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+    return [_option_fill_row(row) for row in rows]
+
+
+def _option_fill_row(row: sqlite3.Row) -> dict:
+    out = dict(row)
+    try:
+        out["payload"] = json.loads(out.get("payload") or "{}")
+    except json.JSONDecodeError:
+        out["payload"] = {}
+    return out
 
 
 # ---------------------------------------------------------------------------

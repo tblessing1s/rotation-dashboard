@@ -13,10 +13,18 @@ NOT wired here.
 """
 from __future__ import annotations
 
+from datetime import date, datetime
+
+from options_math import normalize_type
 from providers.base import ProviderError
 from providers.schwab import SchwabProvider
 
 EQUITY = "EQUITY"
+OPTION = "OPTION"
+
+# Single-option open instructions by direction. Buying a call/put to open is the
+# CFM "long premium" play; selling to open is a written/short option.
+_OPTION_OPEN_INSTR = {"buy": "BUY_TO_OPEN", "sell": "SELL_TO_OPEN"}
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +93,138 @@ def build_bracket_order(signal: dict) -> dict:
     if entry_type != "MARKET":
         order["price"] = f"{entry:.2f}"
     return order
+
+
+# ---------------------------------------------------------------------------
+# Option orders (single-leg)
+# ---------------------------------------------------------------------------
+def _coerce_expiry(expiry) -> date:
+    """Accept a date, a datetime, or a 'YYYY-MM-DD' string -> a date."""
+    if isinstance(expiry, datetime):
+        return expiry.date()
+    if isinstance(expiry, date):
+        return expiry
+    s = str(expiry).strip()
+    try:
+        return datetime.strptime(s[:10], "%Y-%m-%d").date()
+    except ValueError as e:
+        raise ValueError(f"expiry must be YYYY-MM-DD, got {expiry!r}") from e
+
+
+def osi_symbol(underlying: str, expiry, option_type: str, strike: float) -> str:
+    """Build the 21-char OSI option symbol Schwab expects.
+
+    Layout: 6-char root left-justified (space padded), YYMMDD expiry, C/P, then
+    the strike as price*1000 zero-padded to 8 digits. Example:
+    ``osi_symbol("AAPL", "2026-06-19", "call", 150)`` -> ``"AAPL  260619C00150000"``.
+    """
+    root = str(underlying or "").strip().upper()
+    if not root or len(root) > 6:
+        raise ValueError(f"underlying root must be 1-6 chars, got {underlying!r}")
+    exp = _coerce_expiry(expiry)
+    cp = "C" if normalize_type(option_type) == "call" else "P"
+    strike = float(strike)
+    if strike <= 0:
+        raise ValueError("strike must be greater than 0")
+    strike_int = int(round(strike * 1000))
+    return f"{root:<6}{exp:%y%m%d}{cp}{strike_int:08d}"
+
+
+def build_option_order(spec: dict) -> dict:
+    """Spec -> a Schwab single-leg option order (open).
+
+    Required spec keys: ``underlying``, ``expiry`` (YYYY-MM-DD), ``option_type``
+    (call/put), ``strike``, ``quantity`` (contracts), ``side`` (buy/sell).
+    Optional: ``order_type`` (LIMIT default, or MARKET) and ``limit_price``
+    (per-share premium, required for LIMIT). Raises ValueError/KeyError on a
+    malformed spec.
+    """
+    side = str(spec.get("side") or "buy").lower()
+    if side not in _OPTION_OPEN_INSTR:
+        raise ValueError("side must be buy or sell")
+    qty = int(spec["quantity"])
+    if qty <= 0:
+        raise ValueError("quantity (contracts) must be greater than 0")
+
+    symbol = osi_symbol(
+        spec["underlying"], spec["expiry"], spec["option_type"], spec["strike"]
+    )
+    order_type = str(spec.get("order_type") or "LIMIT").upper()
+    if order_type not in ("LIMIT", "MARKET"):
+        raise ValueError("order_type must be LIMIT or MARKET")
+
+    order = {
+        "orderType": order_type,
+        "session": "NORMAL",
+        "duration": "DAY",
+        "orderStrategyType": "SINGLE",
+        "complexOrderStrategyType": "NONE",
+        "orderLegCollection": [{
+            "instruction": _OPTION_OPEN_INSTR[side],
+            "quantity": qty,
+            "instrument": {"symbol": symbol, "assetType": OPTION},
+        }],
+    }
+    if order_type == "LIMIT":
+        try:
+            limit = round(float(spec["limit_price"]), 2)
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError("limit_price (per-share premium) is required for a LIMIT order") from e
+        if limit <= 0:
+            raise ValueError("limit_price must be greater than 0")
+        order["price"] = f"{limit:.2f}"
+    return order
+
+
+# Schwab order states that mean the order is done resolving (no further polling).
+TERMINAL_ORDER_STATES = {
+    "FILLED", "CANCELED", "REJECTED", "EXPIRED", "REPLACED",
+}
+
+
+def parse_fill(order_status: dict) -> dict:
+    """Pull the fill from a Schwab GET-order payload.
+
+    Returns ``{status, filledQuantity, fillPrice}`` where ``fillPrice`` is the
+    share-quantity-weighted average execution price across the order's activity
+    legs (falling back to the order's stated ``price`` when no execution detail
+    is present yet). ``fillPrice`` is None until something actually executes.
+    """
+    order_status = order_status or {}
+    status = str(order_status.get("status") or "").upper()
+    filled_qty = order_status.get("filledQuantity")
+
+    weighted_sum = 0.0
+    weight = 0.0
+    for activity in order_status.get("orderActivityCollection") or []:
+        for leg in activity.get("executionLegs") or []:
+            try:
+                px = float(leg.get("price"))
+                qty = float(leg.get("quantity"))
+            except (TypeError, ValueError):
+                continue
+            if qty <= 0:
+                continue
+            weighted_sum += px * qty
+            weight += qty
+
+    if weight > 0:
+        fill_price = round(weighted_sum / weight, 4)
+    else:
+        try:
+            fill_price = round(float(order_status.get("price")), 4)
+        except (TypeError, ValueError):
+            fill_price = None
+        # A bare order price only counts as a fill once the order says FILLED.
+        if status != "FILLED":
+            fill_price = None
+
+    try:
+        filled_qty = float(filled_qty) if filled_qty is not None else None
+    except (TypeError, ValueError):
+        filled_qty = None
+
+    return {"status": status, "filledQuantity": filled_qty, "fillPrice": fill_price}
 
 
 # ---------------------------------------------------------------------------
