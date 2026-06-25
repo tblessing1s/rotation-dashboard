@@ -774,9 +774,10 @@ function CheckRow({ label, ok }) {
 // ============================================================================
 // MAIN APP
 // ============================================================================
-const CFM_TABS = ["Command", "Scan", "Rotation", "Entry Watch", "Theta", "Positions", "Indicators"];
+// CFM Strategy workflow tabs (production-ready)
+const CFM_TABS = ["Command", "Scan", "Entry Watch", "Rotation", "Theta", "Positions", "Indicators"];
+// Day Trading tabs (experimental, hidden by default)
 const DAY_TRADING_TABS = ["Screener", "Backtest", "Executor"];
-const TABS = [...CFM_TABS, ...DAY_TRADING_TABS];
 const DEFAULT_ENTRY_WATCH_SYMBOLS = [];
 
 // Hydration gate: load persisted state from the backend before the dashboard
@@ -813,6 +814,7 @@ export default function App() {
 
 function TradingDashboard({ backendOffline }) {
   const [tab, setTab] = useState("Command");
+  const [showDayTrading, setShowDayTrading] = useState(false);
 
   // ---- State: live quotes ----
   const [quotes, setQuotes] = useState(store.get("quotes", {}));
@@ -1016,9 +1018,9 @@ function TradingDashboard({ backendOffline }) {
       <div style={{ maxWidth: 1180, margin: "0 auto" }}>
         <Header sig={sig} lastFetch={lastFetch} status={fetchStatus} onRefresh={refreshQuotes} quotes={quotes} macroComputed={macroComputed} />
 
-        {/* Tabs — two groups: CFM Strategy | Day Trading */}
+        {/* Tabs — CFM Strategy (primary) + optional Day Trading */}
         <div style={{ margin: "20px 0 18px" }}>
-          <nav style={{ display: "flex", alignItems: "flex-end", gap: 0, borderBottom: `1px solid ${C.line}` }}>
+          <nav style={{ display: "flex", alignItems: "flex-end", gap: 0, borderBottom: `1px solid ${C.line}`, justifyContent: "space-between" }}>
             {/* CFM Strategy group */}
             <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
               <span style={{ font: `600 9px/1 ${C.mono}`, letterSpacing: 2, color: C.inkFaint, textTransform: "uppercase", padding: "0 14px 5px" }}>CFM Strategy</span>
@@ -1033,20 +1035,25 @@ function TradingDashboard({ backendOffline }) {
               </div>
             </div>
 
-            {/* Divider */}
-            <div style={{ width: 1, height: 32, background: C.line, margin: "0 8px 1px", alignSelf: "flex-end" }} />
-
-            {/* Day Trading group */}
+            {/* Day Trading toggle + optional tabs */}
             <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
-              <span style={{ font: `600 9px/1 ${C.mono}`, letterSpacing: 2, color: C.amber, textTransform: "uppercase", padding: "0 14px 5px" }}>Day Trading</span>
-              <div style={{ display: "flex" }}>
-                {DAY_TRADING_TABS.map((t) => (
+              {showDayTrading && (
+                <span style={{ font: `600 9px/1 ${C.mono}`, letterSpacing: 2, color: C.amber, textTransform: "uppercase", padding: "0 14px 5px" }}>Experimental</span>
+              )}
+              <div style={{ display: "flex", alignItems: "center" }}>
+                {showDayTrading && DAY_TRADING_TABS.map((t) => (
                   <button key={t} onClick={() => setTab(t)} style={{
                     background: "none", border: "none", cursor: "pointer", padding: "8px 14px",
                     font: `600 13px ${C.sans}`, color: tab === t ? C.ink : C.inkFaint,
                     borderBottom: `2px solid ${tab === t ? C.amber : "transparent"}`, marginBottom: -1,
                   }}>{t}</button>
                 ))}
+                <button onClick={() => setShowDayTrading(!showDayTrading)} style={{
+                  background: "none", border: "none", cursor: "pointer", padding: "8px 14px",
+                  font: `500 11px ${C.mono}`, color: showDayTrading ? C.amber : C.inkFaint,
+                  borderBottom: `2px solid transparent`, marginBottom: -1,
+                  opacity: 0.7, transition: "opacity 0.2s",
+                }}>{showDayTrading ? "▼" : "▶"} Experimental</button>
               </div>
             </div>
           </nav>
