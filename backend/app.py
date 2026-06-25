@@ -629,12 +629,25 @@ def api_options_replace():
 
 @app.route("/api/options/fills")
 def api_options_fills():
+    import theta_ledger
+
     underlying = request.args.get("underlying") or request.args.get("symbol")
     try:
         limit = int(request.args.get("limit") or 200)
     except (TypeError, ValueError):
         limit = 200
-    return jsonify({"fills": db.list_option_fills(underlying=underlying, limit=limit)})
+    # Read-only: attach the latest stored mark + theta P&L (no provider call).
+    fills = theta_ledger.enrich(db.list_option_fills(underlying=underlying, limit=limit))
+    return jsonify({"fills": fills})
+
+
+@app.route("/api/options/marks/refresh", methods=["POST"])
+def api_options_marks_refresh():
+    import theta_ledger
+
+    body = request.get_json(silent=True) or {}
+    out = theta_ledger.refresh(underlying=body.get("underlying") or request.args.get("underlying"))
+    return jsonify(out), 200 if out.get("ok") else 400
 
 
 # ---------------------------------------------------------------------------

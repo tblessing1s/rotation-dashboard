@@ -196,6 +196,20 @@ CREATE TABLE IF NOT EXISTS option_fills (
 -- One row per Schwab fill: re-recording the same order id is idempotent.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_option_fills_order
     ON option_fills(order_id) WHERE order_id IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS option_marks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    fill_id INTEGER NOT NULL,       -- FK to option_fills.id
+    as_of_date TEXT NOT NULL,       -- YYYY-MM-DD trading day of this mark
+    mark REAL,                      -- option mark/last per share, now
+    stock_price REAL,               -- underlying price at the same instant
+    intrinsic REAL,                 -- per-share, now
+    extrinsic REAL,                 -- per-share, now (mark - intrinsic)
+    theta REAL,                     -- Schwab's modeled theta greek, if present
+    source TEXT NOT NULL DEFAULT 'schwab',
+    fetched_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_option_marks_fill ON option_marks(fill_id, as_of_date);
 """
 
 
@@ -973,6 +987,48 @@ def _option_fill_row(row: sqlite3.Row) -> dict:
     except json.JSONDecodeError:
         out["payload"] = {}
     return out
+
+
+def record_option_mark(mark: dict) -> None:
+    """Append a dated mark for an open option (the theta-decay series).
+
+    Append-only; the newest row per (fill_id, as_of_date) wins on read, so
+    refreshing twice in one day just supersedes the earlier mark.
+    """
+    conn = connect()
+    with conn:
+        conn.execute(
+            "INSERT INTO option_marks"
+            " (fill_id, as_of_date, mark, stock_price, intrinsic, extrinsic, theta, source, fetched_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                int(mark["fill_id"]), mark["as_of_date"], mark.get("mark"),
+                mark.get("stock_price"), mark.get("intrinsic"), mark.get("extrinsic"),
+                mark.get("theta"), mark.get("source") or "schwab", utcnow(),
+            ),
+        )
+
+
+def latest_option_mark(fill_id: int) -> dict | None:
+    """Most recent stored mark for a fill (newest date, newest fetch)."""
+    conn = connect()
+    row = conn.execute(
+        "SELECT * FROM option_marks WHERE fill_id=? ORDER BY as_of_date DESC, id DESC LIMIT 1",
+        (int(fill_id),),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def prior_option_mark(fill_id: int, before_date: str) -> dict | None:
+    """Most recent mark from a day strictly before `before_date` — the baseline
+    for day-over-day theta decay."""
+    conn = connect()
+    row = conn.execute(
+        "SELECT * FROM option_marks WHERE fill_id=? AND as_of_date < ?"
+        " ORDER BY as_of_date DESC, id DESC LIMIT 1",
+        (int(fill_id), before_date),
+    ).fetchone()
+    return dict(row) if row else None
 
 
 # ---------------------------------------------------------------------------

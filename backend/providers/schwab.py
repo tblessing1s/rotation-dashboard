@@ -120,6 +120,38 @@ def token_status() -> dict:
     return out
 
 
+def _parse_quote_node(symbol: str, node: dict) -> dict:
+    """Flatten one Schwab quote node into the fields the dashboard uses.
+
+    Equity nodes give last/bid/ask/mark. Option nodes add ``underlyingPrice``
+    (the stock price at the same instant) and greeks (``theta``/``delta``), so
+    an option quote alone is enough to re-decompose the premium.
+    """
+    q = (node or {}).get("quote") or {}
+
+    def _n(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    asset_type = (node or {}).get("assetMainType") or (node or {}).get("assetType")
+    return {
+        "symbol": symbol,
+        "assetType": asset_type,
+        "last": _n(q.get("lastPrice")),
+        "bid": _n(q.get("bidPrice")),
+        "ask": _n(q.get("askPrice")),
+        "mark": _n(q.get("mark")),
+        "underlyingPrice": _n(q.get("underlyingPrice")),
+        "theta": _n(q.get("theta")),
+        "delta": _n(q.get("delta")),
+        "openInterest": _n(q.get("openInterest")),
+        "quoteTimeMs": q.get("quoteTime"),
+        "raw": node,
+    }
+
+
 class SchwabProvider(Provider):
     """Schwab Trader API — matches thinkorswim's data feed.
 
@@ -275,55 +307,59 @@ class SchwabProvider(Provider):
             raise ProviderError(f"schwab {symbol} intraday: no usable rows")
         return df
 
-    def get_quote(self, symbol: str) -> dict:
-        """Real-time quote for one symbol from the market-data feed.
+    def get_quotes(self, symbols) -> dict:
+        """Real-time quotes for many symbols in ONE call (equities AND options).
 
-        Returns the live last/bid/ask/mark plus Schwab's quoteTime (epoch ms),
-        normalized into a flat dict. This is the same market-data product the
-        bar feeds use (no extra Schwab approval needed), and it is the price
-        snapshot taken at option-execution time so an option fill can be split
-        into intrinsic/extrinsic against the underlying's price at that instant.
+        Schwab's quotes endpoint accepts a comma-joined symbol list, so a whole
+        theta ledger refreshes in a single request — important for staying under
+        the API budget. For an OPTION symbol the quote node also carries
+        ``underlyingPrice`` and the greeks, so one option quote yields everything
+        needed to re-split the premium (no separate stock-quote call per leg).
+
+        Returns ``{requested_symbol: parsed_or_None}``. Missing symbols map to
+        None rather than raising, so one bad symbol never sinks the batch.
         """
-        schwab_symbol = SYMBOL_MAP.get(symbol, symbol)
+        if isinstance(symbols, str):
+            symbols = [symbols]
+        symbols = [s for s in symbols if s]
+        if not symbols:
+            return {}
+        mapped = {s: SYMBOL_MAP.get(s, s) for s in symbols}
         try:
             resp = requests.get(
                 QUOTES_URL,
                 headers={"Authorization": f"Bearer {self._token()}", "Accept": "application/json"},
-                params={"symbols": schwab_symbol, "fields": "quote"},
+                params={"symbols": ",".join(mapped.values()), "fields": "quote"},
                 timeout=20,
             )
         except requests.RequestException as e:
-            raise ProviderError(f"schwab quote {symbol}: {e}") from e
+            raise ProviderError(f"schwab quotes: {e}") from e
         if resp.status_code != 200:
-            raise ProviderError(f"schwab quote {symbol}: HTTP {resp.status_code} {resp.text[:200]}")
+            raise ProviderError(f"schwab quotes: HTTP {resp.status_code} {resp.text[:200]}")
         try:
             payload = resp.json()
         except ValueError as e:
-            raise ProviderError(f"schwab quote {symbol}: non-JSON response") from e
-        node = payload.get(schwab_symbol) or payload.get(symbol)
-        if not node:
+            raise ProviderError("schwab quotes: non-JSON response") from e
+        # Match response keys tolerantly: OSI option symbols carry internal
+        # padding spaces, so key the payload by a space-stripped form too.
+        by_norm = {str(k).replace(" ", ""): v for k, v in (payload or {}).items()}
+        out = {}
+        for orig, ms in mapped.items():
+            node = payload.get(ms) or payload.get(orig) or by_norm.get(str(ms).replace(" ", ""))
+            out[orig] = _parse_quote_node(orig, node) if node else None
+        return out
+
+    def get_quote(self, symbol: str) -> dict:
+        """Real-time quote for one symbol (thin wrapper over get_quotes).
+
+        Used to snapshot the underlying's price at option-execution time so a
+        fill can be split into intrinsic/extrinsic against the price at that
+        instant. Raises if the symbol has no quote.
+        """
+        parsed = self.get_quotes([symbol]).get(symbol)
+        if not parsed:
             raise ProviderError(f"schwab quote {symbol}: no quote in response")
-        q = node.get("quote") or {}
-
-        def _n(v):
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return None
-
-        last = _n(q.get("lastPrice"))
-        bid = _n(q.get("bidPrice"))
-        ask = _n(q.get("askPrice"))
-        mark = _n(q.get("mark"))
-        return {
-            "symbol": symbol,
-            "last": last,
-            "bid": bid,
-            "ask": ask,
-            "mark": mark,
-            "quoteTimeMs": q.get("quoteTime"),
-            "raw": node,
-        }
+        return parsed
 
     # -- accounts & trading --------------------------------------------------
     # These hit the Trader API's account endpoints (a different product than the

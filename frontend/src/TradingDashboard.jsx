@@ -426,6 +426,17 @@ async function apiOptionsFills(underlying = "") {
   return r.json();
 }
 
+// Pull live option marks for every open position (one batched Schwab call) and
+// store today's mark, so the ledger shows real extrinsic decay. User-triggered.
+async function apiOptionsMarksRefresh() {
+  const r = await fetch(`${API}/api/options/marks/refresh`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok };
+}
+
 // Re-check a placed order; if it has filled since, the backend captures the
 // theta snapshot now (idempotently).
 async function apiOptionsOrderStatus(orderId) {
@@ -2955,6 +2966,7 @@ function SchwabAccountPanel({ snapshot }) {
 // THETA LEDGER (Theta tab) — execute a CFM option from the app and split its
 // premium into intrinsic/extrinsic against the underlying price at fill.
 // ============================================================================
+const OPTION_MULTIPLIER = 100;  // one US equity-option contract = 100 shares.
 const DEFAULT_OPTION_SPEC = {
   underlying: "", expiry: "", option_type: "call", strike: "",
   quantity: 1, side: "buy", order_type: "LIMIT", limit_price: "",
@@ -2996,8 +3008,24 @@ function ThetaView({ computed }) {
     setPreview(null); setResult(null); setConfirmArm(false);
   };
 
+  const [marksBusy, setMarksBusy] = useState(false);
+  const [marksMsg, setMarksMsg] = useState("");
+
   const loadFills = useCallback(() => {
     apiOptionsFills().then((d) => setFills(d.fills || [])).catch(() => {});
+  }, []);
+
+  const refreshMarks = useCallback(async () => {
+    setMarksBusy(true); setMarksMsg("");
+    try {
+      const out = await apiOptionsMarksRefresh();
+      if (out.ok) {
+        setFills(out.ledger || []);
+        const miss = out.missing?.length ? `, ${out.missing.length} no quote` : "";
+        setMarksMsg(`Marked ${out.refreshed} open position${out.refreshed === 1 ? "" : "s"}${miss}.`);
+      } else setMarksMsg(out.error || "Mark refresh failed.");
+    } catch (e) { setMarksMsg(String(e.message || e)); }
+    setMarksBusy(false);
   }, []);
 
   useEffect(() => {
@@ -3128,7 +3156,8 @@ function ThetaView({ computed }) {
         )}
       </Panel>
 
-      <ThetaLedger fills={fills} onRefresh={loadFills} computed={computed} />
+      <ThetaLedger fills={fills} onRefresh={loadFills} onRefreshMarks={refreshMarks}
+        marksBusy={marksBusy} marksMsg={marksMsg} />
     </div>
   );
 }
@@ -3262,12 +3291,30 @@ function PlaceResultBox({ result }) {
   );
 }
 
-function ThetaLedger({ fills, onRefresh, computed }) {
+// Signed dollar cell: green positive, red negative, dim zero/none.
+function moneyCell(v, td) {
+  if (v == null) return <td style={{ ...td, color: C.inkFaint }}>—</td>;
+  const tone = v > 0 ? C.green : v < 0 ? C.red : C.inkDim;
+  return <td style={{ ...td, color: tone }}>{v > 0 ? "+" : ""}${gnum(v, 2)}</td>;
+}
+
+function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg }) {
   const th = { textAlign: "left", font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, padding: "8px 10px", borderBottom: `1px solid ${C.line}`, textTransform: "uppercase" };
   const td = { font: `500 12px ${C.mono}`, color: C.ink, padding: "9px 10px", borderBottom: `1px solid ${C.lineSoft}` };
+  const ghostBtn = { background: "none", border: `1px solid ${C.line}`, borderRadius: 6, color: C.inkDim, cursor: "pointer", font: `600 11px ${C.sans}`, padding: "5px 10px" };
+  const asOf = fills.map((f) => f.mark?.as_of_date).filter(Boolean).sort().slice(-1)[0];
   return (
-    <Panel title="Theta ledger" eyebrow="filled options · entry split"
-      right={<button onClick={onRefresh} style={{ background: "none", border: `1px solid ${C.line}`, borderRadius: 6, color: C.inkDim, cursor: "pointer", font: `600 11px ${C.sans}`, padding: "5px 10px" }}>↻ Refresh</button>}>
+    <Panel title="Theta ledger" eyebrow="filled options · extrinsic decay"
+      right={
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          {marksMsg && <span style={{ font: `500 10px ${C.mono}`, color: C.inkFaint }}>{marksMsg}</span>}
+          <button onClick={onRefresh} style={ghostBtn}>↻ Reload</button>
+          <button onClick={onRefreshMarks} disabled={marksBusy}
+            style={{ ...btn(C.blue, marksBusy), padding: "6px 12px", font: `700 11px ${C.sans}` }}>
+            {marksBusy ? "Marking…" : "↻ Mark live"}
+          </button>
+        </div>
+      }>
       {(!fills || fills.length === 0) ? (
         <div style={{ padding: "14px 16px", borderRadius: 8, background: C.panel2, border: `1px dashed ${C.line}`, font: `400 12px/1.5 ${C.sans}`, color: C.inkDim }}>
           No option fills logged yet. Execute an option above and its intrinsic / extrinsic entry snapshot lands here.
@@ -3277,46 +3324,45 @@ function ThetaLedger({ fills, onRefresh, computed }) {
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead><tr>
               <th style={th}>Contract</th><th style={th}>Side</th><th style={th}>Qty</th>
-              <th style={th}>Premium</th><th style={th}>Stock@fill</th><th style={th}>Intrinsic</th>
-              <th style={th}>Extrinsic</th><th style={th}>Now</th><th style={th}>θ decay</th>
+              <th style={th}>Premium</th><th style={th}>Ext@entry</th><th style={th}>Mark now</th>
+              <th style={th}>Ext now</th><th style={th}>θ bled</th><th style={th}>θ / day</th><th style={th}>Opt P&amp;L</th>
             </tr></thead>
             <tbody>
               {fills.map((f) => {
-                const live = computed?.[f.underlying]?.price ?? null;
-                const liveIntrinsic = live == null ? null
-                  : f.option_type === "put" ? Math.max(0, f.strike - live) : Math.max(0, live - f.strike);
-                // Extrinsic decay = entry extrinsic minus what's left, assuming premium held to mark.
-                // We don't have the live option mark here, so we show the intrinsic shift the stock has produced.
-                const intrinsicNow = liveIntrinsic;
+                const m = f.mark;            // latest stored mark (or null)
+                const p = f.thetaPnl;        // computed P&L (or null)
                 const expiry = f.expiry || "";
                 const dte = expiry ? Math.round((new Date(expiry) - new Date()) / 86400000) : null;
+                const expired = dte != null && dte < 0;
                 return (
-                  <tr key={f.id}>
+                  <tr key={f.id} style={expired ? { opacity: 0.5 } : null}>
                     <td style={td}>
                       <div>{f.underlying} {gnum(f.strike, f.strike % 1 ? 2 : 0)}{f.option_type === "put" ? "P" : "C"}</div>
                       <div style={{ font: `400 10px ${C.sans}`, color: C.inkFaint }}>
-                        {expiry}{dte != null && ` · ${dte}d`}
+                        {expiry}{dte != null && ` · ${expired ? "expired" : `${dte}d`}`}
                       </div>
                     </td>
                     <td style={{ ...td, color: f.side === "sell" ? C.amber : C.inkDim }}>{f.side}</td>
                     <td style={td}>{f.quantity}</td>
                     <td style={td}>${gnum(f.premium, 2)}</td>
-                    <td style={td}>${gnum(f.stock_price, 2)}</td>
-                    <td style={{ ...td, color: C.green }}>${gnum(f.intrinsic, 2)}</td>
                     <td style={{ ...td, color: C.amber }}>${gnum(f.extrinsic, 2)}</td>
-                    <td style={{ ...td, color: C.inkDim }}>{intrinsicNow == null ? "—" : `$${gnum(intrinsicNow, 2)} int`}</td>
-                    <td style={{ ...td, color: C.inkFaint }}>
-                      {intrinsicNow == null ? "—" : `${intrinsicNow > f.intrinsic ? "+" : ""}${gnum(intrinsicNow - f.intrinsic, 2)} int Δ`}
+                    <td style={td}>{m?.mark != null ? `$${gnum(m.mark, 2)}` : "—"}</td>
+                    <td style={{ ...td, color: m?.extrinsic != null ? C.amber : C.inkFaint }}>
+                      {m?.extrinsic != null ? `$${gnum(m.extrinsic, 2)}` : "—"}
                     </td>
+                    {moneyCell(p?.bledDollars, td)}
+                    {moneyCell(p?.dayDollars, td)}
+                    {moneyCell(p?.optionPnlDollars, td)}
                   </tr>
                 );
               })}
             </tbody>
           </table>
-          <div style={{ font: `400 10px/1.4 ${C.sans}`, color: C.inkFaint, marginTop: 10 }}>
-            Entry split is captured at fill from the live Schwab quote. "Now" reflects the intrinsic shift the
-            underlying has produced since (daily snapshot); full extrinsic mark-to-market lands when the option
-            quote feed is wired.
+          <div style={{ font: `400 10px/1.5 ${C.sans}`, color: C.inkFaint, marginTop: 10 }}>
+            Entry split captured at fill. <b>Mark live</b> re-quotes every open contract in one Schwab call and
+            stores today's mark. <b>θ bled</b> = extrinsic lost since entry (× {OPTION_MULTIPLIER}× contracts);
+            <b> θ / day</b> = bleed vs. the last marked day; <b>Opt P&amp;L</b> = mark-to-market of the position,
+            signed for long/short. {asOf ? `Last marked ${asOf}.` : "Not marked yet — click Mark live."}
           </div>
         </div>
       )}
