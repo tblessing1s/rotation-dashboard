@@ -30,9 +30,16 @@ def available() -> bool:
 
 
 def _is_open(fill: dict, today: str) -> bool:
-    """A fill is still trackable while its contract is unexpired."""
+    """A fill is still trackable while unexpired and not closed.
+
+    Closed positions (side contains "close") are not refreshed since they
+    represent exits, not live option inventory.
+    """
     expiry = str(fill.get("expiry") or "")[:10]
-    return bool(expiry) and expiry >= today
+    if not (bool(expiry) and expiry >= today):
+        return False
+    side = str(fill.get("side") or "").lower()
+    return "close" not in side
 
 
 def _pnl(fill: dict, latest: dict, prior: dict | None) -> dict:

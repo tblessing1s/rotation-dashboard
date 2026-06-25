@@ -650,6 +650,69 @@ def api_options_marks_refresh():
     return jsonify(out), 200 if out.get("ok") else 400
 
 
+@app.route("/api/options/close", methods=["POST"])
+def api_options_close():
+    import option_trades
+
+    body = request.get_json(silent=True) or {}
+    fill_id = body.get("fillId")
+    if not fill_id:
+        return jsonify({"ok": False, "error": "fillId is required."}), 400
+    order_type = str(body.get("orderType") or "LIMIT").upper()
+    limit_price = body.get("limitPrice")
+    out = option_trades.close_option(
+        int(fill_id), account_hash=body.get("accountHash"),
+        order_type=order_type, limit_price=limit_price,
+    )
+    if out.get("ok"):
+        return jsonify(out), 200
+    return jsonify(out), 403 if out.get("liveDisabled") else 400
+
+
+@app.route("/api/options/close/batch", methods=["POST"])
+def api_options_close_batch():
+    import option_trades
+
+    body = request.get_json(silent=True) or {}
+    fill_ids = body.get("fillIds") or []
+    if not fill_ids:
+        return jsonify({"ok": False, "error": "fillIds array is required."}), 400
+    order_type = str(body.get("orderType") or "LIMIT").upper()
+    limit_price = body.get("limitPrice")
+    out = option_trades.batch_close_options(
+        [int(fid) for fid in fill_ids], account_hash=body.get("accountHash"),
+        order_type=order_type, limit_price=limit_price,
+    )
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
+@app.route("/api/options/roll", methods=["POST"])
+def api_options_roll():
+    import option_trades
+
+    body = request.get_json(silent=True) or {}
+    fill_id = body.get("fillId")
+    new_strike = body.get("newStrike")
+    new_expiry = body.get("newExpiry")
+    if not fill_id or new_strike is None or not new_expiry:
+        return jsonify({
+            "ok": False,
+            "error": "fillId, newStrike, and newExpiry are required.",
+        }), 400
+    close_order_type = str(body.get("closeOrderType") or "MARKET").upper()
+    open_order_type = str(body.get("openOrderType") or "LIMIT").upper()
+    open_limit_price = body.get("openLimitPrice")
+    out = option_trades.roll_option(
+        int(fill_id), float(new_strike), new_expiry,
+        account_hash=body.get("accountHash"),
+        close_order_type=close_order_type, open_order_type=open_order_type,
+        open_limit_price=open_limit_price,
+    )
+    if out.get("ok"):
+        return jsonify(out), 200
+    return jsonify(out), 403 if out.get("liveDisabled") else 400
+
+
 # ---------------------------------------------------------------------------
 # Backtesting engine — configure a day-trading setup, run it against stored
 # 5-minute bars, and get a trade log + summary stats. The run path is
