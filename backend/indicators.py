@@ -298,11 +298,25 @@ def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
     ma21 = float(ma21_series.iloc[-1])
     price = float(close.iloc[-1])
 
+    # MA200 anchors the CFM Level 2 trend check (price vs MA200). Needs 200 bars;
+    # None when history is short so the frontend can show "—" instead of guessing.
+    ma200 = None
+    if len(close) >= 200:
+        ma200 = float(moving_average(close, 200, ma_method).iloc[-1])
+
+    atr_val = atr_value(high, low, close)
+    atr_dir, _atr_now, _atr_prev = atr_direction(high, low, close)
+
     return {
         "asOf": str(bars.index[-1].date()),
         "price": round(price, 2),
         "ma21": _round(ma21, 2),
         "priceAboveMA21": price > ma21,
+        "ma200": _round(ma200, 2),
+        "priceAboveMA200": (price > ma200) if ma200 is not None else None,
+        "atr": _round(atr_val, 2),
+        "atrPct": _round(atr_percent(high, low, close), 2),
+        "atrDirection": atr_dir,
         "rsi": _round(rsi(close, method=getattr(cfg, "RSI_METHOD", "wilder"))),
         "obv": obv_trend(close, vol),
         "accDist": accumulation_distribution_trend(high, low, close, vol),
@@ -322,25 +336,67 @@ def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
     }
 
 
+def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
+    """Wilder true range: max of the day's range and the gap from prior close."""
+    prev_close = close.shift(1)
+    return pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+
+def atr_value(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float | None:
+    """ATR(14) in price (dollar) terms.
+
+    This is the input the CFM short-strike math needs: a weekly short is sold at
+    ``stock − 1.5 × ATR``, so the gate and Execute blueprint both read it directly.
+    """
+    if len(close) < period + 1:
+        return None
+    atr = true_range(high, low, close).dropna().iloc[-period:].mean()
+    return float(atr)
+
+
 def atr_percent(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float | None:
     """Average True Range expressed as a percentage of the latest close.
 
     ATR% = ATR(14) / close * 100.  Useful as a day-trading volatility filter
     (sweet spot: 4–9% matches typical intraday range for liquid large-caps).
     """
-    if len(close) < period + 1:
+    atr = atr_value(high, low, close, period)
+    if atr is None:
         return None
-    prev_close = close.shift(1)
-    tr = pd.concat([
-        high - low,
-        (high - prev_close).abs(),
-        (low - prev_close).abs(),
-    ], axis=1).max(axis=1)
-    atr = tr.dropna().iloc[-period:].mean()
     price = float(close.iloc[-1])
     if price <= 0:
         return None
     return float(atr / price * 100)
+
+
+def atr_direction(high: pd.Series, low: pd.Series, close: pd.Series,
+                  period: int = 14, lookback: int = 10, threshold: float = 0.03):
+    """Whether volatility is contracting / expanding / flat.
+
+    Compares ATR now versus ATR ``lookback`` bars ago. Contracting ATR is the
+    CFM "consolidating, ready to sell premium" tell (Level 3); expanding ATR is
+    what a sector entry (Level 1) wants. ``threshold`` is a dead-band so day-to-day
+    noise doesn't flip the label. Returns (label, atr_now, atr_prev).
+    """
+    if len(close) < period + lookback + 1:
+        return None, None, None
+    atr_series = true_range(high, low, close).rolling(period).mean().dropna()
+    if len(atr_series) < lookback + 1:
+        return None, None, None
+    now = float(atr_series.iloc[-1])
+    prev = float(atr_series.iloc[-1 - lookback])
+    if prev <= 0:
+        return None, now, prev
+    change = (now - prev) / prev
+    if change <= -threshold:
+        return "contracting", now, prev
+    if change >= threshold:
+        return "expanding", now, prev
+    return "flat", now, prev
 
 
 def avg_volume_20d(vols: pd.Series) -> float | None:

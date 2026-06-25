@@ -700,7 +700,7 @@ function CheckRow({ label, ok }) {
 // ============================================================================
 // MAIN APP
 // ============================================================================
-const CFM_TABS = ["Command", "Rotation", "Entry Watch", "Positions", "Indicators"];
+const CFM_TABS = ["Command", "Scan", "Rotation", "Entry Watch", "Positions", "Indicators"];
 const DAY_TRADING_TABS = ["Screener", "Backtest", "Executor"];
 const TABS = [...CFM_TABS, ...DAY_TRADING_TABS];
 const DEFAULT_ENTRY_WATCH_SYMBOLS = [];
@@ -982,6 +982,10 @@ function TradingDashboard({ backendOffline }) {
           <CommandView sig={sig} focus={focus} sectorRows={sectorRows} positionGuide={positionGuide} cfm={cfm} app={app} macro={macro} setMacro={setMacro}
             quotes={quotes} exitsXLV={exitsXLV} exitsAAPL={exitsAAPL}
             deployed={deployed} reserve={reserve} capital={capital} openPL={openPL} positions={positions} />
+        )}
+        {tab === "Scan" && (
+          <ScanView macro={macro} focus={focus} computed={computed} calcStatus={calcStatus}
+            watchItems={normalizedEntryWatchItems} setTab={setTab} />
         )}
         {tab === "Rotation" && (
           <RotationView focus={focus} rows={sectorRows} />
@@ -1282,6 +1286,235 @@ function RotationView({ focus, rows }) {
     <div style={{ display: "grid", gap: 16 }}>
       <SectorFocusPanel focus={focus} />
       <SectorRotationTable rows={rows} />
+    </div>
+  );
+}
+
+// ============================================================================
+// ENTRY GATE (Scan tab) — Levels 0–4, evaluated in order, STOP on first fail.
+// Levels 0–3 run entirely on the daily indicator snapshot we already ingest
+// (macro, RS3M, ATR, MA21/MA200) — no provider calls. Level 4 (Juice) needs the
+// option chain and stays "pending" until the Alpha Vantage options feed lands.
+// ============================================================================
+const GATE_STATUS = {
+  pass: { color: C.green, tone: C.greenDim, mark: "✓" },
+  caution: { color: C.amber, tone: `${C.amber}22`, mark: "!" },
+  fail: { color: C.red, tone: C.redDim, mark: "✗" },
+  pending: { color: C.inkFaint, tone: C.panel2, mark: "…" },
+  blocked: { color: C.inkFaint, tone: C.panel2, mark: "·" },
+};
+
+const gnum = (v, d = 1) => (v == null || Number.isNaN(Number(v)) ? "—" : Number(v).toFixed(d));
+const gsigned = (v, d = 1) => (v == null || Number.isNaN(Number(v)) ? "—" : `${v > 0 ? "+" : ""}${Number(v).toFixed(d)}%`);
+
+// Pure: evaluate the 0–4 ladder for one candidate. `stockCalc`/`sectorCalc` are
+// the backend indicator snapshots for the symbol and its sector proxy.
+function evaluateEntryGate({ symbol, stockCalc, sectorCalc, macro, focus, sectorProxy }) {
+  const sig = macroSignal(macro);
+  const proxy = sectorProxy || inferSectorProxy(symbol);
+  const levels = [];
+
+  // ---- Level 0 — Market regime --------------------------------------------
+  {
+    const status = sig.level === "RED" ? "fail" : sig.level === "YELLOW" ? "caution" : "pass";
+    const chip = sig.level === "GREEN" ? "Market: GREEN ✓"
+      : sig.level === "YELLOW" ? "Market: YELLOW — proceed with caution"
+      : "Market: RED ✗ — wait";
+    levels.push({
+      n: 0, title: "Market regime", status, chip,
+      checks: [
+        [`VIX ${gnum(macro.vix)} below 25`, macro.vix < 25],
+        [`Breadth ${gnum(macro.breadth)}% ≥ 50`, macro.breadth >= 50],
+        [`Regime not risk-off (${sig.level})`, sig.level !== "RED"],
+      ],
+    });
+  }
+
+  // ---- Level 1 — Sector ----------------------------------------------------
+  if (!sectorCalc) {
+    levels.push({ n: 1, title: "Sector", status: "pending", chip: `${proxy || "Sector"}: no indicator data yet`, checks: [] });
+  } else {
+    const c = sectorCalc;
+    const tier = proxy ? focusTierForSymbol(proxy, focus) : "Neutral";
+    const notAvoided = tier !== "Ignored";
+    const breadthOk = macro.breadth >= 50;
+    const rsLeading = (c.rs3mMom ?? 0) > 0 || (c.rs3m ?? 0) > 0;
+    const atrExpanding = c.atrDirection === "expanding";
+    const checks = [
+      [`RS3M ${gsigned(c.rs3m)} / MOM ${gnum(c.rs3mMom, 0)} leading`, rsLeading],
+      [`Breadth ${gnum(macro.breadth)}% ≥ 50`, breadthOk],
+      [`Sector in focus (${tier})`, notAvoided],
+      [`ATR ${c.atrDirection || "—"} (expanding favored)`, atrExpanding],
+    ];
+    const hardPass = notAvoided && breadthOk && rsLeading;
+    const status = !hardPass ? "fail" : atrExpanding ? "pass" : "caution";
+    const chip = `${proxy}: ${gsigned(c.rs3m)} RS3M, ${gnum(macro.breadth)}% breadth, ATR ${c.atrDirection || "—"}`;
+    levels.push({ n: 1, title: "Sector", status, chip, checks });
+  }
+
+  // ---- Level 2 — Stock vs SPY + Sector ------------------------------------
+  if (!stockCalc) {
+    levels.push({ n: 2, title: "Stock vs SPY + Sector", status: "pending", chip: `${symbol}: no indicator data yet`, checks: [] });
+  } else {
+    const c = stockCalc;
+    const vsSpy = c.rs3m ?? null;                         // RS3M is already measured vs SPY
+    const vsSector = (sectorCalc && c.rs3m != null && sectorCalc.rs3m != null) ? c.rs3m - sectorCalc.rs3m : null;
+    const vsSpyOk = vsSpy != null && vsSpy > 5;          // spec validator: RS3M vs SPY > +5%
+    const vsSectorOk = vsSector != null && vsSector > 0; // spec validator: RS3M vs Sector > 0 (critical)
+    const rsiOk = c.rsi != null && c.rsi >= 40 && c.rsi <= 70;
+    const ma200Ok = c.priceAboveMA200 !== false;         // pass when above or unknown (short history)
+    const ma21Ok = !!c.priceAboveMA21;
+    const checks = [
+      [`${gsigned(vsSpy)} vs SPY (> +5%)`, vsSpyOk],
+      [`${gsigned(vsSector)} vs Sector (> 0, critical)`, vsSectorOk],
+      [`RSI ${gnum(c.rsi)} healthy 40–70`, rsiOk],
+      [`Price ${c.priceAboveMA200 == null ? "vs MA200 —" : c.priceAboveMA200 ? "above MA200" : "below MA200"}`, ma200Ok],
+      [`Price ${ma21Ok ? "above MA21" : "below MA21"}`, ma21Ok],
+    ];
+    const hardPass = vsSpyOk && vsSectorOk && ma21Ok && ma200Ok;
+    const status = hardPass ? (rsiOk ? "pass" : "caution") : "fail";
+    const chip = `${symbol}: ${gsigned(vsSpy)} vs SPY, ${gsigned(vsSector)} vs Sector, RSI ${gnum(c.rsi)}`;
+    levels.push({ n: 2, title: "Stock vs SPY + Sector", status, chip, checks });
+  }
+
+  // ---- Level 3 — CFM fit (consolidating) ----------------------------------
+  if (!stockCalc) {
+    levels.push({ n: 3, title: "CFM fit (consolidating)", status: "pending", chip: `${symbol}: no indicator data yet`, checks: [] });
+  } else {
+    const c = stockCalc;
+    const contracting = c.atrDirection === "contracting" || c.atrDirection === "flat";
+    const nearMA21 = (c.ma21 && c.price) ? Math.abs(c.price - c.ma21) / c.ma21 <= 0.05 : false;
+    const volQuiet = c.volRatio != null && c.volRatio < 120;
+    const checks = [
+      [`ATR $${gnum(c.atr, 2)} ${c.atrDirection || "—"} (contracting favored)`, contracting],
+      [`Price $${gnum(c.price, 2)} near MA21 $${gnum(c.ma21, 2)}`, nearMA21],
+      [`Volume ${gnum(c.volRatio, 0)}% quiet (< 120%)`, volQuiet],
+    ];
+    const hardPass = contracting && nearMA21 && volQuiet;
+    const status = hardPass ? "pass" : "fail";
+    const chip = `ATR $${gnum(c.atr, 2)} (${c.atrDirection || "—"}), price $${gnum(c.price, 2)} near MA21 $${gnum(c.ma21, 2)}, vol ${volQuiet ? "quiet" : "elevated"}`;
+    levels.push({ n: 3, title: "CFM fit (consolidating)", status, chip, checks });
+  }
+
+  // ---- Level 4 — Juice (options) — pending until Phase 2 options feed ------
+  levels.push({
+    n: 4, title: "Juice (options)", status: "pending",
+    chip: "Awaiting options feed — Phase 2 (Alpha Vantage realtime options)",
+    checks: [
+      ["Extrinsic > $0.50/share on the weekly short", null],
+      ["ATR buffer fits short strike (stock − 1.5×ATR)", null],
+    ],
+  });
+
+  // ---- Verdict: stop on the first hard FAIL among levels 0–3 ---------------
+  const failed = levels.find((l) => l.n <= 3 && l.status === "fail");
+  const blockedFrom = failed ? failed.n + 1 : null;
+  if (blockedFrom != null) {
+    for (const l of levels) if (l.n > failed.n) l.status = "blocked";
+  }
+  const cautioned = levels.some((l) => l.n <= 3 && l.status === "caution");
+  const verdict = failed ? "BLOCKED" : "READY";
+  const headline = failed
+    ? `BLOCKED at Level ${failed.n} (${failed.title}) — ${failed.chip}`
+    : "READY TO ENTER — wait for high-probability spot (MA21 support, ATR contract, volume dry).";
+
+  return { symbol, proxy, levels, verdict, failedAt: failed ? failed.n : null, cautioned, headline };
+}
+
+function GateLevelRow({ level }) {
+  const s = GATE_STATUS[level.status] || GATE_STATUS.pending;
+  return (
+    <div style={{ borderRadius: 8, border: `1px solid ${C.lineSoft}`, overflow: "hidden", background: C.panel2 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderLeft: `3px solid ${s.color}` }}>
+        <span style={{ flexShrink: 0, width: 22, height: 22, borderRadius: 6, background: s.tone, color: s.color, display: "grid", placeItems: "center", font: `700 11px ${C.mono}` }}>{s.mark}</span>
+        <span style={{ flexShrink: 0, font: `700 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1 }}>L{level.n}</span>
+        <span style={{ flexShrink: 0, font: `600 12px ${C.sans}`, color: C.ink, width: 150 }}>{level.title}</span>
+        <span style={{ font: `${level.status === "fail" ? 700 : 500} 12px ${C.sans}`, color: level.status === "fail" ? C.red : level.status === "blocked" ? C.inkFaint : C.inkDim }}>{level.chip}</span>
+      </div>
+      {level.checks.length > 0 && level.status !== "blocked" && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "0 12px 10px 47px" }}>
+          {level.checks.map(([label, ok], i) => (
+            <span key={i} style={{
+              font: `500 10px ${C.mono}`, padding: "3px 7px", borderRadius: 4,
+              border: `1px solid ${ok === null ? C.line : ok ? C.green : C.redDim}`,
+              color: ok === null ? C.inkFaint : ok ? C.green : C.red,
+              background: ok ? C.greenDim : "transparent",
+            }}>{ok === null ? "…" : ok ? "✓" : "✗"} {label}</span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GateCard({ gate, highProbOn, onToggleHighProb }) {
+  const ready = gate.verdict === "READY";
+  return (
+    <Panel
+      title={gate.symbol}
+      eyebrow={`Sector proxy · ${gate.proxy || "—"}`}
+      accent={ready ? (gate.cautioned ? C.amber : C.green) : C.red}
+      right={<span style={{ font: `700 12px ${C.mono}`, padding: "5px 11px", borderRadius: 6, background: ready ? (gate.cautioned ? `${C.amber}22` : C.greenDim) : C.redDim, color: ready ? (gate.cautioned ? C.amber : C.green) : C.red, letterSpacing: 1 }}>{gate.verdict}</span>}
+    >
+      <div style={{ display: "grid", gap: 7 }}>
+        {gate.levels.map((l) => <GateLevelRow key={l.n} level={l} />)}
+      </div>
+      <div style={{ marginTop: 12, padding: "10px 12px", borderRadius: 8, background: ready ? (gate.cautioned ? `${C.amber}14` : `${C.green}14`) : `${C.red}14`, border: `1px solid ${ready ? (gate.cautioned ? C.amber : C.green) : C.redDim}` }}>
+        <div style={{ font: `600 12px/1.4 ${C.sans}`, color: ready ? (gate.cautioned ? C.amber : C.green) : C.red }}>{gate.headline}</div>
+        {ready && (
+          <label style={{ display: "flex", alignItems: "center", gap: 9, marginTop: 10, cursor: "pointer", font: `500 12px ${C.sans}`, color: C.inkDim }}>
+            <input type="checkbox" checked={!!highProbOn} onChange={(e) => onToggleHighProb(e.target.checked)} style={{ width: 16, height: 16, accentColor: C.green, cursor: "pointer" }} />
+            High-probability spot confirmed — price into MA21 support, ATR contracting, volume below average
+          </label>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function ScanView({ macro, focus, computed, calcStatus, watchItems, setTab }) {
+  const [highProbSpots, setHighProbSpots] = useState(() => store.get("gateHighProbSpots", {}));
+  const toggleHighProb = (symbol, on) => {
+    const next = { ...highProbSpots, [symbol]: on };
+    setHighProbSpots(next);
+    store.set("gateHighProbSpots", next, true).catch(() => {});
+  };
+
+  const gates = useMemo(() => (watchItems || []).map((item) => {
+    const proxy = item.sectorProxy || inferSectorProxy(item.symbol);
+    return evaluateEntryGate({
+      symbol: item.symbol,
+      stockCalc: computed?.[item.symbol] || null,
+      sectorCalc: computed?.[proxy] || null,
+      macro, focus, sectorProxy: proxy,
+    });
+  }).sort((a, b) => {
+    // Ready first, then by how far each got through the ladder.
+    const rank = (g) => g.verdict === "READY" ? -1 : -(g.failedAt ?? 0);
+    return rank(a) - rank(b);
+  }), [watchItems, computed, macro, focus]);
+
+  const readyCount = gates.filter((g) => g.verdict === "READY").length;
+
+  return (
+    <div style={{ display: "grid", gap: 16 }}>
+      <Panel title="Entry gate" eyebrow="Levels 0–4 · stop on first fail" accent={SIG[macroSignal(macro).level]}
+        right={<span style={{ font: `700 12px ${C.mono}`, color: readyCount ? C.green : C.inkDim }}>{readyCount} ready / {gates.length}</span>}>
+        <div style={{ font: `400 12px/1.5 ${C.sans}`, color: C.inkDim }}>
+          Each watch-list ticker is run through Level 0 (market regime) → 1 (sector) → 2 (stock vs SPY + sector) → 3 (CFM consolidation) → 4 (juice). The gate stops on the first hard fail. Levels 0–3 use the daily indicator snapshot already ingested; Level 4 (options juice) lights up once the Alpha Vantage options feed is connected.
+          {calcStatus === "loading" && <span style={{ color: C.amber }}> · refreshing indicators…</span>}
+        </div>
+        {gates.length === 0 && (
+          <div style={{ marginTop: 14, padding: "14px 16px", borderRadius: 8, background: C.panel2, border: `1px dashed ${C.line}`, font: `400 12px/1.5 ${C.sans}`, color: C.inkDim }}>
+            No tickers on the watch list yet. Add candidates in the{" "}
+            <button onClick={() => setTab("Entry Watch")} style={{ background: "none", border: "none", color: C.blue, cursor: "pointer", font: `600 12px ${C.sans}`, padding: 0 }}>Entry Watch</button>{" "}
+            tab and they will appear here.
+          </div>
+        )}
+      </Panel>
+      {gates.map((gate) => (
+        <GateCard key={gate.symbol} gate={gate} highProbOn={highProbSpots[gate.symbol]} onToggleHighProb={(on) => toggleHighProb(gate.symbol, on)} />
+      ))}
     </div>
   );
 }
