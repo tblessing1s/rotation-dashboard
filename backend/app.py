@@ -592,6 +592,41 @@ def api_options_place():
     return jsonify(out), 403 if out.get("liveDisabled") else 400
 
 
+@app.route("/api/options/order/<order_id>")
+def api_options_order_status(order_id):
+    import option_trades
+
+    out = option_trades.order_status(order_id, account_hash=request.args.get("accountHash"))
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
+@app.route("/api/options/cancel", methods=["POST"])
+def api_options_cancel():
+    import option_trades
+
+    body = request.get_json(silent=True) or {}
+    order_id = body.get("orderId") or request.args.get("orderId")
+    if not order_id:
+        return jsonify({"ok": False, "error": "orderId is required."}), 400
+    out = option_trades.cancel_option(str(order_id), account_hash=body.get("accountHash"))
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
+@app.route("/api/options/replace", methods=["POST"])
+def api_options_replace():
+    import option_trades
+
+    body = request.get_json(silent=True) or {}
+    order_id = body.get("orderId")
+    spec = body.get("spec") if "spec" in body else {k: v for k, v in body.items() if k != "orderId"}
+    if not order_id:
+        return jsonify({"ok": False, "error": "orderId is required."}), 400
+    out = option_trades.replace_option(str(order_id), spec or {}, account_hash=body.get("accountHash"))
+    if out.get("ok"):
+        return jsonify(out), 200
+    return jsonify(out), 403 if out.get("liveDisabled") else 400
+
+
 @app.route("/api/options/fills")
 def api_options_fills():
     underlying = request.args.get("underlying") or request.args.get("symbol")

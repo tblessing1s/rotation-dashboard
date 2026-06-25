@@ -237,6 +237,138 @@ def test_place_option_working_order_takes_no_snapshot(fresh_db, monkeypatch):
     assert db.list_option_fills() == []
 
 
+# ---------------------------------------------------------------------------
+# OSI round-trip + order lifecycle (status / cancel / replace)
+# ---------------------------------------------------------------------------
+def test_osi_symbol_round_trips():
+    sym = schwab_orders.osi_symbol("AAPL", "2026-06-19", "call", 150)
+    parsed = schwab_orders.parse_osi_symbol(sym)
+    assert parsed == {
+        "underlying": "AAPL", "expiry": "2026-06-19", "option_type": "call", "strike": 150.0,
+    }
+    # Fractional strike survives the round trip.
+    sym2 = schwab_orders.osi_symbol("F", "2026-01-16", "put", 12.5)
+    assert schwab_orders.parse_osi_symbol(sym2)["strike"] == 12.5
+
+
+def test_parse_osi_rejects_garbage():
+    with pytest.raises(ValueError):
+        schwab_orders.parse_osi_symbol("NOTASYMBOL")
+
+
+def _status_provider(monkeypatch, order_payload, quote=None):
+    monkeypatch.setattr(option_trades.SchwabProvider, "configured", staticmethod(lambda: True))
+    monkeypatch.setattr(
+        option_trades.SchwabProvider, "account_numbers",
+        lambda self: [{"accountNumber": "12345678", "hashValue": "HASH"}],
+    )
+    monkeypatch.setattr(
+        option_trades.SchwabProvider, "get_order", lambda self, h, oid: order_payload,
+    )
+    monkeypatch.setattr(
+        option_trades.SchwabProvider, "get_quote",
+        lambda self, sym: quote or {"symbol": sym, "last": 156.0},
+    )
+
+
+_FILLED_ORDER = {
+    "status": "FILLED", "filledQuantity": 1, "price": 8.0,
+    "orderLegCollection": [{
+        "instruction": "BUY_TO_OPEN", "quantity": 1,
+        "instrument": {"symbol": "AAPL  260619C00150000", "assetType": "OPTION"},
+    }],
+    "orderActivityCollection": [{"executionLegs": [{"quantity": 1, "price": 8.0}]}],
+}
+
+
+def test_order_status_captures_a_late_fill(fresh_db, monkeypatch):
+    # A limit that filled after the place window: status-check snapshots it.
+    _status_provider(monkeypatch, _FILLED_ORDER)
+    out = option_trades.order_status("ORD5")
+    assert out["ok"] is True
+    assert out["status"] == "FILLED"
+    assert out["split"]["intrinsic"] == 6.0
+    assert out["split"]["extrinsic"] == 2.0
+    fills = db.list_option_fills(underlying="AAPL")
+    assert len(fills) == 1
+    assert fills[0]["side"] == "buy"
+    assert fills[0]["expiry"] == "2026-06-19"
+    assert fills[0]["strike"] == 150.0
+
+
+def test_order_status_is_idempotent(fresh_db, monkeypatch):
+    _status_provider(monkeypatch, _FILLED_ORDER)
+    option_trades.order_status("ORD5")
+    again = option_trades.order_status("ORD5")
+    assert again.get("alreadyCaptured") is True
+    assert len(db.list_option_fills(underlying="AAPL")) == 1
+
+
+def test_order_status_working_takes_no_snapshot(fresh_db, monkeypatch):
+    _status_provider(monkeypatch, {"status": "WORKING", "price": 8.05})
+    out = option_trades.order_status("ORD6")
+    assert out["ok"] is True
+    assert out["status"] == "WORKING"
+    assert out["fill"] is None
+    assert db.list_option_fills() == []
+
+
+def test_cancel_option_not_gated_by_kill_switch(fresh_db, monkeypatch):
+    monkeypatch.delenv("SCHWAB_LIVE_TRADING_ENABLED", raising=False)
+    monkeypatch.setattr(option_trades.SchwabProvider, "configured", staticmethod(lambda: True))
+    monkeypatch.setattr(
+        option_trades.SchwabProvider, "account_numbers",
+        lambda self: [{"accountNumber": "12345678", "hashValue": "HASH"}],
+    )
+    called = {}
+    monkeypatch.setattr(
+        option_trades.SchwabProvider, "cancel_order",
+        lambda self, h, oid: called.setdefault("oid", oid) or {"canceled": True},
+    )
+    out = option_trades.cancel_option("ORD7")
+    assert out["ok"] is True
+    assert out["status"] == "CANCELED"
+    assert called["oid"] == "ORD7"
+
+
+def test_replace_blocked_when_kill_switch_off(monkeypatch):
+    monkeypatch.setattr(option_trades.SchwabProvider, "configured", staticmethod(lambda: True))
+    monkeypatch.delenv("SCHWAB_LIVE_TRADING_ENABLED", raising=False)
+    monkeypatch.setattr(
+        option_trades.SchwabProvider, "replace_order",
+        lambda self, h, oid, o: (_ for _ in ()).throw(AssertionError("must not replace")),
+    )
+    out = option_trades.replace_option("ORD8", _SPEC)
+    assert out["ok"] is False
+    assert out["liveDisabled"] is True
+
+
+def test_replace_reprices_and_snapshots_on_fill(fresh_db, monkeypatch):
+    monkeypatch.setenv("SCHWAB_LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setattr(option_trades.SchwabProvider, "configured", staticmethod(lambda: True))
+    monkeypatch.setattr(
+        option_trades.SchwabProvider, "account_numbers",
+        lambda self: [{"accountNumber": "12345678", "hashValue": "HASH"}],
+    )
+    # Replace mints a new order id; the new order fills.
+    monkeypatch.setattr(
+        option_trades.SchwabProvider, "replace_order",
+        lambda self, h, oid, o: {"orderId": "NEW1", "replacedOrderId": oid},
+    )
+    monkeypatch.setattr(
+        option_trades.SchwabProvider, "get_order", lambda self, h, oid: _FILLED_ORDER,
+    )
+    monkeypatch.setattr(
+        option_trades.SchwabProvider, "get_quote", lambda self, sym: {"symbol": sym, "last": 156.0},
+    )
+    out = option_trades.replace_option("OLD1", {**_SPEC, "limit_price": 8.10}, sleep_fn=lambda s: None)
+    assert out["ok"] is True
+    assert out["orderId"] == "NEW1"
+    assert out["replacedOrderId"] == "OLD1"
+    assert out["split"]["extrinsic"] == 2.0
+    assert db.get_option_fill_by_order("NEW1") is not None
+
+
 def test_preview_option_never_places(fresh_db, monkeypatch):
     monkeypatch.setattr(option_trades.SchwabProvider, "configured", staticmethod(lambda: True))
     monkeypatch.setattr(

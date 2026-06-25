@@ -940,6 +940,17 @@ def get_option_fill(fill_id: int | None) -> dict | None:
     return _option_fill_row(row) if row else None
 
 
+def get_option_fill_by_order(order_id: str | None) -> dict | None:
+    """The stored fill for a Schwab order id, or None if not yet captured."""
+    if not order_id:
+        return None
+    conn = connect()
+    row = conn.execute(
+        "SELECT * FROM option_fills WHERE order_id=?", (str(order_id),)
+    ).fetchone()
+    return _option_fill_row(row) if row else None
+
+
 def list_option_fills(underlying: str | None = None, limit: int = 200) -> list[dict]:
     """Stored option fills, newest first, optionally scoped to one underlying."""
     conn = connect()

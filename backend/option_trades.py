@@ -80,6 +80,118 @@ def _stock_price_from_quote(quote: dict) -> float | None:
     return None
 
 
+def _leg_info(order_like: dict) -> tuple[str | None, str, object]:
+    """Pull (osi_symbol, side, quantity) from any order-shaped dict.
+
+    Works for both an order we built and the order Schwab echoes back on
+    get_order, so fill capture never depends on the original spec.
+    """
+    leg = ((order_like or {}).get("orderLegCollection") or [{}])[0]
+    inst = leg.get("instrument") or {}
+    instruction = str(leg.get("instruction") or "").upper()
+    side = "sell" if instruction.startswith("SELL") else "buy"
+    return inst.get("symbol"), side, leg.get("quantity")
+
+
+def _poll_for_fill(provider, account_hash, order_id, max_polls, poll_delay, sleep_fn):
+    """Poll get_order until a fill price appears or the order reaches a terminal
+    state. Returns (status, fill, last_order_payload)."""
+    status, fill, last = "WORKING", None, {}
+    for attempt in range(max(1, int(max_polls))):
+        try:
+            last = provider.get_order(account_hash, order_id)
+        except ProviderError:
+            last = {}
+        fill = schwab_orders.parse_fill(last)
+        status = fill.get("status") or status
+        if fill.get("fillPrice") is not None or status in schwab_orders.TERMINAL_ORDER_STATES:
+            break
+        if attempt < max_polls - 1:
+            sleep_fn(poll_delay)
+    return status, fill, last
+
+
+def _capture_fill(provider, base: dict, order_like: dict, order_id: str, fill: dict) -> dict:
+    """Snapshot a confirmed fill into the theta ledger and attach it to `base`.
+
+    Idempotent: if this order id was already captured, the stored row is
+    returned instead of re-quoting. The underlying price is the live quote taken
+    *now* — tight when called right at the fill (the poll path), an approximation
+    when re-checking a fill that happened earlier (the status path). Mutates and
+    returns `base`.
+    """
+    fill_price = fill.get("fillPrice")
+    filled_qty = fill.get("filledQuantity")
+
+    existing = db.get_option_fill_by_order(order_id)
+    if existing:
+        base["ok"] = True
+        base["fill"] = existing
+        base["split"] = existing.get("payload", {}).get("split")
+        base["ledger"] = existing
+        base["alreadyCaptured"] = True
+        return base
+
+    osi, side, leg_qty = _leg_info(order_like)
+    try:
+        parsed = schwab_orders.parse_osi_symbol(osi)
+    except (ValueError, TypeError) as e:
+        base["ok"] = True
+        base["fill"] = {"fillPrice": fill_price, "filledQuantity": filled_qty}
+        base["warning"] = f"Filled at {fill_price}, but the option symbol could not be parsed ({e})."
+        return base
+
+    try:
+        quote = provider.get_quote(parsed["underlying"])
+    except ProviderError as e:
+        base["ok"] = True
+        base["fill"] = {"fillPrice": fill_price, "filledQuantity": filled_qty}
+        base["warning"] = f"Filled at {fill_price}, but the stock quote failed ({e}); theta snapshot skipped."
+        return base
+
+    stock_price = _stock_price_from_quote(quote)
+    if stock_price is None:
+        base["ok"] = True
+        base["fill"] = {"fillPrice": fill_price, "filledQuantity": filled_qty}
+        base["warning"] = "Filled, but the stock quote had no usable price; theta snapshot skipped."
+        return base
+
+    split = decompose(parsed["option_type"], parsed["strike"], stock_price, fill_price)
+    record = {
+        "order_id": order_id,
+        "underlying": parsed["underlying"],
+        "osi_symbol": osi,
+        "option_type": split["type"],
+        "strike": parsed["strike"],
+        "expiry": parsed["expiry"],
+        "side": side,
+        "quantity": int(filled_qty or leg_qty or 0),
+        "premium": fill_price,
+        "stock_price": stock_price,
+        "intrinsic": split["intrinsic"],
+        "extrinsic": split["extrinsic"],
+        "quote_time": quote.get("quoteTimeMs"),
+        "filled_at": db.utcnow(),
+        "split": split,
+    }
+    base["ok"] = True
+    base["fill"] = record
+    base["split"] = split
+    base["ledger"] = db.record_option_fill(record)
+    return base
+
+
+def _finalize(provider, base: dict, order_like: dict, order_id: str, fill: dict) -> dict:
+    """Either capture a fill into `base`, or mark the order still working."""
+    if not fill or fill.get("fillPrice") is None:
+        base["ok"] = True
+        base["fill"] = None
+        base["note"] = ("Order is working; not filled yet. Re-check status, cancel, "
+                        "or re-price (replace) to chase the fill.")
+        return base
+    return _capture_fill(provider, base, order_like, order_id, fill)
+
+
 def preview_option(spec: dict, *, account_hash: str | None = None) -> dict:
     """Build the option order for ``spec`` and dry-run it via Schwab previewOrder.
 
@@ -152,71 +264,102 @@ def place_option(
     if not order_id:
         return {"ok": False, "error": "Schwab accepted the order but returned no order id.", "order": order}
 
-    # Poll until the order resolves or we observe a fill price.
-    status, fill = "WORKING", None
-    for attempt in range(max(1, int(max_polls))):
-        try:
-            order_status = provider.get_order(resolved_hash, order_id)
-        except ProviderError:
-            order_status = {}
-        fill = schwab_orders.parse_fill(order_status)
-        status = fill.get("status") or status
-        if fill.get("fillPrice") is not None or status in schwab_orders.TERMINAL_ORDER_STATES:
-            break
-        if attempt < max_polls - 1:
-            sleep_fn(poll_delay)
-
+    status, fill, _ = _poll_for_fill(provider, resolved_hash, order_id, max_polls, poll_delay, sleep_fn)
     base = {"mode": "LIVE", "orderId": order_id, "account": label, "order": order, "status": status}
+    return _finalize(provider, base, order, order_id, fill)
 
-    fill_price = fill.get("fillPrice") if fill else None
-    if fill_price is None:
-        # Placed, but no fill observed in the poll window (e.g. a resting limit).
-        # Nothing to decompose yet; report it so the UI can show a working order.
-        base["ok"] = True
-        base["fill"] = None
-        base["note"] = "Order placed but not filled within the poll window; no theta snapshot taken."
-        return base
 
-    # Filled — capture the underlying price right now and split the premium.
-    underlying = str(spec["underlying"]).upper()
+def order_status(order_id: str, *, account_hash: str | None = None) -> dict:
+    """Re-check a placed order and, if it has filled, capture its theta snapshot now.
+
+    This is the answer to "did it fill yet?" after the place window closed — and
+    it is idempotent, so polling a since-filled order repeatedly only stores the
+    snapshot once. A read action (no kill-switch needed). Returns
+    ``{ok, orderId, status, fill, ...}``.
+    """
+    if not SchwabProvider.configured():
+        return {"ok": False, "error": "Schwab credentials are not set (SCHWAB_APP_KEY / SECRET / REFRESH_TOKEN)."}
+    provider = SchwabProvider()
     try:
-        quote = provider.get_quote(underlying)
+        resolved_hash, label = _resolve_account(provider, account_hash)
+        payload = provider.get_order(resolved_hash, order_id)
     except ProviderError as e:
-        base["ok"] = True
-        base["fill"] = {"fillPrice": fill_price, "filledQuantity": fill.get("filledQuantity")}
-        base["warning"] = f"Filled at {fill_price}, but the stock quote failed ({e}); theta snapshot skipped."
-        return base
+        return {"ok": False, "error": str(e)}
 
-    stock_price = _stock_price_from_quote(quote)
-    if stock_price is None:
-        base["ok"] = True
-        base["fill"] = {"fillPrice": fill_price, "filledQuantity": fill.get("filledQuantity")}
-        base["warning"] = "Filled, but the stock quote had no usable price; theta snapshot skipped."
-        return base
-
-    split = decompose(spec["option_type"], spec["strike"], stock_price, fill_price)
-    osi = order["orderLegCollection"][0]["instrument"]["symbol"]
-    fill_record = {
-        "order_id": order_id,
-        "underlying": underlying,
-        "osi_symbol": osi,
-        "option_type": split["type"],
-        "strike": float(spec["strike"]),
-        "expiry": str(spec["expiry"])[:10],
-        "side": str(spec.get("side") or "buy").lower(),
-        "quantity": int(fill.get("filledQuantity") or spec["quantity"]),
-        "premium": fill_price,
-        "stock_price": stock_price,
-        "intrinsic": split["intrinsic"],
-        "extrinsic": split["extrinsic"],
-        "quote_time": quote.get("quoteTimeMs"),
-        "filled_at": db.utcnow(),
-    }
-    fill_record["split"] = split
-    ledger_row = db.record_option_fill(fill_record)
-
+    fill = schwab_orders.parse_fill(payload)
+    base = {"orderId": str(order_id), "account": label, "status": fill.get("status") or "UNKNOWN"}
+    if fill.get("fillPrice") is not None:
+        return _capture_fill(provider, base, payload, str(order_id), fill)
     base["ok"] = True
-    base["fill"] = fill_record
-    base["split"] = split
-    base["ledger"] = ledger_row
+    base["fill"] = None
     return base
+
+
+def cancel_option(order_id: str, *, account_hash: str | None = None) -> dict:
+    """Cancel a working order. Risk-reducing, so it is NOT behind the kill-switch
+    — you can always pull a resting order even with live placement disabled."""
+    if not SchwabProvider.configured():
+        return {"ok": False, "error": "Schwab credentials are not set (SCHWAB_APP_KEY / SECRET / REFRESH_TOKEN)."}
+    provider = SchwabProvider()
+    try:
+        resolved_hash, label = _resolve_account(provider, account_hash)
+        provider.cancel_order(resolved_hash, order_id)
+    except ProviderError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "orderId": str(order_id), "status": "CANCELED", "account": label}
+
+
+def replace_option(
+    order_id: str,
+    spec: dict,
+    *,
+    account_hash: str | None = None,
+    max_polls: int = DEFAULT_MAX_POLLS,
+    poll_delay: float = DEFAULT_POLL_DELAY,
+    sleep_fn=time.sleep,
+) -> dict:
+    """Re-price a working order: atomically cancel `order_id` and submit `spec`.
+
+    This is the "work the order to get filled" path — bump the limit and replace
+    rather than chase with a separate cancel + place. Schwab mints a NEW order id
+    (the original is canceled); we poll the new id and snapshot on fill, exactly
+    like place_option. Gated behind the kill-switch since it transmits an order.
+    """
+    if not SchwabProvider.configured():
+        return {"ok": False, "error": "Schwab credentials are not set (SCHWAB_APP_KEY / SECRET / REFRESH_TOKEN)."}
+    if not live_trading_enabled():
+        return {
+            "ok": False,
+            "error": (
+                "Live option trading is disabled. Set the "
+                f"{_LIVE_FLAG}=true server secret to arm real order placement/replacement."
+            ),
+            "liveDisabled": True,
+        }
+    try:
+        order = schwab_orders.build_option_order(spec or {})
+    except (KeyError, ValueError, TypeError) as e:
+        return {"ok": False, "error": f"Invalid option spec: {e}"}
+
+    provider = SchwabProvider()
+    try:
+        resolved_hash, label = _resolve_account(provider, account_hash)
+        replaced = provider.replace_order(resolved_hash, order_id, order)
+    except ProviderError as e:
+        return {"ok": False, "error": str(e)}
+
+    new_id = replaced.get("orderId")
+    if not new_id:
+        return {
+            "ok": False,
+            "error": "Schwab accepted the replacement but returned no new order id.",
+            "replacedOrderId": str(order_id),
+            "order": order,
+        }
+
+    status, fill, _ = _poll_for_fill(provider, resolved_hash, new_id, max_polls, poll_delay, sleep_fn)
+    base = {
+        "mode": "LIVE", "orderId": new_id, "replacedOrderId": str(order_id),
+        "account": label, "order": order, "status": status,
+    }
+    return _finalize(provider, base, order, new_id, fill)

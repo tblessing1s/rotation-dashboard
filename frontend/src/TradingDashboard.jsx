@@ -426,6 +426,35 @@ async function apiOptionsFills(underlying = "") {
   return r.json();
 }
 
+// Re-check a placed order; if it has filled since, the backend captures the
+// theta snapshot now (idempotently).
+async function apiOptionsOrderStatus(orderId) {
+  const r = await fetch(`${API}/api/options/order/${encodeURIComponent(orderId)}`);
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok };
+}
+
+// Cancel a working order (risk-reducing; allowed even with live placement off).
+async function apiOptionsCancel(orderId) {
+  const r = await fetch(`${API}/api/options/cancel`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ orderId }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok };
+}
+
+// Atomically cancel + re-submit a re-priced order to chase a fill. Returns a
+// NEW order id (the original is canceled).
+async function apiOptionsReplace(orderId, spec) {
+  const r = await fetch(`${API}/api/options/replace`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ orderId, spec }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok, httpStatus: r.status };
+}
+
 // Manual overrides persist server-side with source="manual" and always beat
 // ingested values. value=null clears the override (back to auto).
 async function apiSetOverride(key, value) {
@@ -2958,6 +2987,7 @@ function ThetaView({ computed }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
   const [confirmArm, setConfirmArm] = useState(false);
+  const [workingOrder, setWorkingOrder] = useState(null);  // { orderId, status, note }
 
   const setField = (k, v) => {
     const next = { ...spec, [k]: v };
@@ -2988,12 +3018,13 @@ function ThetaView({ computed }) {
   };
 
   const runPlace = async () => {
-    setBusy("place"); setError(""); setResult(null);
+    setBusy("place"); setError(""); setResult(null); setWorkingOrder(null);
     try {
       const out = await apiOptionsPlace(spec);
-      setResult(out);
       if (!out.ok) setError(out.error || "Order failed.");
-      else loadFills();
+      else if (out.fill && out.split) { setResult(out); loadFills(); }       // filled instantly
+      else if (out.orderId) setWorkingOrder({ orderId: out.orderId, status: out.status, note: out.note }); // resting
+      else setResult(out);
     } catch (e) { setError(String(e.message || e)); }
     setBusy(""); setConfirmArm(false);
   };
@@ -3085,6 +3116,16 @@ function ThetaView({ computed }) {
 
         {preview && <PreviewBox preview={preview} />}
         {result && result.ok && <PlaceResultBox result={result} />}
+        {workingOrder && (
+          <WorkingOrderBox
+            order={workingOrder}
+            spec={spec}
+            onFilled={(out) => { setWorkingOrder(null); setResult(out); loadFills(); }}
+            onCanceled={() => setWorkingOrder(null)}
+            onReplaced={(next) => setWorkingOrder(next)}
+            onError={setError}
+          />
+        )}
       </Panel>
 
       <ThetaLedger fills={fills} onRefresh={loadFills} computed={computed} />
@@ -3119,6 +3160,75 @@ function PreviewBox({ preview }) {
       {(p.rejects || []).concat(p.alerts || []).map((m, i) => (
         <div key={i} style={{ marginTop: 6, font: `400 11px ${C.sans}`, color: tone }}>• {m}</div>
       ))}
+    </div>
+  );
+}
+
+function WorkingOrderBox({ order, spec, onFilled, onCanceled, onReplaced, onError }) {
+  const [status, setStatus] = useState(order.status || "WORKING");
+  const [busy, setBusy] = useState("");
+
+  const check = useCallback(async () => {
+    try {
+      const out = await apiOptionsOrderStatus(order.orderId);
+      if (!out.ok) { onError(out.error || "Status check failed."); return; }
+      if (out.fill && out.split) onFilled(out);
+      else if (out.status) setStatus(out.status);
+    } catch (e) { onError(String(e.message || e)); }
+  }, [order.orderId, onFilled, onError]);
+
+  // Markets fill on their own clock, so re-check the resting order automatically.
+  useEffect(() => {
+    const id = setInterval(check, 4000);
+    return () => clearInterval(id);
+  }, [check]);
+
+  const doCheck = async () => { setBusy("check"); await check(); setBusy(""); };
+
+  const doCancel = async () => {
+    setBusy("cancel");
+    try {
+      const out = await apiOptionsCancel(order.orderId);
+      if (out.ok) onCanceled(); else onError(out.error || "Cancel failed.");
+    } catch (e) { onError(String(e.message || e)); }
+    setBusy("");
+  };
+
+  // Re-price = cancel + re-submit at the form's current limit, atomically.
+  const doReplace = async () => {
+    setBusy("replace");
+    try {
+      const out = await apiOptionsReplace(order.orderId, spec);
+      if (!out.ok) onError(out.error || "Re-price failed.");
+      else if (out.fill && out.split) onFilled(out);
+      else if (out.orderId) onReplaced({ orderId: out.orderId, status: out.status, note: out.note });
+    } catch (e) { onError(String(e.message || e)); }
+    setBusy("");
+  };
+
+  const repriceLabel = spec.order_type === "LIMIT" ? `$${gnum(spec.limit_price, 2)}` : "MKT";
+  return (
+    <div style={{ marginTop: 12, padding: "12px 14px", borderRadius: 8, background: `${C.amber}14`, border: `1px solid ${C.amber}` }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+        <span style={{ font: `700 11px ${C.mono}`, color: C.amber, letterSpacing: 1 }}>ORDER {status}</span>
+        <span style={{ font: `500 11px ${C.mono}`, color: C.inkFaint }}>#{order.orderId}</span>
+      </div>
+      <div style={{ font: `400 12px/1.4 ${C.sans}`, color: C.inkDim, marginBottom: 10 }}>
+        Working order — auto-checking every 4s. Bump the <b>Limit</b> field above and <b>Re-price</b> to chase the
+        fill, or cancel. The theta snapshot is captured the instant it fills.
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <button onClick={doCheck} disabled={!!busy} style={btn(C.blue, !!busy)}>
+          {busy === "check" ? "Checking…" : "Check now"}
+        </button>
+        <button onClick={doReplace} disabled={!!busy} style={btn(C.amber, !!busy)}
+          title="Cancel and re-submit at the current limit price above">
+          {busy === "replace" ? "Re-pricing…" : `Re-price @ ${repriceLabel}`}
+        </button>
+        <button onClick={doCancel} disabled={!!busy} style={btn(C.red, !!busy)}>
+          {busy === "cancel" ? "Canceling…" : "Cancel order"}
+        </button>
+      </div>
     </div>
   );
 }

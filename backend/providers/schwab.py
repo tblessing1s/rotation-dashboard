@@ -441,3 +441,54 @@ class SchwabProvider(Provider):
         return self._get_json(
             f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}"
         ) or {}
+
+    def cancel_order(self, account_hash: str, order_id: str) -> dict:
+        """Cancel a working order (DELETE .../orders/{id}).
+
+        Risk-reducing — it closes exposure rather than opening it — so callers
+        do not gate this behind the live-trading kill-switch. Schwab returns an
+        empty 200/201 on success; a 400 typically means the order already
+        filled or was already canceled (no longer cancelable).
+        """
+        url = f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}"
+        try:
+            resp = requests.delete(
+                url,
+                headers={"Authorization": f"Bearer {self._token()}", "Accept": "application/json"},
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab cancel order request failed: {e}") from e
+        if resp.status_code in (200, 201):
+            return {"orderId": str(order_id), "canceled": True}
+        hint = self._ACCOUNT_ACCESS_HINT if resp.status_code in (401, 403) else ""
+        raise ProviderError(f"schwab cancel order: HTTP {resp.status_code} {resp.text[:300]}{hint}")
+
+    def replace_order(self, account_hash: str, order_id: str, order: dict) -> dict:
+        """Atomically cancel `order_id` and submit `order` in its place (PUT).
+
+        This is the broker-native "work the order" path: re-pricing a resting
+        limit without a naked moment between a separate cancel and a new place.
+        Schwab cancels the original and mints a NEW order id (returned in the
+        Location header), so the caller polls the new id for the fill.
+        """
+        url = f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}"
+        try:
+            resp = requests.put(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self._token()}",
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                },
+                json=order,
+                timeout=30,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab replace order request failed: {e}") from e
+        if resp.status_code in (200, 201):
+            location = resp.headers.get("Location") or resp.headers.get("location") or ""
+            new_id = location.rstrip("/").rsplit("/", 1)[-1] if location else None
+            return {"orderId": new_id, "replacedOrderId": str(order_id), "location": location}
+        hint = self._ACCOUNT_ACCESS_HINT if resp.status_code in (401, 403) else ""
+        raise ProviderError(f"schwab replace order: HTTP {resp.status_code} {resp.text[:300]}{hint}")

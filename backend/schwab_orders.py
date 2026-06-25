@@ -130,6 +130,31 @@ def osi_symbol(underlying: str, expiry, option_type: str, strike: float) -> str:
     return f"{root:<6}{exp:%y%m%d}{cp}{strike_int:08d}"
 
 
+def parse_osi_symbol(symbol: str) -> dict:
+    """Inverse of osi_symbol: an OSI option symbol -> its components.
+
+    ``"AAPL  260619C00150000"`` -> ``{underlying, expiry, option_type, strike}``
+    with expiry as 'YYYY-MM-DD' and option_type as 'call'/'put'. Lets a fill be
+    decomposed straight from the order Schwab echoes back, so capturing a fill
+    never needs the original spec passed around.
+    """
+    s = str(symbol or "")
+    if len(s) < 15:
+        raise ValueError(f"not an OSI option symbol: {symbol!r}")
+    root = s[:6].strip().upper()
+    yy, mm, dd = s[6:8], s[8:10], s[10:12]
+    cp = s[12].upper()
+    strike_raw = s[13:21]
+    if not root or cp not in ("C", "P") or not strike_raw.isdigit():
+        raise ValueError(f"malformed OSI option symbol: {symbol!r}")
+    return {
+        "underlying": root,
+        "expiry": f"20{yy}-{mm}-{dd}",
+        "option_type": "call" if cp == "C" else "put",
+        "strike": int(strike_raw) / 1000.0,
+    }
+
+
 def build_option_order(spec: dict) -> dict:
     """Spec -> a Schwab single-leg option order (open).
 
