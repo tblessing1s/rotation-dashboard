@@ -84,12 +84,21 @@ def _leg_info(order_like: dict) -> tuple[str | None, str, object]:
     """Pull (osi_symbol, side, quantity) from any order-shaped dict.
 
     Works for both an order we built and the order Schwab echoes back on
-    get_order, so fill capture never depends on the original spec.
+    get_order, so fill capture never depends on the original spec. Side
+    includes "to_close" suffix when applicable (e.g., "sell_to_close").
     """
     leg = ((order_like or {}).get("orderLegCollection") or [{}])[0]
     inst = leg.get("instrument") or {}
     instruction = str(leg.get("instruction") or "").upper()
-    side = "sell" if instruction.startswith("SELL") else "buy"
+    # Preserve the to_close/to_open distinction in the side field.
+    if "SELL_TO_CLOSE" in instruction:
+        side = "sell_to_close"
+    elif "BUY_TO_CLOSE" in instruction:
+        side = "buy_to_close"
+    elif instruction.startswith("SELL"):
+        side = "sell"
+    else:
+        side = "buy"
     return inst.get("symbol"), side, leg.get("quantity")
 
 
@@ -363,3 +372,187 @@ def replace_option(
         "account": label, "order": order, "status": status,
     }
     return _finalize(provider, base, order, new_id, fill)
+
+
+def close_option(
+    fill_id: int,
+    *,
+    account_hash: str | None = None,
+    order_type: str = "LIMIT",
+    limit_price: float | None = None,
+    max_polls: int = DEFAULT_MAX_POLLS,
+    poll_delay: float = DEFAULT_POLL_DELAY,
+    sleep_fn=time.sleep,
+) -> dict:
+    """Close an open option position by selling/buying to close.
+
+    Takes a fill_id (the open position to close) and optionally a limit_price.
+    Builds a close order (opposite direction: buy to close if originally sold,
+    sell to close if originally bought), places it, polls for fill, and snapshots
+    the close. Gated behind the kill-switch since it transmits an order.
+    Returns ``{ok, mode:"LIVE", orderId, status, fill, ledger}`` on success.
+    """
+    if not SchwabProvider.configured():
+        return {"ok": False, "error": "Schwab credentials are not set (SCHWAB_APP_KEY / SECRET / REFRESH_TOKEN)."}
+    if not live_trading_enabled():
+        return {
+            "ok": False,
+            "error": (
+                "Live option trading is disabled. Set the "
+                f"{_LIVE_FLAG}=true server secret to arm real order placement."
+            ),
+            "liveDisabled": True,
+        }
+
+    fill = db.get_option_fill(fill_id)
+    if not fill:
+        return {"ok": False, "error": f"No open position found with fill_id={fill_id}"}
+
+    # Build close order: opposite direction of the opening side.
+    # If originally bought, we sell to close (side="buy" -> instruction="SELL_TO_CLOSE").
+    # If originally sold, we buy to close (side="sell" -> instruction="BUY_TO_CLOSE").
+    opposite_side = "sell" if fill.get("side") == "buy" else "buy"
+    close_spec = {
+        "underlying": fill.get("underlying"),
+        "expiry": fill.get("expiry"),
+        "option_type": fill.get("option_type"),
+        "strike": fill.get("strike"),
+        "quantity": fill.get("quantity"),
+        "side": opposite_side,
+        "order_type": order_type,
+    }
+    if limit_price is not None:
+        close_spec["limit_price"] = limit_price
+
+    try:
+        order = schwab_orders.build_option_close_order(close_spec)
+    except (KeyError, ValueError, TypeError) as e:
+        return {"ok": False, "error": f"Invalid close spec: {e}"}
+
+    provider = SchwabProvider()
+    try:
+        resolved_hash, label = _resolve_account(provider, account_hash)
+        placed = provider.place_order(resolved_hash, order)
+    except ProviderError as e:
+        return {"ok": False, "error": str(e)}
+
+    order_id = placed.get("orderId")
+    if not order_id:
+        return {"ok": False, "error": "Schwab accepted the order but returned no order id.", "order": order}
+
+    status, close_fill, _ = _poll_for_fill(provider, resolved_hash, order_id, max_polls, poll_delay, sleep_fn)
+    base = {
+        "mode": "LIVE", "orderId": order_id, "fillId": fill_id, "account": label,
+        "order": order, "status": status, "closedPosition": fill,
+    }
+    return _finalize(provider, base, order, order_id, close_fill)
+
+
+def batch_close_options(
+    fill_ids: list[int],
+    *,
+    account_hash: str | None = None,
+    order_type: str = "LIMIT",
+    limit_price: float | None = None,
+    max_polls: int = DEFAULT_MAX_POLLS,
+    poll_delay: float = DEFAULT_POLL_DELAY,
+    sleep_fn=time.sleep,
+) -> dict:
+    """Close multiple open positions simultaneously.
+
+    Submits one close order per fill_id and collects results. Returns
+    ``{ok, closed, failed, errors}``.
+    """
+    if not fill_ids:
+        return {"ok": True, "closed": [], "failed": [], "errors": []}
+
+    closed = []
+    failed = []
+    errors = []
+
+    for fid in fill_ids:
+        result = close_option(
+            fid, account_hash=account_hash, order_type=order_type,
+            limit_price=limit_price, max_polls=max_polls, poll_delay=poll_delay,
+            sleep_fn=sleep_fn,
+        )
+        if result.get("ok"):
+            closed.append({"fillId": fid, "orderId": result.get("orderId"), "status": result.get("status")})
+        else:
+            failed.append(fid)
+            errors.append({"fillId": fid, "error": result.get("error")})
+
+    return {
+        "ok": True,
+        "closed": closed,
+        "failed": failed,
+        "errors": errors if errors else None,
+    }
+
+
+def roll_option(
+    fill_id: int,
+    new_strike: float,
+    new_expiry: str,
+    *,
+    account_hash: str | None = None,
+    close_order_type: str = "MARKET",
+    open_order_type: str = "LIMIT",
+    open_limit_price: float | None = None,
+    max_polls: int = DEFAULT_MAX_POLLS,
+    poll_delay: float = DEFAULT_POLL_DELAY,
+    sleep_fn=time.sleep,
+) -> dict:
+    """Roll a position: close current option, open a new one with different strike/expiry.
+
+    Closes the position at market (or at a limit), then opens a new position with
+    the new strike and expiry at a specified limit price. Executes as two separate
+    orders (not atomic), so fills are independent. Gated behind the kill-switch.
+    Returns ``{ok, closed, opened}`` on success, with details of both orders.
+    """
+    close_result = close_option(
+        fill_id, account_hash=account_hash, order_type=close_order_type,
+        max_polls=max_polls, poll_delay=poll_delay, sleep_fn=sleep_fn,
+    )
+    if not close_result.get("ok"):
+        return {"ok": False, "error": "Failed to close position", "closeResult": close_result}
+
+    # Get the closed position to extract details for the new open.
+    fill = db.get_option_fill(fill_id)
+    if not fill:
+        return {
+            "ok": False,
+            "error": "Could not reload position after close",
+            "closeResult": close_result,
+        }
+
+    # Open the new position with the same side and direction, but new strike/expiry.
+    open_spec = {
+        "underlying": fill.get("underlying"),
+        "expiry": new_expiry,
+        "option_type": fill.get("option_type"),
+        "strike": new_strike,
+        "quantity": fill.get("quantity"),
+        "side": fill.get("side"),
+        "order_type": open_order_type,
+    }
+    if open_limit_price is not None:
+        open_spec["limit_price"] = open_limit_price
+
+    open_result = place_option(
+        open_spec, account_hash=account_hash,
+        max_polls=max_polls, poll_delay=poll_delay, sleep_fn=sleep_fn,
+    )
+    if not open_result.get("ok"):
+        return {
+            "ok": False,
+            "error": "Failed to open new position (close succeeded, but new open failed)",
+            "closeResult": close_result,
+            "openResult": open_result,
+        }
+
+    return {
+        "ok": True,
+        "closed": close_result,
+        "opened": open_result,
+    }

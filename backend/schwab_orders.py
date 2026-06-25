@@ -26,6 +26,10 @@ OPTION = "OPTION"
 # CFM "long premium" play; selling to open is a written/short option.
 _OPTION_OPEN_INSTR = {"buy": "BUY_TO_OPEN", "sell": "SELL_TO_OPEN"}
 
+# Single-option close instructions by direction. Closing a long position (bought
+# to open) requires SELL_TO_CLOSE; closing a short position requires BUY_TO_CLOSE.
+_OPTION_CLOSE_INSTR = {"buy": "BUY_TO_CLOSE", "sell": "SELL_TO_CLOSE"}
+
 
 # ---------------------------------------------------------------------------
 # Order construction
@@ -186,6 +190,53 @@ def build_option_order(spec: dict) -> dict:
         "complexOrderStrategyType": "NONE",
         "orderLegCollection": [{
             "instruction": _OPTION_OPEN_INSTR[side],
+            "quantity": qty,
+            "instrument": {"symbol": symbol, "assetType": OPTION},
+        }],
+    }
+    if order_type == "LIMIT":
+        try:
+            limit = round(float(spec["limit_price"]), 2)
+        except (KeyError, TypeError, ValueError) as e:
+            raise ValueError("limit_price (per-share premium) is required for a LIMIT order") from e
+        if limit <= 0:
+            raise ValueError("limit_price must be greater than 0")
+        order["price"] = f"{limit:.2f}"
+    return order
+
+
+def build_option_close_order(spec: dict) -> dict:
+    """Spec -> a Schwab single-leg option close order (sell-to-close or buy-to-close).
+
+    Required spec keys: ``underlying``, ``expiry`` (YYYY-MM-DD), ``option_type``
+    (call/put), ``strike``, ``quantity`` (contracts), ``side`` (buy/sell — the
+    opposite of the opening side).
+    Optional: ``order_type`` (LIMIT default, or MARKET) and ``limit_price``
+    (per-share premium for LIMIT). Raises ValueError/KeyError on a
+    malformed spec.
+    """
+    side = str(spec.get("side") or "buy").lower()
+    if side not in _OPTION_CLOSE_INSTR:
+        raise ValueError("side must be buy or sell")
+    qty = int(spec["quantity"])
+    if qty <= 0:
+        raise ValueError("quantity (contracts) must be greater than 0")
+
+    symbol = osi_symbol(
+        spec["underlying"], spec["expiry"], spec["option_type"], spec["strike"]
+    )
+    order_type = str(spec.get("order_type") or "LIMIT").upper()
+    if order_type not in ("LIMIT", "MARKET"):
+        raise ValueError("order_type must be LIMIT or MARKET")
+
+    order = {
+        "orderType": order_type,
+        "session": "NORMAL",
+        "duration": "DAY",
+        "orderStrategyType": "SINGLE",
+        "complexOrderStrategyType": "NONE",
+        "orderLegCollection": [{
+            "instruction": _OPTION_CLOSE_INSTR[side],
             "quantity": qty,
             "instrument": {"symbol": symbol, "assetType": OPTION},
         }],
