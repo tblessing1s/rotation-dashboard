@@ -16,6 +16,7 @@ import app as app_mod
 import config as cfg
 import db
 import ingest
+from providers import alphavantage
 from providers.base import Provider, ProviderError
 
 
@@ -55,10 +56,8 @@ class FakeYahoo(FakeProvider):
 def env(fresh_db, monkeypatch, tmp_path):
     monkeypatch.setattr(ingest.time, "sleep", lambda s: None)
     monkeypatch.setattr(ingest, "STATE_FILE", str(tmp_path / "state.json"))
-    monkeypatch.setattr(
-        ingest.fred, "fetch_series",
-        lambda sid, timeout=20: fake_fred(sid),
-    )
+    monkeypatch.setattr(alphavantage, "configured", lambda: True)
+    monkeypatch.setattr(alphavantage, "economic_series", lambda sid: fake_fred(sid))
     monkeypatch.setattr(ingest, "is_stale", lambda *a, **k: False)  # no catch-up thread
     return monkeypatch
 
