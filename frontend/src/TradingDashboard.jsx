@@ -466,6 +466,26 @@ async function apiOptionsReplace(orderId, spec) {
   return { ...data, ok: data.ok ?? r.ok, httpStatus: r.status };
 }
 
+// Close an open position.
+async function apiOptionsClose(fillId, orderType = "LIMIT", limitPrice = null) {
+  const r = await fetch(`${API}/api/options/close`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fillId, orderType, limitPrice }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok };
+}
+
+// Roll a position to a new strike/expiry (closes current, opens new).
+async function apiOptionsRoll(fillId, newStrike, newExpiry, closeOrderType = "MARKET", openOrderType = "LIMIT", openLimitPrice = null) {
+  const r = await fetch(`${API}/api/options/roll`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fillId, newStrike, newExpiry, closeOrderType, openOrderType, openLimitPrice }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok };
+}
+
 // Manual overrides persist server-side with source="manual" and always beat
 // ingested values. value=null clears the override (back to auto).
 async function apiSetOverride(key, value) {
@@ -3018,6 +3038,22 @@ function ThetaView({ computed }) {
   const [marksBusy, setMarksBusy] = useState(false);
   const [marksMsg, setMarksMsg] = useState("");
 
+  // Close/roll action state
+  const [closeModal, setCloseModal] = useState(null);           // { fillId, fill } or null
+  const [closeOrderType, setCloseOrderType] = useState("LIMIT");
+  const [closeLimitPrice, setCloseLimitPrice] = useState("");
+  const [closeBusy, setCloseBusy] = useState(false);
+  const [closeMsg, setCloseMsg] = useState("");
+
+  const [rollModal, setRollModal] = useState(null);             // { fillId, fill } or null
+  const [rollNewStrike, setRollNewStrike] = useState("");
+  const [rollNewExpiry, setRollNewExpiry] = useState("");
+  const [rollCloseType, setRollCloseType] = useState("MARKET");
+  const [rollOpenType, setRollOpenType] = useState("LIMIT");
+  const [rollOpenPrice, setRollOpenPrice] = useState("");
+  const [rollBusy, setRollBusy] = useState(false);
+  const [rollMsg, setRollMsg] = useState("");
+
   const loadFills = useCallback(() => {
     apiOptionsFills().then((d) => setFills(d.fills || [])).catch(() => {});
   }, []);
@@ -3034,6 +3070,51 @@ function ThetaView({ computed }) {
     } catch (e) { setMarksMsg(String(e.message || e)); }
     setMarksBusy(false);
   }, []);
+
+  const handleClose = useCallback(async () => {
+    if (!closeModal) return;
+    setCloseBusy(true); setCloseMsg("");
+    try {
+      const limitPrice = closeOrderType === "LIMIT" ? (closeLimitPrice ? parseFloat(closeLimitPrice) : null) : null;
+      const out = await apiOptionsClose(closeModal.fillId, closeOrderType, limitPrice);
+      if (out.ok) {
+        setCloseMsg(`Closed ✓ — ${out.status}`);
+        loadFills();
+        setTimeout(() => setCloseModal(null), 1500);
+      } else {
+        setCloseMsg(out.error || "Close failed.");
+      }
+    } catch (e) {
+      setCloseMsg(String(e.message || e));
+    }
+    setCloseBusy(false);
+  }, [closeModal, closeOrderType, closeLimitPrice, loadFills]);
+
+  const handleRoll = useCallback(async () => {
+    if (!rollModal || !rollNewStrike || !rollNewExpiry) return;
+    setRollBusy(true); setRollMsg("");
+    try {
+      const openPrice = rollOpenType === "LIMIT" ? (rollOpenPrice ? parseFloat(rollOpenPrice) : null) : null;
+      const out = await apiOptionsRoll(
+        rollModal.fillId,
+        parseFloat(rollNewStrike),
+        rollNewExpiry,
+        rollCloseType,
+        rollOpenType,
+        openPrice
+      );
+      if (out.ok) {
+        setRollMsg(`Rolled ✓ — closed ${out.closed?.status || "?"}, opened ${out.opened?.status || "?"}`);
+        loadFills();
+        setTimeout(() => setRollModal(null), 1500);
+      } else {
+        setRollMsg(out.error || "Roll failed.");
+      }
+    } catch (e) {
+      setRollMsg(String(e.message || e));
+    }
+    setRollBusy(false);
+  }, [rollModal, rollNewStrike, rollNewExpiry, rollCloseType, rollOpenType, rollOpenPrice, loadFills]);
 
   useEffect(() => {
     apiOptionsStatus().then(setStatus).catch(() => setStatus({ configured: false, liveTradingEnabled: false }));
@@ -3164,7 +3245,111 @@ function ThetaView({ computed }) {
       </Panel>
 
       <ThetaLedger fills={fills} onRefresh={loadFills} onRefreshMarks={refreshMarks}
-        marksBusy={marksBusy} marksMsg={marksMsg} />
+        marksBusy={marksBusy} marksMsg={marksMsg}
+        onClose={(f) => { setCloseModal({ fillId: f.id, fill: f }); setCloseLimitPrice(""); setCloseOrderType("LIMIT"); setCloseMsg(""); }}
+        onRoll={(f) => { setRollModal({ fillId: f.id, fill: f }); setRollNewStrike(""); setRollNewExpiry(""); setRollMsg(""); }} />
+
+      {closeModal && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 24, maxWidth: 400, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
+            <div style={{ font: `600 16px ${C.sans}`, marginBottom: 16 }}>Close position</div>
+            <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim, marginBottom: 20 }}>
+              {closeModal.fill.underlying} {gnum(closeModal.fill.strike, 0)}{closeModal.fill.option_type === "put" ? "P" : "C"} · {closeModal.fill.expiry}
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 6 }}>Order type</label>
+              <select value={closeOrderType} onChange={(e) => setCloseOrderType(e.target.value)}
+                style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}` }}>
+                <option value="MARKET">Market</option>
+                <option value="LIMIT">Limit</option>
+              </select>
+            </div>
+            {closeOrderType === "LIMIT" && (
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: "block", font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 6 }}>Limit price (per contract)</label>
+                <input type="number" value={closeLimitPrice} onChange={(e) => setCloseLimitPrice(e.target.value)} step="0.01"
+                  style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, boxSizing: "border-box" }} />
+              </div>
+            )}
+            {closeMsg && (
+              <div style={{ padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, font: `500 11px ${C.sans}`, color: C.amber, marginBottom: 16 }}>
+                {closeMsg}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={handleClose} disabled={closeBusy}
+                style={{ flex: 1, padding: "8px 12px", background: C.blue, color: "#06121f", border: "none", borderRadius: 6, cursor: closeBusy ? "default" : "pointer", font: `600 12px ${C.sans}`, opacity: closeBusy ? 0.6 : 1 }}>
+                {closeBusy ? "Closing…" : "Close"}
+              </button>
+              <button onClick={() => setCloseModal(null)} disabled={closeBusy}
+                style={{ flex: 1, padding: "8px 12px", background: C.line, color: C.inkDim, border: "none", borderRadius: 6, cursor: "pointer", font: `600 12px ${C.sans}` }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {rollModal && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 24, maxWidth: 450, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
+            <div style={{ font: `600 16px ${C.sans}`, marginBottom: 16 }}>Roll position</div>
+            <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim, marginBottom: 20 }}>
+              {rollModal.fill.underlying} {gnum(rollModal.fill.strike, 0)}{rollModal.fill.option_type === "put" ? "P" : "C"} · {rollModal.fill.expiry} → new strike & expiry
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+              <div>
+                <label style={{ display: "block", font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 6 }}>New strike</label>
+                <input type="number" value={rollNewStrike} onChange={(e) => setRollNewStrike(e.target.value)} step="0.5"
+                  style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, boxSizing: "border-box" }} />
+              </div>
+              <div>
+                <label style={{ display: "block", font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 6 }}>New expiry (YYYY-MM-DD)</label>
+                <input type="date" value={rollNewExpiry} onChange={(e) => setRollNewExpiry(e.target.value)}
+                  style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, boxSizing: "border-box" }} />
+              </div>
+            </div>
+            <div style={{ marginBottom: 16, paddingTop: 16, borderTop: `1px solid ${C.lineSoft}` }}>
+              <div style={{ font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>Close current</div>
+              <select value={rollCloseType} onChange={(e) => setRollCloseType(e.target.value)}
+                style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, marginBottom: 12 }}>
+                <option value="MARKET">Market</option>
+                <option value="LIMIT">Limit (LIMIT not yet supported for close)</option>
+              </select>
+            </div>
+            <div style={{ marginBottom: 16, paddingBottom: 16, borderBottom: `1px solid ${C.lineSoft}` }}>
+              <div style={{ font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>Open new</div>
+              <select value={rollOpenType} onChange={(e) => setRollOpenType(e.target.value)}
+                style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, marginBottom: 12 }}>
+                <option value="MARKET">Market</option>
+                <option value="LIMIT">Limit</option>
+              </select>
+              {rollOpenType === "LIMIT" && (
+                <div>
+                  <label style={{ display: "block", font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 6 }}>Target entry price (per contract)</label>
+                  <input type="number" value={rollOpenPrice} onChange={(e) => setRollOpenPrice(e.target.value)} step="0.01"
+                    style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, boxSizing: "border-box" }} />
+                </div>
+              )}
+            </div>
+            {rollMsg && (
+              <div style={{ padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, font: `500 11px ${C.sans}`, color: C.amber, marginBottom: 16 }}>
+                {rollMsg}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={handleRoll} disabled={rollBusy || !rollNewStrike || !rollNewExpiry}
+                style={{ flex: 1, padding: "8px 12px", background: C.blue, color: "#06121f", border: "none", borderRadius: 6, cursor: (rollBusy || !rollNewStrike || !rollNewExpiry) ? "default" : "pointer", font: `600 12px ${C.sans}`, opacity: (rollBusy || !rollNewStrike || !rollNewExpiry) ? 0.6 : 1 }}>
+                {rollBusy ? "Rolling…" : "Roll"}
+              </button>
+              <button onClick={() => setRollModal(null)} disabled={rollBusy}
+                style={{ flex: 1, padding: "8px 12px", background: C.line, color: C.inkDim, border: "none", borderRadius: 6, cursor: "pointer", font: `600 12px ${C.sans}` }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3305,10 +3490,11 @@ function moneyCell(v, td) {
   return <td style={{ ...td, color: tone }}>{v > 0 ? "+" : ""}${gnum(v, 2)}</td>;
 }
 
-function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg }) {
+function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg, onClose, onRoll }) {
   const th = { textAlign: "left", font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, padding: "8px 10px", borderBottom: `1px solid ${C.line}`, textTransform: "uppercase" };
   const td = { font: `500 12px ${C.mono}`, color: C.ink, padding: "9px 10px", borderBottom: `1px solid ${C.lineSoft}` };
   const ghostBtn = { background: "none", border: `1px solid ${C.line}`, borderRadius: 6, color: C.inkDim, cursor: "pointer", font: `600 11px ${C.sans}`, padding: "5px 10px" };
+  const actionBtn = { background: "none", border: `1px solid ${C.line}`, borderRadius: 4, color: C.blue, cursor: "pointer", font: `500 11px ${C.sans}`, padding: "4px 8px", fontSize: "11px" };
   const asOf = fills.map((f) => f.mark?.as_of_date).filter(Boolean).sort().slice(-1)[0];
   return (
     <Panel title="Theta ledger" eyebrow="filled options · extrinsic decay"
@@ -3333,6 +3519,7 @@ function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg }) 
               <th style={th}>Contract</th><th style={th}>Side</th><th style={th}>Qty</th>
               <th style={th}>Premium</th><th style={th}>Ext@entry</th><th style={th}>Mark now</th>
               <th style={th}>Ext now</th><th style={th}>θ bled</th><th style={th}>θ / day</th><th style={th}>Opt P&amp;L</th>
+              <th style={th}>Actions</th>
             </tr></thead>
             <tbody>
               {fills.map((f) => {
@@ -3341,6 +3528,7 @@ function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg }) 
                 const expiry = f.expiry || "";
                 const dte = expiry ? Math.round((new Date(expiry) - new Date()) / 86400000) : null;
                 const expired = dte != null && dte < 0;
+                const isClosed = f.side && f.side.toLowerCase().includes("close");
                 return (
                   <tr key={f.id} style={expired ? { opacity: 0.5 } : null}>
                     <td style={td}>
@@ -3360,6 +3548,14 @@ function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg }) 
                     {moneyCell(p?.bledDollars, td)}
                     {moneyCell(p?.dayDollars, td)}
                     {moneyCell(p?.optionPnlDollars, td)}
+                    <td style={{ ...td, whiteSpace: "nowrap" }}>
+                      {!isClosed && !expired && (
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <button onClick={() => onClose?.(f)} style={actionBtn}>Close</button>
+                          <button onClick={() => onRoll?.(f)} style={actionBtn}>Roll</button>
+                        </div>
+                      )}
+                    </td>
                   </tr>
                 );
               })}
