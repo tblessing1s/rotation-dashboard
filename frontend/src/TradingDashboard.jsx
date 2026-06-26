@@ -2180,6 +2180,16 @@ function EntryWatchView({ macro, focus, computed, indicatorHistory, calcStatus, 
     try {
       const r = await apiOptionsChain(symbol);
       if (r.ok) {
+        // Debug: log the actual data structure returned from Schwab
+        console.log(`[Option Chain] Loaded ${symbol}:`, {
+          expirations: r.chain?.expirations?.slice(0, 3),
+          callStructure: r.chain?.callExpDateMap ? Object.keys(r.chain.callExpDateMap)[0] : null,
+          sampleCall: r.chain?.callExpDateMap ? (() => {
+            const expiry = Object.keys(r.chain.callExpDateMap)[0];
+            const strike = Object.keys(r.chain.callExpDateMap[expiry])[0];
+            return r.chain.callExpDateMap[expiry][strike];
+          })() : null,
+        });
         const updated = { ...loadedChains, [symbol]: r.chain };
         setLoadedChains(updated);
         store.set("loadedChains", updated, true).catch(() => {});
