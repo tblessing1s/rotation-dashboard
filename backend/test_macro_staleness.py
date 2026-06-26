@@ -42,3 +42,29 @@ def test_new_observation_still_appends(fresh_db, monkeypatch):
     s = db.get_macro_series("CPIAUCSL")
     assert list(s.values) == [300.0, 301.5]
     assert s.attrs["fetched_at"] == "2026-07-01T00:00:00Z"  # latest date's stamp
+
+
+def test_active_source_wins_over_stale_legacy_rows(fresh_db, monkeypatch):
+    """After the FRED->Alpha Vantage migration the store can still hold legacy
+    FRED rows. Alpha Vantage's economic endpoints often lag FRED by a period, so
+    a dead FRED observation can carry a *newer* date than Alpha Vantage's latest.
+    The series must follow the freshly ingested source, not let that stale FRED
+    row win the most-recent slot and freeze both the value and its fetched_at."""
+    # Legacy FRED GDP, ingested long ago, with a date AHEAD of Alpha Vantage's.
+    monkeypatch.setattr(db, "utcnow", lambda: "2026-01-15T00:00:00Z")
+    db.append_macro_series("GDPC1", _series(["2026-01-01"], [22000.0]), "fred")
+
+    # Alpha Vantage now ingests current quarterly GDP (one quarter behind FRED's
+    # last print) with a fresh fetched_at.
+    monkeypatch.setattr(db, "utcnow", lambda: "2026-06-26T00:00:00Z")
+    db.append_macro_series(
+        "GDPC1", _series(["2025-07-01", "2025-10-01"], [21800.0, 21950.0]), "alphavantage"
+    )
+
+    s = db.get_macro_series("GDPC1")
+    # The Alpha Vantage observations win wholesale — the stale 2026-01-01 FRED
+    # value is NOT the latest, and the recency stamp reflects the AV ingestion.
+    assert list(s.values) == [21800.0, 21950.0]
+    assert str(s.index[-1].date()) == "2025-10-01"
+    assert s.attrs["source"] == "alphavantage"
+    assert s.attrs["fetched_at"] == "2026-06-26T00:00:00Z"

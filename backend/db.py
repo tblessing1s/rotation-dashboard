@@ -529,6 +529,21 @@ def get_macro_series(series_id: str) -> pd.Series | None:
     ).fetchall()
     if not rows:
         return None
+
+    # Alpha Vantage is the sole macro source, but legacy FRED rows can still sit
+    # in the store from before the migration. Merging sources lets a dead FRED
+    # observation whose date is NEWER than Alpha Vantage's latest (AV's economic
+    # endpoints often lag FRED by a period) win the most-recent slot — freezing
+    # both the value and its fetched_at, so the macro gate reads red forever with
+    # the same stale numbers. Follow the most-recently-ingested source only.
+    latest_fetch_by_source: dict[str, str] = {}
+    for row in rows:
+        fetched = row["fetched_at"] or ""
+        if fetched >= latest_fetch_by_source.get(row["source"], ""):
+            latest_fetch_by_source[row["source"]] = fetched
+    active_source = max(latest_fetch_by_source, key=lambda src: latest_fetch_by_source[src])
+    rows = [r for r in rows if r["source"] == active_source]
+
     best = {}
     for row in rows:
         best[row["date"]] = row  # later fetch wins per date
@@ -538,8 +553,11 @@ def get_macro_series(series_id: str) -> pd.Series | None:
         index=pd.to_datetime([r["date"] for r in ordered]),
         dtype=float,
     )
-    s.attrs["source"] = ordered[-1]["source"]
-    s.attrs["fetched_at"] = ordered[-1]["fetched_at"]
+    s.attrs["source"] = active_source
+    # Staleness for slow-moving series tracks ingestion recency, so report the
+    # newest fetch across the active source (the touch in append_macro_series
+    # advances exactly that stamp), not just the latest date's row.
+    s.attrs["fetched_at"] = latest_fetch_by_source[active_source]
     return s
 
 
