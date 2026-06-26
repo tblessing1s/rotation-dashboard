@@ -4,6 +4,7 @@ Admin CLI for the rotation dashboard.
   python cli.py ingest --now            force one ingestion cycle
   python cli.py ingest --symbols XLV,SPY  targeted run (bars + snapshots only)
   python cli.py status                  per-symbol / per-series freshness report
+  python cli.py macro                   check macro series staleness (Alpha Vantage)
   python cli.py backtest-backfill --symbols AMD,HOOD --start 2026-05-15 --end 2026-06-14
                                         pull 5-minute bars from Schwab (Yahoo
                                         fallback) into the datastore
@@ -58,6 +59,61 @@ def cmd_status(args) -> int:
             f"{sid:<10} {info.get('lastDate', '—'):<12} "
             f"{info.get('value', '—'):>10}  {info.get('fetchedAt', '—')}"
         )
+    return 0
+
+
+def cmd_macro(args) -> int:
+    from datetime import datetime, timezone
+
+    def _ingest_staleness(fetched_at: str | None) -> str:
+        if not fetched_at:
+            return "unknown"
+        try:
+            fetched = datetime.strptime(fetched_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            age_hours = (datetime.now(timezone.utc) - fetched).total_seconds() / 3600
+        except ValueError:
+            return "unknown"
+        if age_hours <= 36:
+            return "fresh"
+        if age_hours <= 96:
+            return "yellow"
+        return "red"
+
+    import db
+
+    snap = db.latest_snapshot("macro", "macro") or {"values": {}, "fields": {}, "errors": {}}
+    fields = dict(snap.get("fields") or {})
+    errors = dict(snap.get("errors") or {})
+
+    if not fields and not errors:
+        print("No macro data ingested yet.")
+        return 1
+
+    print(f"\nMacro Data Freshness Report")
+    print(f"=" * 80)
+    print()
+
+    if fields:
+        print(f"{'SERIES':<15} {'VALUE':>12} {'STATE':<8} {'FETCHED AT':<25} SOURCE")
+        print("-" * 80)
+        for key in sorted(fields.keys()):
+            meta = fields[key]
+            staleness = _ingest_staleness(meta.get("fetchedAt"))
+            print(
+                f"{key:<15} {str(meta.get('value', '—')):>12} "
+                f"{staleness:<8} {meta.get('fetchedAt', '—'):<25} "
+                f"{meta.get('source', '—')}"
+            )
+
+    if errors:
+        print()
+        print("Errors:")
+        for key, err in errors.items():
+            print(f"  {key}: {err}")
+
+    print()
+    print(f"Computed at: {snap.get('_computedAt', '—')}")
+    print()
     return 0
 
 
@@ -158,6 +214,9 @@ def main(argv=None) -> int:
     p_status = sub.add_parser("status", help="per-symbol freshness report")
     p_status.add_argument("--json", action="store_true", help="raw JSON output")
     p_status.set_defaults(fn=cmd_status)
+
+    p_macro = sub.add_parser("macro", help="check macro series staleness (Alpha Vantage)")
+    p_macro.set_defaults(fn=cmd_macro)
 
     p_bf = sub.add_parser("backtest-backfill", help="pull 5-minute bars into the datastore")
     p_bf.add_argument("--symbols", required=True, help="comma-separated tickers (e.g. AMD,HOOD)")
