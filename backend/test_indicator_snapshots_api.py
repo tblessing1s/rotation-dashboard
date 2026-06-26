@@ -33,10 +33,12 @@ def test_indicator_snapshots_are_entry_universe_only_and_datastore_backed(fresh_
     assert out["historyState"] == "ok"
     assert [s["asOf"] for s in out["sessions"]] == ["2026-06-10", "2026-06-09"]
     latest = out["sessions"][0]
-    assert set(latest["symbols"]) == {"XLV"}
+    # XLV and AAPL are both in the entry universe (AAPL via XLK constituents);
+    # NOTWATCHED is filtered out.
+    assert set(latest["symbols"]) == {"XLV", "AAPL"}
     assert latest["symbols"]["XLV"]["candidateStrategies"] == ["CFM"]
+    assert latest["symbols"]["AAPL"]["sectorProxy"] == "XLK"
     assert latest["symbols"]["XLV"]["indicators"]["rs3m"] == 2
-    assert "AAPL" not in latest["symbols"]
     assert "NOTWATCHED" not in latest["symbols"]
 
 

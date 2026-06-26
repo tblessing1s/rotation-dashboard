@@ -157,26 +157,43 @@ const SECTORS = [
 
 const SECTOR_BY_SYMBOL = Object.fromEntries(SECTORS.map((sector) => [sector.symbol, sector]));
 const DEFENSIVE_SECTORS = ["XLV", "XLP", "XLU", "XLRE"];
-const CFM_CANDIDATE_UNIVERSE = [
-  "XLV", "XLP", "XLU", "XLRE",
-  "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE",
-  "PG", "COST", "WMT", "PEP", "KO",
-  "NEE", "SO", "DUK", "PLD", "AMT",
-];
-const ENTRY_CANDIDATE_UNIVERSE = CFM_CANDIDATE_UNIVERSE;
-const SECTOR_PROXY_BY_STOCK = {
-  AAPL: "XLK", MSFT: "XLK", NVDA: "XLK", AMD: "XLK", AVGO: "XLK", CRM: "XLK", NOW: "XLK",
-  META: "XLC", GOOGL: "XLC", GOOG: "XLC", NFLX: "XLC",
-  AMZN: "XLY", TSLA: "XLY", HD: "XLY", MCD: "XLY", NKE: "XLY",
-  JNJ: "XLV", MRK: "XLV", PFE: "XLV", ABBV: "XLV", LLY: "XLV", UNH: "XLV", ILMN: "XLV",
-  PG: "XLP", KO: "XLP", PEP: "XLP", COST: "XLP", WMT: "XLP",
-  JPM: "XLF", BAC: "XLF", GS: "XLF", MS: "XLF", BRK: "XLF",
-  XOM: "XLE", CVX: "XLE", COP: "XLE", SLB: "XLE",
-  CAT: "XLI", GE: "XLI", HON: "XLI", DE: "XLI", BA: "XLI",
-  LIN: "XLB", FCX: "XLB", NEM: "XLB",
-  NEE: "XLU", SO: "XLU", DUK: "XLU",
-  PLD: "XLRE", AMT: "XLRE",
+
+// Sector constituents (largest / most-liquid holdings per SPDR sector ETF),
+// ordered by index weight. Single source of truth: the sector-proxy lookup and
+// the CFM candidate-ranking universe are both derived from this map, so adding
+// a name here makes it rank-able and correctly proxied everywhere.
+const SECTOR_CONSTITUENTS = {
+  XLB: ["LIN", "NEM", "FCX", "VMC", "CRH", "MLM", "SHW", "CTVA", "ECL", "APD", "NUE", "STLD"],
+  XLC: ["META", "GOOGL", "GOOG", "NFLX", "TTWO", "DIS", "EA", "TMUS", "VZ", "T", "CMCSA", "CHTR"],
+  XLE: ["XOM", "CVX", "COP", "WMB", "VLO", "MPC", "EOG", "SLB", "PSX", "KMI", "OKE", "OXY"],
+  XLF: ["JPM", "V", "MA", "BAC", "GS", "MS", "WFC", "C", "AXP", "SCHW", "BLK", "SPGI"],
+  XLI: ["CAT", "GE", "RTX", "BA", "ETN", "UNP", "DE", "HON", "LMT", "UPS", "GD", "MMM"],
+  XLK: ["NVDA", "AAPL", "MSFT", "AVGO", "AMD", "CSCO", "TXN", "ORCL", "PLTR", "IBM", "QCOM", "CRM"],
+  XLP: ["WMT", "COST", "PG", "KO", "PM", "CL", "PEP", "MO", "MDLZ", "MNST", "TGT", "KDP"],
+  XLRE: ["WELL", "PLD", "EQIX", "AMT", "SPG", "DLR", "O", "PSA", "VTR", "CBRE", "CCI", "EXR"],
+  XLU: ["NEE", "SO", "DUK", "CEG", "AEP", "D", "SRE", "XEL", "EXC", "PEG", "ED", "WEC"],
+  XLV: ["LLY", "JNJ", "ABBV", "UNH", "MRK", "AMGN", "TMO", "ABT", "GILD", "ISRG", "PFE", "CVS"],
+  XLY: ["AMZN", "TSLA", "HD", "TJX", "MCD", "BKNG", "LOW", "SBUX", "MAR", "GM", "NKE", "AZO"],
 };
+
+// stock -> sector-ETF proxy, derived from the constituents map. Sector ETFs map
+// to themselves so inference is total over both stocks and the ETFs.
+const SECTOR_PROXY_BY_STOCK = {
+  ...Object.fromEntries(SECTORS.map((s) => [s.symbol, s.symbol])),
+  ...Object.fromEntries(
+    Object.entries(SECTOR_CONSTITUENTS).flatMap(([etf, names]) => names.map((n) => [n, etf]))
+  ),
+};
+
+// CFM ranks deeper in the defensive sectors (its wheelhouse) but still covers
+// every sector so the leaderboard can surface the best fit for the regime.
+const CFM_CANDIDATE_UNIVERSE = [...new Set([
+  ...SECTORS.map((s) => s.symbol),
+  ...Object.entries(SECTOR_CONSTITUENTS).flatMap(([etf, names]) =>
+    names.slice(0, DEFENSIVE_SECTORS.includes(etf) ? 10 : 4)
+  ),
+])];
+const ENTRY_CANDIDATE_UNIVERSE = CFM_CANDIDATE_UNIVERSE;
 
 const STRATEGY_META = {
   AUTO: { label: "Auto", color: C.blue },

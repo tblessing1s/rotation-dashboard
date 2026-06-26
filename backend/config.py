@@ -58,23 +58,40 @@ MA21_METHOD = "sma"
 # ---- Data / ingestion --------------------------------------------------------
 HISTORY_DAYS = 320          # ~10 months of daily bars (enough for RS3M_MOM's 131-bar reference)
 
-# Entry-watch candidate universe (CFM strategy only).
-CFM_ENTRY_CANDIDATES = [
-    "XLV", "XLP", "XLU", "XLRE",
-    "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE",
-    "PG", "COST", "WMT", "PEP", "KO",
-    "NEE", "SO", "DUK", "PLD", "AMT",
-]
+# Sector constituents (largest / most-liquid holdings per SPDR sector ETF).
+# Single source of truth for the CFM candidate universe and the stock->sector
+# proxy map. Mirrors SECTOR_CONSTITUENTS in the frontend so scheduled ingestion
+# covers every name the candidate leaderboard can rank.
+SECTOR_CONSTITUENTS = {
+    "XLB": ["LIN", "NEM", "FCX", "VMC", "CRH", "MLM", "SHW", "CTVA", "ECL", "APD", "NUE", "STLD"],
+    "XLC": ["META", "GOOGL", "GOOG", "NFLX", "TTWO", "DIS", "EA", "TMUS", "VZ", "T", "CMCSA", "CHTR"],
+    "XLE": ["XOM", "CVX", "COP", "WMB", "VLO", "MPC", "EOG", "SLB", "PSX", "KMI", "OKE", "OXY"],
+    "XLF": ["JPM", "V", "MA", "BAC", "GS", "MS", "WFC", "C", "AXP", "SCHW", "BLK", "SPGI"],
+    "XLI": ["CAT", "GE", "RTX", "BA", "ETN", "UNP", "DE", "HON", "LMT", "UPS", "GD", "MMM"],
+    "XLK": ["NVDA", "AAPL", "MSFT", "AVGO", "AMD", "CSCO", "TXN", "ORCL", "PLTR", "IBM", "QCOM", "CRM"],
+    "XLP": ["WMT", "COST", "PG", "KO", "PM", "CL", "PEP", "MO", "MDLZ", "MNST", "TGT", "KDP"],
+    "XLRE": ["WELL", "PLD", "EQIX", "AMT", "SPG", "DLR", "O", "PSA", "VTR", "CBRE", "CCI", "EXR"],
+    "XLU": ["NEE", "SO", "DUK", "CEG", "AEP", "D", "SRE", "XEL", "EXC", "PEG", "ED", "WEC"],
+    "XLV": ["LLY", "JNJ", "ABBV", "UNH", "MRK", "AMGN", "TMO", "ABT", "GILD", "ISRG", "PFE", "CVS"],
+    "XLY": ["AMZN", "TSLA", "HD", "TJX", "MCD", "BKNG", "LOW", "SBUX", "MAR", "GM", "NKE", "AZO"],
+}
+
+DEFENSIVE_SECTORS = ["XLV", "XLP", "XLU", "XLRE"]
+
+# CFM ranks deeper in the defensive sectors (its wheelhouse) but still covers
+# every sector so the leaderboard can surface the best fit for the regime.
+CFM_ENTRY_CANDIDATES = list(dict.fromkeys(
+    SECTOR_SYMBOLS
+    + [name for etf, names in SECTOR_CONSTITUENTS.items()
+       for name in names[: (10 if etf in DEFENSIVE_SECTORS else 4)]]
+))
 ENTRY_CANDIDATES = CFM_ENTRY_CANDIDATES
+
+# stock -> sector-ETF proxy, derived from the constituents map. Sector ETFs map
+# to themselves so inference is total over both stocks and the ETFs.
 ENTRY_CANDIDATE_PROXY = {
-    "XLV": "XLV", "XLP": "XLP", "XLU": "XLU", "XLRE": "XLRE",
-    "LLY": "XLV", "UNH": "XLV", "JNJ": "XLV", "MRK": "XLV", "ABBV": "XLV", "PFE": "XLV",
-    "PG": "XLP", "COST": "XLP", "WMT": "XLP", "PEP": "XLP", "KO": "XLP",
-    "NEE": "XLU", "SO": "XLU", "DUK": "XLU", "PLD": "XLRE", "AMT": "XLRE",
-    "XLK": "XLK", "XLY": "XLY", "XLC": "XLC", "XLI": "XLI",
-    "NVDA": "XLK", "MSFT": "XLK", "AAPL": "XLK", "AVGO": "XLK", "AMD": "XLK", "CRM": "XLK", "NOW": "XLK",
-    "META": "XLC", "GOOGL": "XLC", "NFLX": "XLC", "AMZN": "XLY", "TSLA": "XLY",
-    "HD": "XLY", "CAT": "XLI", "GE": "XLI", "HON": "XLI", "DE": "XLI",
+    **{etf: etf for etf in SECTOR_CONSTITUENTS},
+    **{name: etf for etf, names in SECTOR_CONSTITUENTS.items() for name in names},
 }
 
 # If the newest successful ingest is older than this, an API hit kicks off a
