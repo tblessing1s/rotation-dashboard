@@ -157,20 +157,13 @@ const SECTORS = [
 
 const SECTOR_BY_SYMBOL = Object.fromEntries(SECTORS.map((sector) => [sector.symbol, sector]));
 const DEFENSIVE_SECTORS = ["XLV", "XLP", "XLU", "XLRE"];
-const APP_SECTORS = ["XLK", "XLY", "XLC", "XLI"];
 const CFM_CANDIDATE_UNIVERSE = [
   "XLV", "XLP", "XLU", "XLRE",
   "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE",
   "PG", "COST", "WMT", "PEP", "KO",
   "NEE", "SO", "DUK", "PLD", "AMT",
 ];
-const APP_CANDIDATE_UNIVERSE = [
-  "XLK", "XLY", "XLC", "XLI",
-  "NVDA", "MSFT", "AAPL", "AVGO", "AMD", "CRM", "NOW",
-  "META", "GOOGL", "NFLX", "AMZN", "TSLA",
-  "HD", "CAT", "GE", "HON", "DE",
-];
-const ENTRY_CANDIDATE_UNIVERSE = [...new Set([...CFM_CANDIDATE_UNIVERSE, ...APP_CANDIDATE_UNIVERSE])];
+const ENTRY_CANDIDATE_UNIVERSE = CFM_CANDIDATE_UNIVERSE;
 const SECTOR_PROXY_BY_STOCK = {
   AAPL: "XLK", MSFT: "XLK", NVDA: "XLK", AMD: "XLK", AVGO: "XLK", CRM: "XLK", NOW: "XLK",
   META: "XLC", GOOGL: "XLC", GOOG: "XLC", NFLX: "XLC",
@@ -188,7 +181,6 @@ const SECTOR_PROXY_BY_STOCK = {
 const STRATEGY_META = {
   AUTO: { label: "Auto", color: C.blue },
   CFM: { label: "CFM", color: C.blue },
-  APP: { label: "APP", color: C.amber },
   WAIT: { label: "No trade", color: C.inkDim },
   MIXED: { label: "Mixed", color: C.yellow },
 };
@@ -582,12 +574,11 @@ function sectorFocus(m) {
     rationale.push("Hot inflation favors commodity/cyclical sectors over rate-sensitive groups.");
   } else if (m.fed === "dovish" || (m.growth === "accelerating" && m.breadth >= 55)) {
     regime = "Risk-on growth";
-    favoredStrategy = "APP";
-    primary.push("XLK", "XLY", "XLC", "XLI");
-    secondary.push("XLF");
-    avoid.push("XLU", "XLP");
-    entryPermission = "APP setups allowed with breakout confirmation";
-    rationale.push("Growth/breadth/Fed backdrop supports appreciation sectors first.");
+    favoredStrategy = "CFM";
+    primary.push("XLI", "XLF", "XLV");
+    secondary.push("XLK", "XLP");
+    entryPermission = "CFM setups allowed with flow confirmation";
+    rationale.push("Growth/breadth/Fed backdrop supports CFM sectors.");
   } else {
     primary.push("XLI", "XLF", "XLV");
     secondary.push("XLK", "XLP");
@@ -640,12 +631,10 @@ function positionGuidance(position, computed, macro, focus) {
   if (!calc) return { action: "Manual", color: C.inkDim, note: "No live indicator set for this symbol yet." };
   const rotation = sectorRotationStatus(calc, focusTier, macro);
   const isCFM = position.strategy === "CFM";
-  const isAPP = position.strategy === "APP";
 
   if (rotation.exits.length >= 2) return { action: "Exit / reduce", color: C.red, note: rotation.exits.map((e) => e[0]).join(" · ") };
-  if (focusTier === "Ignored" && isAPP) return { action: "Tighten", color: C.amber, note: "Position sector is not favored by Level 1; require leadership to stay." };
   if (focusTier === "Ignored" && isCFM) return { action: "Review", color: C.amber, note: "CFM sector no longer fits the current macro focus." };
-  if (rotation.status === "Confirmed") return { action: isAPP ? "Hold winner" : "Hold", color: C.green, note: "Institutional rotation, flow, and MA21 remain supportive." };
+  if (rotation.status === "Confirmed") return { action: "Hold", color: C.green, note: "Institutional rotation, flow, and MA21 remain supportive." };
   if (rotation.status === "Rotating in") return { action: "Hold / monitor", color: C.blue, note: "Rotation is improving but still needs daily confirmation." };
   return { action: "Tighten", color: C.yellow, note: "Not enough confirmation; watch RS3M_MOM, OBV, and MA21." };
 }
@@ -670,32 +659,6 @@ function cfmChecklist(m, inst, flow, tech) {
     ["Price above MA21", tech.priceAboveMA21],
     ["2–3 bounces at support confirmed", tech.bouncesConfirmed],
     ["Support clearly defined", tech.supportDefined],
-  ];
-  const pass = items.filter((i) => i[1]).length;
-  const verdict = pass === items.length ? "ENTER" : "WAIT";
-  return { items, pass, total: items.length, verdict, macro };
-}
-
-// APP entry checklist
-function appChecklist(m, inst, flow, tech) {
-  const macro = macroSignal(m);
-  const items = [
-    ["Fed dovish or neutral (not hawkish)", m.fed !== "hawkish"],
-    ["Growth accelerating", m.growth === "accelerating"],
-    ["Inflation falling / not hot", m.inflation <= 3],
-    ["Market breadth > 60%", m.breadth > 60],
-    ["VIX < 20", m.vix < 20],
-    ["RS3M negative (laggard rotating in)", inst.rs3m < 0],
-    ["RS3M_MOM +500+ and accelerating", inst.rs3mMom >= 500],
-    ["Earnings revisions trending up fast", inst.earnings === "up"],
-    ["Valuation reasonable (not expensive)", inst.valuation !== "expensive"],
-    ["Credit easy", inst.credit === "easy"],
-    ["MoneyFlow 50–70 (money in, not overbought)", flow.mfi >= 50 && flow.mfi <= 70],
-    ["OBV green and rising", flow.obv === "rising"],
-    ["Volume 120%+ (real breakout)", flow.volRatio >= 120],
-    ["RSI 50–70 (strong, not overbought)", flow.rsi >= 50 && flow.rsi <= 70],
-    ["Breakout above resistance", tech.breakoutConfirmed],
-    ["Support clear below entry", tech.supportDefined],
   ];
   const pass = items.filter((i) => i[1]).length;
   const verdict = pass === items.length ? "ENTER" : "WAIT";
@@ -1024,9 +987,7 @@ function TradingDashboard({ backendOffline }) {
   }), [computed, focus, macro]);
   const positionGuide = useMemo(() => Object.fromEntries(positions.map((p) => [p.id, positionGuidance(p, computed, macro, focus)])), [positions, computed, macro, focus]);
   const cfm = useMemo(() => cfmChecklist(macro, instXLV, flowXLV, techXLV), [macro, instXLV, flowXLV, techXLV]);
-  const app = useMemo(() => appChecklist(macro, instAAPL, flowAAPL, techAAPL), [macro, instAAPL, flowAAPL, techAAPL]);
   const exitsXLV = useMemo(() => exitTriggers(instXLV, flowXLV, macro, techXLV), [instXLV, flowXLV, macro, techXLV]);
-  const exitsAAPL = useMemo(() => exitTriggers(instAAPL, flowAAPL, macro, techAAPL), [instAAPL, flowAAPL, macro, techAAPL]);
 
   // ---- Portfolio math ----
   const capital = 35000, reserve = 13000;
@@ -1089,8 +1050,8 @@ function TradingDashboard({ backendOffline }) {
         </div>
 
         {tab === "Command" && (
-          <CommandView sig={sig} focus={focus} sectorRows={sectorRows} positionGuide={positionGuide} cfm={cfm} app={app} macro={macro} setMacro={setMacro}
-            quotes={quotes} exitsXLV={exitsXLV} exitsAAPL={exitsAAPL}
+          <CommandView sig={sig} focus={focus} sectorRows={sectorRows} positionGuide={positionGuide} cfm={cfm} macro={macro} setMacro={setMacro}
+            quotes={quotes} exitsXLV={exitsXLV}
             deployed={deployed} reserve={reserve} capital={capital} openPL={openPL} positions={positions} />
         )}
         {tab === "Scan" && (
@@ -1101,7 +1062,7 @@ function TradingDashboard({ backendOffline }) {
           <RotationView focus={focus} rows={sectorRows} />
         )}
         {tab === "Entry Watch" && (
-          <EntryWatchView app={app} macro={macro} focus={focus} computed={computed} indicatorHistory={indicatorHistory} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchItems} setEntryWatchSymbols={updateEntryWatchSymbols}
+          <EntryWatchView macro={macro} focus={focus} computed={computed} indicatorHistory={indicatorHistory} calcStatus={calcStatus} entryWatchSymbols={normalizedEntryWatchItems} setEntryWatchSymbols={updateEntryWatchSymbols}
             onSendToExecutor={(symbols) => {
               const prev = store.get("executorForm", {}) || {};
               const existing = String(prev.tickers || "").split(",").map((s) => s.trim().toUpperCase()).filter(Boolean);
@@ -1131,7 +1092,7 @@ function TradingDashboard({ backendOffline }) {
             macroComputed={macroComputed} macroStatus={macroStatus}
             computed={computed} calcStatus={calcStatus} onRefresh={refreshQuotes}
             dataIssues={dataIssues}
-            cfm={cfm} app={app} exitsXLV={exitsXLV} exitsAAPL={exitsAAPL}
+            cfm={cfm} exitsXLV={exitsXLV}
             instXLV={instXLV} setInstXLV={setInstXLV} flowXLV={flowXLV} setFlowXLV={setFlowXLV} techXLV={techXLV} setTechXLV={setTechXLV}
             instAAPL={instAAPL} setInstAAPL={setInstAAPL} flowAAPL={flowAAPL} setFlowAAPL={setFlowAAPL} techAAPL={techAAPL} setTechAAPL={setTechAAPL}
           />
@@ -1260,7 +1221,7 @@ function Header({ sig, lastFetch, status, onRefresh, quotes, macroComputed }) {
 // ============================================================================
 // COMMAND VIEW — everything at a glance
 // ============================================================================
-function CommandView({ sig, focus, sectorRows, positionGuide, cfm, app, macro, setMacro, quotes, exitsXLV, exitsAAPL, deployed, reserve, capital, openPL, positions }) {
+function CommandView({ sig, focus, sectorRows, positionGuide, cfm, macro, setMacro, quotes, exitsXLV, deployed, reserve, capital, openPL, positions }) {
   const macroFavorsCFM = macro.growth === "slowing";
   return (
     <div style={{ display: "grid", gap: 16 }}>
@@ -1286,16 +1247,11 @@ function CommandView({ sig, focus, sectorRows, positionGuide, cfm, app, macro, s
           tag="CFM" name="Cashflow Machine" instrument="XLV" color={C.blue}
           verdict={cfm.verdict} pass={cfm.pass} total={cfm.total}
           target="1–2% weekly" note={macroFavorsCFM ? "Macro supports defensive rotation" : "Macro not ideal for CFM"} />
-        <StrategyCard
-          tag="APP" name="Appreciation" instrument="AAPL" color={C.amber}
-          verdict={app.verdict} pass={app.pass} total={app.total}
-          target="30–50% / trade" note={macro.breadth > 60 ? "Breadth supports growth" : "Breadth below 60% — wait"} />
       </div>
 
       {/* Exit watch */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
         <ExitWatch title="XLV exit triggers" triggers={exitsXLV} />
-        <ExitWatch title="AAPL exit triggers" triggers={exitsAAPL} />
       </div>
 
       {/* Capital bar */}
@@ -1309,7 +1265,7 @@ function CommandView({ sig, focus, sectorRows, positionGuide, cfm, app, macro, s
 function SectorFocusPanel({ focus }) {
   return (
     <Panel title="Level 1 sector focus" eyebrow={focus.regime} accent={SIG[focus.level]}
-      right={<span style={{ font: `700 12px ${C.mono}`, color: focus.favoredStrategy === "APP" ? C.amber : focus.favoredStrategy === "CFM" ? C.blue : C.ink }}>{focus.favoredStrategy}</span>}>
+      right={<span style={{ font: `700 12px ${C.mono}`, color: focus.favoredStrategy === "CFM" ? C.blue : C.ink }}>{focus.favoredStrategy}</span>}>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px,1fr))", gap: 12 }}>
         <FocusList title="Primary focus" symbols={focus.primary} color={C.green} />
         <FocusList title="Secondary" symbols={focus.secondary} color={C.yellow} />
@@ -1747,7 +1703,7 @@ function inferSectorProxy(symbol) {
 
 function normalizeStrategyMode(value) {
   const mode = String(value || "AUTO").toUpperCase();
-  return ["AUTO", "CFM", "APP"].includes(mode) ? mode : "AUTO";
+  return ["AUTO", "CFM"].includes(mode) ? mode : "AUTO";
 }
 
 function normalizeWatchItem(item) {
@@ -1903,71 +1859,21 @@ function cfmStockWatchChecklist(symbol, calc, sectorCalc, macro, focus, calcStat
   );
 }
 
-function appStockWatchChecklist(symbol, calc, sectorCalc, macro, focus, calcStatus, sectorProxy = "") {
-  if (!calc) {
-    return missingIndicatorChecklist(
-      symbol,
-      calcStatus,
-      "Auto APP candidate",
-      "Best when macro favors appreciation, the sector proxy leads, and the stock confirms with relative strength, volume expansion, and breakout behavior."
-    );
-  }
-  const { inst, flow, tech } = bucketsFromCalc(calc);
-  const macroLevel = macroSignal(macro).level;
-  const proxy = sectorProxy || inferSectorProxy(symbol);
-  const proxyTier = proxy ? focusTierForSymbol(proxy, focus) : "Neutral";
-  const macroFavorsAPP = focus.favoredStrategy === "APP" || macro.fed === "dovish" || (macro.growth === "accelerating" && macro.breadth >= 55);
-  const proxyIsApp = APP_SECTORS.includes(proxy);
-  const proxyOk = sectorProxyRotationOk(sectorCalc, macro, focus, proxy, APP_SECTORS);
-  const volumeBreakout = flow.volRatio >= 110 || flow.volAccel >= 110;
-  const items = [
-    ["Macro is not risk-off", macroLevel !== "RED"],
-    ["Macro favors APP / risk-on growth", macroFavorsAPP],
-    ["Breadth strong enough for APP entries", macro.breadth >= 55],
-    ["VIX below 22", macro.vix < 22],
-    [proxy ? `${sectorProxyLabel(proxy)} is not avoided` : "Sector proxy selected", proxy ? proxyTier !== "Ignored" : false],
-    [proxy ? `${sectorProxyLabel(proxy)} fits APP or confirms rotation` : "Sector proxy confirms rotation", proxyOk || proxyIsApp],
-    ["RS3M leadership positive", inst.rs3m > 0],
-    ["RS3M momentum positive", inst.rs3mMom > 0],
-    ["RS3M trend rising", inst.rs3mTrend === "up"],
-    ["MoneyFlow 50–75, not exhausted", flow.mfi >= 50 && flow.mfi <= 75],
-    ["OBV rising", flow.obv === "rising"],
-    ["Volume expansion / breakout participation", volumeBreakout],
-    ["RSI strength 50–70", flow.rsi >= 50 && flow.rsi <= 70],
-    ["Price above MA21", tech.priceAboveMA21],
-  ];
-  return watchResult(
-    items,
-    `${symbol} is an APP candidate when macro supports growth, ${proxy || "its sector proxy"} leads, RS/OBV improve, and volume confirms a breakout attempt.`,
-    "Auto-detected APP / appreciation breakout entry",
-    "Best when risk-on leadership is active and the stock shows relative strength plus expanding participation.",
-    { strategy: "APP", confidence: Math.round((items.filter(([, ok]) => ok).length / items.length) * 100), sectorProxy: proxy }
-  );
-}
-
 function autoStrategyWatchChecklist(symbol, calc, sectorCalc, macro, focus, calcStatus, strategyMode = "AUTO", sectorProxy = "") {
   const cfm = cfmStockWatchChecklist(symbol, calc, sectorCalc, macro, focus, calcStatus, sectorProxy);
-  const app = appStockWatchChecklist(symbol, calc, sectorCalc, macro, focus, calcStatus, sectorProxy);
-  if (strategyMode === "CFM") return { ...cfm, strategy: "CFM", alternate: app, autoReason: "Manual CFM mode" };
-  if (strategyMode === "APP") return { ...app, strategy: "APP", alternate: cfm, autoReason: "Manual APP mode" };
-  if (!calc) return { ...cfm, strategy: "WAIT", alternate: app, autoReason: "Waiting for indicator data" };
+  if (strategyMode === "CFM") return { ...cfm, strategy: "CFM", autoReason: "Manual CFM mode" };
+  if (!calc) return { ...cfm, strategy: "WAIT", autoReason: "Waiting for indicator data" };
 
-  const delta = Math.abs(cfm.score - app.score);
-  const selected = cfm.score >= app.score ? cfm : app;
-  const alternate = selected === cfm ? app : cfm;
-  const strategy = selected.score < 0.55 ? "WAIT" : delta < 0.08 ? "MIXED" : selected.strategy;
-  const autoReason = strategy === "MIXED"
-    ? `CFM ${Math.round(cfm.score * 100)}% vs APP ${Math.round(app.score * 100)}% — both need review.`
-    : strategy === "WAIT"
-      ? `Neither setup is strong yet: CFM ${Math.round(cfm.score * 100)}%, APP ${Math.round(app.score * 100)}%.`
-      : `${strategy} is the better current fit: CFM ${Math.round(cfm.score * 100)}%, APP ${Math.round(app.score * 100)}%.`;
+  const strategy = cfm.score < 0.55 ? "WAIT" : cfm.strategy;
+  const autoReason = strategy === "WAIT"
+    ? `Setup is not strong yet: CFM ${Math.round(cfm.score * 100)}%.`
+    : `CFM setup is ready: ${Math.round(cfm.score * 100)}%.`;
   return {
-    ...selected,
+    ...cfm,
     strategy,
-    alternate,
     autoReason,
-    confidence: Math.round(selected.score * 100),
-    verdict: selected.verdict === "ENTER" && ["CFM", "APP"].includes(strategy) ? "ENTER" : "WAIT",
+    confidence: Math.round(cfm.score * 100),
+    verdict: cfm.verdict === "ENTER" && strategy === "CFM" ? "ENTER" : "WAIT",
   };
 }
 
@@ -1992,7 +1898,7 @@ function previousScoreForCandidate(previousSnapshot, symbol) {
 }
 
 function strategyCandidateRanking(symbols, strategy, computed, macro, focus, calcStatus, previousSnapshot = null) {
-  const checklistFn = strategy === "CFM" ? cfmStockWatchChecklist : appStockWatchChecklist;
+  const checklistFn = cfmStockWatchChecklist;
   const ranked = symbols.map((symbol) => {
     const proxy = inferSectorProxy(symbol);
     const data = checklistFn(symbol, computed?.[symbol], computed?.[proxy], macro, focus, calcStatus, proxy);
@@ -2251,7 +2157,7 @@ function genericWatchChecklist(symbol, calc, macro, focus, calcStatus) {
   };
 }
 
-function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcStatus, entryWatchSymbols, setEntryWatchSymbols, onSendToExecutor }) {
+function EntryWatchView({ macro, focus, computed, indicatorHistory, calcStatus, entryWatchSymbols, setEntryWatchSymbols, onSendToExecutor }) {
   const [draftSymbol, setDraftSymbol] = useState("");
   const [draftStrategyMode, setDraftStrategyMode] = useState("AUTO");
   const [draftSectorProxy, setDraftSectorProxy] = useState("");
@@ -2294,7 +2200,7 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
     const sectorProfile = SECTOR_WATCH_PROFILES[symbol];
     const effectiveProxy = sectorProxy || inferSectorProxy(symbol);
     if (sectorProfile && strategyMode === "AUTO") {
-      const forcedMode = DEFENSIVE_SECTORS.includes(symbol) ? "CFM" : APP_SECTORS.includes(symbol) ? "APP" : "AUTO";
+      const forcedMode = DEFENSIVE_SECTORS.includes(symbol) ? "CFM" : "AUTO";
       const autoData = autoStrategyWatchChecklist(symbol, computed?.[symbol], computed?.[symbol], macro, focus, calcStatus, forcedMode, symbol);
       const data = { ...sectorWatchChecklist(symbol, computed?.[symbol], macro, focus, calcStatus), ...autoData };
       return {
@@ -2328,22 +2234,15 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
 
   const watchedSymbolSet = new Set(normalizedWatch.map((item) => item.symbol));
   const cfmRankingAsOf = candidateRankingSessionAsOf(CFM_CANDIDATE_UNIVERSE, computed, calcStatus);
-  const appRankingAsOf = candidateRankingSessionAsOf(APP_CANDIDATE_UNIVERSE, computed, calcStatus);
   const cfmPreviousSnapshot = previousCompletedRankingSnapshot(candidateRankingHistory, "CFM", cfmRankingAsOf);
-  const appPreviousSnapshot = previousCompletedRankingSnapshot(candidateRankingHistory, "APP", appRankingAsOf);
   const cfmTopCandidates = useMemo(
     () => strategyCandidateRanking(CFM_CANDIDATE_UNIVERSE, "CFM", computed, macro, focus, calcStatus, cfmPreviousSnapshot),
     [computed, macro, focus, calcStatus, cfmPreviousSnapshot]
-  );
-  const appTopCandidates = useMemo(
-    () => strategyCandidateRanking(APP_CANDIDATE_UNIVERSE, "APP", computed, macro, focus, calcStatus, appPreviousSnapshot),
-    [computed, macro, focus, calcStatus, appPreviousSnapshot]
   );
 
   useEffect(() => {
     const snapshots = [
       snapshotFromCandidateRanking("CFM", cfmRankingAsOf, cfmTopCandidates),
-      snapshotFromCandidateRanking("APP", appRankingAsOf, appTopCandidates),
     ].filter(Boolean);
     if (!snapshots.length) return;
 
@@ -2353,7 +2252,7 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
       store.set("entryCandidateRankingSnapshots", next, true).catch(() => {});
       return next;
     });
-  }, [cfmRankingAsOf, appRankingAsOf, cfmTopCandidates, appTopCandidates]);
+  }, [cfmRankingAsOf, cfmTopCandidates]);
 
   const addRankedCandidate = (candidate) => {
     setEntryWatchSymbols([
@@ -2387,18 +2286,17 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
         right={<span style={{ font: `700 12px ${C.mono}`, color: SIG[focus.level] }}>{focus.level}</span>}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
           <Stat label="Macro permission" value={focus.entryPermission} color={SIG[focus.level]} />
-          <Stat label="Favored strategy" value={focus.favoredStrategy} color={focus.favoredStrategy === "APP" ? C.amber : focus.favoredStrategy === "CFM" ? C.blue : C.ink} />
+          <Stat label="Favored strategy" value={focus.favoredStrategy} color={focus.favoredStrategy === "CFM" ? C.blue : C.ink} />
           <Stat label="Tickers monitored" value={normalizedWatch.length} color={C.blue} />
         </div>
         <div style={{ marginTop: 12, font: `400 12px/1.45 ${C.sans}`, color: C.inkDim }}>
-          Add tickers and let Auto score both CFM and APP. The app selects the better fit for the current macro, sector proxy, rotation, flow, volume, and MA21 setup; use Force CFM/APP only when you have a specific thesis.
+          Add tickers to watch for CFM setups. The score uses macro regime, sector proxy fit, RS3M/RS3M_MOM, OBV, MFI, RSI, volume participation, and MA21 status.
         </div>
         <form onSubmit={addSymbol} style={{ display: "grid", gridTemplateColumns: "minmax(150px, 1fr) 150px 170px auto", gap: 8, marginTop: 14 }}>
           <input value={draftSymbol} onChange={(e) => setDraftSymbol(e.target.value)} placeholder="Add ticker (ex: MSFT)" style={{ ...inputStyle, textTransform: "uppercase" }} />
           <select value={draftStrategyMode} onChange={(e) => setDraftStrategyMode(e.target.value)} style={inputStyle}>
             <option value="AUTO">Auto strategy</option>
             <option value="CFM">Force CFM</option>
-            <option value="APP">Force APP</option>
           </select>
           <select value={draftSectorProxy} onChange={(e) => setDraftSectorProxy(e.target.value)} style={inputStyle}>
             <option value="">Auto sector proxy</option>
@@ -2417,7 +2315,6 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 16 }}>
         <CandidateLeaderboard title="Top CFM candidates" strategy="CFM" candidates={cfmTopCandidates} watchedSymbols={watchedSymbolSet} onAdd={addRankedCandidate} />
-        <CandidateLeaderboard title="Top APP candidates" strategy="APP" candidates={appTopCandidates} watchedSymbols={watchedSymbolSet} onAdd={addRankedCandidate} />
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 16 }}>
@@ -2470,7 +2367,7 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
                   Expirations: {loadedChains[viewingChain].expirations?.slice(0, 5).join(" · ") || "—"}
                 </div>
                 {Object.keys(loadedChains[viewingChain].callExpDateMap || {}).length > 0 ? (
-                  <OptionChainTable symbol={viewingChain} calls={loadedChains[viewingChain].callExpDateMap || {}} puts={loadedChains[viewingChain].putExpDateMap || {}} />
+                  <OptionChainTable symbol={viewingChain} calls={loadedChains[viewingChain].callExpDateMap || {}} currentPrice={computed?.[viewingChain]?.close} />
                 ) : (
                   <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No options data available for {viewingChain}.</div>
                 )}
@@ -2483,7 +2380,7 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
   );
 }
 
-function OptionChainTable({ symbol, calls, puts }) {
+function OptionChainTable({ symbol, calls, currentPrice }) {
   const th = { textAlign: "center", font: `600 10px ${C.mono}`, color: C.inkFaint, padding: "8px 6px", borderBottom: `1px solid ${C.line}`, whiteSpace: "nowrap" };
   const td = { textAlign: "center", font: `500 11px ${C.mono}`, color: C.ink, padding: "8px 6px", borderBottom: `1px solid ${C.lineSoft}` };
   const strikeTd = { ...td, textAlign: "right", fontWeight: 600 };
@@ -2494,43 +2391,45 @@ function OptionChainTable({ symbol, calls, puts }) {
 
   const expiry = expirations[0];  // Show first expiry
   const callLegs = calls[expiry] || {};
-  const putLegs = puts[expiry] || {};
-  const strikes = Array.from(new Set([...Object.keys(callLegs), ...Object.keys(putLegs)])).sort((a, b) => parseFloat(a) - parseFloat(b));
+  const allStrikes = Object.keys(callLegs).map(parseFloat).sort((a, b) => a - b);
+
+  // Filter strikes: 5 OTM (above current price) + 20 ITM (below current price)
+  let filteredStrikes = allStrikes;
+  if (currentPrice) {
+    const otm = allStrikes.filter((s) => s > currentPrice).slice(0, 5);
+    const itm = allStrikes.filter((s) => s < currentPrice).slice(-20);
+    filteredStrikes = [...itm, ...otm].sort((a, b) => a - b);
+  }
 
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "11px" }}>
         <thead>
           <tr>
-            <th style={{ ...th, width: "15%" }}>Call bid</th>
-            <th style={{ ...th, width: "15%" }}>Call ask</th>
-            <th style={{ ...th, width: "10%" }}>IV</th>
-            <th style={{ ...th, width: "10%" }}>θ</th>
+            <th style={{ ...th, width: "20%" }}>Bid</th>
+            <th style={{ ...th, width: "20%" }}>Ask</th>
+            <th style={{ ...th, width: "15%" }}>IV</th>
+            <th style={{ ...th, width: "15%" }}>Theta</th>
             <th style={{ ...th, width: "15%" }}>Strike</th>
-            <th style={{ ...th, width: "10%" }}>θ</th>
-            <th style={{ ...th, width: "10%" }}>IV</th>
-            <th style={{ ...th, width: "15%" }}>Put bid</th>
-            <th style={{ ...th, width: "15%" }}>Put ask</th>
+            <th style={{ ...th, width: "15%" }}>Status</th>
           </tr>
         </thead>
         <tbody>
-          {strikes.map((strike) => {
-            const call = callLegs[strike] || {};
-            const put = putLegs[strike] || {};
+          {filteredStrikes.map((strike) => {
+            const call = callLegs[strike.toString()] || {};
             const bid = (v) => v != null ? gnum(v, 2) : "—";
             const iv = (v) => v != null ? gnum(v * 100, 1) + "%" : "—";
             const gr = (v) => v != null ? gnum(v, 3) : "—";
+            const status = currentPrice ? (strike > currentPrice ? "OTM" : strike < currentPrice ? "ITM" : "ATM") : "";
+            const statusColor = status === "OTM" ? C.inkFaint : status === "ITM" ? C.green : C.amber;
             return (
               <tr key={strike}>
                 <td style={td}>{bid(call.bid)}</td>
                 <td style={td}>{bid(call.ask)}</td>
                 <td style={td}>{iv(call.impliedVolatility)}</td>
                 <td style={td}>{gr(call.theta)}</td>
-                <td style={strikeTd}>{gnum(parseFloat(strike), 0)}</td>
-                <td style={td}>{gr(put.theta)}</td>
-                <td style={td}>{iv(put.impliedVolatility)}</td>
-                <td style={td}>{bid(put.bid)}</td>
-                <td style={td}>{bid(put.ask)}</td>
+                <td style={strikeTd}>{gnum(strike, 0)}</td>
+                <td style={{ ...td, color: statusColor, fontWeight: 600 }}>{status}</td>
               </tr>
             );
           })}
@@ -2588,7 +2487,6 @@ function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWh
             <select value={strategyMode || "AUTO"} onChange={(e) => onUpdate(symbol, { strategyMode: e.target.value })} style={inputStyle}>
               <option value="AUTO">Auto detect</option>
               <option value="CFM">Force CFM</option>
-              <option value="APP">Force APP</option>
             </select>
           </label>
           <label style={{ display: "grid", gap: 4 }}>
@@ -4040,7 +3938,7 @@ const td = { padding: "10px", borderBottom: `1px solid ${C.lineSoft}`, color: C.
 // INDICATORS VIEW — calculations, trading-plan enforcement, and manual thesis inputs
 // ============================================================================
 function IndicatorsView(props) {
-  const { macro, setMacroField, acceptAutoMacro, macroComputed, macroStatus, computed, calcStatus, onRefresh, dataIssues, cfm, app, exitsXLV, exitsAAPL } = props;
+  const { macro, setMacroField, acceptAutoMacro, macroComputed, macroStatus, computed, calcStatus, onRefresh, dataIssues, cfm, exitsXLV } = props;
   const cx = computed?.XLV, ci = computed?.AAPL;
   const calculationRows = buildIndicatorCalculationRows(computed);
   const fed = macroComputed?.fields?.fed;
@@ -4102,7 +4000,7 @@ function IndicatorsView(props) {
 
       <IndicatorCalculationsPanel rows={calculationRows} calcStatus={calcStatus} />
 
-      <TradingPlanEnforcer cfm={cfm} app={app} calcXLV={cx} calcAAPL={ci} exitsXLV={exitsXLV} exitsAAPL={exitsAAPL} />
+      <TradingPlanEnforcer cfm={cfm} calcXLV={cx} exitsXLV={exitsXLV} />
 
       <Panel title="Macro inputs" eyebrow={`Level 1 · ${macroStatus === "ok" ? "auto-filled" : macroStatus === "partial" ? "partial auto-fill" : macroStatus === "loading" ? "fetching macro" : "manual fallback"}`}>
         <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
@@ -4224,19 +4122,16 @@ function IndicatorCalculationsPanel({ rows, calcStatus }) {
   );
 }
 
-function TradingPlanEnforcer({ cfm, app, calcXLV, calcAAPL, exitsXLV = [], exitsAAPL = [] }) {
+function TradingPlanEnforcer({ cfm, calcXLV, exitsXLV = [] }) {
   const cfmExitCount = exitsXLV.filter(([, ok]) => ok).length;
-  const appExitCount = exitsAAPL.filter(([, ok]) => ok).length;
   const cfmDataOk = !!calcXLV && calcXLV.staleness !== "red";
-  const appDataOk = !!calcAAPL && calcAAPL.staleness !== "red";
   const cfmAllowed = cfm?.verdict === "ENTER" && cfmDataOk && cfmExitCount === 0;
-  const appAllowed = app?.verdict === "ENTER" && appDataOk && appExitCount === 0;
-  const allowed = cfmAllowed || appAllowed;
+  const allowed = cfmAllowed;
   const blockers = [
-    ["Fresh computed data loaded", cfmDataOk || appDataOk],
-    ["At least one strategy checklist is complete", cfm?.verdict === "ENTER" || app?.verdict === "ENTER"],
-    ["No active exit trigger on the selected setup", (cfmAllowed || appAllowed) || (cfmExitCount === 0 && appExitCount === 0)],
-    ["Manual chart/thesis gates are confirmed", cfm?.verdict === "ENTER" || app?.verdict === "ENTER"],
+    ["Fresh computed data loaded", cfmDataOk],
+    ["Strategy checklist is complete", cfm?.verdict === "ENTER"],
+    ["No active exit trigger on the selected setup", cfmExitCount === 0],
+    ["Manual chart/thesis gates are confirmed", cfm?.verdict === "ENTER"],
   ];
   return (
     <Panel title="Trading plan enforcer" eyebrow="permission gate · protects against discretionary overrides" accent={allowed ? C.green : C.redDim}
@@ -4244,8 +4139,6 @@ function TradingPlanEnforcer({ cfm, app, calcXLV, calcAAPL, exitsXLV = [], exits
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
         <PlanCard title="CFM / XLV" verdict={cfmAllowed ? "ALLOWED" : "LOCKED"} color={cfmAllowed ? C.green : C.red}
           checklist={cfm} dataOk={cfmDataOk} exitCount={cfmExitCount} symbol="XLV" />
-        <PlanCard title="APP / AAPL" verdict={appAllowed ? "ALLOWED" : "LOCKED"} color={appAllowed ? C.green : C.red}
-          checklist={app} dataOk={appDataOk} exitCount={appExitCount} symbol="AAPL" />
         <div style={{ background: C.panel2, border: `1px solid ${C.lineSoft}`, borderRadius: 8, padding: "12px 13px" }}>
           <div style={{ font: `700 11px ${C.mono}`, color: C.ink, marginBottom: 8 }}>NON-NEGOTIABLES</div>
           {blockers.map(([label, ok]) => <CheckRow key={label} label={label} ok={ok} />)}

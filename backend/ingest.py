@@ -31,7 +31,6 @@ import macro as macro_calc
 import validation
 from providers import build_chain
 from providers.base import ProviderError, with_retries
-from providers import fred
 
 STATE_FILE = os.path.join(db.DATA_DIR, "state.json")
 
@@ -163,45 +162,28 @@ def cross_check(chain, detail: dict) -> None:
     detail["crossCheck"] = results
 
 
-def fetch_macro_series(series_id: str):
-    """Fetch one Level 1 macro series, Alpha Vantage first with a FRED fallback.
+def ingest_macro_series(detail: dict) -> None:
+    """Fetch macro series from Alpha Vantage (primary source for all economic data).
 
-    Returns (series, source). Alpha Vantage is the primary source for the Level 1
-    macro inputs; when no AV key is configured, or an AV fetch fails, the same
-    series is pulled from FRED's economic graph at a matching cadence so the
-    regime gate keeps filling. Raises ProviderError only when the available
-    source(s) all fail.
+    Replaces FRED dependency. Alpha Vantage provides GDP, CPI, unemployment,
+    federal funds rate with higher reliability.
     """
     from providers import alphavantage
 
+    ok, failed, written = [], {}, 0
     if not alphavantage.configured():
-        return fred.fetch_series(series_id), "fred"
+        detail["macro"] = {"ok": [], "failed": {s: "Alpha Vantage not configured" for s in cfg.FRED_SERIES}, "rowsWritten": 0}
+        return
 
-    try:
-        return alphavantage.economic_series(series_id), "alphavantage"
-    except Exception as av_err:  # noqa: BLE001 — fall through to the FRED fallback
-        try:
-            return fred.fetch_series(series_id), "fred"
-        except Exception as fred_err:  # noqa: BLE001
-            raise ProviderError(
-                f"Alpha Vantage failed ({av_err}); FRED fallback failed ({fred_err})"
-            ) from fred_err
-
-
-def ingest_fred(detail: dict) -> None:
-    ok, failed, written, fallback = [], {}, 0, []
     for series_id in cfg.FRED_SERIES:
         try:
-            series, source = fetch_macro_series(series_id)
-            written += db.append_macro_series(series_id, series, source)
+            series = alphavantage.economic_series(series_id)
+            written += db.append_macro_series(series_id, series, "alphavantage")
             ok.append(series_id)
-            if source != "alphavantage":
-                fallback.append(series_id)
-                print(f"[ingest] macro {series_id} via {source} fallback")
         except Exception as e:  # noqa: BLE001
             failed[series_id] = str(e)
             print(f"[ingest] macro {series_id} failed: {e}")
-    detail["fred"] = {"ok": ok, "failed": failed, "rowsWritten": written, "fallback": fallback}
+    detail["macro"] = {"ok": ok, "failed": failed, "rowsWritten": written}
 
 
 # ---------------------------------------------------------------------------
@@ -298,11 +280,11 @@ def run(trigger: str = "manual", symbols: list[str] | None = None) -> dict:
             targets = symbols if symbols else universe()
             ingest_bars(targets, detail)
             if symbols is None:
-                ingest_fred(detail)
+                ingest_macro_series(detail)
             compute_indicator_snapshots(targets, detail)
             compute_macro_snapshot(detail)
             _prewarm_screener(symbols, detail)
-            if detail.get("bars", {}).get("failed") or detail.get("fred", {}).get("failed"):
+            if detail.get("bars", {}).get("failed") or detail.get("macro", {}).get("failed"):
                 status = "partial"
         except Exception as e:  # noqa: BLE001
             status = "error"
