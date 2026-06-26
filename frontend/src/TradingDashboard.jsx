@@ -157,26 +157,43 @@ const SECTORS = [
 
 const SECTOR_BY_SYMBOL = Object.fromEntries(SECTORS.map((sector) => [sector.symbol, sector]));
 const DEFENSIVE_SECTORS = ["XLV", "XLP", "XLU", "XLRE"];
-const CFM_CANDIDATE_UNIVERSE = [
-  "XLV", "XLP", "XLU", "XLRE",
-  "LLY", "UNH", "JNJ", "MRK", "ABBV", "PFE",
-  "PG", "COST", "WMT", "PEP", "KO",
-  "NEE", "SO", "DUK", "PLD", "AMT",
-];
-const ENTRY_CANDIDATE_UNIVERSE = CFM_CANDIDATE_UNIVERSE;
-const SECTOR_PROXY_BY_STOCK = {
-  AAPL: "XLK", MSFT: "XLK", NVDA: "XLK", AMD: "XLK", AVGO: "XLK", CRM: "XLK", NOW: "XLK",
-  META: "XLC", GOOGL: "XLC", GOOG: "XLC", NFLX: "XLC",
-  AMZN: "XLY", TSLA: "XLY", HD: "XLY", MCD: "XLY", NKE: "XLY",
-  JNJ: "XLV", MRK: "XLV", PFE: "XLV", ABBV: "XLV", LLY: "XLV", UNH: "XLV", ILMN: "XLV",
-  PG: "XLP", KO: "XLP", PEP: "XLP", COST: "XLP", WMT: "XLP",
-  JPM: "XLF", BAC: "XLF", GS: "XLF", MS: "XLF", BRK: "XLF",
-  XOM: "XLE", CVX: "XLE", COP: "XLE", SLB: "XLE",
-  CAT: "XLI", GE: "XLI", HON: "XLI", DE: "XLI", BA: "XLI",
-  LIN: "XLB", FCX: "XLB", NEM: "XLB",
-  NEE: "XLU", SO: "XLU", DUK: "XLU",
-  PLD: "XLRE", AMT: "XLRE",
+
+// Sector constituents (largest / most-liquid holdings per SPDR sector ETF),
+// ordered by index weight. Single source of truth: the sector-proxy lookup and
+// the CFM candidate-ranking universe are both derived from this map, so adding
+// a name here makes it rank-able and correctly proxied everywhere.
+const SECTOR_CONSTITUENTS = {
+  XLB: ["LIN", "NEM", "FCX", "VMC", "CRH", "MLM", "SHW", "CTVA", "ECL", "APD", "NUE", "STLD"],
+  XLC: ["META", "GOOGL", "GOOG", "NFLX", "TTWO", "DIS", "EA", "TMUS", "VZ", "T", "CMCSA", "CHTR"],
+  XLE: ["XOM", "CVX", "COP", "WMB", "VLO", "MPC", "EOG", "SLB", "PSX", "KMI", "OKE", "OXY"],
+  XLF: ["JPM", "V", "MA", "BAC", "GS", "MS", "WFC", "C", "AXP", "SCHW", "BLK", "SPGI"],
+  XLI: ["CAT", "GE", "RTX", "BA", "ETN", "UNP", "DE", "HON", "LMT", "UPS", "GD", "MMM"],
+  XLK: ["NVDA", "AAPL", "MSFT", "AVGO", "AMD", "CSCO", "TXN", "ORCL", "PLTR", "IBM", "QCOM", "CRM"],
+  XLP: ["WMT", "COST", "PG", "KO", "PM", "CL", "PEP", "MO", "MDLZ", "MNST", "TGT", "KDP"],
+  XLRE: ["WELL", "PLD", "EQIX", "AMT", "SPG", "DLR", "O", "PSA", "VTR", "CBRE", "CCI", "EXR"],
+  XLU: ["NEE", "SO", "DUK", "CEG", "AEP", "D", "SRE", "XEL", "EXC", "PEG", "ED", "WEC"],
+  XLV: ["LLY", "JNJ", "ABBV", "UNH", "MRK", "AMGN", "TMO", "ABT", "GILD", "ISRG", "PFE", "CVS"],
+  XLY: ["AMZN", "TSLA", "HD", "TJX", "MCD", "BKNG", "LOW", "SBUX", "MAR", "GM", "NKE", "AZO"],
 };
+
+// stock -> sector-ETF proxy, derived from the constituents map. Sector ETFs map
+// to themselves so inference is total over both stocks and the ETFs.
+const SECTOR_PROXY_BY_STOCK = {
+  ...Object.fromEntries(SECTORS.map((s) => [s.symbol, s.symbol])),
+  ...Object.fromEntries(
+    Object.entries(SECTOR_CONSTITUENTS).flatMap(([etf, names]) => names.map((n) => [n, etf]))
+  ),
+};
+
+// CFM ranks deeper in the defensive sectors (its wheelhouse) but still covers
+// every sector so the leaderboard can surface the best fit for the regime.
+const CFM_CANDIDATE_UNIVERSE = [...new Set([
+  ...SECTORS.map((s) => s.symbol),
+  ...Object.entries(SECTOR_CONSTITUENTS).flatMap(([etf, names]) =>
+    names.slice(0, DEFENSIVE_SECTORS.includes(etf) ? 10 : 4)
+  ),
+])];
+const ENTRY_CANDIDATE_UNIVERSE = CFM_CANDIDATE_UNIVERSE;
 
 const STRATEGY_META = {
   AUTO: { label: "Auto", color: C.blue },
@@ -4009,7 +4026,7 @@ function IndicatorsView(props) {
             Auto-calc {calcStatus === "ok" ? "ready" : calcStatus === "loading" ? "computing…" : calcStatus === "fail" ? "unavailable" : "idle"}
           </div>
           <div style={{ font: `400 11px/1.4 ${C.sans}`, color: C.inkDim, maxWidth: 620 }}>
-            Computed during scheduled ingestion from stored daily bars (Schwab primary, Yahoo fallback) and FRED history: Level 1 macro, conditions-based Fed policy, RS3M, RS3M_MOM, volume ratio, volume acceleration, RSI, OBV trend, MFI, and MA21.
+            Computed during scheduled ingestion from stored daily bars (Schwab primary, Yahoo fallback) and Alpha Vantage economic history: Level 1 macro, conditions-based Fed policy, RS3M, RS3M_MOM, volume ratio, volume acceleration, RSI, OBV trend, MFI, and MA21.
             Each shows next to your manual field — tap <b style={{ color: C.blue }}>use</b> to apply. Formulas: FORMULAS.md.
             {calcStatus === "fail" && " No ingested data yet — run ingestion or keep entering manually."}
           </div>
@@ -4034,7 +4051,7 @@ function IndicatorsView(props) {
 
       <Panel title="Macro inputs" eyebrow={`Level 1 · ${macroStatus === "ok" ? "auto-filled" : macroStatus === "partial" ? "partial auto-fill" : macroStatus === "loading" ? "fetching macro" : "manual fallback"}`}>
         <div style={{ font: `400 11px/1.45 ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>
-          Auto-fill uses the ingested VIX ETF proxy, FRED Fed funds/CPI/GDP/unemployment data, and ETF breadth above 50-day MA. Fed policy is scored from current inflation, growth, labor, and rate conditions.
+          Auto-fill uses the ingested VIX ETF proxy, Alpha Vantage Fed funds/CPI/GDP/unemployment data, and ETF breadth above 50-day MA. Fed policy is scored from current inflation, growth, labor, and rate conditions.
           Editing a field stores a <b style={{ color: C.amber }}>manual override</b> that beats ingested values until you tap <b>auto ↻</b>.
           {macroComputed?.asOf && <span style={{ color: C.inkFaint }}> Updated {macroComputed.asOf}</span>}
         </div>
@@ -4047,7 +4064,7 @@ function IndicatorsView(props) {
             <NumIn step="1" value={macro.breadth} onChange={(v) => setMacroField("breadth", v)} />
             <div style={{ marginTop: 5 }}><CalcChip value={fieldMeta("breadth")?.override ? null : fieldMeta("breadth")?.value} fmt={(v) => v.toFixed(0)} onApply={() => setMacroField("breadth", fieldMeta("breadth").value)} /></div>
           </Field>
-          <Field label={<span>Fed policy {staleFor("fed")}{overrideBadge("fed")}</span>} hint={fed && fed.score != null ? `score ${fed.score} · ${fed.rate}% funds · CPI ${fed.cpiYoY}% · U-3 ${fed.unemployment}%` : "FRED DFF/CPI/GDP/UNRATE"}>
+          <Field label={<span>Fed policy {staleFor("fed")}{overrideBadge("fed")}</span>} hint={fed && fed.score != null ? `score ${fed.score} · ${fed.rate}% funds · CPI ${fed.cpiYoY}% · U-3 ${fed.unemployment}%` : "AV DFF/CPI/GDP/UNRATE"}>
             <Sel value={macro.fed} onChange={(v) => setMacroField("fed", v)} options={[["dovish", "Dovish"], ["holding", "Holding"], ["hawkish", "Hawkish"]]} />
             <div style={{ marginTop: 5 }}><CalcChip value={fed?.override ? null : fed?.value} onApply={() => setMacroField("fed", fed.value)} /></div>
             {fedConditions && (
@@ -4056,11 +4073,11 @@ function IndicatorsView(props) {
               </div>
             )}
           </Field>
-          <Field label={<span>Growth {staleFor("growth")}{overrideBadge("growth")}</span>} hint={macroComputed?.fields?.growth?.qoqAnnualized != null ? `${macroComputed.fields.growth.qoqAnnualized}% GDP` : "FRED GDP"}>
+          <Field label={<span>Growth {staleFor("growth")}{overrideBadge("growth")}</span>} hint={macroComputed?.fields?.growth?.qoqAnnualized != null ? `${macroComputed.fields.growth.qoqAnnualized}% GDP` : "AV GDP"}>
             <Sel value={macro.growth} onChange={(v) => setMacroField("growth", v)} options={[["accelerating", "Accelerating"], ["stable", "Stable"], ["slowing", "Slowing"]]} />
             <div style={{ marginTop: 5 }}><CalcChip value={fieldMeta("growth")?.override ? null : fieldMeta("growth")?.value} onApply={() => setMacroField("growth", fieldMeta("growth").value)} /></div>
           </Field>
-          <Field label={<span>Inflation % {staleFor("inflation")}{overrideBadge("inflation")}</span>} hint={fieldMeta("inflation")?.override ? "manual" : fieldMeta("inflation")?.asOf || "FRED CPI YoY"}>
+          <Field label={<span>Inflation % {staleFor("inflation")}{overrideBadge("inflation")}</span>} hint={fieldMeta("inflation")?.override ? "manual" : fieldMeta("inflation")?.asOf || "AV CPI YoY"}>
             <NumIn step="0.1" value={macro.inflation} onChange={(v) => setMacroField("inflation", v)} />
             <div style={{ marginTop: 5 }}><CalcChip value={fieldMeta("inflation")?.override ? null : fieldMeta("inflation")?.value} fmt={(v) => v.toFixed(1)} onApply={() => setMacroField("inflation", fieldMeta("inflation").value)} /></div>
           </Field>

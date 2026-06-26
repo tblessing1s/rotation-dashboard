@@ -486,21 +486,37 @@ def append_macro_series(series_id: str, series: pd.Series, source: str) -> int:
             (series_id, source),
         )
     }
+    clean = series.dropna()
     to_insert = []
-    for idx, val in series.dropna().items():
+    for idx, val in clean.items():
         date = str(pd.Timestamp(idx).date())
         val = round(float(val), 6)
         prev = existing.get(date)
         if prev is not None and _close_enough(prev, val):
             continue
         to_insert.append((series_id, date, val, source, now))
-    if to_insert:
-        with conn:
+    with conn:
+        if to_insert:
             conn.executemany(
                 "INSERT INTO macro_observations (series, date, value, source, fetched_at)"
                 " VALUES (?,?,?,?,?)",
                 to_insert,
             )
+        # Touch the latest observation's recency stamp even when its value is
+        # unchanged. Slow-moving series (quarterly GDP, monthly CPI) otherwise
+        # keep the fetched_at from when they were FIRST stored, so the macro
+        # staleness gate would read them as red forever despite ingestion
+        # running fine. Refreshing here reflects "ingestion just re-confirmed
+        # this series", which is exactly what the staleness check wants.
+        if len(clean):
+            latest_date = str(pd.Timestamp(clean.index.max()).date())
+            inserted_dates = {row[1] for row in to_insert}
+            if latest_date not in inserted_dates:
+                conn.execute(
+                    "UPDATE macro_observations SET fetched_at=?"
+                    " WHERE series=? AND source=? AND date=?",
+                    (now, series_id, source, latest_date),
+                )
     return len(to_insert)
 
 
