@@ -100,7 +100,7 @@ def classify_fed_policy(rate_series: pd.Series, cpi_series: pd.Series, gdp_serie
         "hawkishConditions": hawkish,
         "dovishConditions": dovish,
         "asOf": str(rate_series.index[-1].date()),
-        "source": "FRED DFF/CPI/GDP/UNRATE current-conditions model",
+        "source": "Alpha Vantage funds rate/CPI/GDP/unemployment current-conditions model",
     }
 
 
@@ -113,7 +113,7 @@ def inflation_from_cpi(series: pd.Series) -> dict:
         "value": round(yoy, 1),
         "index": round(latest, 3),
         "asOf": str(series.index[-1].date()),
-        "source": "FRED CPIAUCSL year-over-year",
+        "source": "Alpha Vantage CPI year-over-year",
     }
 
 
@@ -135,7 +135,7 @@ def growth_from_gdp(series: pd.Series) -> dict:
         "qoqAnnualized": round(qoq_ann, 1),
         "previousQoqAnnualized": round(prev_qoq_ann, 1),
         "asOf": str(series.index[-1].date()),
-        "source": "FRED GDPC1 real GDP quarterly momentum",
+        "source": "Alpha Vantage real GDP quarterly momentum",
     }
 
 
