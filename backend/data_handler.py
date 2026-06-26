@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -21,6 +22,19 @@ import schwab_api
 _client: schwab_api.SchwabClient | None = None
 _client_lock = threading.Lock()
 _mem_cache: dict[str, pd.DataFrame] = {}
+
+# Shared, bounded pool so batch reads fetch in parallel without spawning an
+# unbounded number of provider connections (which would trip rate limits).
+_FETCH_WORKERS = int(os.environ.get("DATA_FETCH_WORKERS", "8"))
+_executor = ThreadPoolExecutor(max_workers=_FETCH_WORKERS, thread_name_prefix="data-fetch")
+# Per-symbol locks dedupe concurrent fetches of the same symbol across requests.
+_symbol_locks: dict[str, threading.Lock] = {}
+_symbol_locks_guard = threading.Lock()
+
+
+def _symbol_lock(symbol: str) -> threading.Lock:
+    with _symbol_locks_guard:
+        return _symbol_locks.setdefault(symbol, threading.Lock())
 
 
 def client() -> schwab_api.SchwabClient:
@@ -77,6 +91,16 @@ def _fetch(symbol: str) -> pd.DataFrame:
     raise RuntimeError(f"no data source produced {symbol} ({'; '.join(errors) or 'no provider configured'})")
 
 
+def _fallback(symbol: str) -> pd.DataFrame | None:
+    """The last good frame for a symbol when live fetch fails: parquet cache
+    first, then the in-memory copy. (Never use `df or x` — a DataFrame has no
+    unambiguous truth value.)"""
+    cached = _read_cache(symbol)
+    if cached is not None and not cached.empty:
+        return cached
+    return _mem_cache.get(symbol)
+
+
 def get_daily(symbol: str, force: bool = False) -> pd.DataFrame | None:
     """Daily OHLCV for one symbol. Cached for the trading day; on provider
     failure falls back to the cached frame if one exists."""
@@ -86,17 +110,36 @@ def get_daily(symbol: str, force: bool = False) -> pd.DataFrame | None:
         cached = _read_cache(symbol)
         if cached is not None and not cached.empty:
             return cached
-    try:
-        df = _fetch(symbol)
-        _write_cache(symbol, df)
-        _mem_cache[symbol] = df
-        return df
-    except Exception:  # noqa: BLE001
-        return _read_cache(symbol) or _mem_cache.get(symbol)
+    # Serialize fetches per symbol so concurrent requests don't all hit the
+    # provider for the same name; the loser re-reads the freshly written cache.
+    with _symbol_lock(symbol):
+        if not force and _is_fresh(path):
+            cached = _read_cache(symbol)
+            if cached is not None and not cached.empty:
+                return cached
+        try:
+            df = _fetch(symbol)
+            _write_cache(symbol, df)
+            _mem_cache[symbol] = df
+            return df
+        except Exception:  # noqa: BLE001 — degrade to last good data, never raise
+            return _fallback(symbol)
 
 
 def get_many(symbols, force: bool = False) -> dict[str, pd.DataFrame | None]:
-    return {s.upper(): get_daily(s, force=force) for s in dict.fromkeys(symbols)}
+    """Fetch many symbols in parallel over the shared pool. One symbol's failure
+    never sinks the batch (get_daily degrades to cache and never raises)."""
+    syms = list(dict.fromkeys(s.upper() for s in symbols))
+    if not syms:
+        return {}
+    results = _executor.map(lambda s: (s, get_daily(s, force=force)), syms)
+    return dict(results)
+
+
+def prefetch(symbols, force: bool = False) -> None:
+    """Warm the cache for many symbols in parallel (results discarded). Callers
+    then compute from the now-warm per-symbol cache."""
+    get_many(symbols, force=force)
 
 
 def latest_quote(symbol: str) -> dict | None:
