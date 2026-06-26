@@ -33,5 +33,6 @@ export const api = {
   config: () => request("/api/config"),
   state: () => request("/api/state"),
   saveState: (payload) => request("/api/state", { method: "POST", body: JSON.stringify(payload) }),
+  accountStatus: () => request("/api/account/status"),
   schwabAuth: () => request("/auth/schwab"),
 };
