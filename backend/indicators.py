@@ -119,7 +119,10 @@ def rs3m(df: pd.DataFrame, bench: pd.DataFrame, lookback: int = config.RS3M_LOOK
     then = ratio.iloc[-1 - lookback]
     if not then:
         return None
-    return round((now / then - 1) * 100, 2)
+    # Cast to native float: round() on a numpy scalar returns a numpy scalar,
+    # and downstream comparisons would then yield numpy.bool_ (not JSON
+    # serializable). np.float64 serializes fine, but the booleans it spawns do not.
+    return float(round((now / then - 1) * 100, 2))
 
 
 def above_ma(df: pd.DataFrame, window: int = config.BREADTH_MA_WINDOW) -> bool | None:
