@@ -198,6 +198,25 @@ def api_data_status():
     return jsonify({s: {"cache_age_hours": data_handler.cache_age_hours(s)} for s in syms})
 
 
+@app.route("/api/diagnostics/vix")
+def api_diag_vix():
+    """Live, cache-bypassing probe of the VIX so a missing value can be
+    diagnosed: token health, the raw Schwab quote, and the daily-bars result."""
+    out = {"symbol": config.VIX_SYMBOL, "token": schwab_api.token_status(),
+           "schwab_configured": schwab_api.configured()}
+    try:
+        out["quote"] = data_handler.client().get_quote(config.VIX_SYMBOL)
+    except Exception as e:  # noqa: BLE001
+        out["quote_error"] = str(e)
+    try:
+        df = data_handler.get_daily(config.VIX_SYMBOL, force=True)
+        out["daily_rows"] = 0 if df is None else len(df)
+    except Exception as e:  # noqa: BLE001
+        out["daily_error"] = str(e)
+    out["last_error"] = data_handler.last_error(config.VIX_SYMBOL)
+    return jsonify(out)
+
+
 # ---------------------------------------------------------------------------
 # Schwab OAuth (hosted re-auth)
 # ---------------------------------------------------------------------------

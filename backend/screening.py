@@ -22,7 +22,7 @@ _result_locks: dict[str, threading.Lock] = {}
 _results_guard = threading.Lock()
 
 
-def _cached(key: str, fn, ttl: int = _RESULT_TTL):
+def _cached(key: str, fn, ttl: int = _RESULT_TTL, store_if=None):
     hit = _results.get(key)
     if hit and time.time() - hit[0] < ttl:
         return hit[1]
@@ -33,7 +33,10 @@ def _cached(key: str, fn, ttl: int = _RESULT_TTL):
         if hit and time.time() - hit[0] < ttl:
             return hit[1]
         val = fn()
-        _results[key] = (time.time(), val)
+        # Don't pin a transient failure (e.g. a missing VIX right after a token
+        # re-auth) for the full TTL — only cache results that pass store_if.
+        if store_if is None or store_if(val):
+            _results[key] = (time.time(), val)
         return val
 
 
@@ -41,7 +44,9 @@ def _cached(key: str, fn, ttl: int = _RESULT_TTL):
 # Level 1 — market regime
 # ---------------------------------------------------------------------------
 def regime() -> dict:
-    return _cached("regime", _compute_regime)
+    # Don't cache a regime whose VIX failed to load — retry on the next poll so
+    # it self-heals once the Schwab token is valid again.
+    return _cached("regime", _compute_regime, store_if=lambda r: r.get("vix") is not None)
 
 
 def _compute_regime() -> dict:
