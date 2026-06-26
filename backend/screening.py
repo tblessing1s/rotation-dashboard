@@ -171,12 +171,12 @@ def entry_gate(ticker: str) -> dict:
 
     # Level 1 — market regime
     reg = regime()
-    l1_pass = reg["status"] == "green"
+    l1_pass = bool(reg["status"] == "green")
     levels.append({"level": 1, "name": "Market regime green", "pass": l1_pass, "detail": reg})
 
     # Level 2 — sector strong
     sec = sectors().get(sector_etf, {}) if sector_etf else {}
-    l2_pass = sec.get("status") == "green"
+    l2_pass = bool(sec.get("status") == "green")
     levels.append({"level": 2, "name": "Sector strong", "pass": l2_pass, "detail": {"sector": sector_etf, **sec}})
 
     # Levels 3 & 4 — stock beating peers + consolidating
@@ -185,8 +185,8 @@ def entry_gate(ticker: str) -> dict:
     sector_rs = indicators.rs3m(sector_df, spy) if sector_df is not None else None
     row = _stock_row(ticker, spy, sector_rs, sector_etf or "")
 
-    l3_pass = (row["rs3m_vs_spy"] is not None and row["rs3m_vs_spy"] > config.STOCK_RS_VS_SPY_MIN
-               and row["rs3m_vs_sector"] is not None and row["rs3m_vs_sector"] > config.STOCK_RS_VS_SECTOR_MIN)
+    l3_pass = bool(row["rs3m_vs_spy"] is not None and row["rs3m_vs_spy"] > config.STOCK_RS_VS_SPY_MIN
+                   and row["rs3m_vs_sector"] is not None and row["rs3m_vs_sector"] > config.STOCK_RS_VS_SECTOR_MIN)
     levels.append({"level": 3, "name": "Stock beating peers", "pass": l3_pass, "detail": row})
 
     l4_pass = bool(row["consolidating"])

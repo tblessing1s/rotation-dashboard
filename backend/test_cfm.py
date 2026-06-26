@@ -103,3 +103,38 @@ def test_execute_rejects_bad_action():
     import executor
     with pytest.raises(ValueError):
         executor.execute({"action": "nope", "ticker": "ON"})
+
+
+def test_rs3m_returns_native_float():
+    # round() on a numpy scalar yields numpy.float64, whose comparisons produce
+    # numpy.bool_ (not JSON serializable). rs3m must return a native float.
+    n = 100
+    bench = _frame([100.0] * n)
+    strong = _frame([100 + i for i in range(n)])
+    assert type(ind.rs3m(strong, bench)) is float
+
+
+def test_entry_gate_is_json_serializable(monkeypatch):
+    # Feed real numbers through the whole gate and assert the response has no
+    # numpy types left (regression for "Object of type bool is not JSON
+    # serializable").
+    import json
+    import data_handler
+    import screening
+
+    n = 120
+    spy = _frame([100.0] * n)
+    strong = _frame([100 + i * 0.8 for i in range(n)])
+
+    def fake_get_daily(symbol, force=False):
+        return spy if symbol.upper() == "SPY" else strong
+
+    monkeypatch.setattr(data_handler, "get_daily", fake_get_daily)
+    monkeypatch.setattr(data_handler, "get_many", lambda syms, force=False: {s.upper(): strong for s in syms})
+    monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
+    screening._results.clear()  # bypass the TTL cache
+
+    gate = screening.entry_gate("NVDA")
+    # Must not raise:
+    json.dumps(gate)
+    assert all(isinstance(lv["pass"], bool) for lv in gate["levels"])
