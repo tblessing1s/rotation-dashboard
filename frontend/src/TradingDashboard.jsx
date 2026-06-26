@@ -2367,7 +2367,7 @@ function EntryWatchView({ macro, focus, computed, indicatorHistory, calcStatus, 
                   Expirations: {loadedChains[viewingChain].expirations?.slice(0, 5).join(" · ") || "—"}
                 </div>
                 {Object.keys(loadedChains[viewingChain].callExpDateMap || {}).length > 0 ? (
-                  <OptionChainTable symbol={viewingChain} calls={loadedChains[viewingChain].callExpDateMap || {}} puts={loadedChains[viewingChain].putExpDateMap || {}} />
+                  <OptionChainTable symbol={viewingChain} calls={loadedChains[viewingChain].callExpDateMap || {}} currentPrice={computed?.[viewingChain]?.close} />
                 ) : (
                   <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No options data available for {viewingChain}.</div>
                 )}
@@ -2380,7 +2380,7 @@ function EntryWatchView({ macro, focus, computed, indicatorHistory, calcStatus, 
   );
 }
 
-function OptionChainTable({ symbol, calls, puts }) {
+function OptionChainTable({ symbol, calls, currentPrice }) {
   const th = { textAlign: "center", font: `600 10px ${C.mono}`, color: C.inkFaint, padding: "8px 6px", borderBottom: `1px solid ${C.line}`, whiteSpace: "nowrap" };
   const td = { textAlign: "center", font: `500 11px ${C.mono}`, color: C.ink, padding: "8px 6px", borderBottom: `1px solid ${C.lineSoft}` };
   const strikeTd = { ...td, textAlign: "right", fontWeight: 600 };
@@ -2391,43 +2391,45 @@ function OptionChainTable({ symbol, calls, puts }) {
 
   const expiry = expirations[0];  // Show first expiry
   const callLegs = calls[expiry] || {};
-  const putLegs = puts[expiry] || {};
-  const strikes = Array.from(new Set([...Object.keys(callLegs), ...Object.keys(putLegs)])).sort((a, b) => parseFloat(a) - parseFloat(b));
+  const allStrikes = Object.keys(callLegs).map(parseFloat).sort((a, b) => a - b);
+
+  // Filter strikes: 5 OTM (above current price) + 20 ITM (below current price)
+  let filteredStrikes = allStrikes;
+  if (currentPrice) {
+    const otm = allStrikes.filter((s) => s > currentPrice).slice(0, 5);
+    const itm = allStrikes.filter((s) => s < currentPrice).slice(-20);
+    filteredStrikes = [...itm, ...otm].sort((a, b) => a - b);
+  }
 
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "11px" }}>
         <thead>
           <tr>
-            <th style={{ ...th, width: "15%" }}>Call bid</th>
-            <th style={{ ...th, width: "15%" }}>Call ask</th>
-            <th style={{ ...th, width: "10%" }}>IV</th>
-            <th style={{ ...th, width: "10%" }}>θ</th>
+            <th style={{ ...th, width: "20%" }}>Bid</th>
+            <th style={{ ...th, width: "20%" }}>Ask</th>
+            <th style={{ ...th, width: "15%" }}>IV</th>
+            <th style={{ ...th, width: "15%" }}>Theta</th>
             <th style={{ ...th, width: "15%" }}>Strike</th>
-            <th style={{ ...th, width: "10%" }}>θ</th>
-            <th style={{ ...th, width: "10%" }}>IV</th>
-            <th style={{ ...th, width: "15%" }}>Put bid</th>
-            <th style={{ ...th, width: "15%" }}>Put ask</th>
+            <th style={{ ...th, width: "15%" }}>Status</th>
           </tr>
         </thead>
         <tbody>
-          {strikes.map((strike) => {
-            const call = callLegs[strike] || {};
-            const put = putLegs[strike] || {};
+          {filteredStrikes.map((strike) => {
+            const call = callLegs[strike.toString()] || {};
             const bid = (v) => v != null ? gnum(v, 2) : "—";
             const iv = (v) => v != null ? gnum(v * 100, 1) + "%" : "—";
             const gr = (v) => v != null ? gnum(v, 3) : "—";
+            const status = currentPrice ? (strike > currentPrice ? "OTM" : strike < currentPrice ? "ITM" : "ATM") : "";
+            const statusColor = status === "OTM" ? C.inkFaint : status === "ITM" ? C.green : C.amber;
             return (
               <tr key={strike}>
                 <td style={td}>{bid(call.bid)}</td>
                 <td style={td}>{bid(call.ask)}</td>
                 <td style={td}>{iv(call.impliedVolatility)}</td>
                 <td style={td}>{gr(call.theta)}</td>
-                <td style={strikeTd}>{gnum(parseFloat(strike), 0)}</td>
-                <td style={td}>{gr(put.theta)}</td>
-                <td style={td}>{iv(put.impliedVolatility)}</td>
-                <td style={td}>{bid(put.bid)}</td>
-                <td style={td}>{bid(put.ask)}</td>
+                <td style={strikeTd}>{gnum(strike, 0)}</td>
+                <td style={{ ...td, color: statusColor, fontWeight: 600 }}>{status}</td>
               </tr>
             );
           })}
