@@ -1,5 +1,6 @@
 import React from "react";
 import Navbar from "./components/Navbar.jsx";
+import SchwabStatus from "./components/SchwabStatus.jsx";
 import RegimeScanner from "./components/RegimeScanner.jsx";
 import StockFilter from "./components/StockFilter.jsx";
 import ExecuteTab from "./components/ExecuteTab.jsx";
@@ -25,6 +26,7 @@ export default function App() {
     <div className="min-h-full bg-slate-950 text-slate-100">
       <Navbar tabs={TABS} active={tab} onChange={setTab} regimeStatus={regimeStatus} />
       <main className="mx-auto max-w-7xl px-4 py-6">
+        <SchwabStatus />
         {tab === "Scan" && (
           <div className="grid gap-4">
             <RegimeScanner onStatus={setRegimeStatus} />

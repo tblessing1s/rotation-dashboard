@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import secrets
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
 
 import config
@@ -206,12 +206,21 @@ def api_account_status():
     return jsonify(schwab_api.token_status())
 
 
+def _callback_uri() -> str:
+    """The OAuth callback URL. Fly terminates TLS, so request.url_root can come
+    back as http://; force https (except on localhost) so it matches the https
+    callback registered with the Schwab app and used in the authorize request."""
+    root = request.url_root.rstrip("/")
+    if root.startswith("http://") and not any(h in root for h in ("localhost", "127.0.0.1")):
+        root = "https://" + root[len("http://"):]
+    return root + "/auth/schwab/callback"
+
+
 @app.route("/auth/schwab")
 def auth_schwab():
     try:
-        redirect_uri = request.url_root.rstrip("/") + "/auth/schwab/callback"
         state = secrets.token_urlsafe(16)
-        return jsonify({"authorize_url": schwab_api.authorize_url(redirect_uri, state)})
+        return jsonify({"authorize_url": schwab_api.authorize_url(_callback_uri(), state)})
     except Exception as e:  # noqa: BLE001
         return _err(e, 400)
 
@@ -220,14 +229,14 @@ def auth_schwab():
 def auth_schwab_callback():
     code = request.args.get("code")
     if not code:
-        return "Missing authorization code", 400
+        return redirect("/?schwab=error&msg=missing+authorization+code")
     try:
-        redirect_uri = request.url_root.rstrip("/") + "/auth/schwab/callback"
-        tokens = schwab_api.exchange_code(code, redirect_uri)
+        tokens = schwab_api.exchange_code(code, _callback_uri())
         schwab_api.store_refresh_token(tokens["refresh_token"])
-        return "Schwab authorized. You can close this tab and return to the dashboard."
+        return redirect("/?schwab=connected")
     except Exception as e:  # noqa: BLE001
-        return f"Schwab authorization failed: {e}", 400
+        from urllib.parse import quote
+        return redirect(f"/?schwab=error&msg={quote(str(e)[:200])}")
 
 
 # ---------------------------------------------------------------------------
