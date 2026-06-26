@@ -1,174 +1,89 @@
 """
-Configuration & calibration knobs for the rotation dashboard.
+CFM dashboard configuration & calibration.
 
-Edit these to match your thinkorswim studies, then restart the backend.
+Data sources are Schwab (primary) and Alpha Vantage (fallback) only — no FRED,
+no Yahoo. Daily bars are cached to parquet under DATA_DIR/cache; persistent
+state lives in DATA_DIR/state.json (mirrors the Fly volume mount at /data).
 """
+from __future__ import annotations
 
 import os
 
-# Symbols the dashboard tracks. SPY is the RS3M benchmark (always needed).
-SECTOR_UNIVERSE = [
-    {"symbol": "XLK", "name": "Technology", "group": "growth"},
-    {"symbol": "XLY", "name": "Consumer Discretionary", "group": "growth"},
-    {"symbol": "XLC", "name": "Communication Services", "group": "growth"},
-    {"symbol": "XLI", "name": "Industrials", "group": "cyclical"},
-    {"symbol": "XLF", "name": "Financials", "group": "cyclical"},
-    {"symbol": "XLE", "name": "Energy", "group": "inflation"},
-    {"symbol": "XLB", "name": "Materials", "group": "inflation"},
-    {"symbol": "XLV", "name": "Health Care", "group": "defensive"},
-    {"symbol": "XLP", "name": "Consumer Staples", "group": "defensive"},
-    {"symbol": "XLU", "name": "Utilities", "group": "defensive"},
-    {"symbol": "XLRE", "name": "Real Estate", "group": "rates"},
+# ---- Paths -----------------------------------------------------------------
+# On Fly a persistent volume is mounted at /data (DATA_DIR=/data in fly.toml).
+# Locally it falls back to the backend directory so nothing needs configuring.
+BACKEND_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_DIR = os.path.dirname(BACKEND_DIR)
+DATA_DIR = os.environ.get("DATA_DIR") or BACKEND_DIR
+STATE_PATH = os.path.join(DATA_DIR, "state.json")
+CACHE_DIR = os.path.join(DATA_DIR, "cache")
+# The sector universe ships with the repo (root-level), read-only reference data.
+# A data/ fallback is kept for older checkouts.
+TICKERS_BY_SECTOR_CANDIDATES = [
+    os.path.join(REPO_DIR, "tickers_by_sector.txt"),
+    os.path.join(REPO_DIR, "data", "tickers_by_sector.txt"),
 ]
-SECTOR_SYMBOLS = [s["symbol"] for s in SECTOR_UNIVERSE]
-BENCHMARK = "SPY"
-TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # AAPL is the default APP stock candidate.
-
-# The regime input labelled "VIX" is the actual CBOE Volatility Index (^VIX),
-# not an ETF proxy: the macro gate thresholds (VIX < 15 / > 20 / > 30) are
-# calibrated for the index level, so a tradeable ETF's share price would read
-# wrong. Both providers handle it — Schwab maps ^VIX -> $VIX (see providers/
-# schwab.py SYMBOL_MAP) and Yahoo reads ^VIX natively. Override with
-# VIX_PROXY_SYMBOL only if you specifically want an ETF/ETN such as VXX.
-VIX_PROXY_SYMBOL = (
-    (os.environ.get("VIX_PROXY_SYMBOL") or "^VIX").strip().upper() or "^VIX"
+TICKERS_BY_SECTOR_PATH = next(
+    (p for p in TICKERS_BY_SECTOR_CANDIDATES if os.path.exists(p)),
+    TICKERS_BY_SECTOR_CANDIDATES[0],
 )
 
-QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", VIX_PROXY_SYMBOL, "SPY"]  # for the live ticker strip/API
-
-# ---- 5 key indicator settings ----------------------------------------------
-# Schwab daily bars line up with thinkorswim's daily studies, so defaults use
-# the same common study settings:
-# - RS3M: (close / close("SPY")) relative-strength ratio vs the same ratio
-#   63 trading bars ago.
-# - RS3M_MOM: percent change from current RS3M to RS3M[5]. With defaults,
-#   current=(rs/rs[63]-1)*100 and prior=(rs[5]/rs[68]-1)*100.
-# - RSI: 14-period Wilder average (thinkorswim RSI default).
-# - MA21: 21-day simple moving average (thinkorswim SimpleMovingAvg).
-# VolumeRatio uses latest volume / latest 20-day average volume * 100.
-# VolumeAccel uses latest volume / latest 5-day average volume * 100.
-RS3M_METHOD = "ratio"
-RS3M_EMA_SPAN = 1
-RS3M_LOOKBACK = 63
-RS3M_MOM_WINDOW = 10  # legacy/window metadata; exact TOS momentum uses the two lag settings below.
-RS3M_MOM_PAST_END_LAG = 68
-RS3M_MOM_PAST_LOOKBACK = 131  # retained for API/config compatibility; TOS MOM uses the 5-bar lag above.
-MOM_SMOOTH = 1
-MOM_SCALE = 1.0
-RSI_METHOD = "wilder"
-MA21_METHOD = "sma"
-
-# ---- Data / ingestion --------------------------------------------------------
-HISTORY_DAYS = 320          # ~10 months of daily bars (enough for RS3M_MOM's 131-bar reference)
-
-# Sector constituents (largest / most-liquid holdings per SPDR sector ETF).
-# Single source of truth for the CFM candidate universe and the stock->sector
-# proxy map. Mirrors SECTOR_CONSTITUENTS in the frontend so scheduled ingestion
-# covers every name the candidate leaderboard can rank.
-SECTOR_CONSTITUENTS = {
-    "XLB": ["LIN", "NEM", "FCX", "VMC", "CRH", "MLM", "SHW", "CTVA", "ECL", "APD", "NUE", "STLD"],
-    "XLC": ["META", "GOOGL", "GOOG", "NFLX", "TTWO", "DIS", "EA", "TMUS", "VZ", "T", "CMCSA", "CHTR"],
-    "XLE": ["XOM", "CVX", "COP", "WMB", "VLO", "MPC", "EOG", "SLB", "PSX", "KMI", "OKE", "OXY"],
-    "XLF": ["JPM", "V", "MA", "BAC", "GS", "MS", "WFC", "C", "AXP", "SCHW", "BLK", "SPGI"],
-    "XLI": ["CAT", "GE", "RTX", "BA", "ETN", "UNP", "DE", "HON", "LMT", "UPS", "GD", "MMM"],
-    "XLK": ["NVDA", "AAPL", "MSFT", "AVGO", "AMD", "CSCO", "TXN", "ORCL", "PLTR", "IBM", "QCOM", "CRM"],
-    "XLP": ["WMT", "COST", "PG", "KO", "PM", "CL", "PEP", "MO", "MDLZ", "MNST", "TGT", "KDP"],
-    "XLRE": ["WELL", "PLD", "EQIX", "AMT", "SPG", "DLR", "O", "PSA", "VTR", "CBRE", "CCI", "EXR"],
-    "XLU": ["NEE", "SO", "DUK", "CEG", "AEP", "D", "SRE", "XEL", "EXC", "PEG", "ED", "WEC"],
-    "XLV": ["LLY", "JNJ", "ABBV", "UNH", "MRK", "AMGN", "TMO", "ABT", "GILD", "ISRG", "PFE", "CVS"],
-    "XLY": ["AMZN", "TSLA", "HD", "TJX", "MCD", "BKNG", "LOW", "SBUX", "MAR", "GM", "NKE", "AZO"],
+# Sector group classification (the file itself carries only ETF + name).
+SECTOR_GROUPS = {
+    "XLK": "growth", "XLY": "growth", "XLC": "growth",
+    "XLI": "cyclical", "XLF": "cyclical",
+    "XLE": "inflation", "XLB": "inflation",
+    "XLV": "defensive", "XLP": "defensive", "XLU": "defensive",
+    "XLRE": "rates",
 }
 
-DEFENSIVE_SECTORS = ["XLV", "XLP", "XLU", "XLRE"]
+# ---- Benchmark / regime ----------------------------------------------------
+BENCHMARK = "SPY"
+VIX_SYMBOL = (os.environ.get("VIX_SYMBOL") or "^VIX").strip().upper() or "^VIX"
 
-# CFM ranks deeper in the defensive sectors (its wheelhouse) but still covers
-# every sector so the leaderboard can surface the best fit for the regime.
-CFM_ENTRY_CANDIDATES = list(dict.fromkeys(
-    SECTOR_SYMBOLS
-    + [name for etf, names in SECTOR_CONSTITUENTS.items()
-       for name in names[: (10 if etf in DEFENSIVE_SECTORS else 4)]]
-))
-ENTRY_CANDIDATES = CFM_ENTRY_CANDIDATES
-
-# stock -> sector-ETF proxy, derived from the constituents map. Sector ETFs map
-# to themselves so inference is total over both stocks and the ETFs.
-ENTRY_CANDIDATE_PROXY = {
-    **{etf: etf for etf in SECTOR_CONSTITUENTS},
-    **{name: etf for etf, names in SECTOR_CONSTITUENTS.items() for name in names},
-}
-
-# If the newest successful ingest is older than this, an API hit kicks off a
-# background catch-up run (the request itself is never blocked).
-INGEST_STALE_AFTER_HOURS = 6
-
-# ---- Validation / quarantine -------------------------------------------------
-# A bar is quarantined when its close moves more than this fraction vs the
-# prior close (plus null/negative/high<low checks). Per-symbol overrides for
-# things that legitimately gap hard.
-VALIDATION_MAX_MOVE = 0.25
-VALIDATION_MAX_MOVE_PER_SYMBOL = {
-    VIX_PROXY_SYMBOL: 1.00,  # VIX futures ETFs can gap hard during volatility shocks.
-    "^VIX": 1.00,           # keep legacy/index support for older stored data or ad-hoc pulls.
-}
-
-# Level 1 regime inputs cross-checked across two providers when both are
-# available. Divergence beyond tolerance is flagged in the data-issues panel
-# instead of silently trusting one source.
-CROSS_CHECK_SYMBOLS = [VIX_PROXY_SYMBOL, "SPY"]
-CROSS_CHECK_TOLERANCE = 0.01            # 1% on close
-CROSS_CHECK_TOLERANCE_PER_SYMBOL = {
-    VIX_PROXY_SYMBOL: 0.03,  # volatility feeds can snapshot at slightly different times
-    "^VIX": 0.03,           # legacy/index support
-}
-
-# ---- Macro automation -------------------------------------------------------
-# Level 1 inputs are derived from public, no-key sources where possible.
-# Breadth is approximated as the percent of this broad ETF universe trading above
-# its 50-day moving average. Adjust the universe if you prefer a different lens.
-# (^NYA was previously listed as "NYA", which Yahoo doesn't recognize, so the
-# NYSE Composite was silently missing from breadth.)
+# Breadth = percent of this broad universe trading above its 50-day MA.
 BREADTH_SYMBOLS = [
-    "SPY", "QQQ", "IWM", "^NYA",
-    "XLK", "XLV", "XLF", "XLY", "XLC", "XLI", "XLP", "XLE", "XLU", "XLB", "XLRE",
+    "SPY", "QQQ", "IWM",
+    "XLK", "XLY", "XLC", "XLI", "XLF", "XLE", "XLB", "XLV", "XLP", "XLU", "XLRE",
 ]
 BREADTH_MA_WINDOW = 50
 
-# FRED series ingested daily. Fetched via the official FRED API when the
-# FRED_API_KEY env var is set (free key from https://fred.stlouisfed.org/docs/api/api_key.html),
-# falling back to the keyless graph CSV. The keyless endpoint has started
-# returning HTTP 403 to programmatic requests, so a key is strongly recommended.
-FRED_SERIES = ["DFF", "CPIAUCSL", "GDPC1", "UNRATE"]
+# Regime gate thresholds (Level 1). VIX is the index level, not an ETF proxy.
+REGIME_BREADTH_GREEN = 60      # % of universe above 50-DMA for a green tape
+REGIME_BREADTH_RED = 40
+VIX_CALM = 18                  # below = calm
+VIX_ELEVATED = 24             # above = risk-off
 
-# ---- Daily screener (Alpha Vantage) -----------------------------------------
-# Alpha Vantage has no server-side market screener, so the screener scans a
-# *universe* and applies the price/volume/ATR% filters locally. The ≥10M-volume
-# floor already collapses the entire US market to a few hundred names, so a
-# curated high-liquidity list — plus the day's TOP_GAINERS_LOSERS most-actives
-# as a discovery layer — covers effectively everything in range. Tune this list
-# freely; symbols that fall out of range are simply filtered out each run.
-SCREENER_UNIVERSE = [
-    # Broad / sector / thematic ETFs that routinely trade heavy volume.
-    "SPY", "QQQ", "IWM", "DIA", "XLK", "XLF", "XLE", "XLY", "XLI", "XLV",
-    "XLP", "XLU", "XLB", "XLC", "XLRE", "SMH", "SOXL", "SOXS", "TQQQ", "SQQQ",
-    "ARKK", "XBI", "KRE", "GDX", "SLV", "USO", "TLT", "HYG", "FXI", "EEM",
-    # Mega-cap / high-liquidity single names.
-    "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA", "AVGO",
-    "AMD", "INTC", "MU", "QCOM", "TXN", "CRM", "ORCL", "ADBE", "NOW", "PLTR",
-    "NFLX", "DIS", "CMCSA", "T", "VZ", "PYPL", "SQ", "SHOP", "UBER", "ABNB",
-    "COIN", "MSTR", "SNOW", "CRWD", "PANW", "DDOG", "NET", "SMCI", "ARM", "DELL",
-    "JPM", "BAC", "WFC", "C", "GS", "MS", "SCHW", "V", "MA", "AXP",
-    "BX", "KKR", "COF", "USB", "PNC",
-    "XOM", "CVX", "COP", "SLB", "OXY", "MRO", "DVN", "HAL", "FANG", "MPC",
-    "UNH", "JNJ", "LLY", "PFE", "MRK", "ABBV", "BMY", "GILD", "AMGN", "CVS",
-    "MRNA", "TMO", "DHR", "ISRG", "VRTX",
-    "WMT", "COST", "HD", "LOW", "TGT", "NKE", "SBUX", "MCD", "PG", "KO",
-    "PEP", "CAT", "DE", "BA", "GE", "HON", "UPS", "FDX", "LMT", "RTX",
-    "F", "GM", "RIVN", "LCID", "NIO", "DAL", "AAL", "UAL", "CCL", "NCLH",
-    "BABA", "PDD", "JD", "MARA", "RIOT", "CLSK", "AFRM", "SOFI", "HOOD", "DKNG",
-    "ROKU", "ZM", "DOCU", "TTD", "ENPH", "FSLR", "RUN", "PLUG", "CHPT", "NEE",
-]
+# ---- Sector gate (Level 2) -------------------------------------------------
+SECTOR_RS3M_MIN = 10.0         # sector RS3M vs SPY must clear +10%
+SECTOR_BREADTH_MIN = 60.0     # % of sector constituents above 50-DMA
 
+# ---- Stock gate (Levels 3 & 4) ---------------------------------------------
+STOCK_RS_VS_SPY_MIN = 5.0      # stock RS3M vs SPY > +5%
+STOCK_RS_VS_SECTOR_MIN = 0.0  # stock RS3M vs Sector > 0
+CONSOLIDATION_ATR_PCT_MAX = 5.0   # daily ATR% of price below this = consolidating
+CONSOLIDATION_MA21_DIST_MAX = 4.0  # within this % of MA21 = near the mean
 
-# ---- Portfolio defaults (mirrors your framework) ----------------------------
+# ---- Indicator calibration (matches thinkorswim daily studies) -------------
+RS3M_LOOKBACK = 63            # ~3 months of trading days
+ATR_WINDOW = 9               # CFM uses a 9-day ATR for strike spacing
+RSI_WINDOW = 14
+MA_WINDOW = 21
+VOL_AVG_WINDOW = 20
+HISTORY_DAYS = 320           # daily bars pulled / cached per symbol
+
+# ---- CFM mechanics ---------------------------------------------------------
+LEAP_CONTRACTS = 5            # 5 deep-ITM LEAP calls per stock
+LEAP_TARGET_DELTA = 0.90
+LEAP_TARGET_DTE = 180
+SHORT_ATR_MULT = 1.5         # short strike = stock - 1.5 * ATR
+SHARE_CAP = 500              # accumulate to 500 shares per stock, then rotate
+LEAP_ROLL_DTE = 30           # roll/replace LEAP when it nears this DTE
+
+# ---- Capital ---------------------------------------------------------------
 CAPITAL = 35000
-RESERVE = 13000
+RESERVE_REQUIRED = 13000
+
+# Income milestones (monthly net juice) used by the position tracker.
+MILESTONE_HALF_NUT = 2150
+MILESTONE_QUIT_SAFE = 7500

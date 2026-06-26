@@ -3,9 +3,12 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
-backend/.cache/
+
+# Runtime state & caches (DATA_DIR; on Fly this lives on the /data volume)
 backend/state.json
-backend/data/
+backend/schwab_token.json
+backend/cache/
+data/cache/
 
 # Node/Vite
 frontend/node_modules/

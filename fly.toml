@@ -4,7 +4,7 @@ primary_region = "iad"
 [build]
   dockerfile = "Dockerfile"
 
-# Persistent datastore (SQLite + state.json). Create once with:
+# Persistent state (state.json + parquet cache + Schwab token). Create once with:
 #   fly volume create data --region iad --size 1
 # Single-writer store: run exactly ONE machine (`fly scale count 1`). A volume
 # attaches to only one machine, so 2 machines would need 2 volumes and the data
