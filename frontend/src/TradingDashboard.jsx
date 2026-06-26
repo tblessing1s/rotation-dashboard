@@ -2257,11 +2257,35 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
   const [draftSectorProxy, setDraftSectorProxy] = useState("");
   const [candidateRankingHistory, setCandidateRankingHistory] = useState(() => store.get("entryCandidateRankingSnapshots", {}));
 
-  // Option chain modal state
-  const [chainModal, setChainModal] = useState(null);  // { symbol } or null
-  const [chainData, setChainData] = useState(null);
-  const [chainBusy, setChainBusy] = useState(false);
+  // Option chain state: user-selected symbols to load
+  const [chainSymbolInput, setChainSymbolInput] = useState("");
+  const [loadedChains, setLoadedChains] = useState(() => store.get("loadedChains", {}));  // { symbol: chain_data }
+  const [chainBusy, setChainBusy] = useState(null);  // symbol being loaded or null
   const [chainError, setChainError] = useState("");
+  const [viewingChain, setViewingChain] = useState(null);  // symbol currently viewing or null
+
+  const loadChain = async (symbol) => {
+    symbol = symbol.toUpperCase().trim();
+    if (!symbol) return;
+    if (loadedChains[symbol]) { setViewingChain(symbol); return; }  // Already loaded
+
+    setChainBusy(symbol);
+    setChainError("");
+    try {
+      const r = await apiOptionsChain(symbol);
+      if (r.ok) {
+        const updated = { ...loadedChains, [symbol]: r.chain };
+        setLoadedChains(updated);
+        store.set("loadedChains", updated, true).catch(() => {});
+        setViewingChain(symbol);
+      } else {
+        setChainError(`Failed to load ${symbol}: ${r.error || "Unknown error"}`);
+      }
+    } catch (e) {
+      setChainError(`Failed to load ${symbol}: ${String(e)}`);
+    }
+    setChainBusy(null);
+  };
 
   const normalizedWatch = normalizeWatchItems(entryWatchSymbols || []);
 
@@ -2397,40 +2421,63 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 16 }}>
-        {candidates.length ? candidates.map((candidate) => <EntryWatchCard key={candidate.symbol} {...candidate} onRemove={removeSymbol} onUpdate={updateWatchItem} onSendToExecutor={onSendToExecutor} onViewChain={() => { setChainModal({ symbol: candidate.symbol }); setChainData(null); setChainError(""); setChainBusy(true); apiOptionsChain(candidate.symbol).then((r) => { if (r.ok) setChainData(r.chain); else setChainError(r.error || "Failed to fetch chain."); setChainBusy(false); }).catch((e) => { setChainError(String(e)); setChainBusy(false); }); }} />) : (
+        {candidates.length ? candidates.map((candidate) => <EntryWatchCard key={candidate.symbol} {...candidate} onRemove={removeSymbol} onUpdate={updateWatchItem} onSendToExecutor={onSendToExecutor} onViewChain={() => loadChain(candidate.symbol)} />) : (
           <Panel title="No tickers monitored" eyebrow="Entry watch" accent={C.inkFaint}>
             <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>Add a ticker above to start monitoring entry readiness.</div>
           </Panel>
         )}
       </div>
 
-      {chainModal && (
-        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 2000 }}>
-          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 24, maxWidth: 900, maxHeight: "80vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-              <div style={{ font: `600 18px ${C.sans}` }}>Option chain: {chainModal.symbol}</div>
-              <button onClick={() => setChainModal(null)} style={{ background: "none", border: "none", font: `600 20px ${C.sans}`, color: C.inkDim, cursor: "pointer" }}>×</button>
+      {(viewingChain || Object.keys(loadedChains).length > 0) && (
+        <Panel title="Option chains" eyebrow="cached & loaded · strategic request management"
+          right={
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ font: `500 10px ${C.mono}`, color: C.inkFaint }}>{Object.keys(loadedChains).length} loaded</span>
+              <button onClick={() => { setViewingChain(null); setChainError(""); }} style={{ background: "none", border: "none", font: `600 14px ${C.sans}`, color: C.inkDim, cursor: "pointer" }}>×</button>
+            </div>
+          }>
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
+              <input type="text" placeholder="Enter symbol to load (e.g., AAPL, SPY)" value={chainSymbolInput}
+                onChange={(e) => { setChainSymbolInput(e.target.value); setChainError(""); }}
+                onKeyPress={(e) => { if (e.key === "Enter") { loadChain(chainSymbolInput); setChainSymbolInput(""); } }}
+                style={{ padding: "8px 12px", background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, boxSizing: "border-box" }} />
+              <button onClick={() => { loadChain(chainSymbolInput); setChainSymbolInput(""); }} disabled={chainBusy || !chainSymbolInput.trim()}
+                style={{ padding: "8px 16px", background: chainBusy || !chainSymbolInput.trim() ? C.line : C.blue, color: chainBusy || !chainSymbolInput.trim() ? C.inkFaint : "#06121f", border: "none", borderRadius: 6, cursor: (chainBusy || !chainSymbolInput.trim()) ? "default" : "pointer", font: `600 11px ${C.sans}`, opacity: (chainBusy || !chainSymbolInput.trim()) ? 0.5 : 1 }}>
+                {chainBusy === chainSymbolInput.toUpperCase() ? "Loading…" : "Load"}
+              </button>
             </div>
 
-            {chainBusy && <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>Loading chain data…</div>}
-            {chainError && <div style={{ padding: 12, background: C.red + "20", border: `1px solid ${C.red}`, borderRadius: 6, font: `400 12px ${C.sans}`, color: C.red, marginBottom: 16 }}>{chainError}</div>}
+            {chainError && <div style={{ padding: 10, background: C.red + "20", border: `1px solid ${C.red}`, borderRadius: 6, font: `400 11px ${C.sans}`, color: C.red }}>{chainError}</div>}
 
-            {chainData && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {Object.keys(loadedChains).map((sym) => (
+                <button key={sym} onClick={() => setViewingChain(sym)}
+                  style={{
+                    padding: "6px 12px", borderRadius: 6, border: `1px solid ${viewingChain === sym ? C.blue : C.line}`,
+                    background: viewingChain === sym ? C.blue + "20" : C.panel2,
+                    color: viewingChain === sym ? C.blue : C.inkDim,
+                    cursor: "pointer", font: `600 11px ${C.sans}`,
+                  }}>
+                  {sym}
+                </button>
+              ))}
+            </div>
+
+            {viewingChain && loadedChains[viewingChain] && (
               <div>
-                <div style={{ font: `500 11px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, marginBottom: 12 }}>Expirations: {chainData.expirations?.slice(0, 5).join(" · ") || "—"}</div>
-                {Object.keys(chainData.callExpDateMap || {}).length > 0 ? (
-                  <OptionChainTable symbol={chainModal.symbol} calls={chainData.callExpDateMap || {}} puts={chainData.putExpDateMap || {}} />
+                <div style={{ font: `500 11px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, marginBottom: 12 }}>
+                  Expirations: {loadedChains[viewingChain].expirations?.slice(0, 5).join(" · ") || "—"}
+                </div>
+                {Object.keys(loadedChains[viewingChain].callExpDateMap || {}).length > 0 ? (
+                  <OptionChainTable symbol={viewingChain} calls={loadedChains[viewingChain].callExpDateMap || {}} puts={loadedChains[viewingChain].putExpDateMap || {}} />
                 ) : (
-                  <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No options data available.</div>
+                  <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No options data available for {viewingChain}.</div>
                 )}
               </div>
             )}
-
-            <div style={{ display: "flex", gap: 10, marginTop: 16, paddingTop: 16, borderTop: `1px solid ${C.lineSoft}` }}>
-              <button onClick={() => setChainModal(null)} style={{ flex: 1, padding: "8px 12px", background: C.line, color: C.inkDim, border: "none", borderRadius: 6, cursor: "pointer", font: `600 12px ${C.sans}` }}>Close</button>
-            </div>
           </div>
-        </div>
+        </Panel>
       )}
     </div>
   );
