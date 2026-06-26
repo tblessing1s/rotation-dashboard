@@ -466,6 +466,35 @@ async function apiOptionsReplace(orderId, spec) {
   return { ...data, ok: data.ok ?? r.ok, httpStatus: r.status };
 }
 
+// Close an open position.
+async function apiOptionsClose(fillId, orderType = "LIMIT", limitPrice = null) {
+  const r = await fetch(`${API}/api/options/close`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fillId, orderType, limitPrice }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok };
+}
+
+// Roll a position to a new strike/expiry (closes current, opens new).
+async function apiOptionsRoll(fillId, newStrike, newExpiry, closeOrderType = "MARKET", openOrderType = "LIMIT", openLimitPrice = null) {
+  const r = await fetch(`${API}/api/options/roll`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ fillId, newStrike, newExpiry, closeOrderType, openOrderType, openLimitPrice }),
+  });
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok };
+}
+
+// Fetch option chain for a symbol, optionally filtered to one expiry.
+async function apiOptionsChain(symbol, expiry = null) {
+  const q = new URLSearchParams({ symbol });
+  if (expiry) q.append("expiry", expiry);
+  const r = await fetch(`${API}/api/options/chain?${q}`);
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok };
+}
+
 // Manual overrides persist server-side with source="manual" and always beat
 // ingested values. value=null clears the override (back to auto).
 async function apiSetOverride(key, value) {
@@ -2227,6 +2256,37 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
   const [draftStrategyMode, setDraftStrategyMode] = useState("AUTO");
   const [draftSectorProxy, setDraftSectorProxy] = useState("");
   const [candidateRankingHistory, setCandidateRankingHistory] = useState(() => store.get("entryCandidateRankingSnapshots", {}));
+
+  // Option chain state: user-selected symbols to load
+  const [chainSymbolInput, setChainSymbolInput] = useState("");
+  const [loadedChains, setLoadedChains] = useState(() => store.get("loadedChains", {}));  // { symbol: chain_data }
+  const [chainBusy, setChainBusy] = useState(null);  // symbol being loaded or null
+  const [chainError, setChainError] = useState("");
+  const [viewingChain, setViewingChain] = useState(null);  // symbol currently viewing or null
+
+  const loadChain = async (symbol) => {
+    symbol = symbol.toUpperCase().trim();
+    if (!symbol) return;
+    if (loadedChains[symbol]) { setViewingChain(symbol); return; }  // Already loaded
+
+    setChainBusy(symbol);
+    setChainError("");
+    try {
+      const r = await apiOptionsChain(symbol);
+      if (r.ok) {
+        const updated = { ...loadedChains, [symbol]: r.chain };
+        setLoadedChains(updated);
+        store.set("loadedChains", updated, true).catch(() => {});
+        setViewingChain(symbol);
+      } else {
+        setChainError(`Failed to load ${symbol}: ${r.error || "Unknown error"}`);
+      }
+    } catch (e) {
+      setChainError(`Failed to load ${symbol}: ${String(e)}`);
+    }
+    setChainBusy(null);
+  };
+
   const normalizedWatch = normalizeWatchItems(entryWatchSymbols || []);
 
   const candidates = normalizedWatch.map((watch) => {
@@ -2361,17 +2421,126 @@ function EntryWatchView({ app, macro, focus, computed, indicatorHistory, calcSta
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 16 }}>
-        {candidates.length ? candidates.map((candidate) => <EntryWatchCard key={candidate.symbol} {...candidate} onRemove={removeSymbol} onUpdate={updateWatchItem} onSendToExecutor={onSendToExecutor} />) : (
+        {candidates.length ? candidates.map((candidate) => <EntryWatchCard key={candidate.symbol} {...candidate} onRemove={removeSymbol} onUpdate={updateWatchItem} onSendToExecutor={onSendToExecutor} onViewChain={() => loadChain(candidate.symbol)} />) : (
           <Panel title="No tickers monitored" eyebrow="Entry watch" accent={C.inkFaint}>
             <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>Add a ticker above to start monitoring entry readiness.</div>
           </Panel>
         )}
       </div>
+
+      {(viewingChain || Object.keys(loadedChains).length > 0) && (
+        <Panel title="Option chains" eyebrow="cached & loaded · strategic request management"
+          right={
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <span style={{ font: `500 10px ${C.mono}`, color: C.inkFaint }}>{Object.keys(loadedChains).length} loaded</span>
+              <button onClick={() => { setViewingChain(null); setChainError(""); }} style={{ background: "none", border: "none", font: `600 14px ${C.sans}`, color: C.inkDim, cursor: "pointer" }}>×</button>
+            </div>
+          }>
+          <div style={{ display: "grid", gap: 12 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 8, alignItems: "center" }}>
+              <input type="text" placeholder="Enter symbol to load (e.g., AAPL, SPY)" value={chainSymbolInput}
+                onChange={(e) => { setChainSymbolInput(e.target.value); setChainError(""); }}
+                onKeyPress={(e) => { if (e.key === "Enter") { loadChain(chainSymbolInput); setChainSymbolInput(""); } }}
+                style={{ padding: "8px 12px", background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, boxSizing: "border-box" }} />
+              <button onClick={() => { loadChain(chainSymbolInput); setChainSymbolInput(""); }} disabled={chainBusy || !chainSymbolInput.trim()}
+                style={{ padding: "8px 16px", background: chainBusy || !chainSymbolInput.trim() ? C.line : C.blue, color: chainBusy || !chainSymbolInput.trim() ? C.inkFaint : "#06121f", border: "none", borderRadius: 6, cursor: (chainBusy || !chainSymbolInput.trim()) ? "default" : "pointer", font: `600 11px ${C.sans}`, opacity: (chainBusy || !chainSymbolInput.trim()) ? 0.5 : 1 }}>
+                {chainBusy === chainSymbolInput.toUpperCase() ? "Loading…" : "Load"}
+              </button>
+            </div>
+
+            {chainError && <div style={{ padding: 10, background: C.red + "20", border: `1px solid ${C.red}`, borderRadius: 6, font: `400 11px ${C.sans}`, color: C.red }}>{chainError}</div>}
+
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {Object.keys(loadedChains).map((sym) => (
+                <button key={sym} onClick={() => setViewingChain(sym)}
+                  style={{
+                    padding: "6px 12px", borderRadius: 6, border: `1px solid ${viewingChain === sym ? C.blue : C.line}`,
+                    background: viewingChain === sym ? C.blue + "20" : C.panel2,
+                    color: viewingChain === sym ? C.blue : C.inkDim,
+                    cursor: "pointer", font: `600 11px ${C.sans}`,
+                  }}>
+                  {sym}
+                </button>
+              ))}
+            </div>
+
+            {viewingChain && loadedChains[viewingChain] && (
+              <div>
+                <div style={{ font: `500 11px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, marginBottom: 12 }}>
+                  Expirations: {loadedChains[viewingChain].expirations?.slice(0, 5).join(" · ") || "—"}
+                </div>
+                {Object.keys(loadedChains[viewingChain].callExpDateMap || {}).length > 0 ? (
+                  <OptionChainTable symbol={viewingChain} calls={loadedChains[viewingChain].callExpDateMap || {}} puts={loadedChains[viewingChain].putExpDateMap || {}} />
+                ) : (
+                  <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No options data available for {viewingChain}.</div>
+                )}
+              </div>
+            )}
+          </div>
+        </Panel>
+      )}
     </div>
   );
 }
 
-function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWhen, strategyMode, sectorProxy, onRemove, onUpdate, onSendToExecutor }) {
+function OptionChainTable({ symbol, calls, puts }) {
+  const th = { textAlign: "center", font: `600 10px ${C.mono}`, color: C.inkFaint, padding: "8px 6px", borderBottom: `1px solid ${C.line}`, whiteSpace: "nowrap" };
+  const td = { textAlign: "center", font: `500 11px ${C.mono}`, color: C.ink, padding: "8px 6px", borderBottom: `1px solid ${C.lineSoft}` };
+  const strikeTd = { ...td, textAlign: "right", fontWeight: 600 };
+
+  // Flatten the chain structure: callExpDateMap is {expDate: {strike: {bid, ask, ...}}}
+  const expirations = Object.keys(calls).sort();
+  if (expirations.length === 0) return <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No data</div>;
+
+  const expiry = expirations[0];  // Show first expiry
+  const callLegs = calls[expiry] || {};
+  const putLegs = puts[expiry] || {};
+  const strikes = Array.from(new Set([...Object.keys(callLegs), ...Object.keys(putLegs)])).sort((a, b) => parseFloat(a) - parseFloat(b));
+
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "11px" }}>
+        <thead>
+          <tr>
+            <th style={{ ...th, width: "15%" }}>Call bid</th>
+            <th style={{ ...th, width: "15%" }}>Call ask</th>
+            <th style={{ ...th, width: "10%" }}>IV</th>
+            <th style={{ ...th, width: "10%" }}>θ</th>
+            <th style={{ ...th, width: "15%" }}>Strike</th>
+            <th style={{ ...th, width: "10%" }}>θ</th>
+            <th style={{ ...th, width: "10%" }}>IV</th>
+            <th style={{ ...th, width: "15%" }}>Put bid</th>
+            <th style={{ ...th, width: "15%" }}>Put ask</th>
+          </tr>
+        </thead>
+        <tbody>
+          {strikes.map((strike) => {
+            const call = callLegs[strike] || {};
+            const put = putLegs[strike] || {};
+            const bid = (v) => v != null ? gnum(v, 2) : "—";
+            const iv = (v) => v != null ? gnum(v * 100, 1) + "%" : "—";
+            const gr = (v) => v != null ? gnum(v, 3) : "—";
+            return (
+              <tr key={strike}>
+                <td style={td}>{bid(call.bid)}</td>
+                <td style={td}>{bid(call.ask)}</td>
+                <td style={td}>{iv(call.impliedVolatility)}</td>
+                <td style={td}>{gr(call.theta)}</td>
+                <td style={strikeTd}>{gnum(parseFloat(strike), 0)}</td>
+                <td style={td}>{gr(put.theta)}</td>
+                <td style={td}>{iv(put.impliedVolatility)}</td>
+                <td style={td}>{bid(put.bid)}</td>
+                <td style={td}>{bid(put.ask)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWhen, strategyMode, sectorProxy, onRemove, onUpdate, onSendToExecutor, onViewChain }) {
   const go = data.verdict === "ENTER";
   const readiness = readinessFromChecklist(data);
   const { passed, missing } = splitChecklistItems(data.items);
@@ -2440,14 +2609,24 @@ function EntryWatchCard({ tag, name, symbol, color, data, setup, trigger, bestWh
           <div style={{ font: `500 12px/1.45 ${C.sans}`, color: C.ink }}>{go ? "All conditions are met. Validate price/action live before placing the trade." : trigger}</div>
         </div>
 
-        {go && onSendToExecutor && (
-          <button
-            onClick={() => onSendToExecutor([symbol])}
-            style={{ width: "100%", background: C.green, color: "#000", border: "none", borderRadius: 7, padding: "9px 0", font: `700 12px ${C.sans}`, cursor: "pointer", letterSpacing: 0.3 }}
-          >
-            → Monitor in Executor
-          </button>
-        )}
+        <div style={{ display: "grid", gridTemplateColumns: onSendToExecutor ? "1fr 1fr" : "1fr", gap: 10 }}>
+          {go && onSendToExecutor && (
+            <button
+              onClick={() => onSendToExecutor([symbol])}
+              style={{ background: C.green, color: "#000", border: "none", borderRadius: 7, padding: "9px 0", font: `700 12px ${C.sans}`, cursor: "pointer", letterSpacing: 0.3 }}
+            >
+              → Monitor in Executor
+            </button>
+          )}
+          {onViewChain && (
+            <button
+              onClick={onViewChain}
+              style={{ background: C.blue, color: "#06121f", border: "none", borderRadius: 7, padding: "9px 0", font: `700 12px ${C.sans}`, cursor: "pointer", letterSpacing: 0.3 }}
+            >
+              📊 View option chain
+            </button>
+          )}
+        </div>
 
         <div style={{ borderTop: `1px solid ${C.lineSoft}`, paddingTop: 10 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: levelsState === "idle" ? 0 : 8 }}>
@@ -3018,6 +3197,22 @@ function ThetaView({ computed }) {
   const [marksBusy, setMarksBusy] = useState(false);
   const [marksMsg, setMarksMsg] = useState("");
 
+  // Close/roll action state
+  const [closeModal, setCloseModal] = useState(null);           // { fillId, fill } or null
+  const [closeOrderType, setCloseOrderType] = useState("LIMIT");
+  const [closeLimitPrice, setCloseLimitPrice] = useState("");
+  const [closeBusy, setCloseBusy] = useState(false);
+  const [closeMsg, setCloseMsg] = useState("");
+
+  const [rollModal, setRollModal] = useState(null);             // { fillId, fill } or null
+  const [rollNewStrike, setRollNewStrike] = useState("");
+  const [rollNewExpiry, setRollNewExpiry] = useState("");
+  const [rollCloseType, setRollCloseType] = useState("MARKET");
+  const [rollOpenType, setRollOpenType] = useState("LIMIT");
+  const [rollOpenPrice, setRollOpenPrice] = useState("");
+  const [rollBusy, setRollBusy] = useState(false);
+  const [rollMsg, setRollMsg] = useState("");
+
   const loadFills = useCallback(() => {
     apiOptionsFills().then((d) => setFills(d.fills || [])).catch(() => {});
   }, []);
@@ -3034,6 +3229,51 @@ function ThetaView({ computed }) {
     } catch (e) { setMarksMsg(String(e.message || e)); }
     setMarksBusy(false);
   }, []);
+
+  const handleClose = useCallback(async () => {
+    if (!closeModal) return;
+    setCloseBusy(true); setCloseMsg("");
+    try {
+      const limitPrice = closeOrderType === "LIMIT" ? (closeLimitPrice ? parseFloat(closeLimitPrice) : null) : null;
+      const out = await apiOptionsClose(closeModal.fillId, closeOrderType, limitPrice);
+      if (out.ok) {
+        setCloseMsg(`Closed ✓ — ${out.status}`);
+        loadFills();
+        setTimeout(() => setCloseModal(null), 1500);
+      } else {
+        setCloseMsg(out.error || "Close failed.");
+      }
+    } catch (e) {
+      setCloseMsg(String(e.message || e));
+    }
+    setCloseBusy(false);
+  }, [closeModal, closeOrderType, closeLimitPrice, loadFills]);
+
+  const handleRoll = useCallback(async () => {
+    if (!rollModal || !rollNewStrike || !rollNewExpiry) return;
+    setRollBusy(true); setRollMsg("");
+    try {
+      const openPrice = rollOpenType === "LIMIT" ? (rollOpenPrice ? parseFloat(rollOpenPrice) : null) : null;
+      const out = await apiOptionsRoll(
+        rollModal.fillId,
+        parseFloat(rollNewStrike),
+        rollNewExpiry,
+        rollCloseType,
+        rollOpenType,
+        openPrice
+      );
+      if (out.ok) {
+        setRollMsg(`Rolled ✓ — closed ${out.closed?.status || "?"}, opened ${out.opened?.status || "?"}`);
+        loadFills();
+        setTimeout(() => setRollModal(null), 1500);
+      } else {
+        setRollMsg(out.error || "Roll failed.");
+      }
+    } catch (e) {
+      setRollMsg(String(e.message || e));
+    }
+    setRollBusy(false);
+  }, [rollModal, rollNewStrike, rollNewExpiry, rollCloseType, rollOpenType, rollOpenPrice, loadFills]);
 
   useEffect(() => {
     apiOptionsStatus().then(setStatus).catch(() => setStatus({ configured: false, liveTradingEnabled: false }));
@@ -3164,7 +3404,111 @@ function ThetaView({ computed }) {
       </Panel>
 
       <ThetaLedger fills={fills} onRefresh={loadFills} onRefreshMarks={refreshMarks}
-        marksBusy={marksBusy} marksMsg={marksMsg} />
+        marksBusy={marksBusy} marksMsg={marksMsg}
+        onClose={(f) => { setCloseModal({ fillId: f.id, fill: f }); setCloseLimitPrice(""); setCloseOrderType("LIMIT"); setCloseMsg(""); }}
+        onRoll={(f) => { setRollModal({ fillId: f.id, fill: f }); setRollNewStrike(""); setRollNewExpiry(""); setRollMsg(""); }} />
+
+      {closeModal && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 24, maxWidth: 400, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
+            <div style={{ font: `600 16px ${C.sans}`, marginBottom: 16 }}>Close position</div>
+            <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim, marginBottom: 20 }}>
+              {closeModal.fill.underlying} {gnum(closeModal.fill.strike, 0)}{closeModal.fill.option_type === "put" ? "P" : "C"} · {closeModal.fill.expiry}
+            </div>
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: "block", font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 6 }}>Order type</label>
+              <select value={closeOrderType} onChange={(e) => setCloseOrderType(e.target.value)}
+                style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}` }}>
+                <option value="MARKET">Market</option>
+                <option value="LIMIT">Limit</option>
+              </select>
+            </div>
+            {closeOrderType === "LIMIT" && (
+              <div style={{ marginBottom: 16 }}>
+                <label style={{ display: "block", font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 6 }}>Limit price (per contract)</label>
+                <input type="number" value={closeLimitPrice} onChange={(e) => setCloseLimitPrice(e.target.value)} step="0.01"
+                  style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, boxSizing: "border-box" }} />
+              </div>
+            )}
+            {closeMsg && (
+              <div style={{ padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, font: `500 11px ${C.sans}`, color: C.amber, marginBottom: 16 }}>
+                {closeMsg}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={handleClose} disabled={closeBusy}
+                style={{ flex: 1, padding: "8px 12px", background: C.blue, color: "#06121f", border: "none", borderRadius: 6, cursor: closeBusy ? "default" : "pointer", font: `600 12px ${C.sans}`, opacity: closeBusy ? 0.6 : 1 }}>
+                {closeBusy ? "Closing…" : "Close"}
+              </button>
+              <button onClick={() => setCloseModal(null)} disabled={closeBusy}
+                style={{ flex: 1, padding: "8px 12px", background: C.line, color: C.inkDim, border: "none", borderRadius: 6, cursor: "pointer", font: `600 12px ${C.sans}` }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {rollModal && (
+        <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+          <div style={{ background: C.panel, border: `1px solid ${C.line}`, borderRadius: 12, padding: 24, maxWidth: 450, boxShadow: "0 20px 60px rgba(0,0,0,0.5)" }}>
+            <div style={{ font: `600 16px ${C.sans}`, marginBottom: 16 }}>Roll position</div>
+            <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim, marginBottom: 20 }}>
+              {rollModal.fill.underlying} {gnum(rollModal.fill.strike, 0)}{rollModal.fill.option_type === "put" ? "P" : "C"} · {rollModal.fill.expiry} → new strike & expiry
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+              <div>
+                <label style={{ display: "block", font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 6 }}>New strike</label>
+                <input type="number" value={rollNewStrike} onChange={(e) => setRollNewStrike(e.target.value)} step="0.5"
+                  style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, boxSizing: "border-box" }} />
+              </div>
+              <div>
+                <label style={{ display: "block", font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 6 }}>New expiry (YYYY-MM-DD)</label>
+                <input type="date" value={rollNewExpiry} onChange={(e) => setRollNewExpiry(e.target.value)}
+                  style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, boxSizing: "border-box" }} />
+              </div>
+            </div>
+            <div style={{ marginBottom: 16, paddingTop: 16, borderTop: `1px solid ${C.lineSoft}` }}>
+              <div style={{ font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>Close current</div>
+              <select value={rollCloseType} onChange={(e) => setRollCloseType(e.target.value)}
+                style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, marginBottom: 12 }}>
+                <option value="MARKET">Market</option>
+                <option value="LIMIT">Limit (LIMIT not yet supported for close)</option>
+              </select>
+            </div>
+            <div style={{ marginBottom: 16, paddingBottom: 16, borderBottom: `1px solid ${C.lineSoft}` }}>
+              <div style={{ font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 12 }}>Open new</div>
+              <select value={rollOpenType} onChange={(e) => setRollOpenType(e.target.value)}
+                style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, marginBottom: 12 }}>
+                <option value="MARKET">Market</option>
+                <option value="LIMIT">Limit</option>
+              </select>
+              {rollOpenType === "LIMIT" && (
+                <div>
+                  <label style={{ display: "block", font: `500 11px ${C.sans}`, color: C.inkDim, marginBottom: 6 }}>Target entry price (per contract)</label>
+                  <input type="number" value={rollOpenPrice} onChange={(e) => setRollOpenPrice(e.target.value)} step="0.01"
+                    style={{ width: "100%", padding: 8, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, color: C.ink, font: `400 12px ${C.sans}`, boxSizing: "border-box" }} />
+                </div>
+              )}
+            </div>
+            {rollMsg && (
+              <div style={{ padding: 10, background: C.panel2, border: `1px solid ${C.line}`, borderRadius: 6, font: `500 11px ${C.sans}`, color: C.amber, marginBottom: 16 }}>
+                {rollMsg}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={handleRoll} disabled={rollBusy || !rollNewStrike || !rollNewExpiry}
+                style={{ flex: 1, padding: "8px 12px", background: C.blue, color: "#06121f", border: "none", borderRadius: 6, cursor: (rollBusy || !rollNewStrike || !rollNewExpiry) ? "default" : "pointer", font: `600 12px ${C.sans}`, opacity: (rollBusy || !rollNewStrike || !rollNewExpiry) ? 0.6 : 1 }}>
+                {rollBusy ? "Rolling…" : "Roll"}
+              </button>
+              <button onClick={() => setRollModal(null)} disabled={rollBusy}
+                style={{ flex: 1, padding: "8px 12px", background: C.line, color: C.inkDim, border: "none", borderRadius: 6, cursor: "pointer", font: `600 12px ${C.sans}` }}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3305,10 +3649,11 @@ function moneyCell(v, td) {
   return <td style={{ ...td, color: tone }}>{v > 0 ? "+" : ""}${gnum(v, 2)}</td>;
 }
 
-function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg }) {
+function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg, onClose, onRoll }) {
   const th = { textAlign: "left", font: `600 10px ${C.mono}`, color: C.inkFaint, letterSpacing: 1, padding: "8px 10px", borderBottom: `1px solid ${C.line}`, textTransform: "uppercase" };
   const td = { font: `500 12px ${C.mono}`, color: C.ink, padding: "9px 10px", borderBottom: `1px solid ${C.lineSoft}` };
   const ghostBtn = { background: "none", border: `1px solid ${C.line}`, borderRadius: 6, color: C.inkDim, cursor: "pointer", font: `600 11px ${C.sans}`, padding: "5px 10px" };
+  const actionBtn = { background: "none", border: `1px solid ${C.line}`, borderRadius: 4, color: C.blue, cursor: "pointer", font: `500 11px ${C.sans}`, padding: "4px 8px", fontSize: "11px" };
   const asOf = fills.map((f) => f.mark?.as_of_date).filter(Boolean).sort().slice(-1)[0];
   return (
     <Panel title="Theta ledger" eyebrow="filled options · extrinsic decay"
@@ -3333,6 +3678,7 @@ function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg }) 
               <th style={th}>Contract</th><th style={th}>Side</th><th style={th}>Qty</th>
               <th style={th}>Premium</th><th style={th}>Ext@entry</th><th style={th}>Mark now</th>
               <th style={th}>Ext now</th><th style={th}>θ bled</th><th style={th}>θ / day</th><th style={th}>Opt P&amp;L</th>
+              <th style={th}>Actions</th>
             </tr></thead>
             <tbody>
               {fills.map((f) => {
@@ -3341,6 +3687,7 @@ function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg }) 
                 const expiry = f.expiry || "";
                 const dte = expiry ? Math.round((new Date(expiry) - new Date()) / 86400000) : null;
                 const expired = dte != null && dte < 0;
+                const isClosed = f.side && f.side.toLowerCase().includes("close");
                 return (
                   <tr key={f.id} style={expired ? { opacity: 0.5 } : null}>
                     <td style={td}>
@@ -3360,6 +3707,14 @@ function ThetaLedger({ fills, onRefresh, onRefreshMarks, marksBusy, marksMsg }) 
                     {moneyCell(p?.bledDollars, td)}
                     {moneyCell(p?.dayDollars, td)}
                     {moneyCell(p?.optionPnlDollars, td)}
+                    <td style={{ ...td, whiteSpace: "nowrap" }}>
+                      {!isClosed && !expired && (
+                        <div style={{ display: "flex", gap: 4 }}>
+                          <button onClick={() => onClose?.(f)} style={actionBtn}>Close</button>
+                          <button onClick={() => onRoll?.(f)} style={actionBtn}>Roll</button>
+                        </div>
+                      )}
+                    </td>
                   </tr>
                 );
               })}

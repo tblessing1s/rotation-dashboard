@@ -713,6 +713,18 @@ def api_options_roll():
     return jsonify(out), 403 if out.get("liveDisabled") else 400
 
 
+@app.route("/api/options/chain")
+def api_options_chain():
+    import option_trades
+
+    symbol = request.args.get("symbol") or request.args.get("underlying")
+    expiry_date = request.args.get("expiry")
+    if not symbol:
+        return jsonify({"ok": False, "error": "symbol is required."}), 400
+    out = option_trades.get_chain(symbol, expiry_date)
+    return jsonify(out), 200 if out.get("ok") else 400
+
+
 # ---------------------------------------------------------------------------
 # Backtesting engine — configure a day-trading setup, run it against stored
 # 5-minute bars, and get a trade log + summary stats. The run path is

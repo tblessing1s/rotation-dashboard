@@ -17,6 +17,7 @@ TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 AUTHORIZE_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 PRICE_HISTORY_URL = "https://api.schwabapi.com/marketdata/v1/pricehistory"
 QUOTES_URL = "https://api.schwabapi.com/marketdata/v1/quotes"
+OPTION_CHAIN_URL = "https://api.schwabapi.com/marketdata/v1/chains"
 ACCOUNTS_BASE = "https://api.schwabapi.com/trader/v1"
 
 # Schwab refresh tokens are valid for exactly 7 days after they are minted via
@@ -360,6 +361,32 @@ class SchwabProvider(Provider):
         if not parsed:
             raise ProviderError(f"schwab quote {symbol}: no quote in response")
         return parsed
+
+    def get_option_chain(self, symbol: str, expiry_date: str | None = None) -> dict:
+        """Fetch option chain for a symbol, optionally filtered to one expiry.
+
+        Returns structured chain data: {expirations: [...], callExpDateMap, putExpDateMap}.
+        Each leg maps to {bid, ask, mark, impliedVolatility, theta, ...}.
+        If expiry_date is specified, only that expiry's legs are returned.
+        """
+        try:
+            params = {"symbol": symbol.upper(), "contractType": "ALL", "strikeCount": 100}
+            if expiry_date:
+                params["expirationDate"] = expiry_date
+            resp = requests.get(
+                OPTION_CHAIN_URL,
+                headers={"Authorization": f"Bearer {self._token()}", "Accept": "application/json"},
+                params=params,
+                timeout=20,
+            )
+        except requests.RequestException as e:
+            raise ProviderError(f"schwab option chain: {e}") from e
+        if resp.status_code != 200:
+            raise ProviderError(f"schwab option chain: HTTP {resp.status_code} {resp.text[:200]}")
+        try:
+            return resp.json()
+        except ValueError as e:
+            raise ProviderError("schwab option chain: non-JSON response") from e
 
     # -- accounts & trading --------------------------------------------------
     # These hit the Trader API's account endpoints (a different product than the
