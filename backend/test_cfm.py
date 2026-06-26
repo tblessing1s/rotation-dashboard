@@ -161,3 +161,28 @@ def test_entry_gate_level3_splits_spy_and_sector_legs(monkeypatch):
     assert l3["pass"] is False         # combined fails
     assert spy_check["pass"] is False  # vs SPY +2 is not > +5
     assert sector_check["pass"] is True  # vs Sector +3 IS > 0 — the leg that confused the user
+
+
+def test_filter_ready_requires_regime_and_sector(monkeypatch):
+    # A stock can be strong + consolidating (gate Levels 3/4) yet not entry-ready
+    # because the market regime or its sector isn't green. The filter's "ready"
+    # must agree with the gate's READY TO ENTER, naming what blocks it.
+    import data_handler
+    import indicators
+    import screening
+
+    df = _frame([100.0] * 70)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(indicators, "rs3m", lambda d, b, **k: 12.0)   # stock vs SPY +12
+    monkeypatch.setattr(indicators, "atr_pct", lambda d, **k: 2.0)
+    monkeypatch.setattr(indicators, "consolidating", lambda d: True)
+
+    # rs_vs_sector = 12 - 2 = +10 (> 0); stock leg passes, consolidating passes.
+    weak_regime = screening._stock_row("NVDA", df, 2.0, "XLK", regime_green=False, sector_strong=True)
+    assert weak_regime["stock_strong"] is True
+    assert weak_regime["status"] == "wait"
+    assert "regime" in weak_regime["blocked_by"]
+
+    all_green = screening._stock_row("NVDA", df, 2.0, "XLK", regime_green=True, sector_strong=True)
+    assert all_green["status"] == "ready"
+    assert all_green["blocked_by"] == []

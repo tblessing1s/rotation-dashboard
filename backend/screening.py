@@ -109,7 +109,8 @@ def _compute_sectors() -> dict:
 # ---------------------------------------------------------------------------
 # Levels 3 & 4 — stock filter
 # ---------------------------------------------------------------------------
-def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str) -> dict:
+def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str,
+               regime_green: bool = False, sector_strong: bool = False) -> dict:
     df = data_handler.get_daily(ticker)
     rs_vs_spy = indicators.rs3m(df, spy) if df is not None else None
     rs_vs_sector = None
@@ -118,9 +119,25 @@ def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str
     atrp = indicators.atr_pct(df) if df is not None else None
     cons = indicators.consolidating(df) if df is not None else None
 
+    # Stock-level legs (gate Levels 3 & 4).
     beats = (rs_vs_spy is not None and rs_vs_spy > config.STOCK_RS_VS_SPY_MIN
              and rs_vs_sector is not None and rs_vs_sector > config.STOCK_RS_VS_SECTOR_MIN)
-    if beats and cons:
+
+    # "ready" means the FULL gate would pass, so it matches the entry gate's
+    # READY TO ENTER verdict — regime + sector must also be green, not just the
+    # stock's own strength. blocked_by names what's missing so a strong stock
+    # that isn't entry-ready explains why.
+    blocked_by = []
+    if not regime_green:
+        blocked_by.append("regime")
+    if not sector_strong:
+        blocked_by.append("sector")
+    if not beats:
+        blocked_by.append("stock")
+    if not cons:
+        blocked_by.append("consolidation")
+
+    if not blocked_by:
         status = "ready"
     elif rs_vs_sector is not None and rs_vs_sector < 0:
         status = "no"
@@ -133,6 +150,8 @@ def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str
         "rs3m_vs_sector": rs_vs_sector,
         "atr_pct": atrp,
         "consolidating": cons,
+        "stock_strong": beats,
+        "blocked_by": blocked_by,
         "status": status,
     }
 
@@ -150,12 +169,18 @@ def _compute_stock_filter(sector: str | None = None) -> list[dict]:
         universe += sector_data.constituents(etf)
     data_handler.prefetch(universe)
     spy = data_handler.get_daily(config.BENCHMARK)
+    # Regime + sector strength gate "ready" the same way the entry gate does, so
+    # the filter's status agrees with the gate verdict.
+    regime_green = regime().get("status") == "green"
+    sector_status = sectors()
     rows = []
     for etf in etfs:
         sector_df = data_handler.get_daily(etf)
         sector_rs = indicators.rs3m(sector_df, spy) if sector_df is not None else None
+        sector_strong = sector_status.get(etf, {}).get("status") == "green"
         for ticker in sector_data.constituents(etf):
-            rows.append(_stock_row(ticker, spy, sector_rs, etf))
+            rows.append(_stock_row(ticker, spy, sector_rs, etf,
+                                   regime_green=regime_green, sector_strong=sector_strong))
     # Sort by RS3M vs Sector descending (best fit first); None last.
     rows.sort(key=lambda r: (r["rs3m_vs_sector"] is None, -(r["rs3m_vs_sector"] or 0)))
     return rows
@@ -206,7 +231,9 @@ def entry_gate(ticker: str) -> dict:
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_df = data_handler.get_daily(sector_etf) if sector_etf else None
     sector_rs = indicators.rs3m(sector_df, spy) if sector_df is not None else None
-    row = _stock_row(ticker, spy, sector_rs, sector_etf or "")
+    # Pass the regime/sector verdicts so the row's status matches this gate's.
+    row = _stock_row(ticker, spy, sector_rs, sector_etf or "",
+                     regime_green=_all(l1_checks), sector_strong=_all(l2_checks))
 
     # The two legs are checked separately: "beats SPY" and "beats its sector"
     # are distinct conditions, so the UI can show exactly which one failed.
