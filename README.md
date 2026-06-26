@@ -56,7 +56,7 @@ maxes out.
 |---|---|
 | `app.py` | Flask app + all CFM routes; serves the built frontend. |
 | `config.py` | Thresholds, calibration, capital figures, DATA_DIR-aware paths. |
-| `sector_data.py` | Parses `data/tickers_by_sector.txt` into the sector universe. |
+| `sector_data.py` | Parses the root-level `tickers_by_sector.txt` into the sector universe. |
 | `indicators.py` | RS3M, ATR, MA, RSI, breadth, consolidation, strike spacing. |
 | `data_handler.py` | Daily OHLCV (Schwab → Alpha Vantage) with a parquet cache. |
 | `schwab_api.py` | **Kept** — market data, quotes, option chains, order execution. |

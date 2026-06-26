@@ -1,14 +1,25 @@
-"""Load and serve the sector universe parsed from data/tickers_by_sector.txt.
+"""Load and serve the sector universe parsed from tickers_by_sector.txt.
 
+File format (blocks separated by blank lines):
+
+    XLK — Technology
+    NVDA, AAPL, MSFT, ...
+
+The first line of each block is the sector header (ETF symbol, a dash, then the
+sector name); the following line(s) are the comma-separated constituents.
 Parsed once at import and cached in memory. Provides the sector ETF list, each
 sector's constituent tickers, and a stock -> sector-ETF reverse map used to
 compute RS3M-vs-Sector for any candidate.
 """
 from __future__ import annotations
 
+import re
 from functools import lru_cache
 
 import config
+
+# A header line is "<ETF> <dash> <name>"; dash may be em/en/hyphen.
+_HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9.]{0,6})\s*[—–-]\s*(.+)$")
 
 
 class Sector:
@@ -22,20 +33,38 @@ class Sector:
         return {"etf": self.etf, "name": self.name, "group": self.group, "tickers": self.tickers}
 
 
+def _flush(sectors: dict, header: tuple[str, str] | None, ticker_lines: list[str]) -> None:
+    if not header:
+        return
+    etf, name = header
+    csv = ", ".join(ticker_lines)
+    tickers = [t.strip().upper() for t in csv.split(",") if t.strip()]
+    if tickers:
+        group = config.SECTOR_GROUPS.get(etf, "")
+        sectors[etf] = Sector(etf, name, group, tickers)
+
+
 @lru_cache(maxsize=1)
 def _load() -> dict[str, Sector]:
     sectors: dict[str, Sector] = {}
+    header: tuple[str, str] | None = None
+    ticker_lines: list[str] = []
     with open(config.TICKERS_BY_SECTOR_PATH, encoding="utf-8") as fh:
         for raw in fh:
             line = raw.strip()
             if not line or line.startswith("#"):
+                _flush(sectors, header, ticker_lines)
+                header, ticker_lines = None, []
                 continue
-            parts = [p.strip() for p in line.split("|")]
-            if len(parts) != 4:
-                continue
-            etf, name, group, ticker_csv = parts
-            tickers = [t.strip().upper() for t in ticker_csv.split(",") if t.strip()]
-            sectors[etf.upper()] = Sector(etf.upper(), name, group, tickers)
+            m = _HEADER_RE.match(line)
+            # A line is a header only if it has no comma (ticker lines are CSV).
+            if m and "," not in line:
+                _flush(sectors, header, ticker_lines)
+                header = (m.group(1).upper(), m.group(2).strip())
+                ticker_lines = []
+            else:
+                ticker_lines.append(line)
+    _flush(sectors, header, ticker_lines)
     if not sectors:
         raise RuntimeError(f"no sectors parsed from {config.TICKERS_BY_SECTOR_PATH}")
     return sectors

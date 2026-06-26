@@ -17,8 +17,25 @@ REPO_DIR = os.path.dirname(BACKEND_DIR)
 DATA_DIR = os.environ.get("DATA_DIR") or BACKEND_DIR
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
-# The sector universe ships with the repo; it is read-only reference data.
-TICKERS_BY_SECTOR_PATH = os.path.join(REPO_DIR, "data", "tickers_by_sector.txt")
+# The sector universe ships with the repo (root-level), read-only reference data.
+# A data/ fallback is kept for older checkouts.
+TICKERS_BY_SECTOR_CANDIDATES = [
+    os.path.join(REPO_DIR, "tickers_by_sector.txt"),
+    os.path.join(REPO_DIR, "data", "tickers_by_sector.txt"),
+]
+TICKERS_BY_SECTOR_PATH = next(
+    (p for p in TICKERS_BY_SECTOR_CANDIDATES if os.path.exists(p)),
+    TICKERS_BY_SECTOR_CANDIDATES[0],
+)
+
+# Sector group classification (the file itself carries only ETF + name).
+SECTOR_GROUPS = {
+    "XLK": "growth", "XLY": "growth", "XLC": "growth",
+    "XLI": "cyclical", "XLF": "cyclical",
+    "XLE": "inflation", "XLB": "inflation",
+    "XLV": "defensive", "XLP": "defensive", "XLU": "defensive",
+    "XLRE": "rates",
+}
 
 # ---- Benchmark / regime ----------------------------------------------------
 BENCHMARK = "SPY"
