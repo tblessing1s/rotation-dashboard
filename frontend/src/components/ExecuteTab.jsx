@@ -1,6 +1,13 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Light, fmt, pct } from "./ui.jsx";
+import { Card, Pill, Light, fmt } from "./ui.jsx";
+
+function checkValue(v) {
+  if (v === null || v === undefined) return "—";
+  if (typeof v === "boolean") return v ? "yes" : "no";
+  if (typeof v === "string") return v;
+  return fmt(v, 1);
+}
 
 function GateLevel({ lv }) {
   return (
@@ -10,12 +17,19 @@ function GateLevel({ lv }) {
         <div className="text-sm font-medium text-slate-200">
           Level {lv.level}: {lv.name}
         </div>
-        <div className="text-xs text-slate-500">
-          {lv.level === 1 && lv.detail && `breadth ${fmt(lv.detail.breadth, 0)}% · VIX ${fmt(lv.detail.vix, 1)} · SPY ${lv.detail.spy_trend}`}
-          {lv.level === 2 && lv.detail && `${lv.detail.sector || ""} RS3M ${pct(lv.detail.rs3m)} · breadth ${fmt(lv.detail.breadth, 0)}%`}
-          {lv.level === 3 && lv.detail && `vs SPY ${pct(lv.detail.rs3m_vs_spy)} · vs Sector ${pct(lv.detail.rs3m_vs_sector)}`}
-          {lv.level === 4 && lv.detail && `ATR ${fmt(lv.detail.atr_pct, 1)}% · ${lv.detail.consolidating ? "consolidating" : "extended"}`}
-        </div>
+        {/* Per-condition sub-checks: each leg is flagged on its own so a level
+            FAIL is never ambiguous about which condition missed. */}
+        {lv.checks?.length ? (
+          <div className="mt-1 space-y-0.5">
+            {lv.checks.map((c, i) => (
+              <div key={i} className="flex items-center gap-2 text-xs">
+                <span className={c.pass ? "text-emerald-400" : "text-rose-400"}>{c.pass ? "✓" : "✗"}</span>
+                <span className="text-slate-400">{c.label}</span>
+                <span className="text-slate-500">({checkValue(c.value)})</span>
+              </div>
+            ))}
+          </div>
+        ) : null}
       </div>
       <Pill status={lv.pass ? "ready" : "no"}>{lv.pass ? "PASS" : "FAIL"}</Pill>
     </div>

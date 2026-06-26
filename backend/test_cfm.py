@@ -138,3 +138,26 @@ def test_entry_gate_is_json_serializable(monkeypatch):
     # Must not raise:
     json.dumps(gate)
     assert all(isinstance(lv["pass"], bool) for lv in gate["levels"])
+
+
+def test_entry_gate_level3_splits_spy_and_sector_legs(monkeypatch):
+    # The user's scenario: a stock beats its sector (+3) but not SPY by enough
+    # (+2 <= +5). Level 3 must FAIL overall, yet the sector sub-check must show
+    # PASS — so the UI never reads a SPY-leg miss as "not beating the sector".
+    import screening
+    screening._results.clear()
+    monkeypatch.setattr(screening, "regime",
+                        lambda: {"status": "green", "breadth": 70, "vix": 15, "spy_trend": "up"})
+    monkeypatch.setattr(screening, "sectors",
+                        lambda: {"XLK": {"name": "Technology", "rs3m": 20, "breadth": 70,
+                                         "atr_expanding": True, "status": "green"}})
+    monkeypatch.setattr(screening, "_stock_row", lambda *a, **k: {
+        "ticker": "NVDA", "sector": "XLK", "rs3m_vs_spy": 2.0, "rs3m_vs_sector": 3.0,
+        "atr_pct": 3.0, "consolidating": True, "status": "wait"})
+
+    gate = screening.entry_gate("NVDA")
+    l3 = next(l for l in gate["levels"] if l["level"] == 3)
+    spy_check, sector_check = l3["checks"]
+    assert l3["pass"] is False         # combined fails
+    assert spy_check["pass"] is False  # vs SPY +2 is not > +5
+    assert sector_check["pass"] is True  # vs Sector +3 IS > 0 — the leg that confused the user
