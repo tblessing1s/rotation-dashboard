@@ -79,42 +79,104 @@ def cmd_macro(args) -> int:
             return "yellow"
         return "red"
 
+    import config as cfg
     import db
+    import macro as macro_calc
 
+    n = max(1, int(getattr(args, "observations", 6) or 6))
+
+    # ---- 1) Snapshot freshness: what the regime gate actually reads ----------
     snap = db.latest_snapshot("macro", "macro") or {"values": {}, "fields": {}, "errors": {}}
     fields = dict(snap.get("fields") or {})
     errors = dict(snap.get("errors") or {})
 
-    if not fields and not errors:
-        print("No macro data ingested yet.")
-        return 1
-
-    print(f"\nMacro Data Freshness Report")
-    print(f"=" * 80)
-    print()
-
+    print("\nMacro Data Freshness Report")
+    print("=" * 80)
     if fields:
-        print(f"{'SERIES':<15} {'VALUE':>12} {'STATE':<8} {'FETCHED AT':<25} SOURCE")
+        print()
+        print(f"{'FIELD':<12} {'VALUE':>12} {'STATE':<8} {'FETCHED AT':<22} SOURCE")
         print("-" * 80)
         for key in sorted(fields.keys()):
             meta = fields[key]
-            staleness = _ingest_staleness(meta.get("fetchedAt"))
+            # vix/breadth are market inputs judged by observation date; the slow
+            # series are judged by ingestion recency (matches /api/macro).
+            staleness = meta.get("staleness") or _ingest_staleness(meta.get("fetchedAt"))
             print(
-                f"{key:<15} {str(meta.get('value', '—')):>12} "
-                f"{staleness:<8} {meta.get('fetchedAt', '—'):<25} "
+                f"{key:<12} {str(meta.get('value', '—')):>12} "
+                f"{staleness:<8} {str(meta.get('fetchedAt') or '—'):<22} "
                 f"{meta.get('source', '—')}"
             )
-
     if errors:
         print()
         print("Errors:")
         for key, err in errors.items():
             print(f"  {key}: {err}")
-
     print()
     print(f"Computed at: {snap.get('_computedAt', '—')}")
+
+    # ---- 2) Raw stored observations + how each is interpreted ----------------
+    # Proves the pull AND the math: the last few observations per series, the
+    # active source/fetched_at, and the derived value the calculators produce.
+    try:
+        from providers import alphavantage
+        econ_map = getattr(alphavantage, "_ECON_SERIES", {})
+    except Exception:  # noqa: BLE001
+        econ_map = {}
+
     print()
-    return 0
+    print(f"Raw Series & Interpretation (last {n} stored observations)")
+    print("=" * 80)
+    series: dict = {}
+    for sid in cfg.FRED_SERIES:
+        s = db.get_macro_series(sid)
+        series[sid] = s
+        func = (econ_map.get(sid) or ("?", {}))[0]
+        print()
+        if s is None or s.empty:
+            print(f"{sid}  (AV {func}):  MISSING — no stored observations")
+            continue
+        fa = s.attrs.get("fetched_at", "?")
+        print(f"{sid}  (AV {func}) · source={s.attrs.get('source', '?')} · "
+              f"{len(s)} obs · fetched_at={fa} [{_ingest_staleness(fa)}]")
+        for idx, val in s.tail(n).items():
+            print(f"    {str(idx.date())}:  {float(val):.4f}")
+        try:
+            if sid == "GDPC1":
+                g = macro_calc.growth_from_gdp(s)
+                print(f"    => growth: {g['value']}  qoqAnnualized={g['qoqAnnualized']}% "
+                      f"(prev {g['previousQoqAnnualized']}%)  asOf {g['asOf']}")
+            elif sid == "CPIAUCSL":
+                inf = macro_calc.inflation_from_cpi(s)
+                print(f"    => inflation YoY: {inf['value']}%  index={inf['index']}  asOf {inf['asOf']}")
+            elif sid == "DFF":
+                print(f"    => funds rate: {float(s.iloc[-1]):.2f}%  "
+                      f"63-obs change={macro_calc._series_change(s, 63):+.2f}")
+            elif sid == "UNRATE":
+                print(f"    => unemployment: {float(s.iloc[-1]):.1f}%  "
+                      f"3-obs change={macro_calc._series_change(s, 3):+.1f}")
+        except Exception as e:  # noqa: BLE001
+            print(f"    => interpretation failed: {e}")
+
+    # Fed policy is a derived score across all four series — show the votes.
+    needed = ["DFF", "CPIAUCSL", "GDPC1", "UNRATE"]
+    if all(series.get(k) is not None and not series[k].empty for k in needed):
+        try:
+            fed = macro_calc.classify_fed_policy(
+                series["DFF"], series["CPIAUCSL"], series["GDPC1"], series["UNRATE"]
+            )
+            print()
+            print(f"Fed policy model:  {str(fed['value']).upper()}  (score {fed['score']})")
+            print(f"    rate={fed['rate']}%  cpiYoY={fed['cpiYoY']}%  "
+                  f"growth={fed['qoqAnnualizedGrowth']}%  unemp={fed['unemployment']}%  "
+                  f"realRate={fed['realPolicyRate']}")
+            if fed.get("hawkishConditions"):
+                print(f"    hawkish ({len(fed['hawkishConditions'])}): {', '.join(fed['hawkishConditions'])}")
+            if fed.get("dovishConditions"):
+                print(f"    dovish  ({len(fed['dovishConditions'])}): {', '.join(fed['dovishConditions'])}")
+        except Exception as e:  # noqa: BLE001
+            print(f"\nFed policy model failed: {e}")
+    print()
+    return 0 if (fields or any(s is not None and not s.empty for s in series.values())) else 1
 
 
 def _intraday_symbols(args) -> list[str]:
@@ -215,7 +277,8 @@ def main(argv=None) -> int:
     p_status.add_argument("--json", action="store_true", help="raw JSON output")
     p_status.set_defaults(fn=cmd_status)
 
-    p_macro = sub.add_parser("macro", help="check macro series staleness (Alpha Vantage)")
+    p_macro = sub.add_parser("macro", help="check macro series freshness, raw observations, and interpretation")
+    p_macro.add_argument("-n", "--observations", type=int, default=6, help="raw observations to show per series (default 6)")
     p_macro.set_defaults(fn=cmd_macro)
 
     p_bf = sub.add_parser("backtest-backfill", help="pull 5-minute bars into the datastore")
