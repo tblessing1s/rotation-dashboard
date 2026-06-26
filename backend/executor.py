@@ -1,0 +1,191 @@
+"""Execute CFM actions (buy_leap / sell_short / close_short) and auto-log them.
+
+Every execution captures the stock price + premium at the moment of execution
+and appends an immutable record to state.json, from which the theta ledger and
+extrinsic-payback meters are derived. Live order transmission to Schwab is
+gated behind the CFM_LIVE_TRADING env flag; with it off (the default) the action
+is captured and logged against live market prices but no order is sent — the
+honest paper path. Position state updates identically either way.
+"""
+from __future__ import annotations
+
+import os
+
+import config
+import data_handler
+import indicators
+import logging_handler as log
+import sector_data
+
+VALID_ACTIONS = {"buy_leap", "sell_short", "close_short"}
+
+
+def live_enabled() -> bool:
+    return os.environ.get("CFM_LIVE_TRADING", "").strip() in ("1", "true", "yes")
+
+
+def _capture_price(ticker: str, supplied: float | None) -> tuple[float | None, str]:
+    if supplied is not None:
+        return float(supplied), "supplied"
+    q = data_handler.latest_quote(ticker)
+    if q:
+        return q["price"], q["source"]
+    return None, "unavailable"
+
+
+def _ensure_position(state: dict, ticker: str) -> dict:
+    p = log.find_position(state, ticker)
+    if p:
+        return p
+    p = {
+        "ticker": ticker.upper(),
+        "sector": sector_data.sector_for(ticker) or "",
+        "entry_date": log.utcnow()[:10],
+        "status": "active",
+        "leap": None,
+        "shares": {"count": 0, "cost_basis_per_share": None, "cap": config.SHARE_CAP, "pct_to_cap": 0},
+        "short_calls": [],
+        "kill_switch": {},
+        "thesis": {"fundamentals": "", "intact": True},
+    }
+    state["positions"].append(p)
+    return p
+
+
+def execute(payload: dict) -> dict:
+    action = (payload.get("action") or "").strip()
+    ticker = (payload.get("ticker") or "").strip().upper()
+    if action not in VALID_ACTIONS:
+        raise ValueError(f"unknown action '{action}' (expected one of {sorted(VALID_ACTIONS)})")
+    if not ticker:
+        raise ValueError("ticker is required")
+    contracts = int(payload.get("contracts") or 0)
+    strike = payload.get("strike")
+    stock_price, price_source = _capture_price(ticker, payload.get("stock_price"))
+
+    state = log.load_state()
+    position = _ensure_position(state, ticker)
+    log.save_state(state)  # persist the shell position before recording the fill
+
+    mode = "live" if live_enabled() else "logged"
+
+    if action == "buy_leap":
+        execution, position_update = _buy_leap(payload, ticker, strike, contracts, stock_price)
+    elif action == "sell_short":
+        execution, position_update = _sell_short(payload, ticker, strike, contracts, stock_price)
+    else:  # close_short
+        execution, position_update = _close_short(payload, ticker, strike, contracts, stock_price)
+
+    execution["mode"] = mode
+    execution["price_source"] = price_source
+    stored = log.append_execution(execution)
+
+    # Re-apply the position mutation onto the freshly written state and persist.
+    state = log.load_state()
+    position = _ensure_position(state, ticker)
+    position_update(position)
+    log.recompute_derived(state)
+    log.save_state(state)
+
+    return {
+        "success": True,
+        "execution_id": stored["id"],
+        "timestamp": stored["date"],
+        "mode": mode,
+        "captured_price": stock_price,
+        "execution": stored,
+    }
+
+
+def _buy_leap(payload, ticker, strike, contracts, stock_price):
+    # execution_price is per-contract total dollars; execution_total is the trade.
+    price_per_contract = float(payload.get("execution_price") or 0)
+    total = float(payload.get("execution_total") or price_per_contract * contracts)
+    intrinsic_per_contract = max((stock_price or 0) - (strike or 0), 0) * 100
+    extrinsic_at_entry = float(payload.get("extrinsic_captured")
+                               or max(price_per_contract - intrinsic_per_contract, 0) * contracts)
+    execution = {
+        "ticker": ticker, "action": "buy_leap", "strike": strike, "contracts": contracts,
+        "execution_price": price_per_contract, "execution_total": total,
+        "extrinsic_captured": round(extrinsic_at_entry, 2), "stock_price": stock_price,
+    }
+
+    def apply(position):
+        position["leap"] = {
+            "strike": strike, "contracts": contracts, "cost_basis": total,
+            "current_bid": total, "intrinsic": round(intrinsic_per_contract * contracts, 2),
+            "extrinsic": round(extrinsic_at_entry, 2),
+            "entry_date": log.utcnow()[:10], "dte": payload.get("dte", config.LEAP_TARGET_DTE),
+            "extrinsic_at_entry": round(extrinsic_at_entry, 2), "extrinsic_collected_to_date": 0,
+        }
+        position["status"] = "active"
+    return execution, apply
+
+
+def _sell_short(payload, ticker, strike, contracts, stock_price):
+    premium_per_share = float(payload.get("premium_per_share") or 0)
+    premium_total = float(payload.get("premium_total") or premium_per_share * contracts * 100)
+    intrinsic_per_share = max((stock_price or 0) - (strike or 0), 0)
+    entry_extrinsic_per_share = round(max(premium_per_share - intrinsic_per_share, 0), 4)
+    execution = {
+        "ticker": ticker, "action": "sell_short", "strike": strike, "contracts": contracts,
+        "premium_per_share": premium_per_share, "premium_total": premium_total,
+        "stock_price": stock_price, "entry_extrinsic_per_share": entry_extrinsic_per_share,
+    }
+
+    def apply(position):
+        position.setdefault("short_calls", []).append({
+            "strike": strike, "contracts": contracts, "open_date": log.utcnow()[:10],
+            "dte": payload.get("dte", 5), "entry_extrinsic_per_share": entry_extrinsic_per_share,
+            "entry_premium_total": premium_total, "current_bid": premium_per_share,
+            "current_cost": premium_total,
+        })
+    return execution, apply
+
+
+def _close_short(payload, ticker, strike, contracts, stock_price):
+    close_per_share = float(payload.get("close_price_per_share") or 0)
+    close_total = float(payload.get("close_total") or close_per_share * contracts * 100)
+    intrinsic_per_share = max((stock_price or 0) - (strike or 0), 0)
+    extrinsic_paid_back = round(max(close_per_share - intrinsic_per_share, 0), 4)
+
+    # Pull the matching open short to recover what extrinsic we originally sold.
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    extrinsic_sold = payload.get("extrinsic_sold")
+    if extrinsic_sold is None and position:
+        for sc in position.get("short_calls", []):
+            if sc.get("strike") == strike:
+                extrinsic_sold = sc.get("entry_extrinsic_per_share")
+                break
+    extrinsic_sold = round(float(extrinsic_sold or 0), 4)
+    net_juice = round(extrinsic_sold - extrinsic_paid_back, 4)
+    net_juice_total = round(net_juice * contracts * 100, 2)
+    execution = {
+        "ticker": ticker, "action": "close_short", "strike": strike, "contracts": contracts,
+        "close_price_per_share": close_per_share, "close_total": close_total,
+        "stock_price": stock_price, "extrinsic_sold": extrinsic_sold,
+        "extrinsic_paid_back": extrinsic_paid_back, "net_juice": net_juice,
+        "net_juice_total": net_juice_total,
+    }
+
+    def apply(position):
+        position["short_calls"] = [sc for sc in position.get("short_calls", [])
+                                   if sc.get("strike") != strike]
+    return execution, apply
+
+
+def roll_suggestion(ticker: str) -> dict:
+    """Next weekly short strike = stock - 1.5*ATR (rounded to 0.5)."""
+    df = data_handler.get_daily(ticker)
+    price = indicators.last(df)
+    atr_val = indicators.atr(df)
+    if price is None or atr_val is None:
+        return {"ticker": ticker, "error": "insufficient data"}
+    return {
+        "ticker": ticker,
+        "stock_price": round(price, 2),
+        "atr": round(atr_val, 2),
+        "atr_mult": config.SHORT_ATR_MULT,
+        "suggested_strike": indicators.short_strike(price, atr_val),
+    }

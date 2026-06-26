@@ -1,1120 +1,248 @@
-"""
-Rotation Dashboard — backend API.
+"""CFM dashboard Flask backend.
 
-The request path reads exclusively from the SQLite datastore (see db.py).
-External providers are only contacted by scheduled ingestion (ingest.py),
-triggered by the Fly cron machine via POST /api/ingest, the CLI, or a
-background catch-up thread when the app wakes up with stale data.
-
-Run:  python app.py     (then open http://localhost:5179)
+Serves the built React frontend and the CFM API: scan (regime/sectors/stock
+filter) -> entry gate -> execute (Schwab + auto-log) -> track (positions/theta
+ledger/kill switch/checklist). state.json is the source of truth; the only route
+that contacts a provider live is the Schwab account/quote path used at execution.
 """
 from __future__ import annotations
 
-import json
 import os
 import secrets
-import shutil
-import tempfile
-import time
-import traceback
 
-from flask import Flask, jsonify, redirect, request, send_from_directory
+from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
-import config as cfg
-import db
-import indicators as ind
-import ingest
-import market_calendar as mcal
+import config
+import data_handler
+import executor
+import kill_switch
+import logging_handler as log
+import position_manager
+import schwab_api
+import screening
+import sector_data
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-FRONTEND = os.path.join(HERE, "..", "frontend", "dist")
-
-STATE_FILE = ingest.STATE_FILE
-_LEGACY_STATE_FILE = os.path.join(HERE, "state.json")
+DIST_DIR = os.path.join(config.REPO_DIR, "frontend", "dist")
 
 app = Flask(__name__, static_folder=None)
 CORS(app)
 
 
-def _migrate_legacy_state() -> None:
-    """One-time move of state.json into DATA_DIR (the Fly volume)."""
-    if os.path.exists(STATE_FILE) or not os.path.exists(_LEGACY_STATE_FILE):
-        return
-    os.makedirs(os.path.dirname(STATE_FILE), exist_ok=True)
-    shutil.copy2(_LEGACY_STATE_FILE, STATE_FILE)
-    print(f"[state] migrated {_LEGACY_STATE_FILE} -> {STATE_FILE}")
-
-
-_migrate_legacy_state()
+def _err(e: Exception, code: int = 500):
+    return jsonify({"error": str(e)}), code
 
 
 # ---------------------------------------------------------------------------
-# Background catch-up: if the machine wakes up with stale data, kick one
-# ingestion run in a daemon thread. Requests are never blocked on providers.
+# Scan
 # ---------------------------------------------------------------------------
-_last_kick = 0.0
-
-
-@app.before_request
-def _catchup_if_stale():
-    global _last_kick
-    if not request.path.startswith("/api/"):
-        return
-    now = time.time()
-    if now - _last_kick < 600:  # at most one kick per 10 minutes
-        return
-    if ingest.is_stale():
-        _last_kick = now
-        print("[ingest] data stale — starting background catch-up run")
-        ingest.run_in_background("catchup")
-
-
-# ---------------------------------------------------------------------------
-# Staleness helpers
-# ---------------------------------------------------------------------------
-def _bar_staleness(as_of: str | None) -> str:
-    return mcal.staleness(as_of)
-
-
-def _ingest_staleness(fetched_at: str | None) -> str:
-    """Freshness of slow-moving (monthly/quarterly) series: what matters is
-    that ingestion keeps running, not that the observation is recent."""
-    if not fetched_at:
-        return "unknown"
+@app.route("/api/regime")
+def api_regime():
     try:
-        from datetime import datetime, timezone
-
-        fetched = datetime.strptime(fetched_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        age_hours = (datetime.now(timezone.utc) - fetched).total_seconds() / 3600
-    except ValueError:
-        return "unknown"
-    if age_hours <= 36:
-        return "fresh"
-    if age_hours <= 96:
-        return "yellow"
-    return "red"
+        return jsonify(screening.regime())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
 
 
-# ---------------------------------------------------------------------------
-# API — all reads come from the datastore
-# ---------------------------------------------------------------------------
-@app.route("/api/quotes")
-def api_quotes():
-    out = {}
-    for symbol in cfg.QUOTE_SYMBOLS:
-        bar = db.latest_bar(symbol)
-        if bar is None:
-            out[symbol] = {"symbol": symbol, "error": True}
-            continue
-        quote = {
-            "symbol": symbol,
-            "close": round(bar["close"], 2),
-            "open": round(bar["open"], 2) if bar["open"] is not None else None,
-            "date": bar["date"],
-            "source": bar["source"],
-            "fetchedAt": bar["fetched_at"],
-            "staleness": _bar_staleness(bar["date"]),
-        }
-        out[symbol] = quote
-        if symbol == cfg.VIX_PROXY_SYMBOL:
-            out["VIX"] = {**quote, "symbol": "VIX", "underlyingSymbol": symbol}
-    return jsonify(out)
-
-
-@app.route("/api/indicators")
-def api_indicators():
-    requested = request.args.get("symbols", "")
-    symbols = [s.strip().upper() for s in requested.split(",") if s.strip()] or cfg.TRACKED
-    symbols = list(dict.fromkeys(symbols))
-
-    snapshots = db.latest_snapshots("indicators")
-    out = {}
-    missing = []
-    for sym in symbols:
-        snap = snapshots.get(sym)
-        if snap is None:
-            out[sym] = {"error": "no data"}
-            missing.append(sym)
-            continue
-        snap["staleness"] = _bar_staleness(snap.get("asOf"))
-        out[sym] = snap
-
-    # Newly watched symbols get picked up by a targeted background fetch; the
-    # response stays datastore-only.
-    if missing:
-        known = set(db.known_symbols())
-        new_symbols = [s for s in missing if s not in known]
-        if new_symbols:
-            ingest.run_in_background("new-symbols", new_symbols)
-    return jsonify(out)
-
-
-def _entry_candidate_universe() -> list[dict]:
-    cfm = set(getattr(cfg, "CFM_ENTRY_CANDIDATES", []))
-    app_candidates = set(getattr(cfg, "APP_ENTRY_CANDIDATES", []))
-    proxies = getattr(cfg, "ENTRY_CANDIDATE_PROXY", {})
-    universe = []
-    for symbol in getattr(cfg, "ENTRY_CANDIDATES", []):
-        strategies = []
-        if symbol in cfm:
-            strategies.append("CFM")
-        if symbol in app_candidates:
-            strategies.append("APP")
-        universe.append({
-            "symbol": symbol,
-            "candidateStrategies": strategies,
-            "sectorProxy": proxies.get(symbol, symbol if symbol in getattr(cfg, "SECTOR_SYMBOLS", []) else None),
-        })
-    return universe
-
-
-@app.route("/api/indicator-snapshots")
-def api_indicator_snapshots():
-    """Recent indicator snapshots for Entry Watch candidate rank comparisons.
-
-    Datastore-only: returns previously computed snapshot payloads from SQLite.
-    The symbol set is clamped to the Entry Watch candidate universe so the UI
-    can rebuild prior CFM/APP rankings without broad arbitrary history reads.
-    """
-    universe = _entry_candidate_universe()
-    allowed = {item["symbol"] for item in universe}
-    requested = request.args.get("symbols", "")
-    symbols = [s.strip().upper() for s in requested.split(",") if s.strip()]
-    if symbols:
-        symbols = [s for s in dict.fromkeys(symbols) if s in allowed]
-    else:
-        symbols = [item["symbol"] for item in universe]
-
-    as_of = request.args.get("as_of") or None
+@app.route("/api/sectors")
+def api_sectors():
     try:
-        limit = max(1, min(10, int(request.args.get("limit", "3"))))
-    except ValueError:
-        return jsonify({"error": "limit must be an integer"}), 400
-
-    sessions = []
-    for session in db.snapshots_by_as_of("indicators", symbols, as_of=as_of, limit_sessions=limit):
-        snapshots = session.get("snapshots", {})
-        missing = [s for s in symbols if s not in snapshots]
-        enriched = {}
-        for item in universe:
-            symbol = item["symbol"]
-            if symbol not in snapshots:
-                continue
-            payload = snapshots[symbol]
-            enriched[symbol] = {
-                "symbol": symbol,
-                "candidateStrategies": item["candidateStrategies"],
-                "sectorProxy": item["sectorProxy"],
-                "asOf": session["asOf"],
-                "computedAt": payload.get("_computedAt") or session.get("computedAt"),
-                "indicators": payload,
-                "staleness": _bar_staleness(session["asOf"]),
-            }
-        sessions.append({
-            "asOf": session["asOf"],
-            "computedAt": session.get("computedAt"),
-            "complete": not missing,
-            "missing": missing,
-            "symbols": enriched,
-        })
-
-    return jsonify({
-        "universe": universe,
-        "asOf": as_of,
-        "sessions": sessions,
-        "historyState": "ok" if sessions else "insufficient_history",
-    })
+        return jsonify(screening.sectors())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
 
 
-@app.route("/api/levels")
-def api_levels():
-    """On-demand support/resistance for a single Entry Watch symbol.
-
-    Reads stored daily bars only (no provider call). Unknown symbols trigger a
-    targeted background fetch so a retry after the next ingest has data.
-    """
-    symbol = request.args.get("symbol", "").strip().upper()
-    if not symbol:
-        return jsonify({"error": "symbol required"}), 400
-
-    bars = db.get_bars(symbol)
-    if bars is None or bars.empty:
-        if symbol not in set(db.known_symbols()):
-            ingest.run_in_background("new-symbols", [symbol])
-        return jsonify({"symbol": symbol, "error": "no data"})
-
-    result = ind.support_resistance(bars)
-    result["symbol"] = symbol
-    result["asOf"] = str(bars.index[-1].date())
-    result["staleness"] = _bar_staleness(result["asOf"])
-    return jsonify(result)
-
-
-def _build_sector_map() -> dict:
-    """Map symbol -> sector name using the configured sector universe + entry candidates."""
-    sector_map = {}
-    for s in getattr(cfg, "SECTOR_UNIVERSE", []):
-        sector_map[s["symbol"]] = s["name"]
-    proxy_to_sector = {s["symbol"]: s["name"] for s in getattr(cfg, "SECTOR_UNIVERSE", [])}
-    for sym, proxy in getattr(cfg, "ENTRY_CANDIDATE_PROXY", {}).items():
-        if proxy in proxy_to_sector and sym not in sector_map:
-            sector_map[sym] = proxy_to_sector[proxy]
-    return sector_map
-
-
-@app.route("/api/daily-screener")
-def api_daily_screener():
-    """Scan a liquid US universe via Alpha Vantage for day-trading setups.
-
-    Query params:
-      price_min default 20
-      price_max default 100
-      vol_min   default 10000000  (20-day average daily volume in shares)
-      atr_min   default 4  (ATR% = ATR14 / close * 100)
-      atr_max   default 9
-      refresh   "1" forces a background rebuild of the universe snapshot
-
-    Reads from a background-built daily snapshot (never blocks on the provider),
-    then applies the filters locally and returns the top 50 by atrPct descending.
-    """
+@app.route("/api/stock-filter")
+def api_stock_filter():
     try:
-        price_min = float(request.args.get("price_min", 20))
-        price_max = float(request.args.get("price_max", 100))
-        vol_min = float(request.args.get("vol_min", 10_000_000))
-        atr_min = float(request.args.get("atr_min", 4))
-        atr_max = float(request.args.get("atr_max", 9))
-    except (ValueError, TypeError):
-        return jsonify({"error": "invalid filter parameter"}), 400
-
-    import screener
-
-    if not alphavantage_configured():
-        return jsonify({
-            "error": "Alpha Vantage is not configured. Set ALPHAVANTAGE_API_KEY "
-                     "(e.g. `fly secrets set ALPHAVANTAGE_API_KEY=…`) and redeploy."
-        }), 503
-
-    if request.args.get("refresh") == "1":
-        screener.refresh_in_background()
-
-    snapshot, building = screener.get_snapshot(auto_refresh=True)
-    if snapshot is None:
-        # First-ever call: the universe is being built in the background.
-        return jsonify({
-            "results": [], "count": 0, "building": True, "source": "alphavantage",
-            "filters": {"priceMin": price_min, "priceMax": price_max,
-                        "volMin": vol_min, "atrMin": atr_min, "atrMax": atr_max},
-            "message": "Building the screener universe (first run can take ~1 minute). "
-                       "Re-run shortly.",
-        })
-
-    results = screener.filter_rows(
-        snapshot.get("rows", []),
-        price_min=price_min, price_max=price_max, vol_min=vol_min,
-        atr_min=atr_min, atr_max=atr_max, limit=50,
-    )
-    return jsonify({
-        "results": results,
-        "filters": {
-            "priceMin": price_min, "priceMax": price_max,
-            "volMin": vol_min, "atrMin": atr_min, "atrMax": atr_max,
-        },
-        "count": len(results),
-        "building": building,
-        "universeSize": snapshot.get("universeSize"),
-        "builtAt": snapshot.get("builtAt"),
-        "stale": not screener.is_fresh(snapshot),
-        "source": "alphavantage",
-    })
+        return jsonify(screening.stock_filter(request.args.get("sector")))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
 
 
-def alphavantage_configured() -> bool:
-    from providers import alphavantage
-
-    return alphavantage.configured()
-
-
-@app.route("/api/macro")
-def api_macro():
-    snap = db.latest_snapshot("macro", "macro") or {"values": {}, "fields": {}, "errors": {"macro": "no ingested data yet"}}
-    fields = dict(snap.get("fields") or {})
-    errors = dict(snap.get("errors") or {})
-
-    # Per-field staleness: market inputs by trading-day age, FRED-derived
-    # inputs by ingestion age (CPI being a month old is normal).
-    for key, meta in fields.items():
-        if key in ("vix", "breadth"):
-            meta["staleness"] = _bar_staleness(meta.get("asOf"))
-        else:
-            meta["staleness"] = _ingest_staleness(meta.get("fetchedAt"))
-
-    # Manual overrides always win.
-    for key, ov in db.get_overrides("macro").items():
-        fields[key] = {
-            "value": ov["value"],
-            "source": "manual",
-            "asOf": ov["updatedAt"],
-            "override": True,
-            "staleness": "fresh",
-        }
-        errors.pop(key, None)
-
-    values = {key: meta["value"] for key, meta in fields.items()}
-
-    # The regime gate is only as fresh as its oldest input.
-    order = {"fresh": 0, "yellow": 1, "red": 2, "unknown": 2}
-    worst = max((meta.get("staleness", "unknown") for meta in fields.values()),
-                key=lambda s: order.get(s, 2), default="unknown")
-    expected = ["vix", "breadth", "fed", "growth", "inflation"]
-    if any(key not in fields for key in expected):
-        worst = "red"
-
-    return jsonify({
-        "values": values,
-        "fields": fields,
-        "errors": errors,
-        "asOf": snap.get("_computedAt"),
-        "staleness": worst,
-        "degraded": worst == "red",
-    })
-
-
-@app.route("/api/overrides", methods=["GET", "POST"])
-def api_overrides():
-    if request.method == "GET":
-        scope = request.args.get("scope", "macro")
-        return jsonify(db.get_overrides(scope))
-    body = request.get_json(force=True) or {}
-    scope = str(body.get("scope") or "macro")
-    key = str(body.get("key") or "").strip()
-    if not key:
-        return jsonify({"error": "key required"}), 400
-    if body.get("value") is None:
-        db.clear_override(scope, key)
-        return jsonify({"ok": True, "cleared": key})
-    db.set_override(scope, key, body["value"], source="manual")
-    return jsonify({"ok": True, "key": key})
-
-
-@app.route("/api/data-issues")
-def api_data_issues():
-    from providers import schwab
-
-    return jsonify({
-        "quarantine": db.recent_quarantine(),
-        "lastRun": db.last_ingest_run(),
-        "lastSuccessfulRun": db.last_successful_ingest(),
-        "schwabAuthError": db.kv_get("schwab_auth_error"),
-        "schwabToken": schwab.token_status(),
-    })
-
-
-# ---------------------------------------------------------------------------
-# Schwab re-authorization (hosted OAuth) — browser flow so the weekly refresh
-# is a one-click consent instead of a CLI + secret-edit chore. Schwab requires
-# a human login every 7 days; this just removes everything around that click.
-# The minted refresh token is stored in the datastore (current_refresh_token()
-# reads it before the env secret), so no redeploy/secret edit is needed.
-# ---------------------------------------------------------------------------
-def _schwab_redirect_uri() -> str:
-    """The callback that must be registered on the Schwab app. Defaults to this
-    app's public URL; override with SCHWAB_REDIRECT_URI if the host differs."""
-    override = os.environ.get("SCHWAB_REDIRECT_URI")
-    if override:
-        return override
-    return f"https://{request.host}/auth/schwab/callback"
-
-
-def _auth_result_page(title: str, message: str, ok: bool = True):
-    color = "#1f9d55" if ok else "#e3342f"
-    html = (
-        "<!doctype html><html><head><meta charset='utf-8'>"
-        f"<title>{title}</title><style>"
-        "body{font-family:system-ui,-apple-system,sans-serif;background:#0b0e14;color:#e6e6e6;"
-        "display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}"
-        ".card{max-width:520px;padding:32px;border:1px solid #222;border-radius:12px;background:#11151c}"
-        f"h1{{color:{color};font-size:20px;margin:0 0 12px}}"
-        "p{color:#9aa4b2;line-height:1.55}a{color:#3b82f6}</style></head>"
-        f"<body><div class='card'><h1>{title}</h1><p>{message}</p>"
-        "<p><a href='/'>&larr; Back to dashboard</a></p></div></body></html>"
-    )
-    return html, (200 if ok else 400)
-
-
-@app.route("/auth/schwab")
-def auth_schwab_start():
-    if not (os.environ.get("SCHWAB_APP_KEY") and os.environ.get("SCHWAB_APP_SECRET")):
-        return _auth_result_page(
-            "Schwab not configured",
-            "Set the SCHWAB_APP_KEY and SCHWAB_APP_SECRET secrets first.",
-            ok=False,
-        )
-    from providers import schwab
-
-    state = secrets.token_urlsafe(24)
-    db.kv_set("schwab_oauth_state", {"state": state, "at": db.utcnow()})
-    return redirect(schwab.authorize_url(_schwab_redirect_uri(), state))
-
-
-@app.route("/auth/schwab/callback")
-def auth_schwab_callback():
-    from providers import schwab
-
-    if request.args.get("error"):
-        return _auth_result_page(
-            "Schwab authorization declined",
-            f"Schwab returned: {request.args.get('error')}",
-            ok=False,
-        )
-    code = request.args.get("code")
-    state = request.args.get("state")
-    saved = db.kv_get("schwab_oauth_state") or {}
-    if not code:
-        return _auth_result_page("Missing code", "No authorization code in the callback URL.", ok=False)
-    if not state or state != saved.get("state"):
-        return _auth_result_page(
-            "State mismatch",
-            "The authorization state did not match. Start again from /auth/schwab.",
-            ok=False,
-        )
-    db.kv_set("schwab_oauth_state", None)  # single-use
+@app.route("/api/entry-gate")
+def api_entry_gate():
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
     try:
-        tokens = schwab.exchange_code(code, _schwab_redirect_uri())
-    except Exception as e:  # noqa: BLE001 — surface the failure to the browser
-        return _auth_result_page("Token exchange failed", str(e), ok=False)
-    refresh = tokens.get("refresh_token")
-    if not refresh:
-        return _auth_result_page("No refresh token", "Schwab did not return a refresh token.", ok=False)
-    schwab.store_refresh_token(refresh)
-    ingest.run_in_background("schwab-reauth")  # pull Schwab data right away
-    return _auth_result_page(
-        "Schwab re-authorized ✓",
-        "Your refresh token is stored and valid for 7 days. A fresh ingest is "
-        "running now and the dashboard will use Schwab as the primary feed.",
-        ok=True,
-    )
+        return jsonify(screening.entry_gate(ticker))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
 
 
-@app.route("/api/data-status")
-def api_data_status():
-    import status as status_mod
-
-    return jsonify(status_mod.data_status())
-
-
-@app.route("/api/ingest", methods=["POST"])
-def api_ingest():
-    token = os.environ.get("INGEST_TOKEN")
-    if token:
-        supplied = request.headers.get("Authorization", "").removeprefix("Bearer ").strip() \
-            or request.args.get("token", "")
-        if supplied != token:
-            return jsonify({"error": "unauthorized"}), 401
-    if request.args.get("wait") == "1":
-        # Synchronous: the cron machine uses this so the Fly machine stays
-        # awake for the whole run.
-        return jsonify(ingest.run(trigger="cron"))
-    ingest.run_in_background("api")
-    return jsonify({"ok": True, "started": True}), 202
-
-
-# ---------------------------------------------------------------------------
-# Schwab account sync — pull live positions + trade history on demand.
-#
-# Unlike every other API route, this one deliberately contacts a provider: it
-# is user-triggered (the Positions tab "Sync from Schwab" button), returns
-# account data that has no place in the market datastore, and degrades to a
-# clear error if the Schwab app lacks the Accounts & Trading product.
-# ---------------------------------------------------------------------------
-@app.route("/api/account/status")
-def api_account_status():
-    import schwab_account
-
-    return jsonify({
-        "configured": schwab_account.available(),
-        "lastError": db.kv_get("schwab_account_error"),
-    })
-
-
-@app.route("/api/account/sync", methods=["POST"])
-def api_account_sync():
-    import schwab_account
-
-    body = request.get_json(silent=True) or {}
-    days = body.get("days") or request.args.get("days") or schwab_account.MAX_SYNC_DAYS
+@app.route("/api/roll-suggestion")
+def api_roll_suggestion():
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
     try:
-        days = int(days)
-    except (TypeError, ValueError):
-        days = schwab_account.MAX_SYNC_DAYS
-    result = schwab_account.sync(days=days)
-    return jsonify(result), 200 if result.get("configured") else 409
+        return jsonify(executor.roll_suggestion(ticker))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
-# Option execution + theta ledger.
-#
-# Unlike every read-only route, /place can transmit a REAL order against the
-# live Schwab account — but only when the SCHWAB_LIVE_TRADING_ENABLED kill-switch
-# is armed (option_trades.place_option refuses otherwise). /preview is always a
-# safe dry-run, /fills reads the stored intrinsic/extrinsic ledger.
+# Execute
 # ---------------------------------------------------------------------------
-@app.route("/api/options/status")
-def api_options_status():
-    import option_trades
-
-    return jsonify({
-        "configured": option_trades.available(),
-        "liveTradingEnabled": option_trades.live_trading_enabled(),
-    })
-
-
-@app.route("/api/options/preview", methods=["POST"])
-def api_options_preview():
-    import option_trades
-
-    body = request.get_json(silent=True) or {}
-    spec = body.get("spec") if "spec" in body else body
-    out = option_trades.preview_option(spec or {}, account_hash=body.get("accountHash"))
-    return jsonify(out), 200 if out.get("ok") else 400
-
-
-@app.route("/api/options/place", methods=["POST"])
-def api_options_place():
-    import option_trades
-
-    body = request.get_json(silent=True) or {}
-    spec = body.get("spec") if "spec" in body else body
-    out = option_trades.place_option(spec or {}, account_hash=body.get("accountHash"))
-    if out.get("ok"):
-        return jsonify(out), 200
-    # A disabled kill-switch is a deliberate 403 (forbidden by config), not a 400.
-    return jsonify(out), 403 if out.get("liveDisabled") else 400
-
-
-@app.route("/api/options/order/<order_id>")
-def api_options_order_status(order_id):
-    import option_trades
-
-    out = option_trades.order_status(order_id, account_hash=request.args.get("accountHash"))
-    return jsonify(out), 200 if out.get("ok") else 400
-
-
-@app.route("/api/options/cancel", methods=["POST"])
-def api_options_cancel():
-    import option_trades
-
-    body = request.get_json(silent=True) or {}
-    order_id = body.get("orderId") or request.args.get("orderId")
-    if not order_id:
-        return jsonify({"ok": False, "error": "orderId is required."}), 400
-    out = option_trades.cancel_option(str(order_id), account_hash=body.get("accountHash"))
-    return jsonify(out), 200 if out.get("ok") else 400
-
-
-@app.route("/api/options/replace", methods=["POST"])
-def api_options_replace():
-    import option_trades
-
-    body = request.get_json(silent=True) or {}
-    order_id = body.get("orderId")
-    spec = body.get("spec") if "spec" in body else {k: v for k, v in body.items() if k != "orderId"}
-    if not order_id:
-        return jsonify({"ok": False, "error": "orderId is required."}), 400
-    out = option_trades.replace_option(str(order_id), spec or {}, account_hash=body.get("accountHash"))
-    if out.get("ok"):
-        return jsonify(out), 200
-    return jsonify(out), 403 if out.get("liveDisabled") else 400
-
-
-@app.route("/api/options/fills")
-def api_options_fills():
-    import theta_ledger
-
-    underlying = request.args.get("underlying") or request.args.get("symbol")
+@app.route("/api/execute", methods=["POST"])
+def api_execute():
+    payload = request.get_json(silent=True) or {}
     try:
-        limit = int(request.args.get("limit") or 200)
-    except (TypeError, ValueError):
-        limit = 200
-    # Read-only: attach the latest stored mark + theta P&L (no provider call).
-    fills = theta_ledger.enrich(db.list_option_fills(underlying=underlying, limit=limit))
-    return jsonify({"fills": fills})
-
-
-@app.route("/api/options/marks/refresh", methods=["POST"])
-def api_options_marks_refresh():
-    import theta_ledger
-
-    body = request.get_json(silent=True) or {}
-    out = theta_ledger.refresh(underlying=body.get("underlying") or request.args.get("underlying"))
-    return jsonify(out), 200 if out.get("ok") else 400
-
-
-@app.route("/api/options/close", methods=["POST"])
-def api_options_close():
-    import option_trades
-
-    body = request.get_json(silent=True) or {}
-    fill_id = body.get("fillId")
-    if not fill_id:
-        return jsonify({"ok": False, "error": "fillId is required."}), 400
-    order_type = str(body.get("orderType") or "LIMIT").upper()
-    limit_price = body.get("limitPrice")
-    out = option_trades.close_option(
-        int(fill_id), account_hash=body.get("accountHash"),
-        order_type=order_type, limit_price=limit_price,
-    )
-    if out.get("ok"):
-        return jsonify(out), 200
-    return jsonify(out), 403 if out.get("liveDisabled") else 400
-
-
-@app.route("/api/options/close/batch", methods=["POST"])
-def api_options_close_batch():
-    import option_trades
-
-    body = request.get_json(silent=True) or {}
-    fill_ids = body.get("fillIds") or []
-    if not fill_ids:
-        return jsonify({"ok": False, "error": "fillIds array is required."}), 400
-    order_type = str(body.get("orderType") or "LIMIT").upper()
-    limit_price = body.get("limitPrice")
-    out = option_trades.batch_close_options(
-        [int(fid) for fid in fill_ids], account_hash=body.get("accountHash"),
-        order_type=order_type, limit_price=limit_price,
-    )
-    return jsonify(out), 200 if out.get("ok") else 400
-
-
-@app.route("/api/options/roll", methods=["POST"])
-def api_options_roll():
-    import option_trades
-
-    body = request.get_json(silent=True) or {}
-    fill_id = body.get("fillId")
-    new_strike = body.get("newStrike")
-    new_expiry = body.get("newExpiry")
-    if not fill_id or new_strike is None or not new_expiry:
-        return jsonify({
-            "ok": False,
-            "error": "fillId, newStrike, and newExpiry are required.",
-        }), 400
-    close_order_type = str(body.get("closeOrderType") or "MARKET").upper()
-    open_order_type = str(body.get("openOrderType") or "LIMIT").upper()
-    open_limit_price = body.get("openLimitPrice")
-    out = option_trades.roll_option(
-        int(fill_id), float(new_strike), new_expiry,
-        account_hash=body.get("accountHash"),
-        close_order_type=close_order_type, open_order_type=open_order_type,
-        open_limit_price=open_limit_price,
-    )
-    if out.get("ok"):
-        return jsonify(out), 200
-    return jsonify(out), 403 if out.get("liveDisabled") else 400
-
-
-@app.route("/api/options/chain")
-def api_options_chain():
-    import option_trades
-
-    symbol = request.args.get("symbol") or request.args.get("underlying")
-    expiry_date = request.args.get("expiry")
-    if not symbol:
-        return jsonify({"ok": False, "error": "symbol is required."}), 400
-    out = option_trades.get_chain(symbol, expiry_date)
-    return jsonify(out), 200 if out.get("ok") else 400
-
-
-# ---------------------------------------------------------------------------
-# Backtesting engine — configure a day-trading setup, run it against stored
-# 5-minute bars, and get a trade log + summary stats. The run path is
-# datastore-only; pulling missing intraday history from Schwab/Yahoo is an
-# explicit, user-triggered action (the backfill endpoint, or autoBackfill).
-# ---------------------------------------------------------------------------
-@app.route("/api/backtest/run", methods=["POST"])
-def api_backtest_run():
-    import backtest_service
-
-    body = request.get_json(silent=True) or {}
-    auto = bool(body.get("autoBackfill"))
-    config = body.get("config") if "config" in body else body
-    out = backtest_service.run(config, auto_backfill=auto)
-    return jsonify(out), 200 if out.get("ok") else 400
-
-
-@app.route("/api/backtest/coverage", methods=["POST"])
-def api_backtest_coverage():
-    import backtest as engine
-    import backtest_service
-
-    body = request.get_json(silent=True) or {}
-    config, errors = engine.validate_config(body.get("config") if "config" in body else body)
-    if errors:
-        return jsonify({"ok": False, "errors": errors}), 400
-    config = backtest_service._apply_default_sector_map(config)
-    return jsonify({"ok": True, "coverage": backtest_service.coverage_report(config)})
-
-
-@app.route("/api/backtest/backfill", methods=["POST"])
-def api_backtest_backfill():
-    import backtest as engine
-    import backtest_service
-
-    body = request.get_json(silent=True) or {}
-    config, errors = engine.validate_config(body.get("config") if "config" in body else body)
-    if errors:
-        return jsonify({"ok": False, "errors": errors}), 400
-    config = backtest_service._apply_default_sector_map(config)
-    symbols = backtest_service._context_symbols(config)
-    result = backtest_service.backfill(
-        symbols, config["date_range"]["start"], config["date_range"]["end"],
-        int(config.get("interval_min", 5)), engine._vol_avg_length(config),
-        fine_symbols=config["tickers"],
-        refine_interval_min=int(config.get("refine_interval_min", 1) or 0),
-    )
-    return jsonify({"ok": result["ok"], "backfill": result,
-                    "coverage": backtest_service.coverage_report(config)})
-
-
-@app.route("/api/backtest/export", methods=["POST"])
-def api_backtest_export():
-    import backtest as engine
-
-    body = request.get_json(silent=True) or {}
-    csv_text = engine.trades_to_csv(body.get("trades") or [])
-    return app.response_class(
-        csv_text, mimetype="text/csv",
-        headers={"Content-Disposition": "attachment; filename=backtest_trades.csv"},
-    )
-
-
-@app.route("/api/backtest/resolve", methods=["GET", "POST"])
-def api_backtest_resolve():
-    import backtest_service
-
-    if request.method == "GET":
-        return jsonify(backtest_service.list_resolutions())
-    body = request.get_json(silent=True) or {}
-    ticker = str(body.get("ticker") or "").strip()
-    date = str(body.get("date") or "").strip()
-    entry_time = str(body.get("entry_time") or "").strip()
-    if not (ticker and date and entry_time):
-        return jsonify({"error": "ticker, date and entry_time are required"}), 400
-    store = backtest_service.set_resolution(ticker, date, entry_time, body.get("outcome"))
-    return jsonify({"ok": True, "resolutions": store})
-
-
-@app.route("/api/backtest/configs", methods=["GET", "POST", "DELETE"])
-def api_backtest_configs():
-    import backtest_service
-
-    if request.method == "GET":
-        return jsonify(backtest_service.list_configs())
-    body = request.get_json(silent=True) or {}
-    name = str(body.get("name") or "").strip()
-    if not name:
-        return jsonify({"error": "name required"}), 400
-    if request.method == "DELETE":
-        return jsonify(backtest_service.delete_config(name))
-    if body.get("config") is None:
-        return jsonify({"error": "config required"}), 400
-    try:
-        store = backtest_service.save_config(name, body["config"])
+        return jsonify(executor.execute(payload))
     except ValueError as e:
-        return jsonify({"error": str(e)}), 400
-    return jsonify({"ok": True, "configs": store})
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
-# Intraday Setup Executor — Phase 1 (detection only). Reuses the backtest
-# engine's setup rules to evaluate today's closed 5-minute candles for setups
-# (price breaks yesterday's level on a volume spike) and emit signals. Refresh
-# pulls today's bars from Schwab/Yahoo; playback replays stored candles to
-# validate detection against historical data. No alerts/order execution yet.
+# Track
 # ---------------------------------------------------------------------------
-@app.route("/api/executor/config", methods=["GET"])
-def api_executor_config():
-    import intraday_executor as ix
-
-    return jsonify({"ok": True, "config": ix.DEFAULT_MONITOR_CONFIG})
-
-
-def _executor_error(label: str, exc: Exception):
-    """Turn an unexpected executor failure into a structured JSON error (logged
-    with a traceback) instead of an opaque HTML 500, so the UI can show why."""
-    print(f"[executor] {label} failed: {exc}")
-    traceback.print_exc()
-    return jsonify({"ok": False, "error": f"{label} failed: {exc}"}), 500
-
-
-@app.route("/api/executor/monitor", methods=["POST"])
-def api_executor_monitor():
-    import intraday_executor as ix
-
-    body = request.get_json(silent=True) or {}
-    config = body.get("config") if "config" in body else body
+@app.route("/api/positions")
+def api_positions():
     try:
-        out = ix.run_monitor(config, refresh=bool(body.get("refresh")),
-                             on_date=body.get("date"), as_of=body.get("asOf"))
-    except Exception as e:  # noqa: BLE001 — surface the cause to the UI + logs
-        return _executor_error("Scan", e)
-    return jsonify(out), 200 if out.get("ok") else 400
+        state = log.load_state()
+        return jsonify({
+            "positions": position_manager.positions_view(state),
+            "capital": position_manager.capital_summary(state),
+            "extrinsic_payback": state.get("extrinsic_payback", {}),
+        })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
 
 
-@app.route("/api/executor/playback", methods=["POST"])
-def api_executor_playback():
-    import intraday_executor as ix
-
-    body = request.get_json(silent=True) or {}
-    config = body.get("config") if "config" in body else body
+@app.route("/api/theta-ledger")
+def api_theta_ledger():
+    ticker = request.args.get("ticker")
+    period = request.args.get("period")  # week | month | ytd
     try:
-        out = ix.run_playback(config, date=body.get("date"),
-                             date_range=body.get("date_range"),
-                             auto_backfill=bool(body.get("autoBackfill")))
-    except Exception as e:  # noqa: BLE001 — surface the cause to the UI + logs
-        return _executor_error("Playback", e)
-    return jsonify(out), 200 if out.get("ok") else 400
+        state = log.load_state()
+        ledger = state.get("theta_ledger", {})
+        weeks = ledger.get("weeks", [])
+        if ticker:
+            weeks = [w for w in weeks if w.get("ticker", "").upper() == ticker.upper()]
+        totals = ledger.get("totals", {})
+        out = {"weeks": weeks, "totals": totals, "extrinsic_payback": state.get("extrinsic_payback", {})}
+        if period in ("week", "month", "ytd"):
+            key = {"week": "this_week", "month": "this_month", "ytd": "ytd"}[period]
+            out["period"] = {"period": period, "net_juice": totals.get(key)}
+        return jsonify(out)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
 
 
-@app.route("/api/executor/replay", methods=["POST"])
-def api_executor_replay():
-    """Replay a date (or range) through the full executor engine and return
-    completed trades with outcomes (entry/stop/target/exit/R).
-
-    This is the offline validation path: REPLAY binds the historical data source +
-    ReplayExecutionAdapter and resolves each setup's exit over stored candles using
-    the same rules as the backtester — so the trades here reproduce backtest
-    results exactly. Detection/sizing live in the shared StrategyCore; switching to
-    PAPER/LIVE later changes only the bound adapter + data source.
-    """
-    import executor_engine as ee
-
-    body = request.get_json(silent=True) or {}
-    config = body.get("config") if "config" in body else body
+@app.route("/api/kill-switch")
+def api_kill_switch():
     try:
-        out = ee.run_replay(config, date=body.get("date"),
-                            date_range=body.get("date_range"))
-    except Exception as e:  # noqa: BLE001 — surface the cause to the UI + logs
-        return _executor_error("Replay", e)
-    return jsonify(out), 200 if out.get("ok") else 400
+        return jsonify({"positions": kill_switch.evaluate_all(log.load_state())})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
 
 
-@app.route("/api/executor/signals", methods=["GET"])
-def api_executor_signals():
-    body_date = request.args.get("date")
+@app.route("/api/daily-checklist")
+def api_daily_checklist():
     try:
-        limit = int(request.args.get("limit", 100))
-    except (TypeError, ValueError):
-        limit = 100
-    return jsonify({"ok": True, "signals": db.recent_setup_signals(body_date, limit)})
-
-
-@app.route("/api/executor/paper/execute", methods=["POST"])
-def api_executor_paper_execute():
-    """Paper-only execution: logs the signal as an OPEN simulated bracket trade.
-
-    No live/Schwab order placement is performed from this endpoint.
-    """
-    import intraday_executor as ix
-
-    body = request.get_json(silent=True) or {}
-    out = ix.execute_paper_order(body.get("signal") or body, notes=body.get("notes"))
-    return jsonify(out), 200 if out.get("ok") else 400
-
-
-@app.route("/api/executor/schwab/preview", methods=["POST"])
-def api_executor_schwab_preview():
-    """Dry-run a signal's bracket order against Schwab's previewOrder endpoint.
-
-    Schwab has no paper-trading API, so this validates the order against the real
-    account (buying power, pricing, tradeability) and returns the projected cost /
-    fees and any rejects — but NOTHING is filled. It never places a live order.
-    """
-    import schwab_orders
-
-    body = request.get_json(silent=True) or {}
-    try:
-        out = schwab_orders.preview_bracket(body.get("signal") or body,
-                                            account_hash=body.get("accountHash"))
-    except Exception as e:  # noqa: BLE001 — surface the cause to the UI + logs
-        return _executor_error("Schwab preview", e)
-    return jsonify(out), 200 if out.get("ok") else 400
-
-
-@app.route("/api/executor/paper/trades", methods=["GET"])
-def api_executor_paper_trades():
-    import intraday_executor as ix
-
-    try:
-        limit = int(request.args.get("limit", 100))
-    except (TypeError, ValueError):
-        limit = 100
-    out = ix.list_paper_trades(
-        date=request.args.get("date"),
-        status=request.args.get("status"),
-        limit=limit,
-    )
-    return jsonify(out)
-
-
-@app.route("/api/executor/paper/trades/<order_id>", methods=["PATCH"])
-def api_paper_trade_update(order_id):
-    """Close a paper trade with an exit price and WIN / LOSS / SKIP outcome."""
-    body = request.get_json(silent=True) or {}
-    outcome = body.get("outcome")
-    if outcome and outcome not in ("OPEN", "WIN", "LOSS", "CLOSED", "SKIP"):
-        return jsonify({"ok": False, "error": f"Invalid outcome: {outcome}"}), 400
-    exit_price_raw = body.get("exit_price")
-    try:
-        exit_price = float(exit_price_raw) if exit_price_raw not in (None, "") else None
-    except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "exit_price must be a number"}), 400
-    updated = db.update_paper_trade(
-        order_id,
-        outcome=outcome or None,
-        exit_price=exit_price,
-        exit_time=body.get("exit_time"),
-        notes=body.get("notes"),
-    )
-    if updated is None:
-        return jsonify({"ok": False, "error": "Trade not found"}), 404
-    return jsonify({"ok": True, "trade": updated})
-
-
-def _macro_gate_level(values: dict) -> str:
-    """Replicate the frontend macroSignal() gate for the daily-summary endpoint."""
-    vix = float(values.get("vix") or 25)
-    breadth = float(values.get("breadth") or 50)
-    fed = str(values.get("fed") or "holding")
-    growth = str(values.get("growth") or "stable")
-    inflation = float(values.get("inflation") or 3)
-    risk_on = sum([vix < 15, breadth >= 60, fed == "dovish",
-                   growth == "accelerating", inflation < 2])
-    risk_off = sum([vix > 20, breadth < 45, fed == "hawkish",
-                    growth == "slowing", inflation > 3])
-    if vix > 30 or breadth < 45:
-        return "RED"
-    if risk_on >= 3 and risk_off == 0 and breadth >= 55:
-        return "GREEN"
-    if risk_off >= 3:
-        return "RED"
-    return "YELLOW"
-
-
-@app.route("/api/executor/daily-summary")
-def api_executor_daily_summary():
-    """Macro gate + today's paper trade P&L in one call for the morning briefing."""
-    import intraday_executor as ix
-    date = request.args.get("date") or db.utcnow()[:10]
-
-    trades = db.list_intraday_trades(date=date, limit=500)
-    signals = db.recent_setup_signals(date=date, limit=500)
-
-    wins = sum(1 for t in trades if t.get("outcome") == "WIN")
-    losses = sum(1 for t in trades if t.get("outcome") == "LOSS")
-    open_count = sum(1 for t in trades if t.get("outcome") == "OPEN")
-    r_vals = [t["r_result"] for t in trades if t.get("r_result") is not None]
-    total_r = round(sum(r_vals), 2) if r_vals else None
-
-    macro_snap = db.latest_snapshot("macro", "macro")
-    macro_values = dict((macro_snap or {}).get("values") or {})
-    gate_level = _macro_gate_level(macro_values) if macro_values else "UNKNOWN"
-    gate_label = {"GREEN": "Risk-On", "YELLOW": "Mixed", "RED": "Risk-Off"}.get(gate_level, "Unknown")
-
-    return jsonify({
-        "ok": True,
-        "date": date,
-        "macro": {"level": gate_level, "label": gate_label},
-        "trades": {
-            "total": len(trades),
-            "wins": wins,
-            "losses": losses,
-            "open": open_count,
-            "total_r": total_r,
-        },
-        "signals": {"total": len(signals)},
-    })
+        return jsonify({"items": screening.daily_checklist(log.load_state())})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
 
 
 # ---------------------------------------------------------------------------
-# State persistence (manual inputs, positions) — lives on the data volume
+# State / config
 # ---------------------------------------------------------------------------
-def load_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        try:
-            with open(STATE_FILE) as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
-
-
-def save_state(data: dict) -> None:
-    # Gunicorn serves this with multiple threads and the frontend POSTs state
-    # back debounced + on beforeunload, so writes overlap. A shared temp path
-    # would let one writer's os.replace yank the file out from under another
-    # (FileNotFoundError on the rename), so give each writer a unique temp file
-    # in the same directory and atomically rename it into place.
-    state_dir = os.path.dirname(STATE_FILE)
-    os.makedirs(state_dir, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=state_dir, prefix="state.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, STATE_FILE)
-    except BaseException:
-        # Don't leak the temp file if the write or rename fails.
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
-        raise
-
-
 @app.route("/api/state", methods=["GET", "POST"])
 def api_state():
     if request.method == "POST":
-        save_state(request.get_json(force=True))
-        return jsonify({"ok": True})
-    return jsonify(load_state())
+        payload = request.get_json(silent=True) or {}
+        try:
+            state = log.load_state()
+            # Only metadata + thesis-style fields are user-editable here.
+            if "metadata" in payload:
+                state.setdefault("metadata", {}).update(payload["metadata"])
+            log.recompute_derived(state)
+            return jsonify(log.save_state(state))
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+    return jsonify(log.load_state())
 
 
 @app.route("/api/config")
 def api_config():
     return jsonify({
-        "tracked": cfg.TRACKED, "benchmark": cfg.BENCHMARK,
-        "sectors": cfg.SECTOR_UNIVERSE,
-        "capital": cfg.CAPITAL, "reserve": cfg.RESERVE,
-        "rs3m": {
-            "method": cfg.RS3M_METHOD, "emaSpan": cfg.RS3M_EMA_SPAN,
-            "lookback": cfg.RS3M_LOOKBACK, "momWindow": cfg.RS3M_MOM_WINDOW,
-            "momPastEndLag": cfg.RS3M_MOM_PAST_END_LAG,
-            "momPastLookback": cfg.RS3M_MOM_PAST_LOOKBACK,
-            "smooth": cfg.MOM_SMOOTH, "scale": cfg.MOM_SCALE,
-            "rsiMethod": cfg.RSI_METHOD, "ma21Method": cfg.MA21_METHOD,
+        "benchmark": config.BENCHMARK,
+        "sectors": {etf: s.as_dict() for etf, s in sector_data.sectors().items()},
+        "thresholds": {
+            "regime_breadth_green": config.REGIME_BREADTH_GREEN,
+            "vix_calm": config.VIX_CALM,
+            "sector_rs3m_min": config.SECTOR_RS3M_MIN,
+            "stock_rs_vs_spy_min": config.STOCK_RS_VS_SPY_MIN,
+            "stock_rs_vs_sector_min": config.STOCK_RS_VS_SECTOR_MIN,
         },
+        "cfm": {
+            "leap_contracts": config.LEAP_CONTRACTS,
+            "leap_target_delta": config.LEAP_TARGET_DELTA,
+            "leap_target_dte": config.LEAP_TARGET_DTE,
+            "short_atr_mult": config.SHORT_ATR_MULT,
+            "share_cap": config.SHARE_CAP,
+        },
+        "live_trading": executor.live_enabled(),
+        "schwab": schwab_api.token_status(),
+        "alpha_vantage_configured": __import__("alpha_vantage").configured(),
     })
 
 
+@app.route("/api/data-status")
+def api_data_status():
+    syms = [config.BENCHMARK, config.VIX_SYMBOL] + sector_data.sector_etfs()
+    return jsonify({s: {"cache_age_hours": data_handler.cache_age_hours(s)} for s in syms})
+
+
 # ---------------------------------------------------------------------------
-# Serve the built frontend (single origin -> no CORS issues at all)
+# Schwab OAuth (hosted re-auth)
+# ---------------------------------------------------------------------------
+@app.route("/api/account/status")
+def api_account_status():
+    return jsonify(schwab_api.token_status())
+
+
+@app.route("/auth/schwab")
+def auth_schwab():
+    try:
+        redirect_uri = request.url_root.rstrip("/") + "/auth/schwab/callback"
+        state = secrets.token_urlsafe(16)
+        return jsonify({"authorize_url": schwab_api.authorize_url(redirect_uri, state)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e, 400)
+
+
+@app.route("/auth/schwab/callback")
+def auth_schwab_callback():
+    code = request.args.get("code")
+    if not code:
+        return "Missing authorization code", 400
+    try:
+        redirect_uri = request.url_root.rstrip("/") + "/auth/schwab/callback"
+        tokens = schwab_api.exchange_code(code, redirect_uri)
+        schwab_api.store_refresh_token(tokens["refresh_token"])
+        return "Schwab authorized. You can close this tab and return to the dashboard."
+    except Exception as e:  # noqa: BLE001
+        return f"Schwab authorization failed: {e}", 400
+
+
+# ---------------------------------------------------------------------------
+# Static frontend
 # ---------------------------------------------------------------------------
 @app.route("/")
 @app.route("/<path:path>")
-def serve(path="index.html"):
-    full = os.path.join(FRONTEND, path)
-    if os.path.exists(full) and not os.path.isdir(full):
-        return send_from_directory(FRONTEND, path)
-    if os.path.exists(os.path.join(FRONTEND, "index.html")):
-        return send_from_directory(FRONTEND, "index.html")
-    return (
-        "<h2>Backend is running.</h2>"
-        "<p>Frontend not built yet. The API works: try "
-        "<a href='/api/indicators'>/api/indicators</a>.</p>", 200,
-    )
+def serve_frontend(path: str = ""):
+    if path and os.path.exists(os.path.join(DIST_DIR, path)):
+        return send_from_directory(DIST_DIR, path)
+    index = os.path.join(DIST_DIR, "index.html")
+    if os.path.exists(index):
+        return send_from_directory(DIST_DIR, "index.html")
+    return jsonify({"error": "frontend not built — run `npm run build` in frontend/"}), 404
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", "5179"))
-    print(f"Rotation Dashboard backend  ->  http://0.0.0.0:{port}")
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5179)), debug=True)

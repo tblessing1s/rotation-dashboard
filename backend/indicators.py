@@ -1,510 +1,155 @@
-"""
-Indicator math for the rotation dashboard.
+"""CFM indicator math on daily OHLCV frames.
 
-The key sector indicators intentionally mirror the Thinkorswim formulas supplied
-in this project brief and are designed to run on daily Schwab bars:
-- RS3M = ``close / close("SPY")`` relative-strength ratio versus the same ratio
-  63 bars ago, expressed as a percent change.
-- RS3M_Momentum = percent rate-of-change between current RS3M and the
-  RS3M value from the supplied momentum lag (5 bars with the default 63/68 settings).
-- VolumeRatio = latest volume divided by the 20-bar simple average volume, times 100.
-- VolumeAccel = latest volume divided by the 5-bar simple average volume, times 100.
-- MFI, Accumulation/Distribution, and RSI use standard daily OHLCV formulas.
+All functions take a pandas DataFrame with columns Open/High/Low/Close/Volume
+indexed by date (ascending), as returned by data_handler. They return plain
+floats (or None when there is insufficient history) so they serialize straight
+to JSON for the API.
 """
 from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
+import config
 
-def rsi(closes: pd.Series, period: int = 14, method: str = "wilder") -> float | None:
-    """Latest RSI value.
 
-    ``method="wilder"`` matches thinkorswim's default RSI study
-    (``average type = Wilders``): seed the average gain/loss with the first
-    ``period`` changes, then recursively smooth each subsequent change.
-    ``method="simple"`` retains the earlier plain average of the latest
-    ``period`` changes for backward-compatible fixtures/configs.
-    """
-    c = closes.dropna().to_numpy(dtype=float)
-    if len(c) < period + 1:
+def _close(df: pd.DataFrame) -> pd.Series:
+    return df["Close"].astype(float)
+
+
+def last(df: pd.DataFrame | None) -> float | None:
+    if df is None or df.empty:
         return None
-
-    deltas = np.diff(c)
-    gains = np.clip(deltas, 0, None)
-    losses = np.clip(-deltas, 0, None)
-
-    if (method or "wilder").lower() == "simple":
-        avg_gain = gains[-period:].sum() / period
-        avg_loss = losses[-period:].sum() / period
-    else:
-        avg_gain = gains[:period].sum() / period
-        avg_loss = losses[:period].sum() / period
-        for gain, loss in zip(gains[period:], losses[period:]):
-            avg_gain = ((avg_gain * (period - 1)) + gain) / period
-            avg_loss = ((avg_loss * (period - 1)) + loss) / period
-
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return float(100 - 100 / (1 + rs))
+    return float(df["Close"].iloc[-1])
 
 
-def obv_trend(closes: pd.Series, vols: pd.Series, ema_span: int = 20) -> str | None:
-    if len(closes) < ema_span + 5:
+def sma(df: pd.DataFrame, window: int = config.MA_WINDOW) -> float | None:
+    c = _close(df)
+    if len(c) < window:
         return None
-    direction = np.sign(closes.diff().fillna(0))
-    obv = (direction * vols).cumsum()
-    obv_ema = obv.ewm(span=ema_span, adjust=False).mean()
-    last, le = obv.iloc[-1], obv_ema.iloc[-1]
-    slope = obv.iloc[-1] - obv.iloc[-6]
-    if last > le and slope > 0:
-        return "rising"
-    if last < le and slope < 0:
-        return "falling"
-    return "flat"
+    return float(c.rolling(window).mean().iloc[-1])
 
 
-def volume_ratio(vols: pd.Series, window: int = 20) -> float | None:
-    """Latest volume divided by the latest 20-bar simple average, times 100.
-
-    This matches the supplied thinkScript:
-    ``volume / MovingAverage(AverageType.SIMPLE, volume, 20) * 100``.
-    The 20-bar average includes the current bar, just as thinkorswim's study
-    value does on the current daily candle.
-    """
-    v = vols.dropna()
-    if len(v) < window:
+def rsi(df: pd.DataFrame, window: int = config.RSI_WINDOW) -> float | None:
+    c = _close(df)
+    if len(c) < window + 1:
         return None
-    avg = v.iloc[-window:].mean()
-    if avg == 0:
+    delta = c.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    # Wilder smoothing (RMA).
+    avg_gain = gain.ewm(alpha=1 / window, min_periods=window, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1 / window, min_periods=window, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0.0, np.nan)
+    out = 100 - (100 / (1 + rs))
+    val = out.iloc[-1]
+    return None if pd.isna(val) else float(val)
+
+
+def atr(df: pd.DataFrame, window: int = config.ATR_WINDOW) -> float | None:
+    """Wilder ATR over `window` bars (CFM uses 9)."""
+    if len(df) < window + 1:
         return None
-    return float(v.iloc[-1] / avg * 100)
-
-
-def volume_acceleration(vols: pd.Series, short_window: int = 5) -> float | None:
-    """Latest volume divided by the latest 5-bar simple average, times 100.
-
-    This mirrors a thinkorswim-style ``VolumeAccel`` column that answers
-    whether today's participation is accelerating versus the short-term
-    volume baseline:
-    ``volume / MovingAverage(AverageType.SIMPLE, volume, 5) * 100``.
-    """
-    v = vols.dropna()
-    if len(v) < short_window:
-        return None
-    vol5 = v.iloc[-short_window:].mean()
-    if vol5 == 0:
-        return None
-    return float(v.iloc[-1] / vol5 * 100)
-
-
-def mfi(high: pd.Series, low: pd.Series, close: pd.Series, vol: pd.Series, period: int = 14) -> float | None:
-    if len(close) < period + 1:
-        return None
-    tp = (high + low + close) / 3
-    raw = tp * vol
-    delta = tp.diff()
-    pos = raw.where(delta > 0, 0.0)
-    neg = raw.where(delta < 0, 0.0)
-    pos_sum = pos.iloc[-period:].sum()
-    neg_sum = neg.iloc[-period:].sum()
-    if neg_sum == 0:
-        return 100.0
-    mr = pos_sum / neg_sum
-    return float(100 - 100 / (1 + mr))
-
-
-def ema(series: pd.Series, span: int) -> pd.Series:
-    return series.ewm(span=span, adjust=False).mean()
-
-
-def moving_average(series: pd.Series, window: int, method: str = "sma") -> pd.Series:
-    """Moving average helper for MA21. Defaults to SMA like thinkorswim's
-    SimpleMovingAvg study; ``method="ema"`` preserves the previous behavior.
-    """
-    if (method or "sma").lower() == "ema":
-        return ema(series, window)
-    return series.rolling(window=window, min_periods=window).mean()
-
-
-def rs3m_series(sym_close: pd.Series, spy_close: pd.Series, lookback: int = 63,
-                smooth: int = 1, method: str = "ratio", ema_span: int = 1) -> pd.Series:
-    """RS3M from the supplied thinkScript formula, using SPY as benchmark.
-
-    thinkScript equivalent::
-
-        def rs = close / close("SPY");
-        def past = rs[63];
-        plot RS3M = if !IsNaN(past) then (rs / past - 1) * 100 else Double.NaN;
-
-    ``method`` keeps legacy options alive for older config payloads; the default
-    and new ``ratio`` mode are the exact supplied formula.
-    """
-    df = pd.DataFrame({"s": sym_close, "p": spy_close}).dropna()
-    rs_method = (method or "ratio").lower()
-    span = max(int(ema_span or 1), 1)
-
-    if rs_method == "ema" and span > 1:
-        sym_base = ema(df["s"], span)
-        spy_base = ema(df["p"], span)
-        ratio = sym_base / spy_base
-    elif rs_method == "return_spread":
-        sym_ret = ((df["s"] - df["s"].shift(lookback)) / df["s"].shift(lookback)) * 100
-        spy_ret = ((df["p"] - df["p"].shift(lookback)) / df["p"].shift(lookback)) * 100
-        rs = sym_ret - spy_ret
-        if smooth and smooth > 1:
-            rs = rs.ewm(span=smooth, adjust=False).mean()
-        return rs.dropna()
-    else:
-        ratio = df["s"] / df["p"]
-
-    rs = ((ratio / ratio.shift(lookback)) - 1) * 100
-    if smooth and smooth > 1:
-        rs = rs.ewm(span=smooth, adjust=False).mean()
-    return rs.dropna()
-
-
-def rs3m_momentum_from_closes(sym_close: pd.Series, spy_close: pd.Series,
-                              current_lookback: int = 63,
-                              past_end_lag: int = 68,
-                              past_lookback: int = 131) -> float | None:
-    """RS3M_Momentum as percent change in the RS3M plot over the momentum lag.
-
-    In thinkScript, indexing a plot such as ``RS3M[5]`` means "the RS3M value
-    from 5 bars ago", not a separate 63-bar window ending 68 bars ago. With the
-    default settings this computes:
-
-    ``current = (rs[t] / rs[t-63] - 1) * 100``
-    ``prior   = (rs[t-5] / rs[t-68] - 1) * 100``
-    ``mom     = (current - prior) / prior * 100``
-
-    ``past_end_lag`` is kept for compatibility with the existing config; the
-    effective momentum lag is ``past_end_lag - current_lookback``.
-    ``past_lookback`` is accepted but no longer used by the TOS-compatible path.
-    """
-    df = pd.DataFrame({"s": sym_close, "p": spy_close}).dropna()
-    momentum_lag = int(past_end_lag) - int(current_lookback)
-    if momentum_lag <= 0:
-        momentum_lag = 5
-    required_lagged_lookback = current_lookback + momentum_lag
-    if len(df) <= required_lagged_lookback:
-        return None
-    ratio = df["s"] / df["p"]
-    current_past = ratio.iloc[-(current_lookback + 1)]
-    prior_current = ratio.iloc[-(momentum_lag + 1)]
-    prior_past = ratio.iloc[-(required_lagged_lookback + 1)]
-    if current_past == 0 or prior_past == 0:
-        return None
-    current_rs3m = ((ratio.iloc[-1] / current_past) - 1) * 100
-    previous_rs3m = ((prior_current / prior_past) - 1) * 100
-    if previous_rs3m == 0:
-        return 0.0
-    return float((current_rs3m - previous_rs3m) / previous_rs3m * 100)
-
-
-def rs3m_momentum(rs3m_values: pd.Series, window: int = 10) -> float | None:
-    """Legacy current-RS3M versus latest-window average momentum."""
-    values = rs3m_values.dropna()
-    if len(values) < window:
-        return None
-    latest = values.iloc[-window:]
-    avg = latest.mean()
-    if avg == 0:
-        return 0.0
-    current = latest.iloc[-1]
-    return float(((current - avg) / abs(avg)) * 100)
-
-
-def accumulation_distribution(high: pd.Series, low: pd.Series, close: pd.Series, vol: pd.Series) -> pd.Series:
-    """Accumulation/Distribution Line using the standard Chaikin formula."""
-    df = pd.DataFrame({"h": high, "l": low, "c": close, "v": vol}).dropna()
-    if df.empty:
-        return pd.Series(dtype=float)
-    denominator = df["h"] - df["l"]
-    multiplier = ((df["c"] - df["l"]) - (df["h"] - df["c"])) / denominator.replace(0, np.nan)
-    money_flow_volume = multiplier.fillna(0.0) * df["v"]
-    return money_flow_volume.cumsum()
-
-
-def accumulation_distribution_trend(high: pd.Series, low: pd.Series, close: pd.Series, vol: pd.Series,
-                                    signal_span: int = 20, slope_bars: int = 5) -> str | None:
-    """Rising/flat/falling state for the Accumulation/Distribution Line."""
-    ad = accumulation_distribution(high, low, close, vol)
-    if len(ad) < signal_span + slope_bars:
-        return None
-    signal = ad.ewm(span=signal_span, adjust=False).mean()
-    slope = ad.iloc[-1] - ad.iloc[-(slope_bars + 1)]
-    if ad.iloc[-1] > signal.iloc[-1] and slope > 0:
-        return "rising"
-    if ad.iloc[-1] < signal.iloc[-1] and slope < 0:
-        return "falling"
-    return "flat"
-
-
-def compute_all(bars: pd.DataFrame, spy_bars: pd.DataFrame | None, cfg) -> dict:
-    """bars/spy_bars: DataFrames with columns Open, High, Low, Close, Volume.
-    Returns a dict of computed indicators + metadata.
-    """
-    if bars is None or len(bars) < 21:
-        return {"error": "insufficient history"}
-
-    close = bars["Close"]
-    high = bars["High"]
-    low = bars["Low"]
-    vol = bars["Volume"]
-
-    rs3m_val = rs3m_mom = None
-    rs3m_trend = None
-    lookback = getattr(cfg, "RS3M_LOOKBACK", 63)
-    mom_window = getattr(cfg, "RS3M_MOM_WINDOW", 10)
-    mom_past_end_lag = getattr(cfg, "RS3M_MOM_PAST_END_LAG", 68)
-    mom_past_lookback = getattr(cfg, "RS3M_MOM_PAST_LOOKBACK", 131)
-    required_rs_rows = lookback + 1
-    required_mom_rows = max(lookback, mom_past_end_lag, mom_past_lookback) + 1
-    if spy_bars is not None and len(spy_bars) >= required_rs_rows and len(close) >= required_rs_rows:
-        series = rs3m_series(close, spy_bars["Close"],
-                             lookback=lookback, smooth=getattr(cfg, "MOM_SMOOTH", 1),
-                             method=getattr(cfg, "RS3M_METHOD", "ratio"),
-                             ema_span=getattr(cfg, "RS3M_EMA_SPAN", 1))
-        if len(series) > 0:
-            rs3m_val = float(series.iloc[-1])
-            if len(spy_bars) >= required_mom_rows and len(close) >= required_mom_rows:
-                rs3m_mom = rs3m_momentum_from_closes(
-                    close,
-                    spy_bars["Close"],
-                    current_lookback=lookback,
-                    past_end_lag=mom_past_end_lag,
-                    past_lookback=mom_past_lookback,
-                )
-                mom_scale = float(getattr(cfg, "MOM_SCALE", 1.0) or 1.0)
-                if rs3m_mom is not None:
-                    rs3m_mom *= mom_scale
-                prev_mom = rs3m_momentum_from_closes(
-                    close.iloc[:-1],
-                    spy_bars["Close"].iloc[:-1],
-                    current_lookback=lookback,
-                    past_end_lag=mom_past_end_lag,
-                    past_lookback=mom_past_lookback,
-                )
-                if prev_mom is not None:
-                    prev_mom *= mom_scale
-                if prev_mom is not None and rs3m_mom is not None:
-                    rs3m_trend = "up" if rs3m_mom > prev_mom else "down" if rs3m_mom < prev_mom else "flat"
-            if rs3m_trend is None and rs3m_mom is not None:
-                rs3m_trend = "up" if rs3m_mom > 0 else "down" if rs3m_mom < 0 else "flat"
-
-    ma_method = getattr(cfg, "MA21_METHOD", "sma")
-    ma21_series = moving_average(close, 21, ma_method)
-    ma21 = float(ma21_series.iloc[-1])
-    price = float(close.iloc[-1])
-
-    # MA200 anchors the CFM Level 2 trend check (price vs MA200). Needs 200 bars;
-    # None when history is short so the frontend can show "—" instead of guessing.
-    ma200 = None
-    if len(close) >= 200:
-        ma200 = float(moving_average(close, 200, ma_method).iloc[-1])
-
-    atr_val = atr_value(high, low, close)
-    atr_dir, _atr_now, _atr_prev = atr_direction(high, low, close)
-
-    return {
-        "asOf": str(bars.index[-1].date()),
-        "price": round(price, 2),
-        "ma21": _round(ma21, 2),
-        "priceAboveMA21": price > ma21,
-        "ma200": _round(ma200, 2),
-        "priceAboveMA200": (price > ma200) if ma200 is not None else None,
-        "atr": _round(atr_val, 2),
-        "atrPct": _round(atr_percent(high, low, close), 2),
-        "atrDirection": atr_dir,
-        "rsi": _round(rsi(close, method=getattr(cfg, "RSI_METHOD", "wilder"))),
-        "obv": obv_trend(close, vol),
-        "accDist": accumulation_distribution_trend(high, low, close, vol),
-        "volRatio": _round(volume_ratio(vol), 0),
-        "volAccel": _round(volume_acceleration(vol), 0),
-        "mfi": _round(mfi(high, low, close, vol)),
-        "rs3m": _round(rs3m_val, 2),
-        "rs3mMom": _round(rs3m_mom, 2),
-        "rs3mTrend": rs3m_trend,
-        "rs3mMethod": getattr(cfg, "RS3M_METHOD", "ratio"),
-        "rs3mLookback": lookback,
-        "rs3mMomWindow": mom_window,
-        "rs3mMomPastEndLag": mom_past_end_lag,
-        "rs3mMomPastLookback": mom_past_lookback,
-        "rsiMethod": getattr(cfg, "RSI_METHOD", "wilder"),
-        "ma21Method": ma_method,
-    }
-
-
-def true_range(high: pd.Series, low: pd.Series, close: pd.Series) -> pd.Series:
-    """Wilder true range: max of the day's range and the gap from prior close."""
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    close = df["Close"].astype(float)
     prev_close = close.shift(1)
-    return pd.concat([
+    tr = pd.concat([
         high - low,
         (high - prev_close).abs(),
         (low - prev_close).abs(),
     ], axis=1).max(axis=1)
+    rma = tr.ewm(alpha=1 / window, min_periods=window, adjust=False).mean()
+    val = rma.iloc[-1]
+    return None if pd.isna(val) else float(val)
 
 
-def atr_value(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float | None:
-    """ATR(14) in price (dollar) terms.
-
-    This is the input the CFM short-strike math needs: a weekly short is sold at
-    ``stock − 1.5 × ATR``, so the gate and Execute blueprint both read it directly.
-    """
-    if len(close) < period + 1:
+def atr_pct(df: pd.DataFrame, window: int = config.ATR_WINDOW) -> float | None:
+    """ATR as a percent of the latest close — the consolidation gauge."""
+    a = atr(df, window)
+    px = last(df)
+    if a is None or not px:
         return None
-    atr = true_range(high, low, close).dropna().iloc[-period:].mean()
-    return float(atr)
+    return round(a / px * 100, 2)
 
 
-def atr_percent(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> float | None:
-    """Average True Range expressed as a percentage of the latest close.
-
-    ATR% = ATR(14) / close * 100.  Useful as a day-trading volatility filter
-    (sweet spot: 4–9% matches typical intraday range for liquid large-caps).
-    """
-    atr = atr_value(high, low, close, period)
-    if atr is None:
+def atr_expanding(df: pd.DataFrame, window: int = config.ATR_WINDOW, lookback: int = 10) -> bool | None:
+    """True when current ATR exceeds the ATR `lookback` bars ago (volatility
+    expanding, the sector-strength condition)."""
+    if len(df) < window + lookback + 1:
         return None
-    price = float(close.iloc[-1])
-    if price <= 0:
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    close = df["Close"].astype(float)
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    rma = tr.ewm(alpha=1 / window, min_periods=window, adjust=False).mean()
+    now, then = rma.iloc[-1], rma.iloc[-1 - lookback]
+    if pd.isna(now) or pd.isna(then):
         return None
-    return float(atr / price * 100)
+    return bool(now > then)
 
 
-def atr_direction(high: pd.Series, low: pd.Series, close: pd.Series,
-                  period: int = 14, lookback: int = 10, threshold: float = 0.03):
-    """Whether volatility is contracting / expanding / flat.
-
-    Compares ATR now versus ATR ``lookback`` bars ago. Contracting ATR is the
-    CFM "consolidating, ready to sell premium" tell (Level 3); expanding ATR is
-    what a sector entry (Level 1) wants. ``threshold`` is a dead-band so day-to-day
-    noise doesn't flip the label. Returns (label, atr_now, atr_prev).
-    """
-    if len(close) < period + lookback + 1:
-        return None, None, None
-    atr_series = true_range(high, low, close).rolling(period).mean().dropna()
-    if len(atr_series) < lookback + 1:
-        return None, None, None
-    now = float(atr_series.iloc[-1])
-    prev = float(atr_series.iloc[-1 - lookback])
-    if prev <= 0:
-        return None, now, prev
-    change = (now - prev) / prev
-    if change <= -threshold:
-        return "contracting", now, prev
-    if change >= threshold:
-        return "expanding", now, prev
-    return "flat", now, prev
-
-
-def avg_volume_20d(vols: pd.Series) -> float | None:
-    """20-day simple average of daily volume, in absolute shares."""
-    v = vols.dropna()
-    if len(v) < 20:
+def pct_from_ma(df: pd.DataFrame, window: int = config.MA_WINDOW) -> float | None:
+    """Percent distance of close above (+) / below (-) its `window`-day MA."""
+    ma = sma(df, window)
+    px = last(df)
+    if ma is None or not px or ma == 0:
         return None
-    return float(v.iloc[-20:].mean())
+    return round((px / ma - 1) * 100, 2)
 
 
-def _round(v, n=1):
-    return None if v is None else round(float(v), n)
+def rs3m(df: pd.DataFrame, bench: pd.DataFrame, lookback: int = config.RS3M_LOOKBACK) -> float | None:
+    """Relative strength vs a benchmark over `lookback` bars, as a percent.
 
-
-# ---------------------------------------------------------------------------
-# Support / resistance — on-demand level detection for the Entry Watch cards.
-# Computed from the same stored daily bars as the indicators above. Pivots
-# (local swing highs/lows) are clustered into price zones, then scored by how
-# many swings touched the zone and how much volume traded inside it.
-# ---------------------------------------------------------------------------
-def _swing_pivots(high, low, window: int):
-    """Local maxima of the high series and minima of the low series.
-
-    A bar is a pivot high if its high is the max across +/- ``window`` bars
-    (and symmetrically for pivot lows). Returns two lists of prices.
+    ratio = symbol_close / bench_close, aligned on date. RS3M is the percent
+    change of that ratio over the lookback window: (ratio_now/ratio_then - 1)*100.
+    Positive = the symbol outran the benchmark over the period.
     """
-    h = high.to_numpy(dtype=float)
-    l = low.to_numpy(dtype=float)
-    n = len(h)
-    highs, lows = [], []
-    for i in range(window, n - window):
-        seg_h = h[i - window:i + window + 1]
-        seg_l = l[i - window:i + window + 1]
-        if h[i] >= seg_h.max():
-            highs.append(h[i])
-        if l[i] <= seg_l.min():
-            lows.append(l[i])
-    return highs, lows
+    if df is None or bench is None or df.empty or bench.empty:
+        return None
+    ratio = (_close(df) / _close(bench).reindex(df.index)).dropna()
+    if len(ratio) < lookback + 1:
+        return None
+    now = ratio.iloc[-1]
+    then = ratio.iloc[-1 - lookback]
+    if not then:
+        return None
+    return round((now / then - 1) * 100, 2)
 
 
-def _cluster(levels, tol):
-    """Group sorted price levels into zones where neighbours are within ``tol``."""
-    if not levels:
-        return []
-    levels = sorted(levels)
-    groups = [[levels[0]]]
-    for lv in levels[1:]:
-        if lv - groups[-1][-1] <= tol:
-            groups[-1].append(lv)
-        else:
-            groups.append([lv])
-    return groups
+def above_ma(df: pd.DataFrame, window: int = config.BREADTH_MA_WINDOW) -> bool | None:
+    ma = sma(df, window)
+    px = last(df)
+    if ma is None or not px:
+        return None
+    return bool(px > ma)
 
 
-def support_resistance(bars: pd.DataFrame, swing_window: int = 5,
-                       tol_pct: float = 0.015, max_zones: int = 3) -> dict:
-    """Detect support/resistance zones from daily bars.
+def breadth(frames: dict[str, pd.DataFrame], window: int = config.BREADTH_MA_WINDOW) -> float | None:
+    """Percent of the supplied frames whose latest close is above their MA."""
+    flags = [above_ma(df, window) for df in frames.values() if df is not None and not df.empty]
+    flags = [f for f in flags if f is not None]
+    if not flags:
+        return None
+    return round(sum(flags) / len(flags) * 100, 1)
 
-    Returns nearest-first support/resistance zone lists (each with band,
-    centre, distance-to-price %, swing touches, and a strength score), plus a
-    breakout trigger above the nearest resistance and a stop below the nearest
-    support. Zones are split by whether their centre sits below (support) or
-    at/above (resistance) the latest close.
-    """
-    if bars is None or len(bars) < swing_window * 2 + 10:
-        return {"error": "insufficient history"}
 
-    high = bars["High"].astype(float)
-    low = bars["Low"].astype(float)
-    close = bars["Close"].astype(float)
-    vol = bars["Volume"].astype(float).fillna(0.0)
-    price = float(close.iloc[-1])
-    if price <= 0:
-        return {"error": "insufficient history"}
+def consolidating(df: pd.DataFrame) -> bool | None:
+    """Low ATR% and price near MA21 = consolidating (not breaking out)."""
+    a = atr_pct(df)
+    dist = pct_from_ma(df)
+    if a is None or dist is None:
+        return None
+    return bool(a <= config.CONSOLIDATION_ATR_PCT_MAX
+               and abs(dist) <= config.CONSOLIDATION_MA21_DIST_MAX)
 
-    pivot_highs, pivot_lows = _swing_pivots(high, low, swing_window)
-    groups = _cluster(pivot_highs + pivot_lows, price * tol_pct)
-    avg_vol = float(vol.tail(60).mean()) or 1.0
 
-    zones = []
-    for grp in groups:
-        lo, hi = min(grp), max(grp)
-        center = sum(grp) / len(grp)
-        in_band = (close >= lo * (1 - tol_pct)) & (close <= hi * (1 + tol_pct))
-        vol_score = float(vol[in_band].sum()) / (avg_vol * len(grp))
-        zones.append({
-            "low": round(lo, 2),
-            "high": round(hi, 2),
-            "center": round(center, 2),
-            "distancePct": round((center - price) / price * 100, 2),
-            "touches": len(grp),
-            "strength": round(len(grp) + min(vol_score, 5.0), 1),
-        })
-
-    support = sorted((z for z in zones if z["center"] < price),
-                     key=lambda z: price - z["center"])[:max_zones]
-    resistance = sorted((z for z in zones if z["center"] >= price),
-                        key=lambda z: z["center"] - price)[:max_zones]
-
-    nearest_support = support[0] if support else None
-    nearest_resistance = resistance[0] if resistance else None
-
-    return {
-        "price": round(price, 2),
-        "support": support,
-        "resistance": resistance,
-        "nearestSupport": nearest_support,
-        "nearestResistance": nearest_resistance,
-        "breakoutTrigger": round(nearest_resistance["high"] * 1.002, 2) if nearest_resistance else None,
-        "stop": round(nearest_support["low"] * 0.99, 2) if nearest_support else None,
-    }
+def short_strike(price: float, atr_value: float, mult: float = config.SHORT_ATR_MULT) -> float:
+    """Suggested weekly short-call strike = price - mult*ATR, rounded to 0.5."""
+    raw = price - mult * atr_value
+    return round(raw * 2) / 2

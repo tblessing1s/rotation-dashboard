@@ -1,0 +1,20 @@
+# tickers_by_sector.txt — CFM sector universe (source of truth, parsed at startup)
+#
+# One row per SPDR sector ETF. Pipe-delimited:
+#   <SECTOR_ETF>|<Sector Name>|<group>|TICKER1,TICKER2,...
+#
+# The ETF symbol itself is the sector proxy used for RS3M-vs-Sector; the
+# comma list is the constituent candidate universe ranked by the Stock Filter.
+# Blank lines and lines beginning with '#' are ignored.
+
+XLK|Technology|growth|NVDA,AAPL,MSFT,AVGO,AMD,CSCO,TXN,ORCL,PLTR,IBM,QCOM,CRM
+XLY|Consumer Discretionary|growth|AMZN,TSLA,HD,TJX,MCD,BKNG,LOW,SBUX,MAR,GM,NKE,AZO
+XLC|Communication Services|growth|META,GOOGL,GOOG,NFLX,TTWO,DIS,EA,TMUS,VZ,T,CMCSA,CHTR
+XLI|Industrials|cyclical|CAT,GE,RTX,BA,ETN,UNP,DE,HON,LMT,UPS,GD,MMM
+XLF|Financials|cyclical|JPM,V,MA,BAC,GS,MS,WFC,C,AXP,SCHW,BLK,SPGI
+XLE|Energy|inflation|XOM,CVX,COP,WMB,VLO,MPC,EOG,SLB,PSX,KMI,OKE,OXY
+XLB|Materials|inflation|LIN,NEM,FCX,VMC,CRH,MLM,SHW,CTVA,ECL,APD,NUE,STLD
+XLV|Health Care|defensive|LLY,JNJ,ABBV,UNH,MRK,AMGN,TMO,ABT,GILD,ISRG,PFE,CVS
+XLP|Consumer Staples|defensive|WMT,COST,PG,KO,PM,CL,PEP,MO,MDLZ,MNST,TGT,KDP
+XLU|Utilities|defensive|NEE,SO,DUK,CEG,AEP,D,SRE,XEL,EXC,PEG,ED,WEC
+XLRE|Real Estate|rates|WELL,PLD,EQIX,AMT,SPG,DLR,O,PSA,VTR,CBRE,CCI,EXR

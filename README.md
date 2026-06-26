@@ -1,327 +1,158 @@
-# Rotation Dashboard
+# Rotation Dashboard — Cash Flow Machine (CFM)
 
-Your two-strategy (CFM / APP) institutional rotation system. A Python backend
-ingests market data on a schedule into a SQLite datastore and computes all
-indicators there; a React frontend renders the 4-level decision system,
-checklists, exit alarms, positions, and P&L.
+A focused trading dashboard for the **Cash Flow Machine** strategy:
+**scan markets → filter stocks → execute trades → auto-log executions → track
+positions.** Buy deep-ITM LEAP calls in strong, consolidating stocks, sell
+weekly ITM short calls against them, and track extrinsic payback until each
+position is "in profit mode."
 
-This dashboard gates real capital deployment, so the data pipeline is built
-around one rule: **the UI never silently shows stale or wrong data.** Every
-value carries its as-of date and a freshness dot; if the regime inputs go
-stale, the Level 1 banner says DEGRADED DATA instead of a confident
-RISK-ON/RISK-OFF.
+```
+  Schwab (primary) ─┐
+                    ├─►  data_handler  ──►  parquet cache (DATA_DIR/cache)
+  Alpha Vantage  ───┘         │
+                              ▼
+        indicators (RS3M · ATR · MA · RSI · breadth)
+                              ▼
+     screening (regime · sectors · stock filter · entry gate)
+                              ▼
+           Flask API  ◄──►  state.json (source of truth)
+                              ▼
+                     React + Tailwind UI
+```
+
+Data sources are **Schwab + Alpha Vantage only**. Every execution is captured
+(stock price + premium + timestamp) and appended to `state.json`; the theta
+ledger and extrinsic-payback meters are *derived* from those records, never
+hand-maintained.
+
+---
+
+## The CFM system
+
+**Entry gate (4 levels, stop on first fail):**
+
+1. **Market regime green** — SPY breadth positive, VIX calm.
+2. **Sector strong** — RS3M vs SPY > +10%, breadth > 60%, ATR expanding.
+3. **Stock beats peers** — RS3M vs SPY > +5%, RS3M vs Sector > 0%.
+4. **Consolidating, not breaking** — low ATR%, price near MA21.
+
+**Weekly routine:** roll the short ITM call (strike = stock − 1.5×ATR), log the
+extrinsic sold and paid back, check the kill switch.
+
+**Kill switch (binary):** RS3M vs Sector turns negative → exit immediately;
+RS3M vs SPY turns negative (confirmed close) → exit within 1–2 days.
+
+**Size:** 5 deep-ITM LEAPs (~0.90 delta, ~180 DTE) per stock; accumulate shares
+on pullbacks toward a 500-share cap; open a new stock only when the current one
+maxes out.
 
 ---
 
 ## Architecture
 
-```
-        scheduled ingestion (cron / CLI / catch-up thread)
-                          │
-   Schwab Trader API ──►  │   ◄── FRED (DFF, CPIAUCSL, GDPC1, UNRATE)
-   Yahoo (fallback)  ──►  │
-                          ▼
-              validation (validation.py)
-        bad bars → quarantine table (with reason)
-                          ▼
-            SQLite datastore (backend/data/rotation.db)
-        bars · macro series · snapshots · overrides · runs
-                          ▼
-        indicator + macro snapshots recomputed at ingest
-                          ▼
-              Flask API (reads datastore ONLY)
-                          ▼
-                    React frontend
-```
+### Backend (`backend/`, Python Flask)
 
-Key properties:
+| Module | Responsibility |
+|---|---|
+| `app.py` | Flask app + all CFM routes; serves the built frontend. |
+| `config.py` | Thresholds, calibration, capital figures, DATA_DIR-aware paths. |
+| `sector_data.py` | Parses `data/tickers_by_sector.txt` into the sector universe. |
+| `indicators.py` | RS3M, ATR, MA, RSI, breadth, consolidation, strike spacing. |
+| `data_handler.py` | Daily OHLCV (Schwab → Alpha Vantage) with a parquet cache. |
+| `schwab_api.py` | **Kept** — market data, quotes, option chains, order execution. |
+| `alpha_vantage.py` | **Kept** — daily OHLCV + quotes fallback. |
+| `screening.py` | Regime, sector strength, stock filter, the 4-level entry gate, checklist. |
+| `executor.py` | Execute buy_leap / sell_short / close_short; capture + auto-log. |
+| `position_manager.py` | LEAP intrinsic/extrinsic, share-cap progress, capital + milestones. |
+| `logging_handler.py` | `state.json` I/O; derives the theta ledger + payback meters. |
+| `kill_switch.py` | Per-position RS3M monitoring and exit signals. |
 
-- **The request path never contacts a provider** for market data. If every
-  provider is down, the dashboard still serves the last good values — visibly
-  aged, never wrong. (The one deliberate exception is the user-triggered
-  Positions → *Sync from Schwab* button, which reads your brokerage account
-  live; it touches no market data and writes nothing to the datastore.)
-- **Append-only history.** A bad fetch can never delete or overwrite good
-  data. Corrections land as new rows; reads resolve the best row per date
-  (manual > schwab > yahoo, then newest fetch).
-- **Validation before write.** Bars with null/negative prices, high < low,
-  negative volume, or absurd moves (±25% vs prior close; ±100% for the VIX ETF proxy —
-  configurable in `config.py`) are quarantined with the reason and surfaced
-  in the UI's Data issues panel.
-- **Cross-checks.** When both providers are available, the regime inputs
-  (VIX ETF proxy, SPY) are compared across them; divergence beyond tolerance is
-  flagged instead of silently trusting one source.
-- **Staleness is measured in trading days** (`market_calendar.py`): Friday's
-  data is fresh all weekend and through Monday's session; NYSE holidays don't
-  count. Green dot = covers the last completed session, yellow = 1 session
-  behind, red = 2+ behind.
+### Frontend (`frontend/src/`, React + Tailwind)
 
-The **Backtest** tab replays a configurable day-trading setup against stored
-5-minute history and produces an auditable trade log with win-rate and
-expectancy stats — see [BACKTESTING.md](BACKTESTING.md).
+`App.jsx` drives six tabs: **Scan** (`RegimeScanner` + `StockFilter`),
+**Execute** (`ExecuteTab` — entry gate + execution), **Theta** (`ThetaLedger`),
+**Kill Switch** (`KillSwitchMonitor`), **Positions** (`PositionTracker`), and
+**Checklist** (`DailyChecklist`).
 
-Formulas for every computed value are documented in [FORMULAS.md](FORMULAS.md).
-Defaults are tuned for Schwab/thinkorswim daily bars (63-bar RS3M, Wilder RSI,
-and SimpleMovingAvg(21)). **When a backend value still disagrees with your
-custom thinkorswim study, thinkorswim is the source of truth** — type the TOS
-value into the field; it is stored as a timestamped manual override that beats
-ingested data until you tap **auto ↻**.
+---
+
+## API
+
+| Route | Purpose |
+|---|---|
+| `GET /api/regime` | Market regime: status (green/yellow/red), breadth, VIX, SPY trend. |
+| `GET /api/sectors` | Per-sector RS3M, breadth, ATR-expanding, status. |
+| `GET /api/stock-filter?sector=XLK` | Candidates with RS3M vs SPY/Sector, ATR%, consolidating, status. |
+| `GET /api/entry-gate?ticker=ON` | The 4-level gate, pass/fail per level, verdict. |
+| `GET /api/roll-suggestion?ticker=ON` | Suggested weekly short strike (stock − 1.5×ATR). |
+| `POST /api/execute` | Execute + auto-log a CFM action; returns execution id + captured prices. |
+| `GET /api/positions` | Positions (LEAP/share/cap), capital summary, milestones. |
+| `GET /api/theta-ledger` | Net juice (week/month/YTD) + extrinsic payback per position. |
+| `GET /api/kill-switch` | Per-position RS3M vs SPY/Sector + exit signals. |
+| `GET /api/daily-checklist` | Today's routine: regime, reserve, expiring shorts, LEAP DTE. |
+| `GET/POST /api/state` | Read the full state; POST updates metadata. |
+| `GET /api/config` | Thresholds, sector universe, Schwab/AV status, live-trading flag. |
 
 ---
 
 ## Run it locally
 
-Requirements: Python 3.10+, Node 18+ (first run only, to build the frontend).
+Requirements: Python 3.10+, Node 18+.
 
 ```bash
-./start.sh        # macOS / Linux
-start.bat         # Windows
+./start.sh        # macOS / Linux  (start.bat on Windows)
 ```
 
-Open **http://localhost:5179**. Stop with `Ctrl+C`.
-
-## CLI
+Open **http://localhost:5179**. Without API keys the UI still renders; data
+values read `—` until Schwab/Alpha Vantage are configured.
 
 ```bash
-cd backend
-python cli.py ingest --now          # force one ingestion cycle
-python cli.py ingest --symbols XLV  # targeted run for specific symbols
-python cli.py status                # per-symbol freshness report
-python cli.py status --json         # same, machine-readable
-python cli.py schwab-auth           # mint a Schwab refresh token (see below)
+cd frontend && npm install && npm run build   # build the UI
+cd backend && pip install -r requirements.txt && python app.py
 ```
-
-`status` shows, per symbol: last bar date, close, source (schwab/yahoo), and
-whether that's current / 1 day behind / stale relative to the last completed
-NYSE session — plus FRED series freshness, open quarantine items, and the
-last ingestion run. The same report is at `GET /api/data-status`.
 
 ---
 
-## Data sources
+## Data sources & credentials
 
 | Source | Used for | Credentials |
 |---|---|---|
-| **Schwab Trader API** (primary) | daily OHLCV — same feed as thinkorswim | `SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, `SCHWAB_REFRESH_TOKEN` |
-| **Yahoo Finance** (fallback) | daily OHLCV when Schwab is unavailable | none |
-| **Alpha Vantage** (primary macro) | Fed funds, CPI, real GDP, unemployment + daily screener universe | `ALPHAVANTAGE_API_KEY` |
-| **FRED** (macro fallback) | same Fed funds / CPI / GDP / unemployment series | `FRED_API_KEY` (recommended) |
+| **Schwab Trader API** (primary) | daily OHLCV, quotes, option chains, order execution | `SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, refresh token |
+| **Alpha Vantage** (fallback) | daily OHLCV + quotes | `ALPHAVANTAGE_API_KEY` |
 
-Every stored row is tagged with its source, and the UI shows it in the
-staleness tooltip. Yahoo is explicitly the labeled last resort.
+### Schwab setup
 
-**Alpha Vantage:** the primary source for the Level 1 macro series (Fed funds /
-CPI / GDP / unemployment), pulled from its economic-indicator endpoints, and it
-also powers the Daily Screener. The screener scans a liquid US universe
-(`config.SCREENER_UNIVERSE` + the day's most-active movers) and applies the
-price / average-volume / ATR% filters locally — Alpha Vantage has no server-side
-screener, but a ≥10M-volume floor already collapses the whole market to a few
-hundred names, so this is effectively a full-market scan without scraping a site
-that 403s bots (the old Finviz path). The universe snapshot is built in a
-background thread and cached, so requests never block on the provider. Without
-this key the macro series fall back to FRED. Get a key at
-https://www.alphavantage.co/support/#api-key and set it:
+1. Create a Trader API app at https://developer.schwab.com. Register the
+   callback `https://<your-app>.fly.dev/auth/schwab/callback`.
+2. `fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=…`
+3. Visit `https://<your-app>.fly.dev/auth/schwab`, approve, and the refresh
+   token is stored automatically (in `DATA_DIR/schwab_token.json`).
 
-```sh
-fly secrets set ALPHAVANTAGE_API_KEY=…
-```
-
-**FRED:** the fallback for the macro series when Alpha Vantage is unconfigured or
-fails. Ingestion prefers the official FRED API and falls back to the keyless
-graph CSV. The keyless endpoint has started returning HTTP 403 to programmatic
-requests, so a free key keeps the fallback healthy. Get one at
-https://fred.stlouisfed.org/docs/api/api_key.html and set it:
-
-```sh
-fly secrets set FRED_API_KEY=…
-```
-
-### Schwab setup (one-time, ~10 minutes)
-
-1. Create an app at https://developer.schwab.com (Trader API — Individual).
-   Register your deployed callback as the Callback URL:
-   `https://<your-app>.fly.dev/auth/schwab/callback`
-   (keep `https://127.0.0.1` too if you want the CLI bootstrap flow).
-2. Set the app credentials: `fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=…`
-3. Visit `https://<your-app>.fly.dev/auth/schwab`, log in to Schwab, approve.
-   The refresh token is stored in the datastore automatically and an ingest
-   kicks off immediately — no secret to copy.
-
-(Alternative bootstrap: `python backend/cli.py schwab-auth` mints a token
-locally and prints the `fly secrets set SCHWAB_REFRESH_TOKEN=…` command. A
-datastore token from `/auth/schwab` always beats the env secret.)
-
-**Schwab refresh tokens expire every 7 days and cannot be renewed
-programmatically — Schwab requires a fresh browser login.** The dashboard
-tracks the token's age: the Data issues panel warns when ≤2 days remain and
-shows a **Re-authorize Schwab** button that repeats step 3 in one click. If
-the token lapses anyway, nothing breaks — ingestion falls back to Yahoo until
-you re-authorize. Without Schwab credentials the app runs Yahoo-only.
-
-#### Account sync (positions, on top of market data)
-
-The same three secrets also power the Positions tab's **Sync from Schwab**
-button, which pulls your live holdings and trade history via Schwab's
-*Accounts & Trading* API (`/trader/v1/accounts…`) instead of importing a CSV.
-This is a **different Schwab product** than the market-data feed: in your app at
-https://developer.schwab.com, the app must be approved for
-**Accounts and Trading Production** (not just Market Data). If it isn't, market
-data keeps flowing but the sync button returns an HTTP 401/403 with a note to
-enable that product. No new credentials are needed — it reuses the existing
-key/secret/refresh token.
-
-The sync is **on-demand and user-triggered** (`POST /api/account/sync`); it is
-the only API route that contacts a provider at request time, because account
-data has no place in the scheduled market datastore. Synced trades land in the
-positions ledger, so open/close history and estimated P&L work without any CSV
-imported data. Set each open position's *current net value* to mark it to market
-(or read the live market value from the account snapshot panel).
+Schwab refresh tokens expire every 7 days and require a fresh browser login;
+`/api/config` reports the token's status. For live order placement (off by
+default), set `CFM_LIVE_TRADING=1` — otherwise executions are captured against
+live prices and logged but no order is transmitted (the honest paper path).
 
 ---
 
 ## Deploy to Fly.io
 
-The root `Dockerfile` builds the frontend and runs Gunicorn on Fly's `$PORT`.
+The root `Dockerfile` builds the frontend and runs Gunicorn. A persistent
+volume at `/data` (`DATA_DIR=/data`) holds `state.json`, the parquet cache, and
+the Schwab token across deploys.
 
 ```bash
-fly launch                  # first time
-fly volume create data --region iad --size 1   # persistent volume for the datastore
-fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=… SCHWAB_REFRESH_TOKEN=…
-fly secrets set ALPHAVANTAGE_API_KEY=…                 # primary macro source + daily screener
-fly secrets set FRED_API_KEY=…                         # free key, macro fallback when AV is down
-fly secrets set INGEST_TOKEN=$(openssl rand -hex 16)   # protects POST /api/ingest
-fly deploy
-fly scale count 1           # one machine — see note below
-```
-
-Mount the volume at `/data` and set `DATA_DIR=/data` in `fly.toml` so the
-SQLite datastore and your saved inputs survive deploys and machine restarts.
-
-**Run exactly one machine.** This app is a single-writer SQLite + `state.json`
-store, and a Fly volume attaches to only one machine. If you let Fly run its
-default of 2 machines you need 2 volumes, and the two copies of your data will
-silently diverge. Keep one machine (`fly scale count 1`) bound to the single
-`data` volume.
-
-If a deploy fails with:
-
-```
-Error: Process group 'app' needs volumes with name 'data' to fulfill mounts
-defined in fly.toml; Run `fly volume create data -r REGION -n COUNT` ... iad=2
-```
-
-it means no volume exists yet (and Fly is trying to place 2 machines). Create
-one volume and pin to a single machine:
-
-```bash
+fly launch
 fly volume create data --region iad --size 1
-fly deploy
-fly scale count 1
+fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=… ALPHAVANTAGE_API_KEY=…
+fly deploy && fly scale count 1
 ```
 
-### Scheduled ingestion
-
-Ingestion is triggered by `POST /api/ingest?wait=1` (Bearer `INGEST_TOKEN`).
-Schedule it twice on trading days — after the close and a pre-open catch-up:
-
-```bash
-# 21:30 UTC ≈ 30 min after the NYSE close; 11:00 UTC pre-open catch-up
-fly machine run --schedule "30 21 * * 1-5" curlimages/curl -- \
-  curl -fsS -X POST -H "Authorization: Bearer $INGEST_TOKEN" \
-  "https://YOUR-APP.fly.dev/api/ingest?wait=1"
-```
-
-There is also a belt-and-braces catch-up: if the app wakes up and the newest
-successful ingest is older than `INGEST_STALE_AFTER_HOURS` (6h), it kicks a
-background run — API requests are never blocked on providers.
+**Run exactly one machine.** `state.json` is a single-writer store and a Fly
+volume attaches to one machine — `fly scale count 1`. Pushes to `master` deploy
+via `.github/workflows/fly.yml`.
 
 ---
-
-## What's automated vs. manual
-
-**Computed at ingest** (from stored bars + FRED): Level 1 macro (VIX,
-breadth, Fed stance, growth, inflation), RS3M, RS3M_MOM, RSI, OBV trend,
-volume ratio, volume acceleration, MFI, MA21, price-vs-MA21.
-
-**Synced from your account** (Positions tab → **Sync from Schwab**): your live
-holdings snapshot (symbol, qty, average price, market value, open P/L) and the
-last year of trade fills, normalized into the Schwab-only positions ledger.
-Synced fills merge with and de-duplicate against existing Schwab fills, while
-legacy CSV-imported rows are removed from the positions view. (Requires the
-Schwab app to also be approved for the **Accounts and Trading** product — see
-below.)
-
-**Manual** (your judgment / non-price data, on the Indicators tab): earnings
-revisions, valuation, credit, chart-reading toggles — and any Level 1 field
-you choose to override (marked MANUAL with its timestamp until cleared).
-
-## Intraday Setup Executor (Phases 1–3, paper trading only)
-
-Real-time setup *detection* and alerting for day trading, built on the same
-rules as the backtester (`backend/intraday_executor.py`). It evaluates each
-**closed** 5-minute candle against yesterday's high/low and a volume spike, and
-— when a setup fires — emits a *signal* carrying the entry, ATR-based stop, R:R
-target, and position size the backtester would have traded. Detection reuses the
-backtest engine's detectors, volume MA, and Wilder ATR, so a live signal and a
-backtested trade apply byte-for-byte identical logic.
-
-Defaults mirror the spec: a close at/through yesterday's level
-(`support_resistance_break`) on ≥2× the 50-bar volume average, an ATR×2 stop
-beyond the level, a 2:1 target, an 08:30–10:00 Central window, and `$20` fixed
-risk per trade — across `CRWV, HIMS, CVNA, HOOD, TOST`. Override any of these
-per request.
-
-**Backend** (detection + paper execution only — no live Schwab order placement):
-
-| Endpoint | Purpose |
-| --- | --- |
-| `GET /api/executor/config` | The default monitor config. |
-| `POST /api/executor/monitor` | Detect on today's latest closed candle + per-ticker status (incl. window candles for charting). `{"refresh": true}` first pulls today's 5-minute bars from Schwab/Yahoo. |
-| `POST /api/executor/playback` | Replay stored candles over a `date` or `date_range` and return every signal — validates detection against historical data. `{"autoBackfill": true}` pulls missing bars first. |
-| `POST /api/executor/replay` | Replay a `date`/`date_range` through the full **engine** and return completed trades *with outcomes* (entry/stop/target/exit/R) — reproduces backtest results exactly. |
-| `GET /api/executor/signals?date=YYYY-MM-DD` | The logged signals (one row per detected candle; idempotent). |
-| `POST /api/executor/paper/execute` | Log a detected signal as a simulated paper bracket trade. This does **not** call Schwab. |
-| `GET /api/executor/paper/trades?date=YYYY-MM-DD` | Return logged paper trades for the session. |
-
-**Frontend** — the **Executor** tab (`frontend/src/ExecutorView.jsx`): a live
-monitor card per ticker (inline SVG 5-minute candle chart with Y-High/Y-Low
-lines + volume histogram, current price, volume ratio, distance to levels), an
-auto-refresh poll, a blinking alert + modal (entry/stop/target/position size)
-when a setup triggers, opt-in desktop notifications (deduped per candle), a
-today's-signals log, an **Execute Paper** button that logs simulated trades, a
-paper-trades panel, and a playback panel to validate alerts on a past session.
-Live trading remains intentionally disabled until the paper workflow is proven.
-
-Real-time is polling-based here (Schwab `pricehistory`), matching the rest of
-the stack; a WebSocket tick feed is a future enhancement.
-
-### Execution engine — one core, swappable adapters (`backend/executor_engine.py`)
-
-The forward-testing engine is built around a single shared **`StrategyCore`**
-(detection + order/position sizing) and three **execution adapters** bound by one
-`MODE` flag, so going live is a one-line binding change — never a rewrite:
-
-| MODE | Data source | Execution adapter | Status |
-| --- | --- | --- | --- |
-| `REPLAY` | `ReplayDataSource` (historical candles) | `ReplayExecutionAdapter` | **complete** — resolves exits over stored candles with the backtester's own simulator, so REPLAY reproduces backtest trades exactly. |
-| `PAPER` | `LiveDataSource` (Schwab real-time) | `SimulatedExecutionAdapter` | honest fill/exit math implemented + unit-tested offline (adverse entry slippage, bid/ask spread capture, real-sequence exit resolution, pessimistic stop fills); live-feed driver is build step 2. |
-| `LIVE` | `LiveDataSource` | `LiveExecutionAdapter` | guarded scaffold — builds the real Schwab bracket but never transmits. |
-
-`StrategyCore` reuses the backtest engine's registered rules (`SETUP_TYPES` /
-`STOP_LOGIC`) and exit simulator (`_simulate`), so detection/sizing exist in
-exactly one place and never drift from the backtester. The one-trade-per-day
-selection and the gap rule live in `StrategyCore`. Build step 1 (REPLAY +
-architecture) is validated in `backend/test_executor_engine.py`, which runs the
-same synthetic sessions through both `run_backtest` and `run_replay` and asserts
-identical entry/stop/target/outcome/R.
-
-## Configuration
-
-`backend/config.py`: tracked symbols (XLV + AAPL), benchmark (SPY), breadth
-universe, validation bands, cross-check tolerances, RS3M calibration knobs
-(`RS3M_METHOD`, `RS3M_EMA_SPAN`, `RS3M_LOOKBACK`, `MOM_SMOOTH`, `MOM_SCALE`),
-RSI/MA defaults (`RSI_METHOD`, `MA21_METHOD` — see FORMULAS.md), staleness
-threshold for the catch-up runner, and capital / reserve figures.
 
 ## Tests
 
@@ -329,13 +160,10 @@ threshold for the catch-up runner, and capital / reserve figures.
 python -m pytest backend -q
 ```
 
-Covers the indicator formulas against reference fixtures, validation rules,
-trading-day staleness (weekends/holidays), provider fallback order, and an
-end-to-end ingestion cycle including garbage-data and provider-outage cases.
+Covers the indicator formulas, sector parsing, and the execute → theta-ledger →
+extrinsic-payback flow end to end (offline, no provider keys needed).
 
-## Notes
+---
 
-- This implements *your* framework's mechanical logic. It is not financial
-  advice; the GO/WAIT verdicts are checklist outputs, not recommendations.
-- Single-user. External calls are limited to the configured market-data
-  providers (Schwab/Yahoo) and FRED, during ingestion only.
+This implements a mechanical framework. It is not financial advice; the
+GO/WAIT verdicts are checklist outputs, not recommendations.

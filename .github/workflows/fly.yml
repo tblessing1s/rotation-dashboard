@@ -21,7 +21,7 @@ jobs:
         uses: superfly/flyctl-actions/setup-flyctl@master
 
       - name: Collapse to a single machine
-        # Single-writer SQLite store: only ONE machine may exist. Earlier HA
+        # Single-writer state.json store: only ONE machine may exist. Earlier HA
         # deploys can leave extra machines behind, and each one independently
         # demands its own 'data' volume (iad=2), failing the deploy. Trim back
         # to exactly one machine before deploying. Idempotent: a no-op when one
@@ -31,7 +31,7 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       - name: Ensure data volume exists
-        # The single-writer SQLite store lives on a volume named 'data'. Fly
+        # The single-writer state.json store lives on a volume named 'data'. Fly
         # does not auto-create the first volume, so create it once (idempotent:
         # skip if a 'data' volume already exists). Keep exactly ONE volume so we
         # never end up with a second machine attaching to diverged data.
@@ -48,7 +48,7 @@ jobs:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 
       - name: Deploy to Fly.io
-        # Single-writer SQLite store: deploy exactly ONE machine. --ha=false
+        # Single-writer state.json store: deploy exactly ONE machine. --ha=false
         # prevents Fly from provisioning a second machine, which would demand a
         # second volume (iad=2) and diverge the data.
         run: flyctl deploy --remote-only --ha=false --app rotation-dashboard
