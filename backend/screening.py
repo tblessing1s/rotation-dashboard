@@ -164,20 +164,43 @@ def _compute_stock_filter(sector: str | None = None) -> list[dict]:
 # ---------------------------------------------------------------------------
 # The 4-level entry gate (stop on first fail)
 # ---------------------------------------------------------------------------
+def _check(label: str, value, passed) -> dict:
+    """One named sub-condition with its value and pass flag (native bool)."""
+    return {"label": label, "value": value, "pass": bool(passed)}
+
+
+def _all(checks: list[dict]) -> bool:
+    return all(c["pass"] for c in checks)
+
+
 def entry_gate(ticker: str) -> dict:
     ticker = ticker.upper()
     sector_etf = sector_data.sector_for(ticker)
     levels = []
 
-    # Level 1 — market regime
+    # Level 1 — market regime. Each sub-condition is shown independently so a
+    # fail is never ambiguous about *which* leg missed.
     reg = regime()
-    l1_pass = bool(reg["status"] == "green")
-    levels.append({"level": 1, "name": "Market regime green", "pass": l1_pass, "detail": reg})
+    l1_checks = [
+        _check(f"Breadth ≥ {config.REGIME_BREADTH_GREEN:g}%", reg.get("breadth"),
+               reg.get("breadth") is not None and reg["breadth"] >= config.REGIME_BREADTH_GREEN),
+        _check(f"VIX < {config.VIX_CALM:g}", reg.get("vix"),
+               reg.get("vix") is not None and reg["vix"] < config.VIX_CALM),
+        _check("SPY trend up", reg.get("spy_trend"), reg.get("spy_trend") == "up"),
+    ]
+    levels.append({"level": 1, "name": "Market regime green", "pass": _all(l1_checks),
+                   "checks": l1_checks, "detail": reg})
 
     # Level 2 — sector strong
     sec = sectors().get(sector_etf, {}) if sector_etf else {}
-    l2_pass = bool(sec.get("status") == "green")
-    levels.append({"level": 2, "name": "Sector strong", "pass": l2_pass, "detail": {"sector": sector_etf, **sec}})
+    l2_checks = [
+        _check(f"Sector RS3M ≥ +{config.SECTOR_RS3M_MIN:g}%", sec.get("rs3m"),
+               sec.get("rs3m") is not None and sec.get("rs3m") >= config.SECTOR_RS3M_MIN),
+        _check(f"Sector breadth ≥ {config.SECTOR_BREADTH_MIN:g}%", sec.get("breadth"),
+               sec.get("breadth") is not None and sec.get("breadth") >= config.SECTOR_BREADTH_MIN),
+    ]
+    levels.append({"level": 2, "name": "Sector strong", "pass": _all(l2_checks),
+                   "checks": l2_checks, "detail": {"sector": sector_etf, **sec}})
 
     # Levels 3 & 4 — stock beating peers + consolidating
     spy = data_handler.get_daily(config.BENCHMARK)
@@ -185,13 +208,25 @@ def entry_gate(ticker: str) -> dict:
     sector_rs = indicators.rs3m(sector_df, spy) if sector_df is not None else None
     row = _stock_row(ticker, spy, sector_rs, sector_etf or "")
 
-    l3_pass = bool(row["rs3m_vs_spy"] is not None and row["rs3m_vs_spy"] > config.STOCK_RS_VS_SPY_MIN
-                   and row["rs3m_vs_sector"] is not None and row["rs3m_vs_sector"] > config.STOCK_RS_VS_SECTOR_MIN)
-    levels.append({"level": 3, "name": "Stock beating peers", "pass": l3_pass, "detail": row})
+    # The two legs are checked separately: "beats SPY" and "beats its sector"
+    # are distinct conditions, so the UI can show exactly which one failed.
+    rs_spy, rs_sec = row["rs3m_vs_spy"], row["rs3m_vs_sector"]
+    l3_checks = [
+        _check(f"RS3M vs SPY > +{config.STOCK_RS_VS_SPY_MIN:g}%", rs_spy,
+               rs_spy is not None and rs_spy > config.STOCK_RS_VS_SPY_MIN),
+        _check(f"RS3M vs Sector > {config.STOCK_RS_VS_SECTOR_MIN:g}%", rs_sec,
+               rs_sec is not None and rs_sec > config.STOCK_RS_VS_SECTOR_MIN),
+    ]
+    levels.append({"level": 3, "name": "Stock beating peers", "pass": _all(l3_checks),
+                   "checks": l3_checks, "detail": row})
 
-    l4_pass = bool(row["consolidating"])
-    levels.append({"level": 4, "name": "Consolidating, not breaking", "pass": l4_pass,
-                   "detail": {"atr_pct": row["atr_pct"], "consolidating": row["consolidating"]}})
+    l4_checks = [
+        _check(f"ATR% ≤ {config.CONSOLIDATION_ATR_PCT_MAX:g}", row["atr_pct"],
+               row["atr_pct"] is not None and row["atr_pct"] <= config.CONSOLIDATION_ATR_PCT_MAX),
+        _check("Near MA21 (consolidating)", row["consolidating"], bool(row["consolidating"])),
+    ]
+    levels.append({"level": 4, "name": "Consolidating, not breaking", "pass": _all(l4_checks),
+                   "checks": l4_checks, "detail": {"atr_pct": row["atr_pct"], "consolidating": row["consolidating"]}})
 
     # Stop-on-fail: the cleared level is the highest contiguous pass from 1.
     cleared = 0
