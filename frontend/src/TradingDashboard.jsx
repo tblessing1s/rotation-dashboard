@@ -2385,7 +2385,7 @@ function OptionChainTable({ symbol, calls, currentPrice }) {
   const td = { textAlign: "center", font: `500 11px ${C.mono}`, color: C.ink, padding: "8px 6px", borderBottom: `1px solid ${C.lineSoft}` };
   const strikeTd = { ...td, textAlign: "right", fontWeight: 600 };
 
-  // Flatten the chain structure: callExpDateMap is {expDate: {strike: {bid, ask, ...}}}
+  // Flatten the chain structure: callExpDateMap is {expDate: {strike: {bid, ask, mark, delta, theta, impliedVolatility, ...}}}
   const expirations = Object.keys(calls).sort();
   if (expirations.length === 0) return <div style={{ font: `400 12px ${C.sans}`, color: C.inkDim }}>No data</div>;
 
@@ -2401,34 +2401,54 @@ function OptionChainTable({ symbol, calls, currentPrice }) {
     filteredStrikes = [...itm, ...otm].sort((a, b) => a - b);
   }
 
+  const fmt = (v) => v != null ? gnum(v, 2) : "—";
+  const pct = (v) => v != null ? gnum(v * 100, 1) + "%" : "—";
+
   return (
     <div style={{ overflowX: "auto" }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: "11px" }}>
         <thead>
           <tr>
-            <th style={{ ...th, width: "20%" }}>Bid</th>
-            <th style={{ ...th, width: "20%" }}>Ask</th>
-            <th style={{ ...th, width: "15%" }}>IV</th>
-            <th style={{ ...th, width: "15%" }}>Theta</th>
-            <th style={{ ...th, width: "15%" }}>Strike</th>
-            <th style={{ ...th, width: "15%" }}>Status</th>
+            <th style={{ ...th, width: "12%" }}>Strike</th>
+            <th style={{ ...th, width: "12%" }}>Premium</th>
+            <th style={{ ...th, width: "12%" }}>Intrinsic</th>
+            <th style={{ ...th, width: "12%" }}>Extrinsic</th>
+            <th style={{ ...th, width: "10%" }}>Delta</th>
+            <th style={{ ...th, width: "10%" }}>Theta</th>
+            <th style={{ ...th, width: "10%" }}>IV</th>
+            <th style={{ ...th, width: "10%" }}>Status</th>
           </tr>
         </thead>
         <tbody>
           {filteredStrikes.map((strike) => {
             const call = callLegs[strike.toString()] || {};
-            const bid = (v) => v != null ? gnum(v, 2) : "—";
-            const iv = (v) => v != null ? gnum(v * 100, 1) + "%" : "—";
-            const gr = (v) => v != null ? gnum(v, 3) : "—";
+
+            // Premium: use mark or bid/ask midpoint
+            const premium = call.mark ?? (call.bid != null && call.ask != null ? (call.bid + call.ask) / 2 : null);
+
+            // Intrinsic: max(0, stock_price - strike)
+            const intrinsic = currentPrice ? Math.max(0, currentPrice - strike) : null;
+
+            // Extrinsic: premium - intrinsic
+            const extrinsic = premium != null && intrinsic != null ? Math.max(0, premium - intrinsic) : null;
+
+            // Delta: 0-1 scale, provided by Schwab
+            const delta = call.delta ?? null;
+            const theta = call.theta ?? null;
+            const iv = call.impliedVolatility ?? null;
+
             const status = currentPrice ? (strike > currentPrice ? "OTM" : strike < currentPrice ? "ITM" : "ATM") : "";
             const statusColor = status === "OTM" ? C.inkFaint : status === "ITM" ? C.green : C.amber;
+
             return (
               <tr key={strike}>
-                <td style={td}>{bid(call.bid)}</td>
-                <td style={td}>{bid(call.ask)}</td>
-                <td style={td}>{iv(call.impliedVolatility)}</td>
-                <td style={td}>{gr(call.theta)}</td>
                 <td style={strikeTd}>{gnum(strike, 0)}</td>
+                <td style={td}>{fmt(premium)}</td>
+                <td style={td}>{fmt(intrinsic)}</td>
+                <td style={td}>{fmt(extrinsic)}</td>
+                <td style={td}>{pct(delta)}</td>
+                <td style={td}>{fmt(theta)}</td>
+                <td style={td}>{pct(iv)}</td>
                 <td style={{ ...td, color: statusColor, fontWeight: 600 }}>{status}</td>
               </tr>
             );
