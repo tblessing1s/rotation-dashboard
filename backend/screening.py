@@ -4,16 +4,49 @@ indicators — no provider calls beyond what data_handler caches.
 """
 from __future__ import annotations
 
+import threading
+import time
+
 import config
 import data_handler
 import indicators
 import sector_data
+
+# Short-TTL memoization so the expensive full-universe scans run once and are
+# reused by repeated polls and by the entry gate, instead of recomputing on
+# every concurrent request. Per-key locks collapse a thundering herd (many
+# parallel callers on a cold cache) into a single computation.
+_RESULT_TTL = int(__import__("os").environ.get("SCAN_CACHE_TTL", "300"))
+_results: dict[str, tuple[float, object]] = {}
+_result_locks: dict[str, threading.Lock] = {}
+_results_guard = threading.Lock()
+
+
+def _cached(key: str, fn, ttl: int = _RESULT_TTL):
+    hit = _results.get(key)
+    if hit and time.time() - hit[0] < ttl:
+        return hit[1]
+    with _results_guard:
+        lock = _result_locks.setdefault(key, threading.Lock())
+    with lock:
+        hit = _results.get(key)
+        if hit and time.time() - hit[0] < ttl:
+            return hit[1]
+        val = fn()
+        _results[key] = (time.time(), val)
+        return val
 
 
 # ---------------------------------------------------------------------------
 # Level 1 — market regime
 # ---------------------------------------------------------------------------
 def regime() -> dict:
+    return _cached("regime", _compute_regime)
+
+
+def _compute_regime() -> dict:
+    # One parallel batch warms breadth universe + VIX + SPY, then compute.
+    data_handler.prefetch(config.BREADTH_SYMBOLS + [config.VIX_SYMBOL, config.BENCHMARK])
     frames = data_handler.get_many(config.BREADTH_SYMBOLS)
     breadth = indicators.breadth(frames)
     vix_df = data_handler.get_daily(config.VIX_SYMBOL)
@@ -45,6 +78,14 @@ def _sector_breadth(etf: str) -> float | None:
 
 
 def sectors() -> dict:
+    return _cached("sectors", _compute_sectors)
+
+
+def _compute_sectors() -> dict:
+    # Warm SPY + every sector ETF + every constituent in one parallel batch, so
+    # the per-sector breadth loop below reads from cache instead of fetching
+    # 500 symbols one at a time.
+    data_handler.prefetch([config.BENCHMARK] + sector_data.sector_etfs() + sector_data.all_tickers())
     spy = data_handler.get_daily(config.BENCHMARK)
     out = {}
     for etf in sector_data.sector_etfs():
@@ -97,8 +138,18 @@ def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str
 
 
 def stock_filter(sector: str | None = None) -> list[dict]:
-    spy = data_handler.get_daily(config.BENCHMARK)
+    key = f"stock_filter:{(sector or 'ALL').upper()}"
+    return _cached(key, lambda: _compute_stock_filter(sector))
+
+
+def _compute_stock_filter(sector: str | None = None) -> list[dict]:
     etfs = [sector.upper()] if sector else sector_data.sector_etfs()
+    # Parallel-warm SPY + the sector ETF(s) + their constituents first.
+    universe = [config.BENCHMARK] + etfs
+    for etf in etfs:
+        universe += sector_data.constituents(etf)
+    data_handler.prefetch(universe)
+    spy = data_handler.get_daily(config.BENCHMARK)
     rows = []
     for etf in etfs:
         sector_df = data_handler.get_daily(etf)
