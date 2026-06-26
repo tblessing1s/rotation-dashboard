@@ -67,7 +67,11 @@ export default function StockFilter({ onSelectStock }) {
                   <td className={`py-2 pr-3 ${weak ? "text-rose-400" : "text-slate-200"}`}>{pct(row.rs3m_vs_sector)}</td>
                   <td className="py-2 pr-3 text-slate-400">{fmt(row.atr_pct, 1)}%</td>
                   <td className="py-2 pr-3">{row.consolidating == null ? "—" : row.consolidating ? "Yes" : "No"}</td>
-                  <td className="py-2 pr-3"><Pill status={row.status} /></td>
+                  <td className="py-2 pr-3">
+                    <span title={row.blocked_by?.length ? `Blocked by: ${row.blocked_by.join(", ")}` : "All 4 gate levels pass"}>
+                      <Pill status={row.status} />
+                    </span>
+                  </td>
                   <td className="py-2 pr-3">
                     <button
                       onClick={() => onSelectStock?.(row.ticker)}
