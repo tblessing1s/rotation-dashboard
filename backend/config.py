@@ -24,11 +24,14 @@ SECTOR_SYMBOLS = [s["symbol"] for s in SECTOR_UNIVERSE]
 BENCHMARK = "SPY"
 TRACKED = SECTOR_SYMBOLS + ["AAPL"]  # AAPL is the default APP stock candidate.
 
-# Volatility proxy used anywhere the dashboard labels the regime input as VIX.
-# Use a traded ETF so Schwab/Yahoo can pull it like every other quote symbol.
-# Override with VIX_PROXY_SYMBOL if you prefer another VIX ETF/ETN such as VXX.
+# The regime input labelled "VIX" is the actual CBOE Volatility Index (^VIX),
+# not an ETF proxy: the macro gate thresholds (VIX < 15 / > 20 / > 30) are
+# calibrated for the index level, so a tradeable ETF's share price would read
+# wrong. Both providers handle it — Schwab maps ^VIX -> $VIX (see providers/
+# schwab.py SYMBOL_MAP) and Yahoo reads ^VIX natively. Override with
+# VIX_PROXY_SYMBOL only if you specifically want an ETF/ETN such as VXX.
 VIX_PROXY_SYMBOL = (
-    (os.environ.get("VIX_PROXY_SYMBOL") or "VIXY").strip().upper() or "VIXY"
+    (os.environ.get("VIX_PROXY_SYMBOL") or "^VIX").strip().upper() or "^VIX"
 )
 
 QUOTE_SYMBOLS = SECTOR_SYMBOLS + ["AAPL", VIX_PROXY_SYMBOL, "SPY"]  # for the live ticker strip/API
