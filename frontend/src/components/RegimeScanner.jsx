@@ -34,7 +34,14 @@ export default function RegimeScanner({ onStatus }) {
       </div>
       <div className="mt-5 grid grid-cols-3 gap-4">
         <Stat label="Breadth" value={r.breadth != null ? `${fmt(r.breadth, 0)}%` : "—"} sub="above 50-DMA" />
-        <Stat label="VIX" value={fmt(r.vix, 1)} sub="index level" />
+        <div title={r.vix == null && r.vix_error ? r.vix_error : ""}>
+          <Stat
+            label="VIX"
+            value={fmt(r.vix, 1)}
+            sub={r.vix == null ? (r.vix_error ? "unavailable — hover for why" : "index level") : "index level"}
+            tone={r.vix == null ? "text-slate-500" : "text-slate-100"}
+          />
+        </div>
         <Stat label="SPY trend" value={(r.spy_trend || "—").toUpperCase()} sub={`vs MA21 ${fmt(r.spy_dist_ma21, 1)}%`} />
       </div>
     </Card>

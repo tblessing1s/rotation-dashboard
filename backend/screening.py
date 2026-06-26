@@ -45,12 +45,24 @@ def regime() -> dict:
 
 
 def _compute_regime() -> dict:
-    # One parallel batch warms breadth universe + VIX + SPY, then compute.
-    data_handler.prefetch(config.BREADTH_SYMBOLS + [config.VIX_SYMBOL, config.BENCHMARK])
+    # One parallel batch warms breadth universe + SPY, then compute.
+    data_handler.prefetch(config.BREADTH_SYMBOLS + [config.BENCHMARK])
     frames = data_handler.get_many(config.BREADTH_SYMBOLS)
     breadth = indicators.breadth(frames)
-    vix_df = data_handler.get_daily(config.VIX_SYMBOL)
-    vix = indicators.last(vix_df)
+
+    # VIX is an index ($VIX): Schwab's quotes endpoint serves it reliably, while
+    # its pricehistory often returns nothing for indices. Take the live quote
+    # first (we only need the latest level), then fall back to daily bars.
+    vix, vix_source = None, None
+    quote = data_handler.latest_quote(config.VIX_SYMBOL)
+    if quote and quote.get("price"):
+        vix, vix_source = quote["price"], quote.get("source")
+    else:
+        vix_df = data_handler.get_daily(config.VIX_SYMBOL)
+        vix = indicators.last(vix_df)
+        vix_source = "daily" if vix is not None else None
+    vix_error = None if vix is not None else data_handler.last_error(config.VIX_SYMBOL)
+
     spy_df = data_handler.get_daily(config.BENCHMARK)
     spy_dist = indicators.pct_from_ma(spy_df) if spy_df is not None else None
     spy_trend = "up" if (spy_dist or 0) > 0 else "down" if spy_dist is not None else "unknown"
@@ -64,6 +76,8 @@ def _compute_regime() -> dict:
         "status": status,
         "breadth": breadth,
         "vix": round(vix, 2) if vix is not None else None,
+        "vix_source": vix_source,
+        "vix_error": vix_error,
         "spy_trend": spy_trend,
         "spy_dist_ma21": spy_dist,
     }

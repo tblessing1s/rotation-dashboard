@@ -22,6 +22,13 @@ import schwab_api
 _client: schwab_api.SchwabClient | None = None
 _client_lock = threading.Lock()
 _mem_cache: dict[str, pd.DataFrame] = {}
+# Last fetch error per symbol, so endpoints can explain a missing value instead
+# of silently showing a blank.
+_last_error: dict[str, str] = {}
+
+
+def last_error(symbol: str) -> str | None:
+    return _last_error.get(symbol.upper())
 
 # Shared, bounded pool so batch reads fetch in parallel without spawning an
 # unbounded number of provider connections (which would trip rate limits).
@@ -121,8 +128,10 @@ def get_daily(symbol: str, force: bool = False) -> pd.DataFrame | None:
             df = _fetch(symbol)
             _write_cache(symbol, df)
             _mem_cache[symbol] = df
+            _last_error.pop(symbol, None)
             return df
-        except Exception:  # noqa: BLE001 — degrade to last good data, never raise
+        except Exception as e:  # noqa: BLE001 — degrade to last good data, never raise
+            _last_error[symbol] = str(e)
             return _fallback(symbol)
 
 
@@ -150,16 +159,18 @@ def latest_quote(symbol: str) -> dict | None:
         try:
             q = client().get_quote(symbol)
             if q and q.get("last"):
+                _last_error.pop(symbol, None)
                 return {"symbol": symbol, "price": q["last"], "source": "schwab"}
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            _last_error[symbol] = str(e)
     if alpha_vantage.configured():
         try:
             q = alpha_vantage.global_quote(symbol)
             if q.get("last"):
+                _last_error.pop(symbol, None)
                 return {"symbol": symbol, "price": q["last"], "source": "alphavantage"}
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            _last_error[symbol] = str(e)
     df = get_daily(symbol)
     if df is not None and not df.empty:
         return {"symbol": symbol, "price": float(df["Close"].iloc[-1]), "source": "cache"}
