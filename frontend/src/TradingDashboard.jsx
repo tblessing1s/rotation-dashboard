@@ -486,6 +486,15 @@ async function apiOptionsRoll(fillId, newStrike, newExpiry, closeOrderType = "MA
   return { ...data, ok: data.ok ?? r.ok };
 }
 
+// Fetch option chain for a symbol, optionally filtered to one expiry.
+async function apiOptionsChain(symbol, expiry = null) {
+  const q = new URLSearchParams({ symbol });
+  if (expiry) q.append("expiry", expiry);
+  const r = await fetch(`${API}/api/options/chain?${q}`);
+  const data = await r.json().catch(() => ({}));
+  return { ...data, ok: data.ok ?? r.ok };
+}
+
 // Manual overrides persist server-side with source="manual" and always beat
 // ingested values. value=null clears the override (back to auto).
 async function apiSetOverride(key, value) {

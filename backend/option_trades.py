@@ -556,3 +556,20 @@ def roll_option(
         "closed": close_result,
         "opened": open_result,
     }
+
+
+def get_chain(symbol: str, expiry_date: str | None = None) -> dict:
+    """Fetch an option chain for a symbol, optionally filtered to one expiry.
+
+    Returns {ok, chain, error} where chain is the raw Schwab chain response.
+    chain contains: {expirations: [...], callExpDateMap: {...}, putExpDateMap: {...}}
+    """
+    if not available():
+        return {"ok": False, "error": "Schwab credentials are not set (SCHWAB_APP_KEY / SECRET / REFRESH_TOKEN)."}
+
+    provider = SchwabProvider()
+    try:
+        chain = provider.get_option_chain(symbol, expiry_date)
+        return {"ok": True, "chain": chain}
+    except ProviderError as e:
+        return {"ok": False, "error": str(e)}
