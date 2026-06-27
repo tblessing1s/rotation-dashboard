@@ -75,6 +75,8 @@ HISTORY_DAYS = 320           # daily bars pulled / cached per symbol
 # ---- CFM mechanics ---------------------------------------------------------
 LEAP_CONTRACTS = 5            # 5 deep-ITM LEAP calls per stock
 LEAP_TARGET_DELTA = 0.90
+LEAP_DELTA_MIN = 0.88        # preferred LEAP delta band (offer strikes to choose)
+LEAP_DELTA_MAX = 0.91
 LEAP_TARGET_DTE = 180
 SHORT_ATR_MULT = 1.5         # short strike = stock - 1.5 * ATR
 SHARE_CAP = 500              # accumulate to 500 shares per stock, then rotate

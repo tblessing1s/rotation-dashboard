@@ -19,14 +19,6 @@ const ACTION_LABELS = {
   close_leap: "Close LEAP (sell to close)",
 };
 
-function StrikeHead({ extra }) {
-  return (
-    <div className={`grid ${extra || "grid-cols-4"} gap-2 text-xs uppercase tracking-wide text-slate-500`}>
-      <span>Strike</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
-    </div>
-  );
-}
-
 /**
  * Option chain viewer + order ticket. Auto-detects the next action from the
  * user's current position, auto-picks the LEAP and an ATR-suggested weekly
@@ -39,6 +31,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [weeklyStrike, setWeeklyStrike] = React.useState(null);
+  const [leapStrike, setLeapStrike] = React.useState(null);
   const [action, setAction] = React.useState(null);
   const [qty, setQty] = React.useState("");
   const [execErr, setExecErr] = React.useState(null);
@@ -53,6 +46,8 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
         setChain(c);
         const sug = c.weekly?.strikes?.find((s) => s.suggested) || c.weekly?.strikes?.[0];
         setWeeklyStrike(sug ? sug.strike : null);
+        const sugLeap = c.leap?.strikes?.find((s) => s.suggested) || c.leap?.strikes?.[0];
+        setLeapStrike(sugLeap ? sugLeap.strike : null);
         setAction(c.suggested_action || "buy_leap");
         const sa = c.suggested_action;
         const defQty =
@@ -83,25 +78,27 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
     : ACTION_LABELS;
   const showPayoff = !mgmt && action !== "close_leap";
   const chosenWeekly = weekly?.strikes?.find((s) => s.strike === weeklyStrike) || null;
+  const chosenLeap = leap?.strikes?.find((s) => s.strike === leapStrike)
+    || leap?.strikes?.find((s) => s.suggested) || null;
   const qtyNum = Number(qty) || 0;
 
   // Live payoff: how much LEAP extrinsic must be covered, and ~weeks for the
   // selected weekly's juice to cover it. Existing-LEAP cover is a fixed remaining
-  // balance; a new entry scales with the chosen quantity.
+  // balance; a new entry scales with the chosen LEAP's extrinsic and quantity.
   const coverTotal = position?.has_leap
     ? chain?.payoff?.leap_extrinsic_to_cover
-    : leap?.extrinsic != null ? leap.extrinsic * 100 * qtyNum : null;
+    : chosenLeap?.extrinsic != null ? chosenLeap.extrinsic * 100 * qtyNum : null;
   const weeklyJuice = chosenWeekly?.extrinsic != null ? chosenWeekly.extrinsic * 100 * qtyNum : null;
   const weeks = coverTotal && weeklyJuice && weeklyJuice > 0 ? Math.ceil(coverTotal / weeklyJuice) : null;
 
   function buildPayload() {
     const base = { action, ticker: chain.ticker, contracts: qtyNum };
     if (chain.underlying_price != null) base.stock_price = chain.underlying_price;
-    if (action === "buy_leap" && leap) {
-      base.strike = leap.strike;
-      if (leap.expiration) base.expiration = leap.expiration;
-      if (leap.dte != null) base.dte = leap.dte;
-      if (leap.mark != null) base.execution_price = Math.round(leap.mark * 100 * 100) / 100;
+    if (action === "buy_leap" && chosenLeap) {
+      base.strike = chosenLeap.strike;
+      if (chosenLeap.expiration) base.expiration = chosenLeap.expiration;
+      if (chosenLeap.dte != null) base.dte = chosenLeap.dte;
+      if (chosenLeap.mark != null) base.execution_price = Math.round(chosenLeap.mark * 100 * 100) / 100;
     } else if (action === "sell_short" && chosenWeekly) {
       base.strike = chosenWeekly.strike;
       if (chosenWeekly.mark != null) base.premium_per_share = chosenWeekly.mark;
@@ -121,7 +118,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
 
   const canExecute =
     qtyNum > 0 &&
-    ((action === "buy_leap" && leap) ||
+    ((action === "buy_leap" && chosenLeap) ||
       (action === "sell_short" && chosenWeekly) ||
       (action === "close_short" && openShort) ||
       (action === "close_leap" && existingLeap));
@@ -141,7 +138,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
       underlying_price: chain.underlying_price,
       regime: chain.regime,
       atr_mult: chain.atr_mult,
-      leap: leap ? { strike: leap.strike, mark: leap.mark, contracts: qtyNum, dte: leap.dte, expiration: leap.expiration } : null,
+      leap: chosenLeap ? { strike: chosenLeap.strike, mark: chosenLeap.mark, contracts: qtyNum, dte: chosenLeap.dte, expiration: chosenLeap.expiration } : null,
       weekly: chosenWeekly ? { strike: chosenWeekly.strike, mark: chosenWeekly.mark, dte: weekly.dte } : null,
     });
     onClose?.();
@@ -264,28 +261,60 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
               {execErr && <p className="mt-2 text-right text-xs text-rose-400">{execErr}</p>}
             </div>
 
-            {/* LEAP — auto-picked, read-only (entry context only) */}
+            {/* LEAP — pick a strike in the preferred delta band (entry only) */}
             {!mgmt && (
             <div className={`rounded-lg border bg-slate-950 p-3 ${action === "buy_leap" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-slate-200">LEAP (auto-picked, delta ~0.90)</h3>
-                <span className="text-xs text-slate-500">read-only</span>
+                <h3 className="text-sm font-semibold text-slate-200">LEAP (pick a strike)</h3>
+                {leap?.delta_band && (
+                  <span className="text-xs text-slate-500">
+                    target delta {fmt(leap.delta_band[0], 2)}–{fmt(leap.delta_band[1], 2)}
+                    {leap.dte != null ? ` · ${leap.dte} DTE` : ""}
+                  </span>
+                )}
               </div>
-              {leap ? (
-                <div className="space-y-1">
-                  <StrikeHead />
-                  <div className="grid grid-cols-4 gap-2 py-1 text-sm tabular-nums">
-                    <span className="font-semibold text-slate-100">{fmt(leap.strike, 2)}</span>
-                    <span className="text-slate-300">{dollars(leap.bid)} / {dollars(leap.ask)}</span>
-                    <span className="text-slate-400">{dollars(leap.mark)}</span>
-                    <span className="text-emerald-300">{dollars(leap.extrinsic)}</span>
+              {leap?.strikes?.length ? (
+                <>
+                  <div className="grid grid-cols-[auto_repeat(5,1fr)] gap-2 text-xs uppercase tracking-wide text-slate-500">
+                    <span className="w-6" /><span>Strike</span><span>Delta</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
                   </div>
-                  <div className="pt-1 text-xs text-slate-500">
-                    {leap.dte} DTE · delta {fmt(leap.delta, 2)} · IV {leap.volatility != null ? `${fmt(leap.volatility, 1)}%` : "—"}
-                    {leap.extrinsic_total != null ? ` · total extrinsic ${bigDollars(leap.extrinsic_total)}` : ""}
-                  </div>
-                </div>
-              ) : <p className="text-sm text-slate-400">No suitable LEAP strike found.</p>}
+                  {leap.strikes.map((s) => {
+                    const inBand = leap.delta_band && s.delta != null
+                      && Math.abs(s.delta) >= leap.delta_band[0] && Math.abs(s.delta) <= leap.delta_band[1];
+                    return (
+                      <label
+                        key={s.strike}
+                        className={`grid grid-cols-[auto_repeat(5,1fr)] items-center gap-2 rounded-lg px-1 py-1 ${
+                          s.strike === leapStrike ? "bg-emerald-500/10" : "hover:bg-slate-800/50"
+                        }`}
+                      >
+                        <input
+                          type="radio" name="leap-strike"
+                          checked={s.strike === leapStrike}
+                          onChange={() => setLeapStrike(s.strike)}
+                          className="accent-emerald-400"
+                        />
+                        <span className="text-sm font-semibold tabular-nums text-slate-100">
+                          {fmt(s.strike, 2)}
+                          {s.suggested && <span className="ml-1 text-[10px] font-normal text-emerald-400">SUGGESTED</span>}
+                        </span>
+                        <span className={`text-sm tabular-nums ${inBand ? "text-emerald-300" : "text-slate-400"}`}>{fmt(s.delta, 2)}</span>
+                        <span className="text-sm tabular-nums text-slate-300">{dollars(s.bid)} / {dollars(s.ask)}</span>
+                        <span className="text-sm tabular-nums text-slate-400">{dollars(s.mark)}</span>
+                        <span className="text-sm tabular-nums text-emerald-300">{dollars(s.extrinsic)}</span>
+                      </label>
+                    );
+                  })}
+                  {chosenLeap && (
+                    <div className="pt-1 text-xs text-slate-500">
+                      Selected {fmt(chosenLeap.strike, 2)} · delta {fmt(chosenLeap.delta, 2)} · IV{" "}
+                      {chosenLeap.volatility != null ? `${fmt(chosenLeap.volatility, 1)}%` : "—"}
+                      {chosenLeap.extrinsic != null && qtyNum > 0
+                        ? ` · total extrinsic ${bigDollars(chosenLeap.extrinsic * 100 * qtyNum)}` : ""}
+                    </div>
+                  )}
+                </>
+              ) : <p className="text-sm text-slate-400">No suitable LEAP strikes found.</p>}
             </div>
             )}
 
@@ -330,13 +359,13 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
               </div>
               {weekly?.strikes?.length ? (
                 <>
-                  <div className="grid grid-cols-[auto_repeat(4,1fr)] gap-2 text-xs uppercase tracking-wide text-slate-500">
-                    <span className="w-6" /><span>Strike</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
+                  <div className="grid grid-cols-[auto_repeat(5,1fr)] gap-2 text-xs uppercase tracking-wide text-slate-500">
+                    <span className="w-6" /><span>Strike</span><span>Delta</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
                   </div>
                   {weekly.strikes.map((s) => (
                     <label
                       key={s.strike}
-                      className={`grid grid-cols-[auto_repeat(4,1fr)] items-center gap-2 rounded-lg px-1 py-1 ${
+                      className={`grid grid-cols-[auto_repeat(5,1fr)] items-center gap-2 rounded-lg px-1 py-1 ${
                         s.strike === weeklyStrike ? "bg-emerald-500/10" : "hover:bg-slate-800/50"
                       }`}
                     >
@@ -350,6 +379,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
                         {fmt(s.strike, 2)}
                         {s.suggested && <span className="ml-1 text-[10px] font-normal text-emerald-400">SUGGESTED</span>}
                       </span>
+                      <span className="text-sm tabular-nums text-slate-400">{fmt(s.delta, 2)}</span>
                       <span className="text-sm tabular-nums text-slate-300">{dollars(s.bid)} / {dollars(s.ask)}</span>
                       <span className="text-sm tabular-nums text-slate-400">{dollars(s.mark)}</span>
                       <span className="text-sm tabular-nums text-emerald-300">{dollars(s.extrinsic)}</span>

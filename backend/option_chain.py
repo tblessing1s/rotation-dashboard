@@ -153,13 +153,18 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
         quote = data_handler.latest_quote(ticker)
         underlying = quote["price"] if quote else None
 
-    # --- LEAP (auto-picked, delta ~0.90, closest to 180 DTE) ----------------
-    leap = indicators.find_leap_strike(contracts, underlying)
+    # --- LEAP: candidate strikes in the preferred delta band (closest to 180
+    # DTE) so the user can choose; the suggested one is closest to target delta.
+    leap_strikes = indicators.get_leap_strikes(contracts, underlying)
+    suggested_leap = next((s for s in leap_strikes if s.get("suggested")),
+                          leap_strikes[0] if leap_strikes else None)
     leap_contracts = int(existing_leap.get("contracts")) if has_leap and existing_leap.get("contracts") else config.LEAP_CONTRACTS
-    if leap:
-        ext = leap.get("extrinsic")
-        leap = {**leap, "target_contracts": leap_contracts,
-                "extrinsic_total": round(ext * 100 * config.LEAP_CONTRACTS, 2) if ext is not None else None}
+    leap = None
+    if suggested_leap:
+        ext = suggested_leap.get("extrinsic")
+        leap = {**suggested_leap, "strikes": leap_strikes, "target_contracts": leap_contracts,
+                "extrinsic_total": round(ext * 100 * config.LEAP_CONTRACTS, 2) if ext is not None else None,
+                "delta_band": [config.LEAP_DELTA_MIN, config.LEAP_DELTA_MAX]}
 
     # --- Weekly short (regime-aware ATR strike + nearby strikes) ------------
     df = data_handler.get_daily(ticker)

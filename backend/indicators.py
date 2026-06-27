@@ -229,6 +229,59 @@ def find_leap_strike(contracts: list[dict], underlying_price: float | None,
     return _augment(chosen, underlying_price)
 
 
+def get_leap_strikes(contracts: list[dict], underlying_price: float | None,
+                     target_delta: float = config.LEAP_TARGET_DELTA,
+                     target_dte: int = config.LEAP_TARGET_DTE,
+                     delta_min: float = config.LEAP_DELTA_MIN,
+                     delta_max: float = config.LEAP_DELTA_MAX,
+                     count: int = 5) -> list[dict]:
+    """Candidate LEAP strikes to choose from, not just one.
+
+    Picks the expiration whose DTE is closest to target_dte, then returns the
+    call strikes whose |delta| falls in the preferred band [delta_min, delta_max],
+    padded out to `count` with the next-closest-by-delta strikes so there's always
+    a choice (e.g. when the chain only lists 0.93/0.85 around the band). Falls back
+    to a strike heuristic when greeks are missing. Each row is augmented with
+    mark/intrinsic/extrinsic and a `suggested` flag on the strike nearest
+    target_delta. Sorted ascending by strike."""
+    pool = [c for c in contracts if c.get("dte") is not None]
+    if not pool:
+        return []
+    best_dte = min({c["dte"] for c in pool}, key=lambda d: abs(d - target_dte))
+    pool = [c for c in pool if c["dte"] == best_dte]
+
+    with_delta = [c for c in pool if c.get("delta") is not None]
+    if with_delta:
+        in_band = [c for c in with_delta if delta_min <= abs(c["delta"]) <= delta_max]
+        nearest = sorted(with_delta, key=lambda c: abs(abs(c["delta"]) - target_delta))
+        chosen = list(in_band)
+        for c in nearest:  # pad with nearest-by-delta until we have `count`
+            if len(chosen) >= count:
+                break
+            if c not in chosen:
+                chosen.append(c)
+    else:
+        # No greeks (market closed): approximate a deep-ITM strike near the target.
+        proxy = (underlying_price or 0) * target_delta
+        chosen = sorted(pool, key=lambda c: abs(c["strike"] - proxy))[:count]
+
+    by_strike = {}
+    for c in chosen:
+        by_strike.setdefault(c["strike"], c)
+    rows = sorted(by_strike.values(), key=lambda c: c["strike"])
+    if any(c.get("delta") is not None for c in rows):
+        sug = min(rows, key=lambda c: abs(abs(c.get("delta") or 0) - target_delta))
+    else:
+        proxy = (underlying_price or 0) * target_delta
+        sug = min(rows, key=lambda c: abs(c["strike"] - proxy))
+    out = []
+    for c in rows:
+        row = _augment(c, underlying_price)
+        row["suggested"] = c is sug
+        out.append(row)
+    return out
+
+
 def get_nearby_strikes(contracts: list[dict], target_strike: float,
                        underlying_price: float | None, count: int = 3) -> list[dict]:
     """The `count` available strikes nearest `target_strike` (a single

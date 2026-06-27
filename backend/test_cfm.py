@@ -97,6 +97,37 @@ def test_find_leap_strike_delta_fallback_when_greeks_missing():
     assert leap["strike"] == 130.0
 
 
+def test_get_leap_strikes_offers_band_and_flags_suggested():
+    # Deeper ITM = higher delta / lower strike. Band is 0.88–0.91.
+    contracts = [
+        {"strike": 110.0, "dte": 178, "delta": 0.95, "bid": 36.0, "ask": 36.4},
+        {"strike": 120.0, "dte": 178, "delta": 0.90, "bid": 27.0, "ask": 27.4},
+        {"strike": 125.0, "dte": 178, "delta": 0.88, "bid": 22.0, "ask": 22.4},
+        {"strike": 130.0, "dte": 178, "delta": 0.84, "bid": 18.0, "ask": 18.4},
+        {"strike": 130.0, "dte": 30, "delta": 0.90, "bid": 16.0, "ask": 16.4},  # wrong DTE
+    ]
+    rows = ind.get_leap_strikes(contracts, 145.0)
+    assert [r["strike"] for r in rows] == sorted(r["strike"] for r in rows)  # ascending
+    assert all(r["dte"] == 178 for r in rows)                                # right expiration
+    # The two in-band strikes (0.90, 0.88) are present; suggested is nearest 0.90.
+    assert 120.0 in [r["strike"] for r in rows] and 125.0 in [r["strike"] for r in rows]
+    sug = [r for r in rows if r["suggested"]]
+    assert len(sug) == 1 and sug[0]["strike"] == 120.0 and sug[0]["delta"] == 0.90
+
+
+def test_get_leap_strikes_pads_when_band_empty():
+    # AMD-like: chain only lists 0.93 and 0.85 around the band — offer both so the
+    # user can choose, suggesting the one nearest 0.90.
+    contracts = [
+        {"strike": 100.0, "dte": 180, "delta": 0.93, "bid": 44.0, "ask": 44.5},
+        {"strike": 115.0, "dte": 180, "delta": 0.85, "bid": 30.0, "ask": 30.5},
+    ]
+    rows = ind.get_leap_strikes(contracts, 140.0)
+    assert {r["strike"] for r in rows} == {100.0, 115.0}
+    sug = next(r for r in rows if r["suggested"])
+    assert sug["delta"] == 0.93  # closest available to 0.90
+
+
 def test_get_nearby_strikes_flags_suggested():
     contracts = [
         {"strike": 68.0, "dte": 5, "bid": 5.0, "ask": 5.2},
