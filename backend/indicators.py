@@ -7,6 +7,8 @@ to JSON for the API.
 """
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -170,6 +172,79 @@ def short_strike(price: float, atr_value: float, mult: float = config.SHORT_ATR_
     """Suggested weekly short-call strike = price - mult*ATR, rounded to 0.5."""
     raw = price - mult * atr_value
     return round(raw * 2) / 2
+
+
+# ---------------------------------------------------------------------------
+# Black–Scholes greeks
+# ---------------------------------------------------------------------------
+# Schwab's chain `delta` field disagrees with thinkorswim (and is internally
+# inconsistent with its own reported IV), so we recompute call delta the way TOS
+# does: imply volatility from the option mark, then Black–Scholes. No dividend is
+# assumed (fine for the non-dividend growth names CFM trades; an American call on
+# a non-dividend stock equals the European value).
+
+def _norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
+
+
+def bs_call_delta(S: float, K: float, T: float, r: float, sigma: float) -> float | None:
+    """Black–Scholes call delta = N(d1)."""
+    if not (S and S > 0 and K and K > 0 and T and T > 0 and sigma and sigma > 0):
+        return None
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    return _norm_cdf(d1)
+
+
+def _bs_call_price(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    return S * _norm_cdf(d1) - K * math.exp(-r * T) * _norm_cdf(d2)
+
+
+def implied_vol_call(price: float | None, S: float, K: float, T: float, r: float) -> float | None:
+    """Implied volatility of a call from its price, via bisection. Price is
+    monotonic in sigma, so bisection is robust even for deep-ITM options where
+    Newton's method fails on tiny vega. Returns None when the price is outside the
+    no-arbitrage band (e.g. a stale mark below intrinsic)."""
+    if price is None or not (S and S > 0 and K and K > 0 and T and T > 0):
+        return None
+    lo, hi = 1e-4, 5.0
+    p_lo, p_hi = _bs_call_price(S, K, T, r, lo), _bs_call_price(S, K, T, r, hi)
+    if not (p_lo - 1e-9 <= price <= p_hi + 1e-9):
+        return None
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        pm = _bs_call_price(S, K, T, r, mid)
+        if abs(pm - price) < 1e-6:
+            return mid
+        if pm < price:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def call_greeks(S: float | None, K: float | None, dte: int | None, mark: float | None,
+                reported_iv: float | None = None,
+                r: float = config.RISK_FREE_RATE) -> tuple[float | None, float | None]:
+    """(delta, iv_pct) for a call via Black–Scholes.
+
+    Uses Schwab's reported per-contract IV when present — thinkorswim is Schwab,
+    so its greeks come from that same IV, and recomputing delta from it matches
+    TOS even though Schwab's pre-computed `delta` field does not. Falls back to
+    implying vol from the mark when no IV is reported (and the mid-price is a
+    usable estimate for longer-dated contracts). Returns (None, None) when inputs
+    are insufficient."""
+    T = (dte or 0) / 365.0
+    if not (S and K and T > 0):
+        return None, None
+    iv = (reported_iv / 100.0) if reported_iv else None
+    if iv is None and mark:
+        iv = implied_vol_call(mark, S, K, T, r)
+    if not iv or iv <= 0:
+        return None, None
+    d = bs_call_delta(S, K, T, r, iv)
+    return (round(d, 4) if d is not None else None, round(iv * 100, 2))
 
 
 # ---------------------------------------------------------------------------

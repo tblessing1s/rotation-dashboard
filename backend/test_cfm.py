@@ -62,6 +62,32 @@ def test_short_strike_spacing():
     assert ind.short_strike(150.0, 4.0) == 144.0
 
 
+def test_black_scholes_delta_and_implied_vol_roundtrip():
+    # ATM, 1y, r=0, sigma=0.20 -> delta = N(0.1) ≈ 0.5398
+    assert ind.bs_call_delta(100, 100, 1.0, 0.0, 0.20) == pytest.approx(0.5398, abs=1e-3)
+    # Price -> implied vol -> back to the same sigma.
+    price = ind._bs_call_price(100, 100, 1.0, 0.0, 0.20)
+    assert ind.implied_vol_call(price, 100, 100, 1.0, 0.0) == pytest.approx(0.20, abs=1e-3)
+    # Below-intrinsic / nonsensical price -> no solution.
+    assert ind.implied_vol_call(0.0, 100, 100, 1.0, 0.0) is None
+
+
+def test_call_greeks_matches_tos_not_schwab_raw_delta():
+    # AMD-like deep-ITM LEAP: Schwab's chain returned delta 0.88 (wrong); with its
+    # reported IV (~77%) the Black–Scholes delta lands near TOS's ~0.93.
+    d, iv = ind.call_greeks(521.58, 260, 174, 275.10, reported_iv=76.8)
+    assert 0.92 < d < 0.96 and iv == 76.8
+    # Delta must DECREASE as strike rises (the flat ~0.88 across strikes was the bug).
+    d260, _ = ind.call_greeks(521.58, 260, 174, 275.10, reported_iv=76.8)
+    d300, _ = ind.call_greeks(521.58, 300, 174, 241.38, reported_iv=76.1)
+    assert d260 > d300
+    # Falls back to mark-implied vol when no IV is reported.
+    d_mark, iv_mark = ind.call_greeks(521.58, 260, 174, 275.10, reported_iv=None)
+    assert d_mark is not None and iv_mark is not None
+    # Insufficient inputs -> (None, None).
+    assert ind.call_greeks(None, 260, 174, 275.10) == (None, None)
+
+
 def test_calculate_extrinsic_midpoint_minus_intrinsic():
     # underlying 145, strike 140 -> intrinsic 5; mid (8+9)/2=8.5 -> extrinsic 3.5
     assert ind.calculate_extrinsic(8.0, 9.0, 140.0, 145.0) == pytest.approx(3.5)

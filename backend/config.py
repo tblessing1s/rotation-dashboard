@@ -78,6 +78,7 @@ LEAP_TARGET_DELTA = 0.90
 LEAP_DELTA_MIN = 0.88        # preferred LEAP delta band (offer strikes to choose)
 LEAP_DELTA_MAX = 0.91
 LEAP_TARGET_DTE = 180
+RISK_FREE_RATE = 0.04        # for Black–Scholes greeks (delta recomputed to match TOS)
 SHORT_ATR_MULT = 1.5         # short strike = stock - 1.5 * ATR
 SHARE_CAP = 500              # accumulate to 500 shares per stock, then rotate
 LEAP_ROLL_DTE = 30           # roll/replace LEAP when it nears this DTE

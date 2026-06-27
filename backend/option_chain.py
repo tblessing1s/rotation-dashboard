@@ -153,6 +153,20 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
         quote = data_handler.latest_quote(ticker)
         underlying = quote["price"] if quote else None
 
+    # Recompute delta + IV via Black–Scholes (implied vol from the mark) for every
+    # contract up front, so strike selection (delta band) and display both use
+    # TOS-consistent values rather than Schwab's unreliable chain greeks.
+    for c in contracts:
+        mark = c.get("mark")
+        if mark is None and c.get("bid") is not None and c.get("ask") is not None:
+            mark = round((c["bid"] + c["ask"]) / 2, 4)
+        d, iv = indicators.call_greeks(underlying, c.get("strike"), c.get("dte"),
+                                       mark, reported_iv=c.get("volatility"))
+        if d is not None:
+            c["delta"] = d
+        if iv is not None:
+            c["volatility"] = iv
+
     # --- LEAP: candidate strikes in the preferred delta band (closest to 180
     # DTE) so the user can choose; the suggested one is closest to target delta.
     leap_strikes = indicators.get_leap_strikes(contracts, underlying)
