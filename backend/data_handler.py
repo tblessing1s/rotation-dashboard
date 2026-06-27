@@ -158,9 +158,11 @@ def latest_quote(symbol: str) -> dict | None:
     if schwab_api.configured():
         try:
             q = client().get_quote(symbol)
-            if q and q.get("last"):
+            # last (intraday) -> mark -> close (off-hours / index quotes).
+            price = (q or {}).get("last") or (q or {}).get("mark") or (q or {}).get("close")
+            if price:
                 _last_error.pop(symbol, None)
-                return {"symbol": symbol, "price": q["last"], "source": "schwab"}
+                return {"symbol": symbol, "price": price, "source": "schwab"}
         except Exception as e:  # noqa: BLE001
             _last_error[symbol] = str(e)
     if alpha_vantage.configured():

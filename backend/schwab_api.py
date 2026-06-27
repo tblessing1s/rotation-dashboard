@@ -151,7 +151,10 @@ def _parse_quote_node(symbol: str, node: dict) -> dict:
     return {
         "symbol": symbol,
         "assetType": asset_type,
+        # Index quotes ($VIX, $SPX) report under lastPrice intraday but only
+        # closePrice off-hours, so expose close as well; callers fall back to it.
         "last": _n(q.get("lastPrice")),
+        "close": _n(q.get("closePrice")),
         "bid": _n(q.get("bidPrice")),
         "ask": _n(q.get("askPrice")),
         "mark": _n(q.get("mark")),
