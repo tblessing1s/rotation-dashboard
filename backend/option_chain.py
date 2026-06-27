@@ -153,15 +153,22 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
         quote = data_handler.latest_quote(ticker)
         underlying = quote["price"] if quote else None
 
-    # Recompute delta + IV via Black–Scholes (implied vol from the mark) for every
-    # contract up front, so strike selection (delta band) and display both use
-    # TOS-consistent values rather than Schwab's unreliable chain greeks.
+    # Recompute delta + IV via Black–Scholes for every contract up front, so
+    # strike selection (delta band) and display both use TOS-consistent values
+    # rather than Schwab's unreliable chain greeks. For an ITM call we prefer the
+    # same-strike PUT's IV — the OTM put's vol is stable and skew-aware, whereas
+    # the deep-ITM call's own IV collapses on thin time value (delta -> ~1.0).
+    put_iv = schwab_api.parse_put_iv(payload)
     for c in contracts:
         mark = c.get("mark")
         if mark is None and c.get("bid") is not None and c.get("ask") is not None:
             mark = round((c["bid"] + c["ask"]) / 2, 4)
-        d, iv = indicators.call_greeks(underlying, c.get("strike"), c.get("dte"),
-                                       mark, reported_iv=c.get("volatility"))
+        strike = c.get("strike")
+        reported_iv = c.get("volatility")
+        if underlying and strike and strike < underlying:  # ITM call -> use OTM put IV
+            reported_iv = put_iv.get((c["expiration"], strike)) or reported_iv
+        d, iv = indicators.call_greeks(underlying, strike, c.get("dte"), mark,
+                                       reported_iv=reported_iv)
         if d is not None:
             c["delta"] = d
         if iv is not None:
