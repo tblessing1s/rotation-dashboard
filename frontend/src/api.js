@@ -25,6 +25,7 @@ export const api = {
   stockFilter: (sector) => request(`/api/stock-filter${sector ? `?sector=${sector}` : ""}`),
   entryGate: (ticker) => request(`/api/entry-gate?ticker=${ticker}`),
   rollSuggestion: (ticker) => request(`/api/roll-suggestion?ticker=${ticker}`),
+  optionChain: (ticker, strategy = "atr") => request(`/api/option-chain/${ticker}?strategy=${strategy}`),
   execute: (payload) => request("/api/execute", { method: "POST", body: JSON.stringify(payload) }),
   positions: () => request("/api/positions"),
   thetaLedger: (params = "") => request(`/api/theta-ledger${params}`),

@@ -265,14 +265,69 @@ class SchwabClient:
             raise SchwabError(f"schwab quote {symbol}: no quote")
         return parsed
 
-    def get_option_chain(self, symbol: str, expiry_date: str | None = None) -> dict:
-        params = {"symbol": symbol.upper(), "contractType": "CALL", "strikeCount": 50}
+    def get_option_chain(self, symbol: str, expiry_date: str | None = None,
+                         strike_count: int = 50, from_date: str | None = None,
+                         to_date: str | None = None) -> dict:
+        """Fetch the CALL chain. With from_date/to_date and a larger strike_count
+        the response spans both near-term (weekly short) and far-dated (LEAP)
+        expirations in one call. includeUnderlyingQuote pins the spot price used
+        for intrinsic/extrinsic math."""
+        params = {"symbol": symbol.upper(), "contractType": "CALL",
+                  "strikeCount": strike_count, "includeUnderlyingQuote": "true"}
         if expiry_date:
             params["expirationDate"] = expiry_date
+        if from_date:
+            params["fromDate"] = from_date
+        if to_date:
+            params["toDate"] = to_date
         resp = requests.get(OPTION_CHAIN_URL, headers=self._auth_headers(), params=params, timeout=20)
         if resp.status_code != 200:
             raise SchwabError(f"schwab option chain: HTTP {resp.status_code} {resp.text[:200]}")
         return resp.json()
+
+
+def _num(v):
+    """Coerce a Schwab numeric field to a clean float, dropping None/NaN/non-numeric
+    (Schwab sends 'NaN' deltas for far-dated strikes when the market is closed)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return None if f != f else f  # NaN != NaN
+
+
+def parse_call_chain(payload: dict) -> tuple[float | None, list[dict]]:
+    """Flatten Schwab's callExpDateMap into (underlying_price, normalized calls).
+
+    Each normalized contract is a plain dict — strike, expiration (YYYY-MM-DD),
+    dte, bid, ask, mark, last, delta, theta, open_interest, symbol — so the
+    indicator helpers and the JSON API stay provider-agnostic.
+    """
+    underlying = _num(payload.get("underlyingPrice"))
+    if underlying is None:
+        u = payload.get("underlying") or {}
+        underlying = _num(u.get("last")) or _num(u.get("mark"))
+
+    contracts: list[dict] = []
+    for exp_key, strikes in (payload.get("callExpDateMap") or {}).items():
+        # exp_key looks like "2025-12-19:178" (expiration date : days-to-expiry).
+        date_part = exp_key.split(":")[0]
+        for strike_str, rows in (strikes or {}).items():
+            for row in rows or []:
+                contracts.append({
+                    "symbol": row.get("symbol"),
+                    "strike": _num(row.get("strikePrice")) or _num(strike_str),
+                    "expiration": date_part,
+                    "dte": row.get("daysToExpiration"),
+                    "bid": _num(row.get("bid")),
+                    "ask": _num(row.get("ask")),
+                    "mark": _num(row.get("mark")),
+                    "last": _num(row.get("last")),
+                    "delta": _num(row.get("delta")),
+                    "theta": _num(row.get("theta")),
+                    "open_interest": row.get("openInterest"),
+                })
+    return underlying, contracts
 
     # -- accounts & trading --------------------------------------------------
     _ACCT_HINT = (" — confirm the Schwab app is approved for 'Accounts and "

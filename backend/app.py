@@ -18,6 +18,7 @@ import data_handler
 import executor
 import kill_switch
 import logging_handler as log
+import option_chain
 import position_manager
 import schwab_api
 import screening
@@ -67,6 +68,17 @@ def api_entry_gate():
         return jsonify({"error": "ticker is required"}), 400
     try:
         return jsonify(screening.entry_gate(ticker))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/option-chain/<ticker>")
+def api_option_chain(ticker: str):
+    strategy = request.args.get("strategy", "atr")
+    try:
+        return jsonify(option_chain.option_chain(ticker, strategy))
+    except option_chain.RegimeBlocked as e:
+        return jsonify({"error": str(e), "regime": "red"}), 403
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

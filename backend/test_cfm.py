@@ -62,6 +62,54 @@ def test_short_strike_spacing():
     assert ind.short_strike(150.0, 4.0) == 144.0
 
 
+def test_calculate_extrinsic_midpoint_minus_intrinsic():
+    # underlying 145, strike 140 -> intrinsic 5; mid (8+9)/2=8.5 -> extrinsic 3.5
+    assert ind.calculate_extrinsic(8.0, 9.0, 140.0, 145.0) == pytest.approx(3.5)
+    # OTM call: intrinsic 0 -> extrinsic = mid
+    assert ind.calculate_extrinsic(1.0, 1.5, 150.0, 145.0) == pytest.approx(1.25)
+    # missing quote -> None; deep ITM under intrinsic clamps to 0
+    assert ind.calculate_extrinsic(None, 2.0, 140.0, 145.0) is None
+    assert ind.calculate_extrinsic(4.0, 4.5, 140.0, 145.0) == 0.0
+
+
+def test_find_leap_strike_picks_dte_then_delta():
+    contracts = [
+        {"strike": 120.0, "dte": 178, "delta": 0.95, "bid": 27.0, "ask": 27.4, "mark": 27.2},
+        {"strike": 130.0, "dte": 178, "delta": 0.90, "bid": 18.0, "ask": 18.4, "mark": 18.2},
+        {"strike": 140.0, "dte": 178, "delta": 0.70, "bid": 10.0, "ask": 10.4, "mark": 10.2},
+        # a closer-to-money but wrong-DTE expiration must be ignored for DTE choice
+        {"strike": 130.0, "dte": 30, "delta": 0.90, "bid": 16.0, "ask": 16.4, "mark": 16.2},
+    ]
+    leap = ind.find_leap_strike(contracts, 145.0)
+    assert leap["strike"] == 130.0 and leap["dte"] == 178
+    assert leap["intrinsic"] == pytest.approx(15.0)  # 145 - 130
+    assert leap["extrinsic"] == pytest.approx(3.2)   # 18.2 - 15.0
+
+
+def test_find_leap_strike_delta_fallback_when_greeks_missing():
+    contracts = [
+        {"strike": 110.0, "dte": 180, "delta": None, "bid": 36.0, "ask": 36.4},
+        {"strike": 130.0, "dte": 180, "delta": None, "bid": 18.0, "ask": 18.4},
+        {"strike": 145.0, "dte": 180, "delta": None, "bid": 6.0, "ask": 6.4},
+    ]
+    leap = ind.find_leap_strike(contracts, 145.0)
+    # proxy ~= 145*(1-0.1)=130.5 -> nearest strike is 130
+    assert leap["strike"] == 130.0
+
+
+def test_get_nearby_strikes_flags_suggested():
+    contracts = [
+        {"strike": 68.0, "dte": 5, "bid": 5.0, "ask": 5.2},
+        {"strike": 69.0, "dte": 5, "bid": 4.2, "ask": 4.4},
+        {"strike": 70.0, "dte": 5, "bid": 3.4, "ask": 3.6},
+        {"strike": 71.0, "dte": 5, "bid": 2.6, "ask": 2.8},
+    ]
+    rows = ind.get_nearby_strikes(contracts, 69.4, 72.0, count=3)
+    assert [r["strike"] for r in rows] == [68.0, 69.0, 70.0]  # sorted ascending
+    suggested = [r for r in rows if r["suggested"]]
+    assert len(suggested) == 1 and suggested[0]["strike"] == 69.0  # closest to 69.4
+
+
 def test_insufficient_history_returns_none():
     df = _frame([1, 2, 3])
     assert ind.sma(df, 21) is None
