@@ -325,6 +325,7 @@ def parse_call_chain(payload: dict) -> tuple[float | None, list[dict]]:
                     "last": _num(row.get("last")),
                     "delta": _num(row.get("delta")),
                     "theta": _num(row.get("theta")),
+                    "volatility": _num(row.get("volatility")),  # annualized IV %
                     "open_interest": row.get("openInterest"),
                 })
     return underlying, contracts

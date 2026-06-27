@@ -12,6 +12,7 @@ Market regime sets the ATR multiplier on the weekly short strike:
 """
 from __future__ import annotations
 
+import math
 import threading
 import time
 from datetime import datetime, timedelta
@@ -19,6 +20,7 @@ from datetime import datetime, timedelta
 import config
 import data_handler
 import indicators
+import logging_handler as log
 import schwab_api
 import screening
 
@@ -64,6 +66,46 @@ def _fetch_chain(ticker: str) -> dict:
         return payload
 
 
+def _median(vals: list) -> float | None:
+    nums = sorted(v for v in vals if v is not None)
+    if not nums:
+        return None
+    mid = len(nums) // 2
+    return nums[mid] if len(nums) % 2 else (nums[mid - 1] + nums[mid]) / 2
+
+
+def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None) -> dict:
+    """Compare the weekly short's IV to the stock's 20-day realized volatility.
+    IV well above realized = rich premium (favorable to sell); below = cheap."""
+    out = {"weekly_iv": weekly_iv, "leap_iv": leap_iv, "hist_vol": hv}
+    if weekly_iv is None or hv is None or hv == 0:
+        out["premium"] = "unknown"
+        out["label"] = "IV vs realized unavailable"
+        out["iv_vs_hv"] = None
+        return out
+    ratio = weekly_iv / hv
+    out["iv_vs_hv"] = round(ratio, 2)
+    if ratio >= 1.1:
+        out["premium"] = "rich"
+        out["label"] = f"IV {weekly_iv:g}% is HIGHER than 20-day realized {hv:g}% — premium rich (favorable to sell)"
+    elif ratio <= 0.9:
+        out["premium"] = "cheap"
+        out["label"] = f"IV {weekly_iv:g}% is LOWER than 20-day realized {hv:g}% — premium cheap (thin to sell)"
+    else:
+        out["premium"] = "fair"
+        out["label"] = f"IV {weekly_iv:g}% is in line with 20-day realized {hv:g}%"
+    return out
+
+
+def _detect_action(has_leap: bool, open_shorts: list) -> tuple[str, str]:
+    """Pick the action the user most likely wants next, given current positions."""
+    if not has_leap:
+        return "buy_leap", "No LEAP held yet — establish the deep-ITM long first."
+    if not open_shorts:
+        return "sell_short", "LEAP held with no open short — sell this week's call for juice."
+    return "close_short", "A short call is already open — roll it (buy to close)."
+
+
 def option_chain(ticker: str, strategy: str = "atr") -> dict:
     """Build the option-chain view: regime banner, auto-picked LEAP, and the
     ATR-suggested weekly short with nearby strikes. Raises RegimeBlocked on RED."""
@@ -87,16 +129,29 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
         quote = data_handler.latest_quote(ticker)
         underlying = quote["price"] if quote else None
 
+    # --- Current position: drives the auto-detected action -----------------
+    state = log.load_state()
+    pos = log.find_position(state, ticker)
+    existing_leap = (pos or {}).get("leap") or None
+    has_leap = bool(existing_leap)
+    open_shorts = [sc for sc in (pos or {}).get("short_calls", []) if sc] if pos else []
+    suggested_action, action_reason = _detect_action(has_leap, open_shorts)
+
     # --- LEAP (auto-picked, delta ~0.90, closest to 180 DTE) ----------------
     leap = indicators.find_leap_strike(contracts, underlying)
+    leap_contracts = int(existing_leap.get("contracts")) if has_leap and existing_leap.get("contracts") else config.LEAP_CONTRACTS
     if leap:
-        leap = {**leap, "target_contracts": config.LEAP_CONTRACTS}
+        ext = leap.get("extrinsic")
+        leap = {**leap, "target_contracts": leap_contracts,
+                "extrinsic_total": round(ext * 100 * config.LEAP_CONTRACTS, 2) if ext is not None else None}
 
     # --- Weekly short (regime-aware ATR strike + nearby strikes) ------------
     df = data_handler.get_daily(ticker)
     atr_val = indicators.atr(df)
+    hv = indicators.hist_vol(df)
     price = underlying if underlying is not None else indicators.last(df)
     weekly: dict | None = None
+    weekly_iv = None
     if atr_val is not None and price is not None:
         suggested_strike = indicators.short_strike(price, atr_val, atr_mult)
         # Nearest expiration with at least one day left = this week's short.
@@ -106,6 +161,8 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
             weekly_exp = min(dated, key=lambda c: c["dte"])["expiration"]
         exp_contracts = [c for c in contracts if c["expiration"] == weekly_exp] if weekly_exp else []
         strikes = indicators.get_nearby_strikes(exp_contracts, suggested_strike, underlying)
+        sug = next((s for s in strikes if s.get("suggested")), strikes[0] if strikes else None)
+        weekly_iv = (sug or {}).get("volatility") or _median([s.get("volatility") for s in strikes])
         weekly = {
             "expiration": weekly_exp,
             "dte": exp_contracts[0]["dte"] if exp_contracts else None,
@@ -115,12 +172,63 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
             "strikes": strikes,
         }
 
+    # --- If a short is already open, surface its live buy-to-close cost ------
+    open_short_view = None
+    if open_shorts:
+        sc = min(open_shorts, key=lambda s: s.get("dte") if s.get("dte") is not None else 1e9)
+        match = next((c for c in contracts if c.get("strike") == sc.get("strike")), None)
+        match = indicators._augment(match, underlying) if match else None
+        open_short_view = {
+            "strike": sc.get("strike"),
+            "contracts": sc.get("contracts"),
+            "dte": sc.get("dte"),
+            "current_bid": (match or {}).get("bid"),
+            "current_ask": (match or {}).get("ask"),
+            "current_mark": (match or {}).get("mark"),
+            "entry_extrinsic_per_share": sc.get("entry_extrinsic_per_share"),
+        }
+
+    # --- Income payoff: how much LEAP extrinsic must be covered, and a rough
+    # weeks-to-income-positive estimate from the suggested weekly juice --------
+    qty = leap_contracts
+    if has_leap:
+        extrinsic_to_cover = state.get("extrinsic_payback", {}).get(ticker, {}).get("remaining_to_payback")
+        cover_basis = "remaining on existing LEAP"
+    else:
+        extrinsic_to_cover = (leap or {}).get("extrinsic")
+        extrinsic_to_cover = round(extrinsic_to_cover * 100 * qty, 2) if extrinsic_to_cover is not None else None
+        cover_basis = "new LEAP entry extrinsic"
+    sug_strike = next((s for s in (weekly or {}).get("strikes", []) if s.get("suggested")), None)
+    weekly_ext_ps = (sug_strike or {}).get("extrinsic")
+    weekly_juice = round(weekly_ext_ps * 100 * qty, 2) if weekly_ext_ps else None
+    weeks = (math.ceil(extrinsic_to_cover / weekly_juice)
+             if extrinsic_to_cover and weekly_juice and weekly_juice > 0 else None)
+    payoff = {
+        "leap_extrinsic_to_cover": extrinsic_to_cover,
+        "cover_basis": cover_basis,
+        "weekly_juice_estimate": weekly_juice,
+        "weeks_to_income_positive": weeks,
+        "quantity": qty,
+    }
+
     return {
         "ticker": ticker,
         "strategy": strategy,
         "regime": regime_status,
         "atr_mult": atr_mult,
         "underlying_price": round(underlying, 2) if underlying is not None else None,
+        "suggested_action": suggested_action,
+        "action_reason": action_reason,
+        "quantity_default": qty,
+        "position": {
+            "has_leap": has_leap,
+            "leap_strike": (existing_leap or {}).get("strike"),
+            "leap_contracts": (existing_leap or {}).get("contracts"),
+            "open_short_count": len(open_shorts),
+            "open_short": open_short_view,
+        },
+        "iv": _iv_view(weekly_iv, (leap or {}).get("volatility"), hv),
         "leap": leap,
         "weekly": weekly,
+        "payoff": payoff,
     }

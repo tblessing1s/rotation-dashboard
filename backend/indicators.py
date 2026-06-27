@@ -94,6 +94,20 @@ def atr_expanding(df: pd.DataFrame, window: int = config.ATR_WINDOW, lookback: i
     return bool(now > then)
 
 
+def hist_vol(df: pd.DataFrame, window: int = 20) -> float | None:
+    """Annualized realized (historical) volatility over `window` daily bars, as a
+    percent — the yardstick for judging whether an option's IV is rich or cheap.
+    std of daily log returns × sqrt(252)."""
+    c = _close(df)
+    if len(c) < window + 1:
+        return None
+    rets = np.log(c / c.shift(1)).dropna()
+    if len(rets) < window:
+        return None
+    vol = rets.tail(window).std(ddof=1) * np.sqrt(252) * 100
+    return None if pd.isna(vol) else float(round(vol, 2))
+
+
 def pct_from_ma(df: pd.DataFrame, window: int = config.MA_WINDOW) -> float | None:
     """Percent distance of close above (+) / below (-) its `window`-day MA."""
     ma = sma(df, window)

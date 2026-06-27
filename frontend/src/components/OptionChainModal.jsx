@@ -7,29 +7,41 @@ function dollars(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
   return "$" + Number(n).toFixed(2);
 }
+function bigDollars(n) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return "$" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
+}
 
-function StrikeRow({ s, cols = "grid-cols-4" }) {
+const ACTION_LABELS = {
+  buy_leap: "Buy LEAP (deep ITM)",
+  sell_short: "Sell weekly short call",
+  close_short: "Close / roll short call",
+};
+
+function StrikeHead({ extra }) {
   return (
-    <div className={`grid ${cols} gap-2 py-1 text-sm tabular-nums`}>
-      <span className="font-semibold text-slate-100">{fmt(s.strike, 2)}</span>
-      <span className="text-slate-300">{dollars(s.bid)} / {dollars(s.ask)}</span>
-      <span className="text-slate-400">{dollars(s.mark)}</span>
-      <span className="text-emerald-300">{dollars(s.extrinsic)}</span>
+    <div className={`grid ${extra || "grid-cols-4"} gap-2 text-xs uppercase tracking-wide text-slate-500`}>
+      <span>Strike</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
     </div>
   );
 }
 
 /**
- * Option chain viewer. Auto-picks the LEAP (read-only) and an ATR-suggested
- * weekly short the user can adjust to a nearby strike, then locks both into the
- * Execute form via onConfirm. Closes itself (with an error message) when the
- * regime is RED or the chain fails to load.
+ * Option chain viewer + order ticket. Auto-detects the next action from the
+ * user's current position, auto-picks the LEAP and an ATR-suggested weekly
+ * strike, shows whether IV is rich vs realized vol, and estimates how long the
+ * short juice takes to cover the LEAP's extrinsic. The user typically only sets
+ * quantity, then executes straight from the chain (or just fills the form).
  */
-export default function OptionChainModal({ ticker, onConfirm, onClose }) {
+export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose }) {
   const [chain, setChain] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [weeklyStrike, setWeeklyStrike] = React.useState(null);
+  const [action, setAction] = React.useState(null);
+  const [qty, setQty] = React.useState("");
+  const [execErr, setExecErr] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
 
   React.useEffect(() => {
     let live = true;
@@ -40,6 +52,8 @@ export default function OptionChainModal({ ticker, onConfirm, onClose }) {
         setChain(c);
         const sug = c.weekly?.strikes?.find((s) => s.suggested) || c.weekly?.strikes?.[0];
         setWeeklyStrike(sug ? sug.strike : null);
+        setAction(c.suggested_action || "buy_leap");
+        setQty(String(c.quantity_default ?? 5));
       })
       .catch((e) => { if (live) setError(e.message); })
       .finally(() => { if (live) setLoading(false); });
@@ -48,7 +62,52 @@ export default function OptionChainModal({ ticker, onConfirm, onClose }) {
 
   const leap = chain?.leap;
   const weekly = chain?.weekly;
+  const iv = chain?.iv;
+  const position = chain?.position;
+  const openShort = position?.open_short;
   const chosenWeekly = weekly?.strikes?.find((s) => s.strike === weeklyStrike) || null;
+  const qtyNum = Number(qty) || 0;
+
+  // Live payoff: how much LEAP extrinsic must be covered, and ~weeks for the
+  // selected weekly's juice to cover it. Existing-LEAP cover is a fixed remaining
+  // balance; a new entry scales with the chosen quantity.
+  const coverTotal = position?.has_leap
+    ? chain?.payoff?.leap_extrinsic_to_cover
+    : leap?.extrinsic != null ? leap.extrinsic * 100 * qtyNum : null;
+  const weeklyJuice = chosenWeekly?.extrinsic != null ? chosenWeekly.extrinsic * 100 * qtyNum : null;
+  const weeks = coverTotal && weeklyJuice && weeklyJuice > 0 ? Math.ceil(coverTotal / weeklyJuice) : null;
+
+  function buildPayload() {
+    const base = { action, ticker: chain.ticker, contracts: qtyNum };
+    if (chain.underlying_price != null) base.stock_price = chain.underlying_price;
+    if (action === "buy_leap" && leap) {
+      base.strike = leap.strike;
+      if (leap.mark != null) base.execution_price = Math.round(leap.mark * 100 * 100) / 100;
+    } else if (action === "sell_short" && chosenWeekly) {
+      base.strike = chosenWeekly.strike;
+      if (chosenWeekly.mark != null) base.premium_per_share = chosenWeekly.mark;
+    } else if (action === "close_short" && openShort) {
+      base.strike = openShort.strike;
+      base.contracts = qtyNum || openShort.contracts;
+      if (openShort.current_mark != null) base.close_price_per_share = openShort.current_mark;
+    }
+    return base;
+  }
+
+  const canExecute =
+    qtyNum > 0 &&
+    ((action === "buy_leap" && leap) ||
+      (action === "sell_short" && chosenWeekly) ||
+      (action === "close_short" && openShort));
+
+  async function execute() {
+    setBusy(true); setExecErr(null);
+    try {
+      await onExecute?.(buildPayload());
+      onClose?.();
+    } catch (e) { setExecErr(e.message); }
+    finally { setBusy(false); }
+  }
 
   function confirm() {
     onConfirm?.({
@@ -56,29 +115,22 @@ export default function OptionChainModal({ ticker, onConfirm, onClose }) {
       underlying_price: chain.underlying_price,
       regime: chain.regime,
       atr_mult: chain.atr_mult,
-      leap: leap
-        ? { strike: leap.strike, mark: leap.mark, contracts: leap.target_contracts, dte: leap.dte }
-        : null,
-      weekly: chosenWeekly
-        ? { strike: chosenWeekly.strike, mark: chosenWeekly.mark, dte: weekly.dte }
-        : null,
+      leap: leap ? { strike: leap.strike, mark: leap.mark, contracts: qtyNum, dte: leap.dte } : null,
+      weekly: chosenWeekly ? { strike: chosenWeekly.strike, mark: chosenWeekly.mark, dte: weekly.dte } : null,
     });
     onClose?.();
   }
 
   const regimeBanner =
-    chain?.regime === "green"
-      ? "GREEN — uptrend · more juice, less protection"
-      : chain?.regime === "yellow"
-      ? "YELLOW — caution · balanced protection"
-      : chain?.regime;
+    chain?.regime === "green" ? "GREEN — uptrend"
+    : chain?.regime === "yellow" ? "YELLOW — caution"
+    : chain?.regime;
+  const ivStatus = { rich: "green", cheap: "red", fair: "yellow" }[iv?.premium] || "unknown";
 
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
-      role="dialog"
-      aria-modal="true"
-      onClick={onClose}
+      role="dialog" aria-modal="true" onClick={onClose}
     >
       <div
         className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
@@ -95,59 +147,124 @@ export default function OptionChainModal({ ticker, onConfirm, onClose }) {
           <div className="rounded-lg border border-rose-800 bg-rose-500/10 p-4 text-sm text-rose-200">
             <p className="font-semibold">Could not load chain</p>
             <p className="mt-1 text-rose-300">{error}</p>
-            <button onClick={onClose} className="mt-3 rounded-lg border border-rose-700 px-3 py-1.5 text-rose-200 hover:bg-rose-500/10">
-              Close
-            </button>
+            <button onClick={onClose} className="mt-3 rounded-lg border border-rose-700 px-3 py-1.5 text-rose-200 hover:bg-rose-500/10">Close</button>
           </div>
         )}
 
         {chain && !loading && !error && (
           <div className="space-y-4">
-            {/* Regime banner */}
-            <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-slate-950 p-3">
-              <div className="flex items-center gap-2 text-sm">
-                <span className="text-slate-400">Market regime</span>
+            {/* Regime + IV banner */}
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950 p-3 text-sm">
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400">Regime</span>
                 <Pill status={chain.regime}>{regimeBanner}</Pill>
+                <span className="text-slate-400">ATR ×<span className="font-semibold text-slate-100">{chain.atr_mult}</span></span>
               </div>
-              <div className="text-sm text-slate-300">
-                ATR ×<span className="font-semibold text-slate-100">{chain.atr_mult}</span>
-                {chain.underlying_price != null && (
-                  <span className="ml-3 text-slate-400">Spot {dollars(chain.underlying_price)}</span>
-                )}
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400">IV</span>
+                <Pill status={ivStatus}>{iv?.premium || "?"}</Pill>
+                {chain.underlying_price != null && <span className="text-slate-400">Spot {dollars(chain.underlying_price)}</span>}
               </div>
+            </div>
+            {iv?.label && <p className="-mt-2 px-1 text-xs text-slate-500">{iv.label}</p>}
+
+            {/* Order ticket — auto-detected action, quantity, payoff, execute */}
+            <div className="rounded-lg border border-sky-800 bg-sky-500/5 p-3">
+              <div className="mb-2 text-xs uppercase tracking-wide text-sky-400">Order (auto-detected)</div>
+              <p className="mb-3 text-xs text-slate-400">{chain.action_reason}</p>
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                <label className="text-slate-400">Action
+                  <select
+                    value={action || ""}
+                    onChange={(e) => setAction(e.target.value)}
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100"
+                  >
+                    {Object.entries(ACTION_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                  </select>
+                </label>
+                <label className="text-slate-400">Quantity (contracts)
+                  <input
+                    value={qty}
+                    onChange={(e) => setQty(e.target.value.replace(/[^0-9]/g, ""))}
+                    inputMode="numeric"
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100"
+                  />
+                </label>
+              </div>
+
+              {/* Payoff estimate */}
+              <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-slate-950 p-3 text-center">
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-500">LEAP extrinsic to cover</div>
+                  <div className="text-base font-semibold text-amber-300">{bigDollars(coverTotal)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Est. weekly juice</div>
+                  <div className="text-base font-semibold text-emerald-300">{bigDollars(weeklyJuice)}</div>
+                </div>
+                <div>
+                  <div className="text-[10px] uppercase tracking-wide text-slate-500">≈ income-positive</div>
+                  <div className="text-base font-semibold text-slate-100">{weeks != null ? `~${weeks} wk` : "—"}</div>
+                </div>
+              </div>
+              <p className="mt-1 text-[11px] text-slate-500">
+                Rough estimate: weekly extrinsic ÷ LEAP extrinsic, {chain.payoff?.cover_basis}. Assumes the short is rolled at a similar credit each week.
+              </p>
+
+              <div className="mt-3 flex items-center justify-end gap-2">
+                <button onClick={confirm} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
+                  Just fill form
+                </button>
+                <button
+                  onClick={execute}
+                  disabled={!canExecute || busy}
+                  className="rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-40"
+                >
+                  {busy ? "Executing…" : `Execute ${ACTION_LABELS[action]?.split(" ")[0] || ""} & log`}
+                </button>
+              </div>
+              {execErr && <p className="mt-2 text-right text-xs text-rose-400">{execErr}</p>}
             </div>
 
             {/* LEAP — auto-picked, read-only */}
-            <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
+            <div className={`rounded-lg border bg-slate-950 p-3 ${action === "buy_leap" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">LEAP (auto-picked, delta ~0.90)</h3>
                 <span className="text-xs text-slate-500">read-only</span>
               </div>
               {leap ? (
                 <div className="space-y-1">
-                  <div className="grid grid-cols-4 gap-2 text-xs uppercase tracking-wide text-slate-500">
-                    <span>Strike</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
+                  <StrikeHead />
+                  <div className="grid grid-cols-4 gap-2 py-1 text-sm tabular-nums">
+                    <span className="font-semibold text-slate-100">{fmt(leap.strike, 2)}</span>
+                    <span className="text-slate-300">{dollars(leap.bid)} / {dollars(leap.ask)}</span>
+                    <span className="text-slate-400">{dollars(leap.mark)}</span>
+                    <span className="text-emerald-300">{dollars(leap.extrinsic)}</span>
                   </div>
-                  <StrikeRow s={leap} />
                   <div className="pt-1 text-xs text-slate-500">
-                    {leap.dte} DTE · delta {fmt(leap.delta, 2)} · {leap.target_contracts} contracts
-                    {leap.expiration ? ` · exp ${leap.expiration}` : ""}
+                    {leap.dte} DTE · delta {fmt(leap.delta, 2)} · IV {leap.volatility != null ? `${fmt(leap.volatility, 1)}%` : "—"}
+                    {leap.extrinsic_total != null ? ` · total extrinsic ${bigDollars(leap.extrinsic_total)}` : ""}
                   </div>
                 </div>
-              ) : (
-                <p className="text-sm text-slate-400">No suitable LEAP strike found.</p>
-              )}
+              ) : <p className="text-sm text-slate-400">No suitable LEAP strike found.</p>}
             </div>
 
+            {/* Open short buyback (only when rolling/closing) */}
+            {openShort && (
+              <div className={`rounded-lg border bg-slate-950 p-3 ${action === "close_short" ? "border-sky-700" : "border-slate-800"}`}>
+                <h3 className="mb-2 text-sm font-semibold text-slate-200">Open short (buy to close)</h3>
+                <div className="text-sm text-slate-300">
+                  {fmt(openShort.strike, 2)} · {openShort.contracts}c · {openShort.dte} DTE · est. buyback{" "}
+                  <span className="font-semibold text-slate-100">{dollars(openShort.current_mark)}/sh</span>
+                </div>
+              </div>
+            )}
+
             {/* Weekly short — ATR-suggested, user-adjustable */}
-            <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
+            <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">Weekly short call (ATR-suggested)</h3>
-                {weekly && (
-                  <span className="text-xs text-slate-500">
-                    {weekly.dte} DTE · {weekly.atr_mult}×ATR {fmt(weekly.atr, 2)}
-                  </span>
-                )}
+                {weekly && <span className="text-xs text-slate-500">{weekly.dte} DTE · {weekly.atr_mult}×ATR {fmt(weekly.atr, 2)}</span>}
               </div>
               {weekly?.strikes?.length ? (
                 <>
@@ -162,8 +279,7 @@ export default function OptionChainModal({ ticker, onConfirm, onClose }) {
                       }`}
                     >
                       <input
-                        type="radio"
-                        name="weekly-strike"
+                        type="radio" name="weekly-strike"
                         checked={s.strike === weeklyStrike}
                         onChange={() => setWeeklyStrike(s.strike)}
                         className="accent-emerald-400"
@@ -178,22 +294,7 @@ export default function OptionChainModal({ ticker, onConfirm, onClose }) {
                     </label>
                   ))}
                 </>
-              ) : (
-                <p className="text-sm text-slate-400">No weekly strikes available.</p>
-              )}
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-1">
-              <button onClick={onClose} className="rounded-lg border border-slate-700 px-4 py-2 text-sm text-slate-300 hover:bg-slate-800">
-                Cancel
-              </button>
-              <button
-                onClick={confirm}
-                disabled={!chosenWeekly && !leap}
-                className="rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-40"
-              >
-                Confirm strikes
-              </button>
+              ) : <p className="text-sm text-slate-400">No weekly strikes available.</p>}
             </div>
           </div>
         )}

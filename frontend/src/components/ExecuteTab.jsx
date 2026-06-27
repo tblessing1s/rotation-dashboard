@@ -96,20 +96,27 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
     else setForm({ ...form, action });
   }
 
-  async function submit() {
+  // Shared by the form's Execute button and the option-chain modal's one-click
+  // execute. Throws on failure so the caller (e.g. the modal) can react.
+  async function runExecute(payload) {
     setBusy(true); setError(null); setResult(null);
     try {
-      const payload = { action: form.action, ticker, contracts: Number(form.contracts) || 0 };
-      if (form.strike !== "") payload.strike = Number(form.strike);
-      if (form.stock_price !== "") payload.stock_price = Number(form.stock_price);
-      if (form.action === "buy_leap" && form.execution_price !== "") payload.execution_price = Number(form.execution_price);
-      if (form.action === "sell_short" && form.premium_per_share !== "") payload.premium_per_share = Number(form.premium_per_share);
-      if (form.action === "close_short" && form.close_price_per_share !== "") payload.close_price_per_share = Number(form.close_price_per_share);
       const res = await api.execute(payload);
       setResult(res);
       onExecuted?.();
-    } catch (e) { setError(e.message); }
+      return res;
+    } catch (e) { setError(e.message); throw e; }
     finally { setBusy(false); }
+  }
+
+  async function submit() {
+    const payload = { action: form.action, ticker, contracts: Number(form.contracts) || 0 };
+    if (form.strike !== "") payload.strike = Number(form.strike);
+    if (form.stock_price !== "") payload.stock_price = Number(form.stock_price);
+    if (form.action === "buy_leap" && form.execution_price !== "") payload.execution_price = Number(form.execution_price);
+    if (form.action === "sell_short" && form.premium_per_share !== "") payload.premium_per_share = Number(form.premium_per_share);
+    if (form.action === "close_short" && form.close_price_per_share !== "") payload.close_price_per_share = Number(form.close_price_per_share);
+    try { await runExecute(payload); } catch { /* surfaced via error state */ }
   }
 
   const field = (k) => ({ value: form[k], onChange: (e) => setForm({ ...form, [k]: e.target.value }) });
@@ -219,6 +226,7 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
         <OptionChainModal
           ticker={ticker}
           onConfirm={onChainConfirm}
+          onExecute={runExecute}
           onClose={() => setChainOpen(false)}
         />
       )}

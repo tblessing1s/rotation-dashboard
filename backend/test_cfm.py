@@ -110,6 +110,28 @@ def test_get_nearby_strikes_flags_suggested():
     assert len(suggested) == 1 and suggested[0]["strike"] == 69.0  # closest to 69.4
 
 
+def test_hist_vol_is_positive_annualized_pct():
+    df = _frame(100 + np.cumsum(np.random.RandomState(7).normal(0, 1, 60)))
+    hv = ind.hist_vol(df, 20)
+    assert hv is not None and hv > 0
+    assert ind.hist_vol(_frame([100, 101, 102]), 20) is None  # too little history
+
+
+def test_detect_action_follows_position_state():
+    import option_chain as oc
+    assert oc._detect_action(has_leap=False, open_shorts=[])[0] == "buy_leap"
+    assert oc._detect_action(has_leap=True, open_shorts=[])[0] == "sell_short"
+    assert oc._detect_action(has_leap=True, open_shorts=[{"strike": 50}])[0] == "close_short"
+
+
+def test_iv_view_flags_rich_vs_cheap():
+    import option_chain as oc
+    assert oc._iv_view(weekly_iv=44.0, leap_iv=33.0, hv=20.0)["premium"] == "rich"
+    assert oc._iv_view(weekly_iv=15.0, leap_iv=14.0, hv=20.0)["premium"] == "cheap"
+    assert oc._iv_view(weekly_iv=21.0, leap_iv=20.0, hv=20.0)["premium"] == "fair"
+    assert oc._iv_view(weekly_iv=None, leap_iv=None, hv=20.0)["premium"] == "unknown"
+
+
 def test_insufficient_history_returns_none():
     df = _frame([1, 2, 3])
     assert ind.sma(df, 21) is None
