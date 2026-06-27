@@ -118,6 +118,10 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
     if (form.strike !== "") payload.strike = Number(form.strike);
     if (form.stock_price !== "") payload.stock_price = Number(form.stock_price);
     if (form.action === "buy_leap" && form.execution_price !== "") payload.execution_price = Number(form.execution_price);
+    if (form.action === "buy_leap" && locked?.leap) {
+      if (locked.leap.expiration) payload.expiration = locked.leap.expiration;
+      if (locked.leap.dte != null) payload.dte = locked.leap.dte;
+    }
     if (form.action === "sell_short" && form.premium_per_share !== "") payload.premium_per_share = Number(form.premium_per_share);
     if (form.action === "close_short" && form.close_price_per_share !== "") payload.close_price_per_share = Number(form.close_price_per_share);
     if (form.action === "close_leap" && form.close_leap_price !== "") payload.close_price = Number(form.close_leap_price);

@@ -99,6 +99,8 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
     if (chain.underlying_price != null) base.stock_price = chain.underlying_price;
     if (action === "buy_leap" && leap) {
       base.strike = leap.strike;
+      if (leap.expiration) base.expiration = leap.expiration;
+      if (leap.dte != null) base.dte = leap.dte;
       if (leap.mark != null) base.execution_price = Math.round(leap.mark * 100 * 100) / 100;
     } else if (action === "sell_short" && chosenWeekly) {
       base.strike = chosenWeekly.strike;
@@ -139,7 +141,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
       underlying_price: chain.underlying_price,
       regime: chain.regime,
       atr_mult: chain.atr_mult,
-      leap: leap ? { strike: leap.strike, mark: leap.mark, contracts: qtyNum, dte: leap.dte } : null,
+      leap: leap ? { strike: leap.strike, mark: leap.mark, contracts: qtyNum, dte: leap.dte, expiration: leap.expiration } : null,
       weekly: chosenWeekly ? { strike: chosenWeekly.strike, mark: chosenWeekly.mark, dte: weekly.dte } : null,
     });
     onClose?.();

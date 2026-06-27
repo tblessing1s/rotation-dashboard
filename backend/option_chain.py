@@ -209,7 +209,14 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     existing_leap_view = None
     if has_leap:
         held_strike = existing_leap.get("strike")
+        held_exp = existing_leap.get("expiration")
         cands = [c for c in contracts if c.get("strike") == held_strike and c.get("dte") is not None]
+        # Prefer the exact stored expiration; fall back to the far-dated match for
+        # older positions saved before the expiration was persisted.
+        if held_exp:
+            exact = [c for c in cands if c.get("expiration") == held_exp]
+            if exact:
+                cands = exact
         match = max(cands, key=lambda c: c["dte"]) if cands else None
         match = indicators._augment(match, underlying) if match else None
         existing_leap_view = {

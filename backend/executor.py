@@ -118,6 +118,7 @@ def _buy_leap(payload, ticker, strike, contracts, stock_price):
             "current_bid": total, "intrinsic": round(intrinsic_per_contract * contracts, 2),
             "extrinsic": round(extrinsic_at_entry, 2),
             "entry_date": log.utcnow()[:10], "dte": payload.get("dte", config.LEAP_TARGET_DTE),
+            "expiration": payload.get("expiration"),
             "extrinsic_at_entry": round(extrinsic_at_entry, 2), "extrinsic_collected_to_date": 0,
         }
         position["status"] = "active"
