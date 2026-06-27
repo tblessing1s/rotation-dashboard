@@ -50,6 +50,26 @@ export function Stat({ label, value, sub, tone = "text-slate-100" }) {
   );
 }
 
+export function Spinner({ size = "h-4 w-4", className = "" }) {
+  return (
+    <span
+      role="status"
+      aria-label="loading"
+      className={`inline-block animate-spin rounded-full border-2 border-slate-600 border-t-slate-200 ${size} ${className}`}
+    />
+  );
+}
+
+// Centered spinner + label for a section that's waiting on data.
+export function Loading({ label = "Loading…", className = "" }) {
+  return (
+    <div className={`flex items-center justify-center gap-2 py-6 text-sm text-slate-400 ${className}`}>
+      <Spinner />
+      <span>{label}</span>
+    </div>
+  );
+}
+
 export function Meter({ pct, tone = "bg-emerald-500" }) {
   const w = Math.max(0, Math.min(100, pct || 0));
   return (

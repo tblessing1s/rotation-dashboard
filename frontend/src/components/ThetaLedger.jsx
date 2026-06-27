@@ -1,10 +1,10 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Stat, Meter, money, fmt, useApi } from "./ui.jsx";
+import { Card, Stat, Meter, Loading, money, fmt, useApi } from "./ui.jsx";
 
 export default function ThetaLedger() {
   const { data, error, loading } = useApi(api.thetaLedger, [], null);
-  if (loading && !data) return <Card title="Theta Ledger">Loading…</Card>;
+  if (loading && !data) return <Card title="Theta Ledger"><Loading /></Card>;
   if (error) return <Card title="Theta Ledger"><p className="text-sm text-rose-400">{error}</p></Card>;
 
   const totals = data?.totals || {};

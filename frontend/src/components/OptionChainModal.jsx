@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Pill, fmt } from "./ui.jsx";
+import { Pill, Loading, fmt } from "./ui.jsx";
 
 // Dollar formatter that tolerates nulls (—) for thin/closed quotes.
 function dollars(n) {
@@ -164,7 +164,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
           <button onClick={onClose} className="rounded-lg px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200">✕</button>
         </div>
 
-        {loading && <p className="py-8 text-center text-sm text-slate-400">Loading chain…</p>}
+        {loading && <Loading label="Loading chain…" className="py-8" />}
 
         {error && (
           <div className="rounded-lg border border-rose-800 bg-rose-500/10 p-4 text-sm text-rose-200">

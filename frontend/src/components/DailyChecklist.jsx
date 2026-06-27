@@ -1,13 +1,13 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Light, useApi } from "./ui.jsx";
+import { Card, Light, Loading, useApi } from "./ui.jsx";
 
 export default function DailyChecklist() {
   const { data, error, loading } = useApi(api.dailyChecklist, [], null);
   // "Done" marks are local/manual per the spec (read-only computed status today).
   const [done, setDone] = React.useState({});
 
-  if (loading && !data) return <Card title="Daily Checklist">Loading…</Card>;
+  if (loading && !data) return <Card title="Daily Checklist"><Loading /></Card>;
   if (error) return <Card title="Daily Checklist"><p className="text-sm text-rose-400">{error}</p></Card>;
 
   const items = data?.items || [];

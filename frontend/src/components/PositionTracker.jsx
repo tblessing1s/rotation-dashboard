@@ -1,10 +1,10 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Stat, Meter, Pill, money, fmt, pct, useApi } from "./ui.jsx";
+import { Card, Stat, Meter, Pill, Loading, money, fmt, pct, useApi } from "./ui.jsx";
 
 export default function PositionTracker() {
   const { data, error, loading } = useApi(api.positions, [], null);
-  if (loading && !data) return <Card title="Positions">Loading…</Card>;
+  if (loading && !data) return <Card title="Positions"><Loading /></Card>;
   if (error) return <Card title="Positions"><p className="text-sm text-rose-400">{error}</p></Card>;
 
   const positions = data?.positions || [];

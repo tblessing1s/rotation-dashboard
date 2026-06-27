@@ -1,10 +1,10 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Light, pct, useApi } from "./ui.jsx";
+import { Card, Pill, Light, Loading, pct, useApi } from "./ui.jsx";
 
 export default function KillSwitchMonitor() {
   const { data, error, loading } = useApi(api.killSwitch, [], 5 * 60 * 1000);
-  if (loading && !data) return <Card title="Kill Switch">Loading…</Card>;
+  if (loading && !data) return <Card title="Kill Switch"><Loading /></Card>;
   if (error) return <Card title="Kill Switch"><p className="text-sm text-rose-400">{error}</p></Card>;
 
   const positions = data?.positions || [];
