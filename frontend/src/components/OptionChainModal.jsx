@@ -269,7 +269,8 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
                 {leap?.delta_band && (
                   <span className="text-xs text-slate-500">
                     target delta {fmt(leap.delta_band[0], 2)}–{fmt(leap.delta_band[1], 2)}
-                    {leap.dte != null ? ` · ${leap.dte} DTE` : ""}
+                    {leap.expiration ? ` · exp ${leap.expiration}` : ""}
+                    {leap.dte != null ? ` (${leap.dte} DTE)` : ""}
                   </span>
                 )}
               </div>
@@ -307,7 +308,8 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
                   })}
                   {chosenLeap && (
                     <div className="pt-1 text-xs text-slate-500">
-                      Selected {fmt(chosenLeap.strike, 2)} · delta {fmt(chosenLeap.delta, 2)} · IV{" "}
+                      Selected {fmt(chosenLeap.strike, 2)}
+                      {chosenLeap.expiration ? ` exp ${chosenLeap.expiration}` : ""} · delta {fmt(chosenLeap.delta, 2)} · IV{" "}
                       {chosenLeap.volatility != null ? `${fmt(chosenLeap.volatility, 1)}%` : "—"}
                       {chosenLeap.extrinsic != null && qtyNum > 0
                         ? ` · total extrinsic ${bigDollars(chosenLeap.extrinsic * 100 * qtyNum)}` : ""}
@@ -355,7 +357,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
             <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">Weekly short call (ATR-suggested)</h3>
-                {weekly && <span className="text-xs text-slate-500">{weekly.dte} DTE · {weekly.atr_mult}×ATR {fmt(weekly.atr, 2)}</span>}
+                {weekly && <span className="text-xs text-slate-500">{weekly.expiration ? `exp ${weekly.expiration} · ` : ""}{weekly.dte} DTE · {weekly.atr_mult}×ATR {fmt(weekly.atr, 2)}</span>}
               </div>
               {weekly?.strikes?.length ? (
                 <>
