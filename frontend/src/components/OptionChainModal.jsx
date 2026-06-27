@@ -16,6 +16,7 @@ const ACTION_LABELS = {
   buy_leap: "Buy LEAP (deep ITM)",
   sell_short: "Sell weekly short call",
   close_short: "Close / roll short call",
+  close_leap: "Close LEAP (sell to close)",
 };
 
 function StrikeHead({ extra }) {
@@ -53,8 +54,10 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
         const sug = c.weekly?.strikes?.find((s) => s.suggested) || c.weekly?.strikes?.[0];
         setWeeklyStrike(sug ? sug.strike : null);
         setAction(c.suggested_action || "buy_leap");
-        const defQty = c.suggested_action === "close_short" && c.position?.open_short?.contracts
-          ? c.position.open_short.contracts
+        const sa = c.suggested_action;
+        const defQty =
+          sa === "close_short" && c.position?.open_short?.contracts ? c.position.open_short.contracts
+          : sa === "close_leap" && c.position?.existing_leap?.contracts ? c.position.existing_leap.contracts
           : c.quantity_default ?? 5;
         setQty(String(defQty));
       })
@@ -68,12 +71,17 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
   const iv = chain?.iv;
   const position = chain?.position;
   const openShort = position?.open_short;
-  // Management-only (RED tape): entries are blocked, so the only move is
-  // closing/rolling the open short to exit. Hide the entry-oriented sections.
+  const existingLeap = position?.existing_leap;
+  // Management-only (RED tape): entries are blocked, so the only moves are
+  // closing the open short and/or selling the LEAP to exit.
   const mgmt = !!chain?.management_only;
   const actionOptions = mgmt
-    ? { close_short: ACTION_LABELS.close_short }
+    ? {
+        ...(position?.open_short_count ? { close_short: ACTION_LABELS.close_short } : {}),
+        ...(position?.has_leap ? { close_leap: ACTION_LABELS.close_leap } : {}),
+      }
     : ACTION_LABELS;
+  const showPayoff = !mgmt && action !== "close_leap";
   const chosenWeekly = weekly?.strikes?.find((s) => s.strike === weeklyStrike) || null;
   const qtyNum = Number(qty) || 0;
 
@@ -99,6 +107,12 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
       base.strike = openShort.strike;
       base.contracts = qtyNum || openShort.contracts;
       if (openShort.current_mark != null) base.close_price_per_share = openShort.current_mark;
+    } else if (action === "close_leap" && existingLeap) {
+      base.strike = existingLeap.strike;
+      base.contracts = qtyNum || existingLeap.contracts;
+      // close_price is per-contract total dollars (mirrors buy_leap).
+      if (existingLeap.current_mark != null) base.close_price = Math.round(existingLeap.current_mark * 100 * 100) / 100;
+      if (existingLeap.cost_basis != null) base.cost_basis = existingLeap.cost_basis;
     }
     return base;
   }
@@ -107,7 +121,8 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
     qtyNum > 0 &&
     ((action === "buy_leap" && leap) ||
       (action === "sell_short" && chosenWeekly) ||
-      (action === "close_short" && openShort));
+      (action === "close_short" && openShort) ||
+      (action === "close_leap" && existingLeap));
 
   async function execute() {
     setBusy(true); setExecErr(null);
@@ -193,7 +208,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
                   <select
                     value={action || ""}
                     onChange={(e) => setAction(e.target.value)}
-                    disabled={mgmt}
+                    disabled={Object.keys(actionOptions).length <= 1}
                     className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100 disabled:opacity-60"
                   >
                     {Object.entries(actionOptions).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
@@ -210,7 +225,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
               </div>
 
               {/* Payoff estimate — entry context only; irrelevant when exiting */}
-              {!mgmt && (
+              {showPayoff && (
                 <>
                   <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-slate-950 p-3 text-center">
                     <div>
@@ -279,6 +294,27 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
                 <div className="text-sm text-slate-300">
                   {fmt(openShort.strike, 2)} · {openShort.contracts}c · {openShort.dte} DTE · est. buyback{" "}
                   <span className="font-semibold text-slate-100">{dollars(openShort.current_mark)}/sh</span>
+                </div>
+              </div>
+            )}
+
+            {/* Existing LEAP sell-to-close (when exiting/rolling the long) */}
+            {action === "close_leap" && existingLeap && (
+              <div className="rounded-lg border border-sky-700 bg-slate-950 p-3">
+                <h3 className="mb-2 text-sm font-semibold text-slate-200">Existing LEAP (sell to close)</h3>
+                <div className="text-sm text-slate-300">
+                  {fmt(existingLeap.strike, 2)} · {existingLeap.contracts}c
+                  {existingLeap.current_dte != null ? ` · ${existingLeap.current_dte} DTE` : ""} · est. sell{" "}
+                  <span className="font-semibold text-slate-100">{dollars(existingLeap.current_mark)}/sh</span>
+                </div>
+                <div className="mt-1 text-xs text-slate-500">
+                  Cost basis {bigDollars(existingLeap.cost_basis)}
+                  {existingLeap.current_mark != null && existingLeap.contracts != null && (
+                    <> · est. proceeds {bigDollars(existingLeap.current_mark * 100 * existingLeap.contracts)}</>
+                  )}
+                  {existingLeap.extrinsic_remaining != null && (
+                    <> · {bigDollars(existingLeap.extrinsic_remaining)} extrinsic still unrecovered</>
+                  )}
                 </div>
               </div>
             )}

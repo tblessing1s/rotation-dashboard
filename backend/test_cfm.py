@@ -122,9 +122,10 @@ def test_detect_action_follows_position_state():
     assert oc._detect_action(has_leap=False, open_shorts=[])[0] == "buy_leap"
     assert oc._detect_action(has_leap=True, open_shorts=[])[0] == "sell_short"
     assert oc._detect_action(has_leap=True, open_shorts=[{"strike": 50}])[0] == "close_short"
-    # Management-only (RED) — entries are off the table, only close/roll.
-    assert oc._detect_action(False, [], management_only=True)[0] == "close_short"
+    # Management-only (RED) — entries are off the table. Close the short first
+    # if one is open, otherwise sell the LEAP to exit the long.
     assert oc._detect_action(True, [{"strike": 50}], management_only=True)[0] == "close_short"
+    assert oc._detect_action(True, [], management_only=True)[0] == "close_leap"
 
 
 def test_red_regime_blocks_entries_but_allows_managing_open_positions(monkeypatch):
@@ -204,6 +205,30 @@ def test_execute_flow_builds_ledger(monkeypatch, tmp_path):
     # short was closed -> removed from the position
     pos = logging_handler.find_position(state, "ON")
     assert pos["short_calls"] == []
+
+
+def test_close_leap_clears_position_and_records_pnl(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
+    import importlib
+    import logging_handler
+    importlib.reload(logging_handler)
+    import executor
+    importlib.reload(executor)
+
+    executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
+                      "contracts": 5, "execution_price": 3300, "stock_price": 145})
+    # Sell the LEAP to close: proceeds 3600*5=18000 vs cost basis 3300*5=16500.
+    res = executor.execute({"action": "close_leap", "ticker": "ON", "strike": 130,
+                            "contracts": 5, "close_price": 3600, "stock_price": 150})
+    assert res["execution"]["realized_pnl"] == 1500.0
+    # intrinsic/contract = (150-130)*100 = 2000; extrinsic remaining = (3600-2000)*5 = 8000
+    assert res["execution"]["extrinsic_remaining"] == 8000.0
+
+    state = logging_handler.load_state()
+    pos = logging_handler.find_position(state, "ON")
+    assert pos["leap"] is None
+    assert pos["status"] == "closed"  # no shares or shorts left
 
 
 def test_execute_rejects_bad_action():

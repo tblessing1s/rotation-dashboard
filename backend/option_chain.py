@@ -104,8 +104,10 @@ def _detect_action(has_leap: bool, open_shorts: list, management_only: bool = Fa
     move is closing/rolling an open short to de-risk or exit."""
     if management_only:
         if open_shorts:
-            return "close_short", "Market is RED — buy to close / roll the open short to reduce risk."
-        return "close_short", "Market is RED — entries blocked. Exit the LEAP at your broker (no close-LEAP action here)."
+            return "close_short", "Market is RED — buy to close / roll the open short first to remove the obligation."
+        if has_leap:
+            return "close_leap", "Market is RED — sell the LEAP to close and exit the long."
+        return "close_short", "Market is RED — entries blocked."
     if not has_leap:
         return "buy_leap", "No LEAP held yet — establish the deep-ITM long first."
     if not open_shorts:
@@ -202,6 +204,25 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
             "entry_extrinsic_per_share": sc.get("entry_extrinsic_per_share"),
         }
 
+    # --- Existing LEAP: surface its live sell-to-close value (for exits/rolls).
+    # Match the held strike to the far-dated contract (largest DTE = the LEAP).
+    existing_leap_view = None
+    if has_leap:
+        held_strike = existing_leap.get("strike")
+        cands = [c for c in contracts if c.get("strike") == held_strike and c.get("dte") is not None]
+        match = max(cands, key=lambda c: c["dte"]) if cands else None
+        match = indicators._augment(match, underlying) if match else None
+        existing_leap_view = {
+            "strike": held_strike,
+            "contracts": existing_leap.get("contracts"),
+            "cost_basis": existing_leap.get("cost_basis"),
+            "current_bid": (match or {}).get("bid"),
+            "current_ask": (match or {}).get("ask"),
+            "current_mark": (match or {}).get("mark"),
+            "current_dte": (match or {}).get("dte"),
+            "extrinsic_remaining": state.get("extrinsic_payback", {}).get(ticker, {}).get("remaining_to_payback"),
+        }
+
     # --- Income payoff: how much LEAP extrinsic must be covered, and a rough
     # weeks-to-income-positive estimate from the suggested weekly juice --------
     qty = leap_contracts
@@ -241,6 +262,7 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
             "leap_contracts": (existing_leap or {}).get("contracts"),
             "open_short_count": len(open_shorts),
             "open_short": open_short_view,
+            "existing_leap": existing_leap_view,
         },
         "iv": _iv_view(weekly_iv, (leap or {}).get("volatility"), hv),
         "leap": leap,

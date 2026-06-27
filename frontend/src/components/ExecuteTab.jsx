@@ -37,7 +37,7 @@ function GateLevel({ lv }) {
   );
 }
 
-const BLANK = { action: "buy_leap", strike: "", contracts: 5, execution_price: "", premium_per_share: "", close_price_per_share: "", stock_price: "" };
+const BLANK = { action: "buy_leap", strike: "", contracts: 5, execution_price: "", premium_per_share: "", close_price_per_share: "", close_leap_price: "", stock_price: "" };
 
 export default function ExecuteTab({ initialTicker, onExecuted }) {
   const [ticker, setTicker] = React.useState(initialTicker || "");
@@ -94,7 +94,9 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
   }
 
   function changeAction(action) {
-    if (locked) applyPick(locked, action);
+    // close_leap targets the existing LEAP, not a chain-picked strike, so don't
+    // overwrite the form from a locked entry pick for it.
+    if (locked && action !== "close_leap") applyPick(locked, action);
     else setForm({ ...form, action });
   }
 
@@ -118,6 +120,7 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
     if (form.action === "buy_leap" && form.execution_price !== "") payload.execution_price = Number(form.execution_price);
     if (form.action === "sell_short" && form.premium_per_share !== "") payload.premium_per_share = Number(form.premium_per_share);
     if (form.action === "close_short" && form.close_price_per_share !== "") payload.close_price_per_share = Number(form.close_price_per_share);
+    if (form.action === "close_leap" && form.close_leap_price !== "") payload.close_price = Number(form.close_leap_price);
     try { await runExecute(payload); } catch { /* surfaced via error state */ }
   }
 
@@ -187,6 +190,7 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
               <option value="buy_leap">Buy LEAP (deep ITM)</option>
               <option value="sell_short">Sell weekly short call</option>
               <option value="close_short">Close / roll short call</option>
+              <option value="close_leap">Close LEAP (sell to close)</option>
             </select>
           </label>
           <label className="text-slate-400">Strike
@@ -208,6 +212,11 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
           {form.action === "close_short" && (
             <label className="text-slate-400">Close / share ($)
               <input {...field("close_price_per_share")} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100" />
+            </label>
+          )}
+          {form.action === "close_leap" && (
+            <label className="text-slate-400">Close / contract ($)
+              <input {...field("close_leap_price")} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100" />
             </label>
           )}
           <label className="text-slate-400">Stock price (optional)
