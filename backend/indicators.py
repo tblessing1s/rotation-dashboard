@@ -156,3 +156,78 @@ def short_strike(price: float, atr_value: float, mult: float = config.SHORT_ATR_
     """Suggested weekly short-call strike = price - mult*ATR, rounded to 0.5."""
     raw = price - mult * atr_value
     return round(raw * 2) / 2
+
+
+# ---------------------------------------------------------------------------
+# Option-chain helpers
+# ---------------------------------------------------------------------------
+# These operate on the normalized call-contract dicts produced by
+# schwab_api.parse_call_chain (strike/expiration/dte/bid/ask/mark/delta/...), so
+# the math stays provider-agnostic and JSON-serializable.
+
+def calculate_extrinsic(bid: float | None, ask: float | None, strike: float,
+                        underlying_price: float | None) -> float | None:
+    """Extrinsic (time) value per share = option midpoint − intrinsic.
+
+    Midpoint is (bid+ask)/2; intrinsic for a call is max(underlying − strike, 0).
+    Returns None when the quote is missing; clamps to ≥ 0 (a stale ITM mark can
+    print just under intrinsic)."""
+    if bid is None or ask is None:
+        return None
+    mid = (bid + ask) / 2
+    intrinsic = max((underlying_price or 0) - strike, 0)
+    return round(max(mid - intrinsic, 0), 4)
+
+
+def _augment(contract: dict, underlying_price: float | None) -> dict:
+    """Add mark (midpoint fallback), intrinsic, and extrinsic to a contract."""
+    bid, ask = contract.get("bid"), contract.get("ask")
+    mark = contract.get("mark")
+    if mark is None and bid is not None and ask is not None:
+        mark = round((bid + ask) / 2, 4)
+    intrinsic = round(max((underlying_price or 0) - contract["strike"], 0), 4)
+    return {**contract, "mark": mark, "intrinsic": intrinsic,
+            "extrinsic": calculate_extrinsic(bid, ask, contract["strike"], underlying_price)}
+
+
+def find_leap_strike(contracts: list[dict], underlying_price: float | None,
+                     target_delta: float = config.LEAP_TARGET_DELTA,
+                     target_dte: int = config.LEAP_TARGET_DTE) -> dict | None:
+    """Auto-pick the deep-ITM LEAP: the expiration whose DTE is closest to
+    target_dte, then within it the strike whose |delta| is closest to
+    target_delta. Falls back to a strike heuristic when deltas are absent (Schwab
+    omits greeks when the market is closed). Returns the chosen contract augmented
+    with mark/intrinsic/extrinsic, or None when there are no contracts."""
+    pool = [c for c in contracts if c.get("dte") is not None]
+    if not pool:
+        return None
+    best_dte = min({c["dte"] for c in pool}, key=lambda d: abs(d - target_dte))
+    pool = [c for c in pool if c["dte"] == best_dte]
+
+    have_delta = [c for c in pool if c.get("delta") is not None]
+    if have_delta:
+        chosen = min(have_delta, key=lambda c: abs(abs(c["delta"]) - target_delta))
+    else:
+        # No greeks: approximate a ~0.90-delta call as a strike well in the money.
+        # target_delta 0.90 → roughly (1 − 0.90) below spot as a rough proxy.
+        proxy = (underlying_price or 0) * (1 - (1 - target_delta))
+        chosen = min(pool, key=lambda c: abs(c["strike"] - proxy))
+    return _augment(chosen, underlying_price)
+
+
+def get_nearby_strikes(contracts: list[dict], target_strike: float,
+                       underlying_price: float | None, count: int = 3) -> list[dict]:
+    """The `count` available strikes nearest `target_strike` (a single
+    expiration's contracts), sorted ascending and each augmented with
+    mark/intrinsic/extrinsic plus a `suggested` flag on the closest strike."""
+    by_strike = {c["strike"]: c for c in contracts if c.get("strike") is not None}
+    if not by_strike:
+        return []
+    nearest = sorted(by_strike.values(), key=lambda c: abs(c["strike"] - target_strike))[:count]
+    closest = min(by_strike, key=lambda s: abs(s - target_strike))
+    out = []
+    for c in sorted(nearest, key=lambda c: c["strike"]):
+        row = _augment(c, underlying_price)
+        row["suggested"] = c["strike"] == closest
+        out.append(row)
+    return out
