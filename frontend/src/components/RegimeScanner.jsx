@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Light, Stat, Pill, fmt, useApi } from "./ui.jsx";
+import { Card, Light, Stat, Pill, Loading, fmt, useApi } from "./ui.jsx";
 
 const REGIME_COPY = {
   green: "Market good — clear to hunt entries.",
@@ -16,7 +16,7 @@ export default function RegimeScanner({ onStatus }) {
     if (data?.status) onStatus?.(data.status);
   }, [data, onStatus]);
 
-  if (loading && !data) return <Card title="Market Regime">Loading…</Card>;
+  if (loading && !data) return <Card title="Market Regime"><Loading /></Card>;
   if (error) return <Card title="Market Regime"><p className="text-rose-400 text-sm">{error}</p></Card>;
 
   const r = data || {};

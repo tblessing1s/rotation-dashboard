@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Light, fmt } from "./ui.jsx";
+import { Card, Pill, Light, Loading, fmt } from "./ui.jsx";
 import OptionChainModal from "./OptionChainModal.jsx";
 
 function checkValue(v) {
@@ -49,16 +49,19 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
   const [error, setError] = React.useState(null);
   const [chainOpen, setChainOpen] = React.useState(false);
   const [locked, setLocked] = React.useState(null); // confirmed chain pick
+  const [gateLoading, setGateLoading] = React.useState(false);
 
   React.useEffect(() => { if (initialTicker) setTicker(initialTicker); }, [initialTicker]);
 
   const loadGate = React.useCallback(async (t) => {
     if (!t) return;
     setError(null); setGate(null); setRoll(null); setLocked(null); setChainOpen(false);
+    setGateLoading(true);
     try {
       const [g, r] = await Promise.all([api.entryGate(t), api.rollSuggestion(t).catch(() => null)]);
       setGate(g); setRoll(r);
     } catch (e) { setError(e.message); }
+    finally { setGateLoading(false); }
   }, []);
 
   React.useEffect(() => { if (ticker) loadGate(ticker); }, [ticker, loadGate]);
@@ -145,6 +148,7 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
           </button>
         </div>
         {error && <p className="text-sm text-rose-400">{error}</p>}
+        {gateLoading && <Loading label="Running gate…" />}
         {gate?.levels?.map((lv) => <GateLevel key={lv.level} lv={lv} />)}
         {gate && (
           <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3 text-sm">
