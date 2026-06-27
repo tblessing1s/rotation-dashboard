@@ -153,6 +153,7 @@ def recompute_derived(state: dict) -> dict:
     # Extrinsic payback meter per position: how much of the LEAP's entry
     # extrinsic the collected short juice has paid back.
     payback: dict[str, dict] = {}
+    agg_at_entry = agg_collected = agg_remaining = 0.0
     for p in state.get("positions", []):
         ticker = p.get("ticker", "")
         leap = p.get("leap") or {}
@@ -168,5 +169,21 @@ def recompute_derived(state: dict) -> dict:
         # keep the position's own running tally in sync
         if leap:
             leap["extrinsic_collected_to_date"] = round(collected, 2)
+        # Aggregate only positions still carrying LEAP extrinsic to recover —
+        # this is the income hurdle the book must clear to be net-positive.
+        if at_entry > 0:
+            agg_at_entry += at_entry
+            agg_collected += collected
+            agg_remaining += remaining
     state["extrinsic_payback"] = payback
+
+    # Book-wide income hurdle: the LEAP extrinsic folded into the ledger so the
+    # net juice is only "real" income once the LEAP extrinsic is paid off.
+    state["theta_ledger"]["extrinsic_summary"] = {
+        "leap_extrinsic_at_entry": round(agg_at_entry, 2),
+        "collected_to_date": round(agg_collected, 2),
+        "remaining_to_payback": round(agg_remaining, 2),
+        "net_income": round(agg_collected - agg_at_entry, 2),
+        "income_positive": agg_at_entry > 0 and agg_remaining <= 0,
+    }
     return state

@@ -10,6 +10,8 @@ export default function ThetaLedger() {
   const totals = data?.totals || {};
   const weeks = data?.weeks || [];
   const payback = data?.extrinsic_payback || {};
+  const summary = data?.extrinsic_summary || {};
+  const hurdle = summary.leap_extrinsic_at_entry || 0;
 
   return (
     <div className="grid gap-4">
@@ -19,6 +21,16 @@ export default function ThetaLedger() {
           <Stat label="This month" value={money(totals.this_month)} />
           <Stat label="YTD" value={money(totals.ytd)} />
         </div>
+        {hurdle > 0 && (
+          <div className="mt-4 grid grid-cols-3 gap-4 border-t border-slate-800 pt-4">
+            <Stat label="LEAP extrinsic hurdle" value={money(hurdle)} sub="income needed to net positive" />
+            <Stat label="Remaining to fill" value={money(summary.remaining_to_payback)}
+                  tone={summary.income_positive ? "text-emerald-300" : "text-amber-300"} />
+            <Stat label="Net income" value={money(summary.net_income)}
+                  tone={summary.income_positive ? "text-emerald-300" : "text-rose-300"}
+                  sub={summary.income_positive ? "income-positive ✓" : "still filling the LEAP"} />
+          </div>
+        )}
       </Card>
 
       <Card title="Extrinsic Payback (fill the LEAP before it's 'real' income)">

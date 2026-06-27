@@ -110,6 +110,98 @@ def test_get_nearby_strikes_flags_suggested():
     assert len(suggested) == 1 and suggested[0]["strike"] == 69.0  # closest to 69.4
 
 
+def test_hist_vol_is_positive_annualized_pct():
+    df = _frame(100 + np.cumsum(np.random.RandomState(7).normal(0, 1, 60)))
+    hv = ind.hist_vol(df, 20)
+    assert hv is not None and hv > 0
+    assert ind.hist_vol(_frame([100, 101, 102]), 20) is None  # too little history
+
+
+def test_detect_action_follows_position_state():
+    import option_chain as oc
+    assert oc._detect_action(has_leap=False, open_shorts=[])[0] == "buy_leap"
+    assert oc._detect_action(has_leap=True, open_shorts=[])[0] == "sell_short"
+    assert oc._detect_action(has_leap=True, open_shorts=[{"strike": 50}])[0] == "close_short"
+    # Management-only (RED) — entries are off the table. Close the short first
+    # if one is open, otherwise sell the LEAP to exit the long.
+    assert oc._detect_action(True, [{"strike": 50}], management_only=True)[0] == "close_short"
+    assert oc._detect_action(True, [], management_only=True)[0] == "close_leap"
+
+
+def test_red_regime_blocks_entries_but_allows_managing_open_positions(monkeypatch):
+    import option_chain as oc
+    import data_handler
+    import logging_handler as log
+    import screening
+
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "red"})
+
+    # RED + nothing to manage -> blocked (no chain fetch, no entries possible).
+    monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {}})
+    monkeypatch.setattr(log, "find_position", lambda s, t: None)
+    with pytest.raises(oc.RegimeBlocked):
+        oc.option_chain("ON")
+
+    # RED + an open short -> management-only mode so the user can exit.
+    df = _frame([100.0] * 60)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 100.0, "source": "test"})
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {
+        "status": "SUCCESS", "underlyingPrice": 100.0,
+        "callExpDateMap": {"2026-07-02:5": {"100.0": [
+            {"symbol": "X", "strikePrice": 100.0, "daysToExpiration": 5,
+             "bid": 1.4, "ask": 1.8, "mark": 1.6, "delta": 0.5, "volatility": 40.0, "openInterest": 5}]}}})
+    monkeypatch.setattr(log, "find_position", lambda s, t: {
+        "ticker": "ON", "leap": {"strike": 80.0, "contracts": 5},
+        "short_calls": [{"strike": 100.0, "contracts": 5, "dte": 3, "entry_extrinsic_per_share": 1.2}]})
+    monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {"ON": {"remaining_to_payback": 1000.0}}})
+
+    out = oc.option_chain("ON")
+    assert out["management_only"] is True
+    assert out["suggested_action"] == "close_short"
+    assert out["position"]["open_short"]["current_mark"] == 1.6
+
+
+def test_existing_leap_matches_stored_expiration(monkeypatch):
+    # Two contracts share strike 80 at different expirations; the held LEAP's
+    # stored expiration must disambiguate which one values the position.
+    import option_chain as oc
+    import data_handler
+    import logging_handler as log
+    import screening
+
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "green"})
+    df = _frame([100.0] * 60)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 100.0, "source": "test"})
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {
+        "status": "SUCCESS", "underlyingPrice": 100.0,
+        "callExpDateMap": {
+            "2026-09-18:90": {"80.0": [{"symbol": "A", "strikePrice": 80.0, "daysToExpiration": 90,
+                                        "bid": 21.0, "ask": 21.4, "mark": 21.2, "delta": 0.9}]},
+            "2026-12-18:174": {"80.0": [{"symbol": "B", "strikePrice": 80.0, "daysToExpiration": 174,
+                                         "bid": 22.0, "ask": 22.6, "mark": 22.3, "delta": 0.93}]},
+            "2026-07-02:5": {"100.0": [{"symbol": "W", "strikePrice": 100.0, "daysToExpiration": 5,
+                                        "bid": 1.4, "ask": 1.8, "mark": 1.6, "delta": 0.5}]},
+        }})
+    monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {"ON": {"remaining_to_payback": 1000.0}}})
+    monkeypatch.setattr(log, "find_position", lambda s, t: {
+        "ticker": "ON", "short_calls": [],
+        "leap": {"strike": 80.0, "contracts": 5, "cost_basis": 16500.0, "expiration": "2026-09-18"}})
+
+    out = oc.option_chain("ON")
+    el = out["position"]["existing_leap"]
+    assert el["current_dte"] == 90 and el["current_mark"] == 21.2  # the Sep contract, not Dec
+
+
+def test_iv_view_flags_rich_vs_cheap():
+    import option_chain as oc
+    assert oc._iv_view(weekly_iv=44.0, leap_iv=33.0, hv=20.0)["premium"] == "rich"
+    assert oc._iv_view(weekly_iv=15.0, leap_iv=14.0, hv=20.0)["premium"] == "cheap"
+    assert oc._iv_view(weekly_iv=21.0, leap_iv=20.0, hv=20.0)["premium"] == "fair"
+    assert oc._iv_view(weekly_iv=None, leap_iv=None, hv=20.0)["premium"] == "unknown"
+
+
 def test_insufficient_history_returns_none():
     df = _frame([1, 2, 3])
     assert ind.sma(df, 21) is None
@@ -128,7 +220,8 @@ def test_execute_flow_builds_ledger(monkeypatch, tmp_path):
     importlib.reload(executor)
 
     executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
-                      "contracts": 5, "execution_price": 3300, "stock_price": 145})
+                      "contracts": 5, "execution_price": 3300, "stock_price": 145,
+                      "expiration": "2026-12-18"})
     executor.execute({"action": "sell_short", "ticker": "ON", "strike": 140.5,
                       "contracts": 5, "premium_per_share": 6.0, "stock_price": 145})
     res = executor.execute({"action": "close_short", "ticker": "ON", "strike": 140.5,
@@ -145,6 +238,40 @@ def test_execute_flow_builds_ledger(monkeypatch, tmp_path):
     # short was closed -> removed from the position
     pos = logging_handler.find_position(state, "ON")
     assert pos["short_calls"] == []
+    # LEAP expiration is persisted at entry for exact close matching later.
+    assert pos["leap"]["expiration"] == "2026-12-18"
+
+    # The LEAP extrinsic is folded into the ledger as the income hurdle: only
+    # $250 of the $9000 is filled, so the book is not yet income-positive.
+    summary = state["theta_ledger"]["extrinsic_summary"]
+    assert summary["leap_extrinsic_at_entry"] == 9000.0
+    assert summary["remaining_to_payback"] == 8750.0
+    assert summary["net_income"] == -8750.0
+    assert summary["income_positive"] is False
+
+
+def test_close_leap_clears_position_and_records_pnl(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
+    import importlib
+    import logging_handler
+    importlib.reload(logging_handler)
+    import executor
+    importlib.reload(executor)
+
+    executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
+                      "contracts": 5, "execution_price": 3300, "stock_price": 145})
+    # Sell the LEAP to close: proceeds 3600*5=18000 vs cost basis 3300*5=16500.
+    res = executor.execute({"action": "close_leap", "ticker": "ON", "strike": 130,
+                            "contracts": 5, "close_price": 3600, "stock_price": 150})
+    assert res["execution"]["realized_pnl"] == 1500.0
+    # intrinsic/contract = (150-130)*100 = 2000; extrinsic remaining = (3600-2000)*5 = 8000
+    assert res["execution"]["extrinsic_remaining"] == 8000.0
+
+    state = logging_handler.load_state()
+    pos = logging_handler.find_position(state, "ON")
+    assert pos["leap"] is None
+    assert pos["status"] == "closed"  # no shares or shorts left
 
 
 def test_execute_rejects_bad_action():

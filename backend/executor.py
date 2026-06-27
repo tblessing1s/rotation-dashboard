@@ -17,7 +17,7 @@ import indicators
 import logging_handler as log
 import sector_data
 
-VALID_ACTIONS = {"buy_leap", "sell_short", "close_short"}
+VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap"}
 
 
 def live_enabled() -> bool:
@@ -73,6 +73,8 @@ def execute(payload: dict) -> dict:
         execution, position_update = _buy_leap(payload, ticker, strike, contracts, stock_price)
     elif action == "sell_short":
         execution, position_update = _sell_short(payload, ticker, strike, contracts, stock_price)
+    elif action == "close_leap":
+        execution, position_update = _close_leap(payload, ticker, strike, contracts, stock_price)
     else:  # close_short
         execution, position_update = _close_short(payload, ticker, strike, contracts, stock_price)
 
@@ -116,9 +118,45 @@ def _buy_leap(payload, ticker, strike, contracts, stock_price):
             "current_bid": total, "intrinsic": round(intrinsic_per_contract * contracts, 2),
             "extrinsic": round(extrinsic_at_entry, 2),
             "entry_date": log.utcnow()[:10], "dte": payload.get("dte", config.LEAP_TARGET_DTE),
+            "expiration": payload.get("expiration"),
             "extrinsic_at_entry": round(extrinsic_at_entry, 2), "extrinsic_collected_to_date": 0,
         }
         position["status"] = "active"
+    return execution, apply
+
+
+def _close_leap(payload, ticker, strike, contracts, stock_price):
+    """Sell the deep-ITM LEAP to close (exit or roll the long).
+
+    close_price is per-contract total dollars (mirrors buy_leap's execution_price).
+    Realized P&L is the sale proceeds minus the stored cost basis; the position's
+    leap is cleared and the position is marked closed if no shares/shorts remain.
+    """
+    close_per_contract = float(payload.get("close_price") or 0)
+    close_total = float(payload.get("close_total") or close_per_contract * contracts)
+    intrinsic_per_contract = max((stock_price or 0) - (strike or 0), 0) * 100
+    extrinsic_remaining = max(close_per_contract - intrinsic_per_contract, 0) * contracts
+
+    # Cost basis from the stored LEAP (caller may override).
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    leap = (position or {}).get("leap") or {}
+    cost_basis = payload.get("cost_basis")
+    cost_basis = float(cost_basis if cost_basis is not None else leap.get("cost_basis") or 0)
+    realized_pnl = round(close_total - cost_basis, 2)
+
+    execution = {
+        "ticker": ticker, "action": "close_leap", "strike": strike, "contracts": contracts,
+        "close_price": close_per_contract, "close_total": close_total, "stock_price": stock_price,
+        "cost_basis": round(cost_basis, 2), "realized_pnl": realized_pnl,
+        "extrinsic_remaining": round(extrinsic_remaining, 2),
+    }
+
+    def apply(position):
+        position["leap"] = None
+        shares = position.get("shares") or {}
+        if not position.get("short_calls") and int(shares.get("count") or 0) == 0:
+            position["status"] = "closed"
     return execution, apply
 
 

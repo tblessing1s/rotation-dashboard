@@ -135,7 +135,9 @@ def api_theta_ledger():
         if ticker:
             weeks = [w for w in weeks if w.get("ticker", "").upper() == ticker.upper()]
         totals = ledger.get("totals", {})
-        out = {"weeks": weeks, "totals": totals, "extrinsic_payback": state.get("extrinsic_payback", {})}
+        out = {"weeks": weeks, "totals": totals,
+               "extrinsic_summary": ledger.get("extrinsic_summary", {}),
+               "extrinsic_payback": state.get("extrinsic_payback", {})}
         if period in ("week", "month", "ytd"):
             key = {"week": "this_week", "month": "this_month", "ytd": "ytd"}[period]
             out["period"] = {"period": period, "net_juice": totals.get(key)}
