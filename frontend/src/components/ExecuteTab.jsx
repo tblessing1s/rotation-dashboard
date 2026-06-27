@@ -64,10 +64,12 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
   React.useEffect(() => { if (ticker) loadGate(ticker); }, [ticker, loadGate]);
 
   const ready = gate?.verdict === "READY TO ENTER";
-  // Show the chain button once the gate has run and the market isn't RED — the
-  // modal itself enforces the regime (GREEN 1.5×, YELLOW 2.0×, RED blocked).
+  // Show the chain button once the gate has run. The modal enforces the regime:
+  // GREEN 1.5× / YELLOW 2.0× for entries; RED blocks new entries but still opens
+  // in management-only mode so an existing position can be closed/rolled to exit.
   const regimeStatus = gate?.levels?.[0]?.detail?.status;
-  const canViewChain = !!gate && regimeStatus !== "red";
+  const canViewChain = !!gate;
+  const chainBtnLabel = regimeStatus === "red" ? "Manage Positions (market RED)" : "View Option Chain";
 
   // Pre-fill the form for a given action from a confirmed chain pick. LEAP fills
   // the buy_leap fields; the chosen weekly strike fills the sell/close fields.
@@ -149,9 +151,13 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
         {canViewChain && (
           <button
             onClick={() => setChainOpen(true)}
-            className="mb-3 w-full rounded-lg border border-sky-700 bg-sky-500/10 py-2 text-sm font-semibold text-sky-300 hover:bg-sky-500/20"
+            className={`mb-3 w-full rounded-lg border py-2 text-sm font-semibold ${
+              regimeStatus === "red"
+                ? "border-rose-700 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
+                : "border-sky-700 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20"
+            }`}
           >
-            View Option Chain
+            {chainBtnLabel}
           </button>
         )}
         {locked && (

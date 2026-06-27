@@ -53,7 +53,10 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
         const sug = c.weekly?.strikes?.find((s) => s.suggested) || c.weekly?.strikes?.[0];
         setWeeklyStrike(sug ? sug.strike : null);
         setAction(c.suggested_action || "buy_leap");
-        setQty(String(c.quantity_default ?? 5));
+        const defQty = c.suggested_action === "close_short" && c.position?.open_short?.contracts
+          ? c.position.open_short.contracts
+          : c.quantity_default ?? 5;
+        setQty(String(defQty));
       })
       .catch((e) => { if (live) setError(e.message); })
       .finally(() => { if (live) setLoading(false); });
@@ -65,6 +68,12 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
   const iv = chain?.iv;
   const position = chain?.position;
   const openShort = position?.open_short;
+  // Management-only (RED tape): entries are blocked, so the only move is
+  // closing/rolling the open short to exit. Hide the entry-oriented sections.
+  const mgmt = !!chain?.management_only;
+  const actionOptions = mgmt
+    ? { close_short: ACTION_LABELS.close_short }
+    : ACTION_LABELS;
   const chosenWeekly = weekly?.strikes?.find((s) => s.strike === weeklyStrike) || null;
   const qtyNum = Number(qty) || 0;
 
@@ -168,6 +177,13 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
             </div>
             {iv?.label && <p className="-mt-2 px-1 text-xs text-slate-500">{iv.label}</p>}
 
+            {mgmt && (
+              <div className="rounded-lg border border-rose-800 bg-rose-500/10 p-3 text-sm text-rose-200">
+                Market is <span className="font-semibold">RED</span> — new entries are blocked. You can
+                still close or roll an open short to de-risk and exit.
+              </div>
+            )}
+
             {/* Order ticket — auto-detected action, quantity, payoff, execute */}
             <div className="rounded-lg border border-sky-800 bg-sky-500/5 p-3">
               <div className="mb-2 text-xs uppercase tracking-wide text-sky-400">Order (auto-detected)</div>
@@ -177,9 +193,10 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
                   <select
                     value={action || ""}
                     onChange={(e) => setAction(e.target.value)}
-                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100"
+                    disabled={mgmt}
+                    className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100 disabled:opacity-60"
                   >
-                    {Object.entries(ACTION_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    {Object.entries(actionOptions).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                   </select>
                 </label>
                 <label className="text-slate-400">Quantity (contracts)
@@ -192,24 +209,28 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
                 </label>
               </div>
 
-              {/* Payoff estimate */}
-              <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-slate-950 p-3 text-center">
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">LEAP extrinsic to cover</div>
-                  <div className="text-base font-semibold text-amber-300">{bigDollars(coverTotal)}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">Est. weekly juice</div>
-                  <div className="text-base font-semibold text-emerald-300">{bigDollars(weeklyJuice)}</div>
-                </div>
-                <div>
-                  <div className="text-[10px] uppercase tracking-wide text-slate-500">≈ income-positive</div>
-                  <div className="text-base font-semibold text-slate-100">{weeks != null ? `~${weeks} wk` : "—"}</div>
-                </div>
-              </div>
-              <p className="mt-1 text-[11px] text-slate-500">
-                Rough estimate: weekly extrinsic ÷ LEAP extrinsic, {chain.payoff?.cover_basis}. Assumes the short is rolled at a similar credit each week.
-              </p>
+              {/* Payoff estimate — entry context only; irrelevant when exiting */}
+              {!mgmt && (
+                <>
+                  <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-slate-950 p-3 text-center">
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-slate-500">LEAP extrinsic to cover</div>
+                      <div className="text-base font-semibold text-amber-300">{bigDollars(coverTotal)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-slate-500">Est. weekly juice</div>
+                      <div className="text-base font-semibold text-emerald-300">{bigDollars(weeklyJuice)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-slate-500">≈ income-positive</div>
+                      <div className="text-base font-semibold text-slate-100">{weeks != null ? `~${weeks} wk` : "—"}</div>
+                    </div>
+                  </div>
+                  <p className="mt-1 text-[11px] text-slate-500">
+                    Rough estimate: weekly extrinsic ÷ LEAP extrinsic, {chain.payoff?.cover_basis}. Assumes the short is rolled at a similar credit each week.
+                  </p>
+                </>
+              )}
 
               <div className="mt-3 flex items-center justify-end gap-2">
                 <button onClick={confirm} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
@@ -226,7 +247,8 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
               {execErr && <p className="mt-2 text-right text-xs text-rose-400">{execErr}</p>}
             </div>
 
-            {/* LEAP — auto-picked, read-only */}
+            {/* LEAP — auto-picked, read-only (entry context only) */}
+            {!mgmt && (
             <div className={`rounded-lg border bg-slate-950 p-3 ${action === "buy_leap" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">LEAP (auto-picked, delta ~0.90)</h3>
@@ -248,6 +270,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
                 </div>
               ) : <p className="text-sm text-slate-400">No suitable LEAP strike found.</p>}
             </div>
+            )}
 
             {/* Open short buyback (only when rolling/closing) */}
             {openShort && (
@@ -260,7 +283,8 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
               </div>
             )}
 
-            {/* Weekly short — ATR-suggested, user-adjustable */}
+            {/* Weekly short — ATR-suggested, user-adjustable (entry only) */}
+            {!mgmt && (
             <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">Weekly short call (ATR-suggested)</h3>
@@ -296,6 +320,7 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
                 </>
               ) : <p className="text-sm text-slate-400">No weekly strikes available.</p>}
             </div>
+            )}
           </div>
         )}
       </div>

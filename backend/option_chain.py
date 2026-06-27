@@ -97,8 +97,15 @@ def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None) -
     return out
 
 
-def _detect_action(has_leap: bool, open_shorts: list) -> tuple[str, str]:
-    """Pick the action the user most likely wants next, given current positions."""
+def _detect_action(has_leap: bool, open_shorts: list, management_only: bool = False) -> tuple[str, str]:
+    """Pick the action the user most likely wants next, given current positions.
+
+    In management_only mode (RED tape) entries are off the table, so the only
+    move is closing/rolling an open short to de-risk or exit."""
+    if management_only:
+        if open_shorts:
+            return "close_short", "Market is RED — buy to close / roll the open short to reduce risk."
+        return "close_short", "Market is RED — entries blocked. Exit the LEAP at your broker (no close-LEAP action here)."
     if not has_leap:
         return "buy_leap", "No LEAP held yet — establish the deep-ITM long first."
     if not open_shorts:
@@ -108,16 +115,31 @@ def _detect_action(has_leap: bool, open_shorts: list) -> tuple[str, str]:
 
 def option_chain(ticker: str, strategy: str = "atr") -> dict:
     """Build the option-chain view: regime banner, auto-picked LEAP, and the
-    ATR-suggested weekly short with nearby strikes. Raises RegimeBlocked on RED."""
+    ATR-suggested weekly short with nearby strikes.
+
+    On a RED tape entries are blocked: if there's nothing to manage we raise
+    RegimeBlocked, but an existing position drops into management-only mode so the
+    user can still close/roll the open short and get out."""
     ticker = ticker.strip().upper()
     if not ticker:
         raise ValueError("ticker is required")
 
     reg = screening.regime()
     regime_status = reg.get("status")
-    if regime_status == "red":
+
+    # --- Current position (cheap local read) — drives action + RED handling -
+    state = log.load_state()
+    pos = log.find_position(state, ticker)
+    existing_leap = (pos or {}).get("leap") or None
+    has_leap = bool(existing_leap)
+    open_shorts = [sc for sc in (pos or {}).get("short_calls", []) if sc] if pos else []
+
+    management_only = regime_status == "red"
+    if management_only and not (has_leap or open_shorts):
+        # Nothing to manage and entries are blocked — there's nothing to show.
         raise RegimeBlocked("Market is RED. No entries.")
     atr_mult = REGIME_ATR_MULT.get(regime_status, REGIME_ATR_MULT["yellow"])
+    suggested_action, action_reason = _detect_action(has_leap, open_shorts, management_only)
 
     payload = _fetch_chain(ticker)
     underlying, contracts = schwab_api.parse_call_chain(payload)
@@ -128,14 +150,6 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     if underlying is None:
         quote = data_handler.latest_quote(ticker)
         underlying = quote["price"] if quote else None
-
-    # --- Current position: drives the auto-detected action -----------------
-    state = log.load_state()
-    pos = log.find_position(state, ticker)
-    existing_leap = (pos or {}).get("leap") or None
-    has_leap = bool(existing_leap)
-    open_shorts = [sc for sc in (pos or {}).get("short_calls", []) if sc] if pos else []
-    suggested_action, action_reason = _detect_action(has_leap, open_shorts)
 
     # --- LEAP (auto-picked, delta ~0.90, closest to 180 DTE) ----------------
     leap = indicators.find_leap_strike(contracts, underlying)
@@ -215,6 +229,7 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
         "ticker": ticker,
         "strategy": strategy,
         "regime": regime_status,
+        "management_only": management_only,
         "atr_mult": atr_mult,
         "underlying_price": round(underlying, 2) if underlying is not None else None,
         "suggested_action": suggested_action,

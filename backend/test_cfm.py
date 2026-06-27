@@ -122,6 +122,43 @@ def test_detect_action_follows_position_state():
     assert oc._detect_action(has_leap=False, open_shorts=[])[0] == "buy_leap"
     assert oc._detect_action(has_leap=True, open_shorts=[])[0] == "sell_short"
     assert oc._detect_action(has_leap=True, open_shorts=[{"strike": 50}])[0] == "close_short"
+    # Management-only (RED) — entries are off the table, only close/roll.
+    assert oc._detect_action(False, [], management_only=True)[0] == "close_short"
+    assert oc._detect_action(True, [{"strike": 50}], management_only=True)[0] == "close_short"
+
+
+def test_red_regime_blocks_entries_but_allows_managing_open_positions(monkeypatch):
+    import option_chain as oc
+    import data_handler
+    import logging_handler as log
+    import screening
+
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "red"})
+
+    # RED + nothing to manage -> blocked (no chain fetch, no entries possible).
+    monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {}})
+    monkeypatch.setattr(log, "find_position", lambda s, t: None)
+    with pytest.raises(oc.RegimeBlocked):
+        oc.option_chain("ON")
+
+    # RED + an open short -> management-only mode so the user can exit.
+    df = _frame([100.0] * 60)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 100.0, "source": "test"})
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {
+        "status": "SUCCESS", "underlyingPrice": 100.0,
+        "callExpDateMap": {"2026-07-02:5": {"100.0": [
+            {"symbol": "X", "strikePrice": 100.0, "daysToExpiration": 5,
+             "bid": 1.4, "ask": 1.8, "mark": 1.6, "delta": 0.5, "volatility": 40.0, "openInterest": 5}]}}})
+    monkeypatch.setattr(log, "find_position", lambda s, t: {
+        "ticker": "ON", "leap": {"strike": 80.0, "contracts": 5},
+        "short_calls": [{"strike": 100.0, "contracts": 5, "dte": 3, "entry_extrinsic_per_share": 1.2}]})
+    monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {"ON": {"remaining_to_payback": 1000.0}}})
+
+    out = oc.option_chain("ON")
+    assert out["management_only"] is True
+    assert out["suggested_action"] == "close_short"
+    assert out["position"]["open_short"]["current_mark"] == 1.6
 
 
 def test_iv_view_flags_rich_vs_cheap():
