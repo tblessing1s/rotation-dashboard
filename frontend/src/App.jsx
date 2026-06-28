@@ -1,4 +1,5 @@
 import React from "react";
+import { api } from "./api.js";
 import Navbar from "./components/Navbar.jsx";
 import SchwabStatus from "./components/SchwabStatus.jsx";
 import RegimeScanner from "./components/RegimeScanner.jsx";
@@ -16,6 +17,22 @@ export default function App() {
   const [regimeStatus, setRegimeStatus] = React.useState("unknown");
   const [selectedTicker, setSelectedTicker] = React.useState("");
   const [execNonce, setExecNonce] = React.useState(0);
+  const [demo, setDemo] = React.useState(false);
+  const [modeBusy, setModeBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    api.mode().then((m) => setDemo(!!m.demo)).catch(() => {});
+  }, []);
+
+  async function toggleDemo() {
+    setModeBusy(true);
+    try {
+      await api.setMode(!demo); // seeds the demo store on first switch-on
+      window.location.reload(); // refetch every tab against the newly active source
+    } catch {
+      setModeBusy(false);
+    }
+  }
 
   function selectStock(ticker) {
     setSelectedTicker(ticker);
@@ -24,9 +41,10 @@ export default function App() {
 
   return (
     <div className="min-h-full bg-slate-950 text-slate-100">
-      <Navbar tabs={TABS} active={tab} onChange={setTab} regimeStatus={regimeStatus} />
+      <Navbar tabs={TABS} active={tab} onChange={setTab} regimeStatus={regimeStatus}
+              demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo} />
       <main className="mx-auto max-w-7xl px-4 py-6">
-        <SchwabStatus />
+        <SchwabStatus demo={demo} />
         {tab === "Scan" && (
           <div className="grid gap-4">
             <RegimeScanner onStatus={setRegimeStatus} />

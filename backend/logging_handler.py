@@ -38,12 +38,12 @@ def _default_state() -> dict:
 
 def load_state() -> dict:
     with _lock:
-        if not os.path.exists(config.STATE_PATH):
+        if not os.path.exists(config.active_state_path()):
             state = _default_state()
             _write(state)
             return state
         try:
-            with open(config.STATE_PATH, encoding="utf-8") as fh:
+            with open(config.active_state_path(), encoding="utf-8") as fh:
                 state = json.load(fh)
         except (ValueError, OSError):
             state = _default_state()
@@ -54,11 +54,12 @@ def load_state() -> dict:
 
 
 def _write(state: dict) -> None:
+    path = config.active_state_path()
     os.makedirs(config.DATA_DIR, exist_ok=True)
-    tmp = config.STATE_PATH + ".tmp"
+    tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(state, fh, indent=2)
-    os.replace(tmp, config.STATE_PATH)
+    os.replace(tmp, path)
 
 
 def save_state(state: dict) -> dict:

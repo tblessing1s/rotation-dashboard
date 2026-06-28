@@ -52,9 +52,16 @@ def client() -> schwab_api.SchwabClient:
         return _client
 
 
+def reset_caches() -> None:
+    """Drop in-process caches — called when switching demo/live mode so the next
+    reads come from the newly active store instead of the other mode's data."""
+    _mem_cache.clear()
+    _last_error.clear()
+
+
 def _cache_path(symbol: str) -> str:
     safe = symbol.replace("^", "_idx_").replace("$", "_d_").replace("/", "_")
-    return os.path.join(config.CACHE_DIR, f"{safe}.parquet")
+    return os.path.join(config.active_cache_dir(), f"{safe}.parquet")
 
 
 def _is_fresh(path: str, max_age_hours: int = 12) -> bool:
@@ -75,7 +82,7 @@ def _read_cache(symbol: str) -> pd.DataFrame | None:
 
 
 def _write_cache(symbol: str, df: pd.DataFrame) -> None:
-    os.makedirs(config.CACHE_DIR, exist_ok=True)
+    os.makedirs(config.active_cache_dir(), exist_ok=True)
     try:
         df.to_parquet(_cache_path(symbol))
     except Exception:  # noqa: BLE001 — cache write failures are non-fatal
@@ -112,6 +119,10 @@ def get_daily(symbol: str, force: bool = False) -> pd.DataFrame | None:
     """Daily OHLCV for one symbol. Cached for the trading day; on provider
     failure falls back to the cached frame if one exists."""
     symbol = symbol.upper()
+    # Demo mode is purely cache-backed (synthetic data, no providers).
+    if config.demo_enabled():
+        cached = _read_cache(symbol)
+        return cached if (cached is not None and not cached.empty) else None
     path = _cache_path(symbol)
     if not force and _is_fresh(path):
         cached = _read_cache(symbol)
@@ -155,6 +166,11 @@ def latest_quote(symbol: str) -> dict | None:
     """Live quote via Schwab, falling back to Alpha Vantage GLOBAL_QUOTE, then
     the last cached close. Used at execution time to capture the stock price."""
     symbol = symbol.upper()
+    if config.demo_enabled():
+        df = get_daily(symbol)
+        if df is not None and not df.empty:
+            return {"symbol": symbol, "price": float(df["Close"].iloc[-1]), "source": "demo"}
+        return None
     if schwab_api.configured():
         try:
             q = client().get_quote(symbol)

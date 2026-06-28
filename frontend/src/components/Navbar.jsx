@@ -1,7 +1,27 @@
 import React from "react";
 import { Light } from "./ui.jsx";
 
-export default function Navbar({ tabs, active, onChange, regimeStatus }) {
+function DemoToggle({ demo, busy, onToggle }) {
+  return (
+    <button
+      onClick={onToggle}
+      disabled={busy}
+      title={demo ? "Showing demo data — click for live data" : "Showing live data — click for demo data"}
+      className={`flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-semibold transition disabled:opacity-50 ${
+        demo
+          ? "border-amber-500/50 bg-amber-500/10 text-amber-300 hover:bg-amber-500/20"
+          : "border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800"
+      }`}
+    >
+      <span className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition ${demo ? "bg-amber-500/70" : "bg-slate-600"}`}>
+        <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition ${demo ? "translate-x-3" : "translate-x-0.5"}`} />
+      </span>
+      {busy ? "Switching…" : demo ? "Demo data" : "Live data"}
+    </button>
+  );
+}
+
+export default function Navbar({ tabs, active, onChange, regimeStatus, demo, modeBusy, onToggleDemo }) {
   return (
     <nav className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3">
@@ -24,9 +44,12 @@ export default function Navbar({ tabs, active, onChange, regimeStatus }) {
             </button>
           ))}
         </div>
-        <div className="flex items-center gap-2 text-xs text-slate-400">
-          <Light status={regimeStatus} />
-          <span className="hidden sm:inline">Regime</span>
+        <div className="flex items-center gap-3 text-xs text-slate-400">
+          <DemoToggle demo={demo} busy={modeBusy} onToggle={onToggleDemo} />
+          <div className="flex items-center gap-2">
+            <Light status={regimeStatus} />
+            <span className="hidden sm:inline">Regime</span>
+          </div>
         </div>
       </div>
     </nav>
