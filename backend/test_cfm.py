@@ -251,6 +251,55 @@ def test_existing_leap_matches_stored_expiration(monkeypatch):
     assert el["current_dte"] == 90 and el["current_mark"] == 21.2  # the Sep contract, not Dec
 
 
+def test_schwab_account_methods_are_class_methods():
+    # Regression: the chain parsers were once inserted mid-class, orphaning the
+    # account/order methods as dead nested functions. They must be real methods.
+    import schwab_api
+    for name in ("account_numbers", "get_accounts", "preview_order", "place_order", "get_order"):
+        assert hasattr(schwab_api.SchwabClient, name), name
+    assert hasattr(schwab_api, "parse_call_chain") and hasattr(schwab_api, "parse_put_iv")
+
+
+def test_parse_put_iv_maps_expiration_strike_to_iv():
+    import schwab_api
+    payload = {"putExpDateMap": {"2026-06-29:2": {
+        "180.0": [{"strikePrice": 180.0, "volatility": 90.0}],
+        "175.0": [{"strikePrice": 175.0, "volatility": "NaN"}],  # dropped
+    }}}
+    m = schwab_api.parse_put_iv(payload)
+    assert m[("2026-06-29", 180.0)] == 90.0
+    assert ("2026-06-29", 175.0) not in m
+
+
+def test_itm_call_delta_uses_otm_put_iv(monkeypatch):
+    # A 2-DTE ITM call with thin time value: its own IV collapses (delta -> ~1.0).
+    # The recompute must instead use the OTM put's skew IV, pulling delta down to
+    # a realistic level (this is what TOS shows).
+    import option_chain as oc
+    import data_handler
+    import logging_handler as log
+    import screening
+
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "green"})
+    df = _frame([192.5] * 60)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 192.5, "source": "t"})
+    monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {}})
+    monkeypatch.setattr(log, "find_position", lambda s, t: None)
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {
+        "status": "SUCCESS", "underlyingPrice": 192.5,
+        "callExpDateMap": {"2026-06-29:2": {"180.0": [
+            {"symbol": "C", "strikePrice": 180.0, "daysToExpiration": 2,
+             "bid": 11.20, "ask": 15.10, "mark": 13.15, "volatility": 15.0}]}},
+        "putExpDateMap": {"2026-06-29:2": {"180.0": [
+            {"symbol": "P", "strikePrice": 180.0, "daysToExpiration": 2,
+             "bid": 0.50, "ask": 0.80, "mark": 0.65, "volatility": 90.0}]}},
+    })
+    out = oc.option_chain("ON")
+    s180 = next(s for s in out["weekly"]["strikes"] if s["strike"] == 180.0)
+    assert 0.80 < s180["delta"] < 0.90  # ~0.85 from the 90% put IV, not ~1.0
+
+
 def test_iv_view_flags_rich_vs_cheap():
     import option_chain as oc
     assert oc._iv_view(weekly_iv=44.0, leap_iv=33.0, hv=20.0)["premium"] == "rich"
