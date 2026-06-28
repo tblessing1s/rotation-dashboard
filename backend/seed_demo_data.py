@@ -1,25 +1,24 @@
 """Seed the dashboard with realistic *demo* data so the UI can be previewed
 without live Schwab / Alpha Vantage keys.
 
-It writes two things, both inside DATA_DIR (gitignored, so this never touches the
-repo's tracked files):
+It writes the demo store — kept *separate* from the live store (state.demo.json +
+cache_demo/, vs state.json + cache/) so toggling demo mode never touches real
+positions — both inside DATA_DIR (gitignored, so this never touches tracked files):
 
   1. A synthetic daily-OHLCV parquet cache for SPY, the VIX, every sector ETF and
-     their constituents. data_handler falls back to this cache when no provider
-     is configured, so the Scan (regime / sectors / stock filter), Kill-Switch
-     and Positions tabs all render real numbers instead of blanks.
-  2. A populated state.json — a small book of CFM positions with a multi-week
+     their constituents. In demo mode data_handler reads only this cache, so the
+     Scan (regime / sectors / stock filter), Kill-Switch and Positions tabs all
+     render real computed numbers instead of blanks.
+  2. A populated state.demo.json — a small book of CFM positions with a multi-week
      log of executions. The theta ledger and extrinsic-payback meters are then
      *derived* from those executions exactly as in production (nothing is
      hand-maintained), so what you see is what the app produces from real use.
 
-Run it from the repo root (or backend/):
+Demo mode is toggled from the navbar (Live/Demo switch) — which calls seed() on
+first use — or from the CLI:
 
-    python backend/seed_demo_data.py            # seed cache + state
-    python backend/seed_demo_data.py --clear    # remove the demo state + cache
-
-This is a developer/demo utility — delete state.json (or run --clear) to get an
-empty dashboard back.
+    python backend/seed_demo_data.py            # build demo store, switch ON
+    python backend/seed_demo_data.py --clear    # remove demo store, switch OFF
 """
 from __future__ import annotations
 
@@ -88,7 +87,7 @@ def _frame(base: float, mu: float, sigma: float, consolidate_tail: int = 0,
 
 def generate_market_cache(strong_tickers: set[str], anchors: dict[str, float]) -> dict[str, float]:
     """Write the synthetic parquet cache and return each symbol's last close."""
-    os.makedirs(config.CACHE_DIR, exist_ok=True)
+    os.makedirs(config.active_cache_dir(), exist_ok=True)
     last_close: dict[str, float] = {}
 
     def emit(symbol: str, base: float, mu: float, sigma: float, tail: int = 0,
@@ -174,8 +173,8 @@ CONTRACTS = config.LEAP_CONTRACTS  # 5
 
 def seed_state(last_close: dict[str, float]) -> None:
     # Start from a clean slate so re-running is idempotent.
-    if os.path.exists(config.STATE_PATH):
-        os.remove(config.STATE_PATH)
+    if os.path.exists(config.active_state_path()):
+        os.remove(config.active_state_path())
     log.load_state()  # writes the default empty state
 
     for spec in BOOK:
@@ -267,32 +266,56 @@ def seed_state(last_close: dict[str, float]) -> None:
     log.save_state(state)
 
 
+def seed() -> int:
+    """(Re)build the demo dataset (synthetic cache + sample book). Always targets
+    the demo store — never the live one — by switching the process into demo mode
+    first, so the handlers write to the demo paths. Returns the position count."""
+    config.set_demo_enabled(True)
+    strong = {s["ticker"] for s in BOOK}
+    anchors = {s["ticker"]: float(s["cur_px"]) for s in BOOK}
+    last_close = generate_market_cache(strong, anchors)
+    seed_state(last_close)
+    return len(BOOK)
+
+
+def is_seeded() -> bool:
+    return (os.path.exists(config.DEMO_STATE_PATH)
+            and os.path.isdir(config.DEMO_CACHE_DIR)
+            and bool(os.listdir(config.DEMO_CACHE_DIR)))
+
+
+def ensure_seeded() -> bool:
+    """Seed the demo dataset only if it isn't already present. Returns True if it
+    (re)built. Cheap no-op when the demo store already exists."""
+    if is_seeded():
+        return False
+    seed()
+    return True
+
+
 def clear() -> None:
-    for p in (config.STATE_PATH,):
-        if os.path.exists(p):
-            os.remove(p)
-            print(f"removed {p}")
-    if os.path.isdir(config.CACHE_DIR):
-        shutil.rmtree(config.CACHE_DIR)
-        print(f"removed {config.CACHE_DIR}")
+    config.set_demo_enabled(False)
+    if os.path.exists(config.DEMO_STATE_PATH):
+        os.remove(config.DEMO_STATE_PATH)
+        print(f"removed {config.DEMO_STATE_PATH}")
+    if os.path.isdir(config.DEMO_CACHE_DIR):
+        shutil.rmtree(config.DEMO_CACHE_DIR)
+        print(f"removed {config.DEMO_CACHE_DIR}")
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Seed (or clear) demo data for the CFM dashboard.")
-    ap.add_argument("--clear", action="store_true", help="remove demo state.json and the parquet cache")
+    ap.add_argument("--clear", action="store_true", help="remove the demo store and switch back to live")
     args = ap.parse_args()
     if args.clear:
         clear()
         return
 
-    strong = {s["ticker"] for s in BOOK}
-    anchors = {s["ticker"]: float(s["cur_px"]) for s in BOOK}
-    print(f"generating synthetic market cache under {config.CACHE_DIR} …")
-    last_close = generate_market_cache(strong, anchors)
-    print(f"  cached {len(last_close)} symbols")
-    print(f"seeding {config.STATE_PATH} with {len(BOOK)} positions …")
-    seed_state(last_close)
-    print("done. Start the backend (python backend/app.py) and open the dashboard.")
+    print(f"generating synthetic market cache under {config.DEMO_CACHE_DIR} …")
+    n = seed()
+    print(f"  cached the universe and seeded {config.DEMO_STATE_PATH} with {n} positions")
+    print("demo mode is now ON. Start the backend (python backend/app.py) and open the dashboard,")
+    print("or toggle Live/Demo from the navbar. Run with --clear to remove it.")
 
 
 if __name__ == "__main__":

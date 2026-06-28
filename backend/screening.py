@@ -22,6 +22,12 @@ _result_locks: dict[str, threading.Lock] = {}
 _results_guard = threading.Lock()
 
 
+def clear_cache() -> None:
+    """Drop memoized scan results — called on a demo/live mode switch so the next
+    scan recomputes against the newly active data source."""
+    _results.clear()
+
+
 def _cached(key: str, fn, ttl: int = _RESULT_TTL, store_if=None):
     hit = _results.get(key)
     if hit and time.time() - hit[0] < ttl:

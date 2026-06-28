@@ -181,9 +181,32 @@ def api_state():
     return jsonify(log.load_state())
 
 
+@app.route("/api/mode", methods=["GET", "POST"])
+def api_mode():
+    """Read or set the demo/live data switch. Setting it points the app at the
+    separate demo store (seeding it on first use) or back at the live store, and
+    clears the in-memory scan/data caches so the next reads reflect the switch."""
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        demo = bool(payload.get("demo"))
+        seeded = False
+        try:
+            config.set_demo_enabled(demo)
+            screening.clear_cache()
+            data_handler.reset_caches()
+            if demo:
+                import seed_demo_data
+                seeded = seed_demo_data.ensure_seeded()
+            return jsonify({"demo": config.demo_enabled(), "seeded": seeded})
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+    return jsonify({"demo": config.demo_enabled()})
+
+
 @app.route("/api/config")
 def api_config():
     return jsonify({
+        "demo": config.demo_enabled(),
         "benchmark": config.BENCHMARK,
         "sectors": {etf: s.as_dict() for etf, s in sector_data.sectors().items()},
         "thresholds": {

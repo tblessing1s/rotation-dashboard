@@ -9,6 +9,10 @@ backend/state.json
 backend/schwab_token.json
 backend/cache/
 data/cache/
+# Demo-mode store (synthetic data, never committed)
+backend/state.demo.json
+backend/cache_demo/
+backend/mode.json
 
 # Node/Vite
 frontend/node_modules/

@@ -17,6 +17,51 @@ REPO_DIR = os.path.dirname(BACKEND_DIR)
 DATA_DIR = os.environ.get("DATA_DIR") or BACKEND_DIR
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
+
+# ---- Demo mode -------------------------------------------------------------
+# A self-contained "fake data" view, kept entirely separate from the live store
+# so toggling it on/off never touches real positions or the live cache. When
+# demo mode is on the app reads the demo state + a synthetic price cache (seeded
+# by seed_demo_data.py); when off it uses the live store + real providers. The
+# flag is persisted to mode.json so it survives a restart within a DATA_DIR.
+DEMO_STATE_PATH = os.path.join(DATA_DIR, "state.demo.json")
+DEMO_CACHE_DIR = os.path.join(DATA_DIR, "cache_demo")
+MODE_PATH = os.path.join(DATA_DIR, "mode.json")
+
+_demo_mode: bool | None = None
+
+
+def demo_enabled() -> bool:
+    global _demo_mode
+    if _demo_mode is None:
+        try:
+            import json
+            with open(MODE_PATH, encoding="utf-8") as fh:
+                _demo_mode = bool(json.load(fh).get("demo", False))
+        except (OSError, ValueError):
+            _demo_mode = False
+    return _demo_mode
+
+
+def set_demo_enabled(on: bool) -> None:
+    global _demo_mode
+    import json
+    _demo_mode = bool(on)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = MODE_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"demo": _demo_mode}, fh)
+    os.replace(tmp, MODE_PATH)
+
+
+def active_state_path() -> str:
+    """state.json path for the current mode (demo store stays separate)."""
+    return DEMO_STATE_PATH if demo_enabled() else STATE_PATH
+
+
+def active_cache_dir() -> str:
+    """Parquet cache dir for the current mode."""
+    return DEMO_CACHE_DIR if demo_enabled() else CACHE_DIR
 # The sector universe ships with the repo (root-level), read-only reference data.
 # A data/ fallback is kept for older checkouts.
 TICKERS_BY_SECTOR_CANDIDATES = [

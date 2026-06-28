@@ -19,7 +19,7 @@ function bannerParam() {
   return { schwab: p.get("schwab"), msg: p.get("msg") };
 }
 
-export default function SchwabStatus() {
+export default function SchwabStatus({ demo = false }) {
   const [tok, setTok] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
@@ -54,6 +54,22 @@ export default function SchwabStatus() {
       setErr(e.message);
       setBusy(false);
     }
+  }
+
+  // In demo mode the Schwab token is irrelevant — show a clear demo banner
+  // instead of nagging about a connection the demo data doesn't use.
+  if (demo) {
+    return (
+      <div className="mb-4 rounded-xl border border-amber-700 bg-amber-500/5 p-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <Pill status="yellow">Demo data</Pill>
+          <div className="text-sm text-slate-300">
+            Showing a synthetic price feed and a sample CFM book — no live providers or orders.
+            Flip the navbar switch to <span className="font-semibold text-slate-100">Live data</span> to use Schwab/Alpha&nbsp;Vantage.
+          </div>
+        </div>
+      </div>
+    );
   }
 
   const status = tok?.status || "missing";
