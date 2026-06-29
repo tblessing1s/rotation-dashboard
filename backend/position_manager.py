@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import config
 import data_handler
+import earnings
 
 
 def _stock_price(ticker: str) -> float | None:
@@ -46,6 +47,11 @@ def enrich_position(position: dict) -> dict:
     shares["pct_to_cap"] = round(count / cap * 100, 1) if cap else 0
     shares["locked"] = count >= cap
     out["shares"] = shares
+    try:
+        out["earnings"] = earnings.next_earnings(ticker)
+    except Exception:  # noqa: BLE001 — earnings is informational, never block positions
+        out["earnings"] = {"ticker": ticker, "date": None, "days_until": None,
+                           "warning": False, "source": "error"}
     return out
 
 

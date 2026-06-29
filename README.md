@@ -37,7 +37,14 @@ hand-maintained.
 4. **Consolidating, not breaking** — low ATR%, price near MA21.
 
 **Weekly routine:** roll the short ITM call (strike = stock − 1.5×ATR), log the
-extrinsic sold and paid back, check the kill switch.
+extrinsic sold and paid back, check the kill switch. The **Positions** tab rolls
+a short in place — pick the same or a different week, and the same or a different
+strike (e.g. deep-ITM into earnings) — as a single `roll_short` action.
+
+**Earnings:** each open position surfaces its next earnings date (Positions tab,
+Kill Switch, and the daily checklist) and flags it inside `EARNINGS_WARN_DAYS` so
+the short can be rolled deep-ITM for protection or the position exited entirely
+before the report.
 
 **Kill switch (binary):** RS3M vs Sector turns negative → exit immediately;
 RS3M vs SPY turns negative (confirmed close) → exit within 1–2 days.
@@ -85,7 +92,9 @@ maxes out.
 | `GET /api/stock-filter?sector=XLK` | Candidates with RS3M vs SPY/Sector, ATR%, consolidating, status. |
 | `GET /api/entry-gate?ticker=ON` | The 4-level gate, pass/fail per level, verdict. |
 | `GET /api/roll-suggestion?ticker=ON` | Suggested weekly short strike (stock − 1.5×ATR). |
-| `POST /api/execute` | Execute + auto-log a CFM action; returns execution id + captured prices. |
+| `GET /api/roll-options?ticker=ON` | Roll picker data: current short + live buyback, plus every expiration to ROLL_MAX_DTE with nearby strikes (choose week + strike). |
+| `GET /api/earnings?ticker=ON` | Next earnings date (Alpha Vantage, day-cached; `&refresh=1` to force). Manual override via `metadata.earnings_overrides`. |
+| `POST /api/execute` | Execute + auto-log a CFM action (`buy_leap`/`sell_short`/`close_short`/`close_leap`/`roll_short`); returns execution id + captured prices. |
 | `GET /api/positions` | Positions (LEAP/share/cap), capital summary, milestones. |
 | `GET /api/theta-ledger` | Net juice (week/month/YTD) + extrinsic payback per position. |
 | `GET /api/kill-switch` | Per-position RS3M vs SPY/Sector + exit signals. |
@@ -118,7 +127,7 @@ cd backend && pip install -r requirements.txt && python app.py
 | Source | Used for | Credentials |
 |---|---|---|
 | **Schwab Trader API** (primary) | daily OHLCV, quotes, option chains, order execution | `SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, refresh token |
-| **Alpha Vantage** (fallback) | daily OHLCV + quotes | `ALPHAVANTAGE_API_KEY` |
+| **Alpha Vantage** (fallback) | daily OHLCV + quotes + next-earnings calendar | `ALPHAVANTAGE_API_KEY` |
 
 ### Schwab setup
 

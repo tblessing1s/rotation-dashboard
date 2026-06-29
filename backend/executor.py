@@ -17,7 +17,7 @@ import indicators
 import logging_handler as log
 import sector_data
 
-VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap"}
+VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_short"}
 
 
 def live_enabled() -> bool:
@@ -68,6 +68,9 @@ def execute(payload: dict) -> dict:
     log.save_state(state)  # persist the shell position before recording the fill
 
     mode = "live" if live_enabled() else "logged"
+
+    if action == "roll_short":
+        return _roll_short(payload, ticker, contracts, stock_price, mode, price_source)
 
     if action == "buy_leap":
         execution, position_update = _buy_leap(payload, ticker, strike, contracts, stock_price)
@@ -174,6 +177,7 @@ def _sell_short(payload, ticker, strike, contracts, stock_price):
     def apply(position):
         position.setdefault("short_calls", []).append({
             "strike": strike, "contracts": contracts, "open_date": log.utcnow()[:10],
+            "expiration": payload.get("expiration"),
             "dte": payload.get("dte", 5), "entry_extrinsic_per_share": entry_extrinsic_per_share,
             "entry_premium_total": premium_total, "current_bid": premium_per_share,
             "current_cost": premium_total,
@@ -211,6 +215,69 @@ def _close_short(payload, ticker, strike, contracts, stock_price):
         position["short_calls"] = [sc for sc in position.get("short_calls", [])
                                    if sc.get("strike") != strike]
     return execution, apply
+
+
+def _roll_short(payload, ticker, contracts, stock_price, mode, price_source):
+    """Roll an open short in one operation: buy to close the existing leg, then
+    sell a new one. The caller chooses the new week (``to_expiration``/``to_dte``)
+    and strike (``to_strike``) independently — same week / different week and same
+    strike / different strike are all just different values here. Two immutable
+    executions are recorded (a close_short then a sell_short) so the theta ledger
+    and extrinsic-payback meters derive exactly as they do for a manual two-step
+    roll; only the position mutation is applied once, atomically, at the end."""
+    from_strike = payload.get("from_strike", payload.get("strike"))
+    to_strike = payload.get("to_strike")
+    if from_strike is None or to_strike is None:
+        raise ValueError("roll_short requires from_strike and to_strike")
+    contracts = int(contracts or 0)
+
+    close_payload = {
+        "ticker": ticker, "strike": from_strike, "contracts": contracts,
+        "close_price_per_share": payload.get("close_price_per_share"),
+        "close_total": payload.get("close_total"),
+        "stock_price": stock_price,
+        "extrinsic_sold": payload.get("extrinsic_sold"),
+    }
+    close_exec, close_apply = _close_short(close_payload, ticker, from_strike, contracts, stock_price)
+
+    sell_payload = {
+        "ticker": ticker, "strike": to_strike, "contracts": contracts,
+        "premium_per_share": payload.get("premium_per_share"),
+        "premium_total": payload.get("premium_total"),
+        "stock_price": stock_price,
+        "expiration": payload.get("to_expiration"),
+        "dte": payload.get("to_dte", payload.get("dte", 5)),
+    }
+    sell_exec, sell_apply = _sell_short(sell_payload, ticker, to_strike, contracts, stock_price)
+
+    for leg_exec, leg in ((close_exec, "close"), (sell_exec, "open")):
+        leg_exec["mode"] = mode
+        leg_exec["price_source"] = price_source
+        leg_exec["roll_leg"] = leg
+
+    stored_close = log.append_execution(close_exec)
+    stored_sell = log.append_execution(sell_exec)
+
+    # Apply both position mutations onto the freshly written state, once.
+    state = log.load_state()
+    position = _ensure_position(state, ticker)
+    close_apply(position)
+    sell_apply(position)
+    log.recompute_derived(state)
+    log.save_state(state)
+
+    close_total = float(stored_close.get("close_total") or 0)
+    new_total = float(stored_sell.get("premium_total") or 0)
+    return {
+        "success": True,
+        "execution_id": stored_sell["id"],
+        "close_execution_id": stored_close["id"],
+        "timestamp": stored_sell["date"],
+        "mode": mode,
+        "captured_price": stock_price,
+        "net_credit": round(new_total - close_total, 2),
+        "executions": [stored_close, stored_sell],
+    }
 
 
 def roll_suggestion(ticker: str) -> dict:

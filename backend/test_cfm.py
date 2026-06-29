@@ -386,6 +386,96 @@ def test_execute_rejects_bad_action():
         executor.execute({"action": "nope", "ticker": "ON"})
 
 
+def test_roll_short_closes_old_and_opens_new(monkeypatch, tmp_path):
+    # A roll is one operation: buy to close the old short and sell a new one at a
+    # freely chosen week + strike. Both legs are logged; the position ends with a
+    # single short at the new strike/expiration and the close books net juice.
+    monkeypatch.setattr(config, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
+    import importlib
+    import logging_handler
+    importlib.reload(logging_handler)
+    import executor
+    importlib.reload(executor)
+
+    executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
+                      "contracts": 5, "execution_price": 3300, "stock_price": 145})
+    executor.execute({"action": "sell_short", "ticker": "ON", "strike": 140.5,
+                      "contracts": 5, "premium_per_share": 6.0, "stock_price": 145,
+                      "expiration": "2026-07-03"})
+    res = executor.execute({
+        "action": "roll_short", "ticker": "ON", "contracts": 5,
+        "from_strike": 140.5, "close_price_per_share": 2.5,
+        "to_strike": 139.0, "premium_per_share": 5.0,
+        "to_expiration": "2026-07-10", "to_dte": 7, "stock_price": 142})
+
+    # net credit = new premium total (5.0*5*100=2500) − buyback (2.5*5*100=1250)
+    assert res["net_credit"] == 1250.0
+    assert [e["roll_leg"] for e in res["executions"]] == ["close", "open"]
+
+    state = logging_handler.load_state()
+    pos = logging_handler.find_position(state, "ON")
+    assert len(pos["short_calls"]) == 1
+    new = pos["short_calls"][0]
+    assert new["strike"] == 139.0 and new["expiration"] == "2026-07-10" and new["dte"] == 7
+    # Closing the 140.5 (sold extrinsic 1.5, paid back 1.0) books 0.5/sh*5*100=250.
+    assert state["theta_ledger"]["totals"]["ytd"] == 250.0
+    assert state["extrinsic_payback"]["ON"]["collected_to_date"] == 250.0
+
+
+def test_roll_short_requires_both_strikes(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
+    import importlib
+    import logging_handler
+    importlib.reload(logging_handler)
+    import executor
+    importlib.reload(executor)
+    with pytest.raises(ValueError):
+        executor.execute({"action": "roll_short", "ticker": "ON", "contracts": 5,
+                          "from_strike": 140.5, "stock_price": 142})
+
+
+# ---- earnings --------------------------------------------------------------
+def test_earnings_summary_flags_warning_window():
+    import earnings
+    from datetime import date, timedelta
+    soon = (date.today() + timedelta(days=3)).isoformat()
+    far = (date.today() + timedelta(days=40)).isoformat()
+    assert earnings._summary("ON", soon, "x")["warning"] is True
+    assert earnings._summary("ON", soon, "x")["days_until"] == 3
+    assert earnings._summary("ON", far, "x")["warning"] is False
+    assert earnings._summary("ON", None, "x")["date"] is None
+
+
+def test_earnings_override_beats_provider(monkeypatch):
+    import earnings
+    from datetime import date, timedelta
+    d = (date.today() + timedelta(days=2)).isoformat()
+    monkeypatch.setattr(earnings, "_override", lambda t: d)
+    out = earnings.next_earnings("ON")
+    assert out["source"] == "override" and out["date"] == d and out["warning"] is True
+
+
+def test_earnings_unknown_when_provider_unconfigured(monkeypatch):
+    import alpha_vantage
+    import earnings
+    monkeypatch.setattr(earnings, "_override", lambda t: None)
+    monkeypatch.setattr(alpha_vantage, "configured", lambda: False)
+    out = earnings.next_earnings("ZZZZ", refresh=True)
+    assert out["date"] is None and out["source"] == "alpha_vantage"
+
+
+def test_earnings_calendar_parses_soonest_first(monkeypatch):
+    import alpha_vantage
+    csv_text = ("symbol,name,reportDate,fiscalDateEnding,estimate,currency\n"
+                "ON,ON Semiconductor,2026-07-28,2026-06-30,1.10,USD\n"
+                "ON,ON Semiconductor,2026-10-27,2026-09-30,1.20,USD\n")
+    monkeypatch.setattr(alpha_vantage, "_get_csv", lambda params, timeout=20: csv_text)
+    rows = alpha_vantage.earnings_calendar("ON")
+    assert len(rows) == 2 and rows[0]["reportDate"] == "2026-07-28"
+
+
 def test_rs3m_returns_native_float():
     # round() on a numpy scalar yields numpy.float64, whose comparisons produce
     # numpy.bool_ (not JSON serializable). rs3m must return a native float.

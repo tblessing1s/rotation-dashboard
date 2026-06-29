@@ -25,6 +25,8 @@ export const api = {
   stockFilter: (sector) => request(`/api/stock-filter${sector ? `?sector=${sector}` : ""}`),
   entryGate: (ticker) => request(`/api/entry-gate?ticker=${ticker}`),
   rollSuggestion: (ticker) => request(`/api/roll-suggestion?ticker=${ticker}`),
+  rollOptions: (ticker) => request(`/api/roll-options?ticker=${ticker}`),
+  earnings: (ticker, refresh = false) => request(`/api/earnings?ticker=${ticker}${refresh ? "&refresh=1" : ""}`),
   optionChain: (ticker, strategy = "atr") => request(`/api/option-chain/${ticker}?strategy=${strategy}`),
   execute: (payload) => request("/api/execute", { method: "POST", body: JSON.stringify(payload) }),
   positions: () => request("/api/positions"),

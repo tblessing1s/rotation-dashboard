@@ -6,6 +6,8 @@ ALPHAVANTAGE_API_KEY to enable.
 """
 from __future__ import annotations
 
+import csv
+import io
 import json
 import os
 import time
@@ -77,6 +79,49 @@ def daily_bars(symbol: str, outputsize: str = "full", timeout: int = 20) -> pd.D
     if df.empty:
         raise AlphaVantageError(f"empty daily series for {symbol}")
     return df
+
+
+def _get_csv(params: dict, timeout: int = 20) -> str:
+    """Like _get but for the CSV endpoints (e.g. EARNINGS_CALENDAR). Alpha
+    Vantage still returns a JSON note/error object on rate limits, so detect that
+    and surface it rather than handing back a stray '{...}' as if it were CSV."""
+    key = _api_key()
+    if not key:
+        raise AlphaVantageError("ALPHAVANTAGE_API_KEY not set")
+    url = f"{API_URL}?{urlencode({**params, 'apikey': key})}"
+    req = Request(url, headers={"User-Agent": USER_AGENT})
+    last_err: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urlopen(req, timeout=timeout) as resp:
+                raw = resp.read().decode("utf-8")
+            stripped = raw.lstrip()
+            if stripped.startswith("{"):
+                data = json.loads(stripped)
+                for soft in ("Error Message", "Note", "Information"):
+                    if soft in data:
+                        raise AlphaVantageError(f"Alpha Vantage: {data[soft]}")
+                raise AlphaVantageError(f"unexpected payload: {stripped[:120]}")
+            return raw
+        except AlphaVantageError:
+            raise
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            time.sleep(2.0 * (attempt + 1))
+    raise AlphaVantageError(f"Alpha Vantage CSV request failed: {last_err}")
+
+
+def earnings_calendar(symbol: str, horizon: str = "3month", timeout: int = 20) -> list[dict]:
+    """Upcoming scheduled-earnings rows for one symbol (CSV endpoint).
+
+    Each row carries at least `symbol`, `name`, `reportDate`, `fiscalDateEnding`,
+    `estimate`, `currency`. Horizon is one of '3month' | '6month' | '12month'.
+    """
+    text = _get_csv(
+        {"function": "EARNINGS_CALENDAR", "symbol": symbol.upper(), "horizon": horizon},
+        timeout,
+    )
+    return [dict(row) for row in csv.DictReader(io.StringIO(text)) if row.get("reportDate")]
 
 
 def global_quote(symbol: str, timeout: int = 20) -> dict:

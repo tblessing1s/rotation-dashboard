@@ -127,6 +127,12 @@ RISK_FREE_RATE = 0.04        # for Black–Scholes greeks (delta recomputed to m
 SHORT_ATR_MULT = 1.5         # short strike = stock - 1.5 * ATR
 SHARE_CAP = 500              # accumulate to 500 shares per stock, then rotate
 LEAP_ROLL_DTE = 30           # roll/replace LEAP when it nears this DTE
+ROLL_MAX_DTE = 45            # short-roll picker offers expirations out to this DTE
+
+# ---- Earnings --------------------------------------------------------------
+# Around earnings we either roll the short deep-ITM for protection or exit the
+# position entirely, so the next report date is surfaced on every open position.
+EARNINGS_WARN_DAYS = 7       # flag a position when earnings is within this many days
 
 # ---- Capital ---------------------------------------------------------------
 CAPITAL = 35000

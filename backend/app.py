@@ -15,6 +15,7 @@ from flask_cors import CORS
 
 import config
 import data_handler
+import earnings
 import executor
 import kill_switch
 import logging_handler as log
@@ -90,6 +91,31 @@ def api_roll_suggestion():
         return jsonify({"error": "ticker is required"}), 400
     try:
         return jsonify(executor.roll_suggestion(ticker))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/roll-options")
+def api_roll_options():
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify(option_chain.roll_options(ticker))
+    except option_chain.RegimeBlocked as e:
+        return jsonify({"error": str(e), "regime": "red"}), 403
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/earnings")
+def api_earnings():
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    refresh = request.args.get("refresh") in ("1", "true", "yes")
+    try:
+        return jsonify(earnings.next_earnings(ticker, refresh=refresh))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

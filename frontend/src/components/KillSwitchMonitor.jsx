@@ -30,6 +30,13 @@ export default function KillSwitchMonitor() {
               </div>
             </div>
             <div className={`mt-2 text-sm ${p.alert ? "text-rose-300" : "text-slate-400"}`}>{p.suggested_action}</div>
+            {p.earnings?.date && (
+              <div className={`mt-1 text-xs ${p.earnings.warning ? "text-amber-300" : "text-slate-500"}`}>
+                {p.earnings.warning ? "⚠ " : ""}Next earnings {p.earnings.date}
+                {p.earnings.days_until != null ? ` (${p.earnings.days_until}d)` : ""}
+                {p.earnings.warning ? " — roll deep-ITM or exit" : ""}
+              </div>
+            )}
           </div>
         ))}
       </div>

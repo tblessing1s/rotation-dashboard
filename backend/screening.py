@@ -317,10 +317,20 @@ def daily_checklist(state: dict) -> list[dict]:
                       "label": f"{ev['ticker']} RS3M intact (vs SPY {ev['rs3m_vs_spy']}, vs Sector {ev['rs3m_vs_sector']})",
                       "ok": ev["status"] != "red", "detail": ev})
 
-    # Short calls expiring + LEAPs nearing roll DTE.
+    # Short calls expiring + LEAPs nearing roll DTE + earnings approaching.
+    import earnings
     for p in state.get("positions", []):
         if p.get("status") == "closed":
             continue
+        try:
+            earn = earnings.next_earnings(p.get("ticker", ""))
+        except Exception:  # noqa: BLE001
+            earn = {"warning": False}
+        if earn.get("warning"):
+            items.append({"id": f"earnings_{p['ticker']}",
+                          "label": (f"{p['ticker']} earnings in {earn['days_until']}d "
+                                    f"({earn['date']}) — roll deep-ITM or exit"),
+                          "ok": False, "detail": earn})
         for sc in p.get("short_calls", []):
             dte = sc.get("dte")
             if dte is not None and dte <= 2:

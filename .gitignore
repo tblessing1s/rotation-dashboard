@@ -7,6 +7,7 @@ venv/
 # Runtime state & caches (DATA_DIR; on Fly this lives on the /data volume)
 backend/state.json
 backend/schwab_token.json
+backend/earnings_cache.json
 backend/cache/
 data/cache/
 # Demo-mode store (synthetic data, never committed)
