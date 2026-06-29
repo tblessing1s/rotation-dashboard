@@ -94,7 +94,9 @@ maxes out.
 | `GET /api/roll-suggestion?ticker=ON` | Suggested weekly short strike (stock − 1.5×ATR). |
 | `GET /api/roll-options?ticker=ON` | Roll picker data: current short + live buyback, plus every expiration to ROLL_MAX_DTE with nearby strikes (choose week + strike). |
 | `GET /api/earnings?ticker=ON` | Next earnings date (Alpha Vantage, day-cached; `&refresh=1` to force). Manual override via `metadata.earnings_overrides`. |
-| `POST /api/execute` | Execute + auto-log a CFM action (`buy_leap`/`sell_short`/`close_short`/`close_leap`/`roll_short`); returns execution id + captured prices. |
+| `POST /api/execute` | Execute a CFM action (`buy_leap`/`sell_short`/`close_short`/`close_leap`/`roll_short`). Paper path logs immediately and returns `status:"filled"`; a live single-leg order returns `status:"working"` + `order_id`. |
+| `GET /api/order-status?order_id=…` | Poll a live order. On fill it commits the execution (at the real fill price) and returns `filled`; `canceled`/`rejected` when the broker drops it; else `working`. |
+| `POST /api/order-cancel` | Cancel a working order (`{order_id}`) at the broker and clear it. |
 | `GET /api/positions` | Positions (LEAP/share/cap), capital summary, milestones. |
 | `GET /api/theta-ledger` | Net juice (week/month/YTD) + extrinsic payback per position. |
 | `GET /api/kill-switch` | Per-position RS3M vs SPY/Sector + exit signals. |
@@ -141,6 +143,15 @@ Schwab refresh tokens expire every 7 days and require a fresh browser login;
 `/api/config` reports the token's status. For live order placement (off by
 default), set `CFM_LIVE_TRADING=1` — otherwise executions are captured against
 live prices and logged but no order is transmitted (the honest paper path).
+
+**Live order lifecycle.** With `CFM_LIVE_TRADING=1` and Schwab connected, a
+single-leg action places a real DAY LIMIT order (`buy_leap`→BUY_TO_OPEN,
+`sell_short`→SELL_TO_OPEN, `close_short`→BUY_TO_CLOSE, `close_leap`→SELL_TO_CLOSE)
+and parks it under `state.json` `pending_orders`; it is **not** recorded as an
+execution until it actually fills. The UI toasts the submit, polls
+`/api/order-status` for the fill, and auto-cancels via `/api/order-cancel` if it
+doesn't fill within 3 seconds — so an unfilled, cancelled order leaves no trace.
+Paper mode keeps committing immediately and just toasts the success.
 
 ---
 

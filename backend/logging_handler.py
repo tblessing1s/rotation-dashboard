@@ -33,6 +33,10 @@ def _default_state() -> dict:
         "executions": [],
         "theta_ledger": {"weeks": [], "totals": {"this_week": 0, "this_month": 0, "ytd": 0, "pct_deployed": 0}},
         "extrinsic_payback": {},
+        # Live orders placed at the broker but not yet filled. Keyed by Schwab
+        # order id; an entry is removed when the order fills (then committed as an
+        # execution) or is cancelled/rejected.
+        "pending_orders": {},
     }
 
 
@@ -92,6 +96,28 @@ def find_position(state: dict, ticker: str) -> dict | None:
         if p.get("ticker", "").upper() == ticker.upper():
             return p
     return None
+
+
+# ---------------------------------------------------------------------------
+# Pending (live, unfilled) orders
+# ---------------------------------------------------------------------------
+def save_pending_order(order_id: str, record: dict) -> None:
+    with _lock:
+        state = load_state()
+        state.setdefault("pending_orders", {})[str(order_id)] = record
+        save_state(state)
+
+
+def get_pending_order(order_id: str) -> dict | None:
+    return load_state().get("pending_orders", {}).get(str(order_id))
+
+
+def pop_pending_order(order_id: str) -> dict | None:
+    with _lock:
+        state = load_state()
+        rec = state.get("pending_orders", {}).pop(str(order_id), None)
+        save_state(state)
+        return rec
 
 
 # ---------------------------------------------------------------------------
