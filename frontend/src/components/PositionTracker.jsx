@@ -1,15 +1,44 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Stat, Meter, Pill, Loading, money, fmt, pct, useApi } from "./ui.jsx";
+import { Card, Stat, Meter, Pill, Loading, money, fmt, useApi } from "./ui.jsx";
+import RollModal from "./RollModal.jsx";
+
+// Next-earnings chip. Amber when inside the warning window (roll deep-ITM or
+// exit before the report); muted otherwise; nothing when the date is unknown.
+function EarningsBadge({ earnings }) {
+  if (!earnings || !earnings.date) {
+    return <span className="text-xs text-slate-600">earnings —</span>;
+  }
+  const warn = earnings.warning;
+  const d = earnings.days_until;
+  const when = d == null ? "" : d < 0 ? ` (${Math.abs(d)}d ago)` : ` (${d}d)`;
+  return (
+    <span
+      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
+        warn ? "border-amber-500/40 bg-amber-500/15 text-amber-300" : "border-slate-700 bg-slate-800/40 text-slate-400"
+      }`}
+      title={warn ? "Earnings approaching — roll the short deep-ITM or exit" : "Next earnings report"}
+    >
+      ⚠ earnings {earnings.date}{when}
+    </span>
+  );
+}
 
 export default function PositionTracker() {
-  const { data, error, loading } = useApi(api.positions, [], null);
+  const { data, error, loading, reload } = useApi(api.positions, [], null);
+  const [rolling, setRolling] = React.useState(null); // ticker being rolled
+
   if (loading && !data) return <Card title="Positions"><Loading /></Card>;
   if (error) return <Card title="Positions"><p className="text-sm text-rose-400">{error}</p></Card>;
 
   const positions = data?.positions || [];
   const cap = data?.capital || {};
   const ms = cap.milestones || {};
+
+  async function runRoll(payload) {
+    await api.execute(payload);
+    reload();
+  }
 
   return (
     <div className="grid gap-4">
@@ -39,8 +68,18 @@ export default function PositionTracker() {
       {positions.map((p) => {
         const leap = p.leap || {};
         const sh = p.shares || {};
+        const shorts = p.short_calls || [];
         return (
-          <Card key={p.ticker} title={`${p.ticker} · ${p.sector || ""}`} right={<Pill status={p.status === "active" ? "green" : "unknown"}>{p.status}</Pill>}>
+          <Card
+            key={p.ticker}
+            title={`${p.ticker} · ${p.sector || ""}`}
+            right={
+              <div className="flex items-center gap-2">
+                <EarningsBadge earnings={p.earnings} />
+                <Pill status={p.status === "active" ? "green" : "unknown"}>{p.status}</Pill>
+              </div>
+            }
+          >
             <div className="grid gap-4 sm:grid-cols-3">
               <div>
                 <div className="text-xs uppercase tracking-wide text-slate-500">LEAP</div>
@@ -55,12 +94,53 @@ export default function PositionTracker() {
               <div>
                 <div className="text-xs uppercase tracking-wide text-slate-500">Stock</div>
                 <div className="text-sm text-slate-200">{fmt(p.stock_price, 2)}</div>
-                <div className="text-xs text-slate-500">{(p.short_calls || []).length} open short(s)</div>
+                <div className="text-xs text-slate-500">{shorts.length} open short(s)</div>
               </div>
+            </div>
+
+            {/* Open shorts — each rollable in place (pick week + strike) */}
+            <div className="mt-4 border-t border-slate-800 pt-3">
+              <div className="mb-2 flex items-center justify-between">
+                <span className="text-xs uppercase tracking-wide text-slate-500">Short calls</span>
+                {shorts.length > 0 && (
+                  <button
+                    onClick={() => setRolling(p.ticker)}
+                    className="rounded-lg border border-sky-700 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-300 hover:bg-sky-500/20"
+                  >
+                    Roll short
+                  </button>
+                )}
+              </div>
+              {shorts.length === 0 ? (
+                <p className="text-xs text-slate-500">No open short — sell this week's call from the Execute tab.</p>
+              ) : (
+                <div className="space-y-1">
+                  {shorts.map((sc, i) => (
+                    <div key={i} className="flex items-center justify-between rounded-lg bg-slate-950/60 px-3 py-1.5 text-sm">
+                      <span className="text-slate-200">
+                        {fmt(sc.strike, 2)}C · {sc.contracts}c
+                        {sc.expiration ? ` · exp ${sc.expiration}` : ""}
+                        {sc.dte != null ? ` · ${sc.dte} DTE` : ""}
+                      </span>
+                      {sc.dte != null && sc.dte <= 2 && (
+                        <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300">expiring</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </Card>
         );
       })}
+
+      {rolling && (
+        <RollModal
+          ticker={rolling}
+          onExecute={runRoll}
+          onClose={() => setRolling(null)}
+        />
+      )}
     </div>
   );
 }

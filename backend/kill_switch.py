@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import config
 import data_handler
+import earnings
 import indicators
 import sector_data
 
@@ -47,6 +48,13 @@ def evaluate(ticker: str) -> dict:
          (rs_vs_spy is not None and rs_vs_spy < config.STOCK_RS_VS_SPY_MIN):
         status = "yellow"
         action = "Watch — relative strength thinning toward the kill line."
+    try:
+        earn = earnings.next_earnings(ticker)
+    except Exception:  # noqa: BLE001
+        earn = {"date": None, "days_until": None, "warning": False}
+    if earn.get("warning"):
+        action = (f"{action}  Earnings in {earn['days_until']}d ({earn['date']}) — "
+                  "roll the short deep-ITM or exit before the report.")
     return {
         "ticker": ticker,
         "rs3m_vs_spy": rs_vs_spy,
@@ -54,6 +62,7 @@ def evaluate(ticker: str) -> dict:
         "status": status,
         "alert": alert,
         "suggested_action": action,
+        "earnings": earn,
     }
 
 

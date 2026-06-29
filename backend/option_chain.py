@@ -115,6 +115,103 @@ def _detect_action(has_leap: bool, open_shorts: list, management_only: bool = Fa
     return "close_short", "A short call is already open — roll it (buy to close)."
 
 
+def roll_options(ticker: str) -> dict:
+    """Data for the short-roll picker: the current open short with its live
+    buy-to-close cost, plus every candidate expiration out to ROLL_MAX_DTE with
+    nearby strikes around the regime-aware ATR target.
+
+    The frontend uses this to let the user roll to the SAME or a DIFFERENT week
+    (pick an expiration) and the SAME or a DIFFERENT strike (pick a strike within
+    it). The current short's own strike is always included in every expiration's
+    list so a same-strike roll is selectable everywhere.
+    """
+    ticker = ticker.strip().upper()
+    if not ticker:
+        raise ValueError("ticker is required")
+
+    state = log.load_state()
+    pos = log.find_position(state, ticker)
+    open_shorts = [sc for sc in (pos or {}).get("short_calls", []) if sc] if pos else []
+    if not open_shorts:
+        return {"ticker": ticker, "current_short": None, "expirations": [],
+                "error": "no open short to roll"}
+
+    payload = _fetch_chain(ticker)
+    underlying, contracts = schwab_api.parse_call_chain(payload)
+    if underlying is None:
+        quote = data_handler.latest_quote(ticker)
+        underlying = quote["price"] if quote else None
+    if not contracts:
+        raise schwab_api.SchwabError(f"no call contracts returned for {ticker}")
+
+    # Regime-aware ATR target strike (same rule the entry chain uses).
+    reg = screening.regime()
+    atr_mult = REGIME_ATR_MULT.get(reg.get("status"), REGIME_ATR_MULT["yellow"])
+    df = data_handler.get_daily(ticker)
+    atr_val = indicators.atr(df)
+    price = underlying if underlying is not None else indicators.last(df)
+    suggested_strike = (indicators.short_strike(price, atr_val, atr_mult)
+                        if atr_val is not None and price is not None else None)
+
+    # The current short to roll = the nearest-dated open leg, with a live buyback.
+    current = min(open_shorts, key=lambda s: s.get("dte") if s.get("dte") is not None else 1e9)
+    cur_strike = current.get("strike")
+    cur_exp = current.get("expiration")
+    match = next((c for c in contracts if c.get("strike") == cur_strike
+                  and (cur_exp is None or c.get("expiration") == cur_exp)), None)
+    if match is None:
+        match = next((c for c in contracts if c.get("strike") == cur_strike), None)
+    match = indicators._augment(match, underlying) if match else None
+    cur_exp = cur_exp or (match or {}).get("expiration")
+    current_view = {
+        "strike": cur_strike,
+        "contracts": current.get("contracts"),
+        "expiration": cur_exp,
+        "dte": current.get("dte") if current.get("dte") is not None else (match or {}).get("dte"),
+        "current_bid": (match or {}).get("bid"),
+        "current_ask": (match or {}).get("ask"),
+        "current_mark": (match or {}).get("mark"),
+        "entry_extrinsic_per_share": current.get("entry_extrinsic_per_share"),
+    }
+
+    # Candidate expirations out to ROLL_MAX_DTE, each with nearby strikes.
+    by_exp: dict[str, dict] = {}
+    for c in contracts:
+        exp, dte = c.get("expiration"), c.get("dte")
+        if exp is None or dte is None or dte < 0 or dte > config.ROLL_MAX_DTE:
+            continue
+        by_exp.setdefault(exp, {"expiration": exp, "dte": dte, "contracts": []})["contracts"].append(c)
+
+    target = suggested_strike if suggested_strike is not None else cur_strike
+    expirations = []
+    for exp in sorted(by_exp, key=lambda e: by_exp[e]["dte"]):
+        grp = by_exp[exp]
+        strikes = indicators.get_nearby_strikes(grp["contracts"], target, underlying, count=7)
+        # Guarantee the current strike is offered so "same strike" always works.
+        if cur_strike is not None and not any(s["strike"] == cur_strike for s in strikes):
+            same = next((c for c in grp["contracts"] if c.get("strike") == cur_strike), None)
+            if same:
+                strikes = sorted(strikes + [indicators._augment(same, underlying)],
+                                 key=lambda s: s["strike"])
+        expirations.append({
+            "expiration": exp,
+            "dte": grp["dte"],
+            "is_current_week": exp == cur_exp,
+            "strikes": strikes,
+        })
+
+    return {
+        "ticker": ticker,
+        "underlying_price": round(underlying, 2) if underlying is not None else None,
+        "regime": reg.get("status"),
+        "atr": round(atr_val, 2) if atr_val is not None else None,
+        "atr_mult": atr_mult,
+        "suggested_strike": suggested_strike,
+        "current_short": current_view,
+        "expirations": expirations,
+    }
+
+
 def option_chain(ticker: str, strategy: str = "atr") -> dict:
     """Build the option-chain view: regime banner, auto-picked LEAP, and the
     ATR-suggested weekly short with nearby strikes.
