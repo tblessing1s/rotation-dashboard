@@ -29,6 +29,9 @@ export const api = {
   earnings: (ticker, refresh = false) => request(`/api/earnings?ticker=${ticker}${refresh ? "&refresh=1" : ""}`),
   optionChain: (ticker, strategy = "atr") => request(`/api/option-chain/${ticker}?strategy=${strategy}`),
   execute: (payload) => request("/api/execute", { method: "POST", body: JSON.stringify(payload) }),
+  // Live order lifecycle (used when an order comes back "working"; paper fills immediately).
+  orderStatus: (orderId) => request(`/api/order-status?order_id=${encodeURIComponent(orderId)}`),
+  cancelOrder: (orderId) => request("/api/order-cancel", { method: "POST", body: JSON.stringify({ order_id: orderId }) }),
   positions: () => request("/api/positions"),
   thetaLedger: (params = "") => request(`/api/theta-ledger${params}`),
   killSwitch: () => request("/api/kill-switch"),

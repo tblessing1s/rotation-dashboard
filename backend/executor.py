@@ -94,6 +94,10 @@ def execute(payload: dict) -> dict:
 
     return {
         "success": True,
+        # The logged/paper path commits the fill immediately, so it's "filled".
+        # A future live path will return "working" + an order_id and resolve the
+        # fill (or auto-cancel) asynchronously; the frontend already handles both.
+        "status": "filled",
         "execution_id": stored["id"],
         "timestamp": stored["date"],
         "mode": mode,
@@ -270,6 +274,7 @@ def _roll_short(payload, ticker, contracts, stock_price, mode, price_source):
     new_total = float(stored_sell.get("premium_total") or 0)
     return {
         "success": True,
+        "status": "filled",
         "execution_id": stored_sell["id"],
         "close_execution_id": stored_close["id"],
         "timestamp": stored_sell["date"],

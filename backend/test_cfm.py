@@ -386,6 +386,23 @@ def test_execute_rejects_bad_action():
         executor.execute({"action": "nope", "ticker": "ON"})
 
 
+def test_execute_reports_filled_status(monkeypatch, tmp_path):
+    # The paper/logged path commits immediately, so the response status is
+    # "filled" — the frontend toasts a success on it (a future live path returns
+    # "working" and resolves the fill / auto-cancel asynchronously).
+    monkeypatch.setattr(config, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
+    import importlib
+    import logging_handler
+    importlib.reload(logging_handler)
+    import executor
+    importlib.reload(executor)
+
+    res = executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
+                            "contracts": 5, "execution_price": 3300, "stock_price": 145})
+    assert res["status"] == "filled" and res["mode"] == "logged"
+
+
 def test_roll_short_closes_old_and_opens_new(monkeypatch, tmp_path):
     # A roll is one operation: buy to close the old short and sell a new one at a
     # freely chosen week + strike. Both legs are logged; the position ends with a

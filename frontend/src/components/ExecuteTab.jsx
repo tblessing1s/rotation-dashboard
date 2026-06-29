@@ -2,6 +2,8 @@ import React from "react";
 import { api } from "../api.js";
 import { Card, Pill, Light, Loading, fmt } from "./ui.jsx";
 import OptionChainModal from "./OptionChainModal.jsx";
+import { useToast } from "./Toast.jsx";
+import { submitOrder } from "../orderFlow.js";
 
 function checkValue(v) {
   if (v === null || v === undefined) return "—";
@@ -38,11 +40,10 @@ function GateLevel({ lv }) {
 }
 
 export default function ExecuteTab({ initialTicker, onExecuted }) {
+  const toast = useToast();
   const [ticker, setTicker] = React.useState(initialTicker || "");
   const [gate, setGate] = React.useState(null);
   const [roll, setRoll] = React.useState(null);
-  const [busy, setBusy] = React.useState(false);
-  const [result, setResult] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [chainOpen, setChainOpen] = React.useState(false);
   const [gateLoading, setGateLoading] = React.useState(false);
@@ -71,16 +72,12 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
   const chainBtnLabel = regimeStatus === "red" ? "Manage Positions (market RED)" : "View Option Chain";
 
   // All execution flows through the option chain modal (it builds + sends the
-  // order ticket); this just records the result and refreshes dependent tabs.
+  // order ticket); submitOrder drives the toast lifecycle (submit → fill/cancel)
+  // and we refresh the dependent tabs on success.
   async function runExecute(payload) {
-    setBusy(true); setError(null); setResult(null);
-    try {
-      const res = await api.execute(payload);
-      setResult(res);
-      onExecuted?.();
-      return res;
-    } catch (e) { setError(e.message); throw e; }
-    finally { setBusy(false); }
+    const res = await submitOrder(api, toast, payload);
+    onExecuted?.();
+    return res;
   }
 
   return (
@@ -132,12 +129,6 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
           <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400">
             Suggested weekly short strike for {ticker}: <span className="font-semibold text-slate-100">{fmt(roll.suggested_strike, 1)}</span>{" "}
             (price {fmt(roll.stock_price, 2)} − {roll.atr_mult}×ATR {fmt(roll.atr, 2)})
-          </div>
-        )}
-        {busy && <p className="mt-3 text-sm text-slate-400">Executing…</p>}
-        {result && (
-          <div className="mt-3 rounded-lg border border-emerald-800 bg-emerald-500/5 p-3 text-xs text-emerald-200">
-            Logged {result.execution_id} ({result.mode}) · captured price {fmt(result.captured_price, 2)} · {result.timestamp}
           </div>
         )}
       </Card>
