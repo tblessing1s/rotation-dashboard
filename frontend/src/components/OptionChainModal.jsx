@@ -26,7 +26,7 @@ const ACTION_LABELS = {
  * short juice takes to cover the LEAP's extrinsic. The user typically only sets
  * quantity, then executes straight from the chain (or just fills the form).
  */
-export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose }) {
+export default function OptionChainModal({ ticker, onExecute, onClose }) {
   const [chain, setChain] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -132,18 +132,6 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
     finally { setBusy(false); }
   }
 
-  function confirm() {
-    onConfirm?.({
-      ticker: chain.ticker,
-      underlying_price: chain.underlying_price,
-      regime: chain.regime,
-      atr_mult: chain.atr_mult,
-      leap: chosenLeap ? { strike: chosenLeap.strike, mark: chosenLeap.mark, contracts: qtyNum, dte: chosenLeap.dte, expiration: chosenLeap.expiration } : null,
-      weekly: chosenWeekly ? { strike: chosenWeekly.strike, mark: chosenWeekly.mark, dte: weekly.dte } : null,
-    });
-    onClose?.();
-  }
-
   const regimeBanner =
     chain?.regime === "green" ? "GREEN — uptrend"
     : chain?.regime === "yellow" ? "YELLOW — caution"
@@ -247,8 +235,8 @@ export default function OptionChainModal({ ticker, onConfirm, onExecute, onClose
               )}
 
               <div className="mt-3 flex items-center justify-end gap-2">
-                <button onClick={confirm} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
-                  Just fill form
+                <button onClick={onClose} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
+                  Cancel
                 </button>
                 <button
                   onClick={execute}

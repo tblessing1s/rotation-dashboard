@@ -37,25 +37,21 @@ function GateLevel({ lv }) {
   );
 }
 
-const BLANK = { action: "buy_leap", strike: "", contracts: 5, execution_price: "", premium_per_share: "", close_price_per_share: "", close_leap_price: "", stock_price: "" };
-
 export default function ExecuteTab({ initialTicker, onExecuted }) {
   const [ticker, setTicker] = React.useState(initialTicker || "");
   const [gate, setGate] = React.useState(null);
   const [roll, setRoll] = React.useState(null);
-  const [form, setForm] = React.useState(BLANK);
   const [busy, setBusy] = React.useState(false);
   const [result, setResult] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [chainOpen, setChainOpen] = React.useState(false);
-  const [locked, setLocked] = React.useState(null); // confirmed chain pick
   const [gateLoading, setGateLoading] = React.useState(false);
 
   React.useEffect(() => { if (initialTicker) setTicker(initialTicker); }, [initialTicker]);
 
   const loadGate = React.useCallback(async (t) => {
     if (!t) return;
-    setError(null); setGate(null); setRoll(null); setLocked(null); setChainOpen(false);
+    setError(null); setGate(null); setRoll(null); setChainOpen(false);
     setGateLoading(true);
     try {
       const [g, r] = await Promise.all([api.entryGate(t), api.rollSuggestion(t).catch(() => null)]);
@@ -74,37 +70,8 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
   const canViewChain = !!gate;
   const chainBtnLabel = regimeStatus === "red" ? "Manage Positions (market RED)" : "View Option Chain";
 
-  // Pre-fill the form for a given action from a confirmed chain pick. LEAP fills
-  // the buy_leap fields; the chosen weekly strike fills the sell/close fields.
-  function applyPick(pick, action) {
-    const next = { ...BLANK, action, contracts: form.contracts };
-    if (pick.underlying_price != null) next.stock_price = String(pick.underlying_price);
-    if (action === "buy_leap" && pick.leap) {
-      next.strike = String(pick.leap.strike);
-      next.contracts = pick.leap.contracts ?? form.contracts;
-      if (pick.leap.mark != null) next.execution_price = String(Math.round(pick.leap.mark * 100 * 100) / 100);
-    } else if (pick.weekly) {
-      next.strike = String(pick.weekly.strike);
-      if (action === "sell_short" && pick.weekly.mark != null) next.premium_per_share = String(pick.weekly.mark);
-      if (action === "close_short" && pick.weekly.mark != null) next.close_price_per_share = String(pick.weekly.mark);
-    }
-    setForm(next);
-  }
-
-  function onChainConfirm(pick) {
-    setLocked(pick);
-    applyPick(pick, form.action);
-  }
-
-  function changeAction(action) {
-    // close_leap targets the existing LEAP, not a chain-picked strike, so don't
-    // overwrite the form from a locked entry pick for it.
-    if (locked && action !== "close_leap") applyPick(locked, action);
-    else setForm({ ...form, action });
-  }
-
-  // Shared by the form's Execute button and the option-chain modal's one-click
-  // execute. Throws on failure so the caller (e.g. the modal) can react.
+  // All execution flows through the option chain modal (it builds + sends the
+  // order ticket); this just records the result and refreshes dependent tabs.
   async function runExecute(payload) {
     setBusy(true); setError(null); setResult(null);
     try {
@@ -115,23 +82,6 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
     } catch (e) { setError(e.message); throw e; }
     finally { setBusy(false); }
   }
-
-  async function submit() {
-    const payload = { action: form.action, ticker, contracts: Number(form.contracts) || 0 };
-    if (form.strike !== "") payload.strike = Number(form.strike);
-    if (form.stock_price !== "") payload.stock_price = Number(form.stock_price);
-    if (form.action === "buy_leap" && form.execution_price !== "") payload.execution_price = Number(form.execution_price);
-    if (form.action === "buy_leap" && locked?.leap) {
-      if (locked.leap.expiration) payload.expiration = locked.leap.expiration;
-      if (locked.leap.dte != null) payload.dte = locked.leap.dte;
-    }
-    if (form.action === "sell_short" && form.premium_per_share !== "") payload.premium_per_share = Number(form.premium_per_share);
-    if (form.action === "close_short" && form.close_price_per_share !== "") payload.close_price_per_share = Number(form.close_price_per_share);
-    if (form.action === "close_leap" && form.close_leap_price !== "") payload.close_price = Number(form.close_leap_price);
-    try { await runExecute(payload); } catch { /* surfaced via error state */ }
-  }
-
-  const field = (k) => ({ value: form[k], onChange: (e) => setForm({ ...form, [k]: e.target.value }) });
 
   return (
     <div className="grid gap-4 lg:grid-cols-2">
@@ -159,10 +109,15 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
       </Card>
 
       <Card title="Execute">
-        {canViewChain && (
+        <p className="mb-3 text-sm text-slate-400">
+          Send trades from the live option chain — it auto-detects the next action
+          (buy LEAP · sell / close / roll the short · sell the LEAP to exit) from
+          your current position and prices the order ticket for you.
+        </p>
+        {canViewChain ? (
           <button
             onClick={() => setChainOpen(true)}
-            className={`mb-3 w-full rounded-lg border py-2 text-sm font-semibold ${
+            className={`w-full rounded-lg border py-2 text-sm font-semibold ${
               regimeStatus === "red"
                 ? "border-rose-700 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
                 : "border-sky-700 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20"
@@ -170,74 +125,16 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
           >
             {chainBtnLabel}
           </button>
-        )}
-        {locked && (
-          <div className="mb-3 flex items-center justify-between rounded-lg border border-emerald-800 bg-emerald-500/5 p-3 text-xs text-emerald-200">
-            <span>
-              Strikes locked from chain · LEAP{" "}
-              <span className="font-semibold">{locked.leap ? fmt(locked.leap.strike, 2) : "—"}</span> · Weekly{" "}
-              <span className="font-semibold">{locked.weekly ? fmt(locked.weekly.strike, 2) : "—"}</span>
-            </span>
-            <button
-              onClick={() => { setLocked(null); setForm({ ...BLANK, action: form.action, contracts: form.contracts }); }}
-              className="rounded border border-emerald-700 px-2 py-0.5 text-emerald-200 hover:bg-emerald-500/10"
-            >
-              Reset
-            </button>
-          </div>
+        ) : (
+          <p className="text-sm text-slate-500">Run the entry gate for a ticker above to load its option chain.</p>
         )}
         {roll && !roll.error && (
-          <div className="mb-3 rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400">
+          <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400">
             Suggested weekly short strike for {ticker}: <span className="font-semibold text-slate-100">{fmt(roll.suggested_strike, 1)}</span>{" "}
             (price {fmt(roll.stock_price, 2)} − {roll.atr_mult}×ATR {fmt(roll.atr, 2)})
           </div>
         )}
-        <div className="grid grid-cols-2 gap-3 text-sm">
-          <label className="col-span-2 text-slate-400">Action
-            <select value={form.action} onChange={(e) => changeAction(e.target.value)} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100">
-              <option value="buy_leap">Buy LEAP (deep ITM)</option>
-              <option value="sell_short">Sell weekly short call</option>
-              <option value="close_short">Close / roll short call</option>
-              <option value="close_leap">Close LEAP (sell to close)</option>
-            </select>
-          </label>
-          <label className="text-slate-400">Strike
-            <input {...field("strike")} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100" />
-          </label>
-          <label className="text-slate-400">Contracts
-            <input {...field("contracts")} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100" />
-          </label>
-          {form.action === "buy_leap" && (
-            <label className="text-slate-400">Price / contract ($)
-              <input {...field("execution_price")} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100" />
-            </label>
-          )}
-          {form.action === "sell_short" && (
-            <label className="text-slate-400">Premium / share ($)
-              <input {...field("premium_per_share")} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100" />
-            </label>
-          )}
-          {form.action === "close_short" && (
-            <label className="text-slate-400">Close / share ($)
-              <input {...field("close_price_per_share")} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100" />
-            </label>
-          )}
-          {form.action === "close_leap" && (
-            <label className="text-slate-400">Close / contract ($)
-              <input {...field("close_leap_price")} className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100" />
-            </label>
-          )}
-          <label className="text-slate-400">Stock price (optional)
-            <input {...field("stock_price")} placeholder="auto-captured" className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100" />
-          </label>
-        </div>
-        <button
-          onClick={submit}
-          disabled={busy || !ticker}
-          className="mt-4 w-full rounded-lg bg-emerald-500/20 py-2 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-40"
-        >
-          {busy ? "Executing…" : "Execute & log"}
-        </button>
+        {busy && <p className="mt-3 text-sm text-slate-400">Executing…</p>}
         {result && (
           <div className="mt-3 rounded-lg border border-emerald-800 bg-emerald-500/5 p-3 text-xs text-emerald-200">
             Logged {result.execution_id} ({result.mode}) · captured price {fmt(result.captured_price, 2)} · {result.timestamp}
@@ -248,7 +145,6 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
       {chainOpen && (
         <OptionChainModal
           ticker={ticker}
-          onConfirm={onChainConfirm}
           onExecute={runExecute}
           onClose={() => setChainOpen(false)}
         />
