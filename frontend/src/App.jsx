@@ -4,6 +4,7 @@ import Navbar from "./components/Navbar.jsx";
 import SchwabStatus from "./components/SchwabStatus.jsx";
 import RegimeScanner from "./components/RegimeScanner.jsx";
 import StockFilter from "./components/StockFilter.jsx";
+import Scorecard from "./components/Scorecard.jsx";
 import ExecuteTab from "./components/ExecuteTab.jsx";
 import ThetaLedger from "./components/ThetaLedger.jsx";
 import KillSwitchMonitor from "./components/KillSwitchMonitor.jsx";
@@ -48,6 +49,7 @@ export default function App() {
         {tab === "Scan" && (
           <div className="grid gap-4">
             <RegimeScanner onStatus={setRegimeStatus} />
+            <Scorecard />
             <StockFilter onSelectStock={selectStock} />
           </div>
         )}
