@@ -408,3 +408,24 @@ def parse_put_iv(payload: dict) -> dict[tuple[str, float], float]:
                 if strike is not None and iv is not None:
                     out[(date_part, strike)] = iv
     return out
+
+
+def parse_put_quotes(payload: dict) -> dict[tuple[str, float], dict]:
+    """Map (expiration YYYY-MM-DD, strike) -> {bid, ask, mark} from putExpDateMap.
+
+    Lets a caller imply a skew-aware vol from the OTM put's *price* when the
+    provider's IV field is missing (e.g. off-hours NaNs) — the put carries time
+    value, so its mark implies a usable vol that recovers the ITM call's delta."""
+    out: dict[tuple[str, float], dict] = {}
+    for exp_key, strikes in (payload.get("putExpDateMap") or {}).items():
+        date_part = exp_key.split(":")[0]
+        for strike_str, rows in (strikes or {}).items():
+            for row in rows or []:
+                strike = _num(row.get("strikePrice")) or _num(strike_str)
+                if strike is None:
+                    continue
+                bid, ask, mark = _num(row.get("bid")), _num(row.get("ask")), _num(row.get("mark"))
+                if mark is None and bid is not None and ask is not None:
+                    mark = round((bid + ask) / 2, 4)
+                out[(date_part, strike)] = {"bid": bid, "ask": ask, "mark": mark}
+    return out

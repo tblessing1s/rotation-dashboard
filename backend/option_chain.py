@@ -256,14 +256,27 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     # same-strike PUT's IV — the OTM put's vol is stable and skew-aware, whereas
     # the deep-ITM call's own IV collapses on thin time value (delta -> ~1.0).
     put_iv = schwab_api.parse_put_iv(payload)
+    put_q = schwab_api.parse_put_quotes(payload)
     for c in contracts:
         mark = c.get("mark")
         if mark is None and c.get("bid") is not None and c.get("ask") is not None:
             mark = round((c["bid"] + c["ask"]) / 2, 4)
         strike = c.get("strike")
         reported_iv = c.get("volatility")
-        if underlying and strike and strike < underlying:  # ITM call -> use OTM put IV
-            reported_iv = put_iv.get((c["expiration"], strike)) or reported_iv
+        if underlying and strike and strike < underlying:  # ITM call -> use OTM put vol
+            # Prefer the provider's same-strike put IV; when it's missing (e.g.
+            # off-hours NaNs) imply the vol from the put's own mark so the delta
+            # stays skew-aware instead of collapsing toward 1.0 on a flat call IV.
+            skew_iv = put_iv.get((c["expiration"], strike))
+            if skew_iv is None:
+                pq = put_q.get((c["expiration"], strike))
+                dte = c.get("dte")
+                if pq and pq.get("mark") and dte:
+                    ivp = indicators.implied_vol_put(pq["mark"], underlying, strike,
+                                                     dte / 365.0, config.RISK_FREE_RATE)
+                    if ivp:
+                        skew_iv = round(ivp * 100, 2)
+            reported_iv = skew_iv or reported_iv
         d, iv = indicators.call_greeks(underlying, strike, c.get("dte"), mark,
                                        reported_iv=reported_iv)
         if d is not None:
