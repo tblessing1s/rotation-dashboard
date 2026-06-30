@@ -128,8 +128,16 @@ cd backend && pip install -r requirements.txt && python app.py
 
 | Source | Used for | Credentials |
 |---|---|---|
-| **Schwab Trader API** (primary) | daily OHLCV, quotes, option chains, order execution | `SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, refresh token |
-| **Alpha Vantage** (fallback) | daily OHLCV + quotes + next-earnings calendar | `ALPHAVANTAGE_API_KEY` |
+| **Schwab Trader API** (primary) | daily OHLCV, quotes, option chains, order execution, dividend yield (fundamentals) | `SCHWAB_APP_KEY`, `SCHWAB_APP_SECRET`, refresh token |
+| **Alpha Vantage** (fallback) | daily OHLCV + quotes + next-earnings calendar + dividend yield (overview) | `ALPHAVANTAGE_API_KEY` |
+
+**Dividend-adjusted greeks.** A call holder forgoes the underlying's dividends,
+so a dividend yield `q` lowers the call's delta (`delta = e^(−qT)·N(d1)`). The
+yield is fetched per ticker (Schwab fundamentals → Alpha Vantage overview),
+day-cached, and overridable by hand via `metadata.dividend_overrides` (e.g.
+`{"CSCO": 0.03}`; a value > 1 is read as a percent). The effect is negligible on
+the weekly short but ~1–2% on the 171-DTE LEAP for a ~3% payer — enough to shift
+a strike across the LEAP delta band. Non-payers (`q = 0`) are unaffected.
 
 ### Schwab setup
 
