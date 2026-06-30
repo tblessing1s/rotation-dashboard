@@ -217,10 +217,10 @@ def test_score_ticker_market_regime_fail_does_not_blanket_avoid(monkeypatch):
     assert sc.compute_verdict(row)["verdict"] == row["verdict"]
 
 
-def test_score_ticker_weak_sector_gates_to_avoid(monkeypatch):
-    # The verdict starts at Level 2: a weak sector (Level 2 fail) short-circuits to
-    # AVOID even when the stock's own legs (3/4) pass, since CFM won't sell premium
-    # in a sector that isn't leading.
+def test_score_ticker_weak_sector_does_not_gate(monkeypatch):
+    # Level 2 (sector strength) is NOT part of the stock verdict — only the stock's
+    # own legs (L3/L4) gate. With a lagging sector but L3/L4 passing, the row is
+    # scored on its own merits, not blanket-AVOID'd for its sector.
     import data_handler
     df = _frame(100 + np.cumsum(np.random.RandomState(13).normal(0, 1, 260)))
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
@@ -228,8 +228,8 @@ def test_score_ticker_weak_sector_gates_to_avoid(monkeypatch):
         {"level": 1, "pass": True}, {"level": 2, "pass": False},
         {"level": 3, "pass": True}, {"level": 4, "pass": True}]}
     row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
-    assert row["verdict"] == "AVOID"
-    assert "entry gate level 2" in row["reasons"][0]
+    assert not any("entry gate" in r for r in row["reasons"])
+    assert sc.compute_verdict(row)["verdict"] == row["verdict"]
 
 
 def test_score_ticker_stock_level_fail_behind_regime_fail_still_avoids(monkeypatch):
