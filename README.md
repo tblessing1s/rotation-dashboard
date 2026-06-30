@@ -49,6 +49,14 @@ before the report.
 **Kill switch (binary):** RS3M vs Sector turns negative → exit immediately;
 RS3M vs SPY turns negative (confirmed close) → exit within 1–2 days.
 
+**Delta coverage (the diagonal guardrail):** the LEAP delta must hold the **0.50
+floor** (below it the LEAP stops acting like a deep-ITM stock proxy — roll it
+deeper ITM), and the long's total delta must stay **≥ the short's** (once the
+short's delta climbs past the long's, an up-move loses faster on the short than
+it gains on the long — i.e. uncovered, so roll the short up/out). The
+**Positions** tab shows each leg's live delta and a covered/uncovered badge; this
+is why the recomputed deltas (skew-aware + dividend-adjusted) need to be right.
+
 **Size:** 5 deep-ITM LEAPs (~0.90 delta, ~180 DTE) per stock; accumulate shares
 on pullbacks toward a 500-share cap; open a new stock only when the current one
 maxes out.
@@ -96,6 +104,7 @@ maxes out.
 | `GET /api/earnings?ticker=ON` | Next earnings date (Alpha Vantage, day-cached; `&refresh=1` to force). Manual override via `metadata.earnings_overrides`. |
 | `POST /api/execute` | Execute + auto-log a CFM action (`buy_leap`/`sell_short`/`close_short`/`close_leap`/`roll_short`); returns execution id + captured prices. |
 | `GET /api/positions` | Positions (LEAP/share/cap), capital summary, milestones. |
+| `GET /api/coverage?ticker=ON` | Delta-coverage guardrail: LEAP vs short deltas, the 0.50 LEAP floor, and whether the long still covers the short. |
 | `GET /api/theta-ledger` | Net juice (week/month/YTD) + extrinsic payback per position. |
 | `GET /api/kill-switch` | Per-position RS3M vs SPY/Sector + exit signals. |
 | `GET /api/daily-checklist` | Today's routine: regime, reserve, expiring shorts, LEAP DTE. |

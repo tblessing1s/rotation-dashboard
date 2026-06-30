@@ -108,6 +108,17 @@ def api_roll_options():
         return _err(e)
 
 
+@app.route("/api/coverage")
+def api_coverage():
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify(option_chain.coverage(ticker))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/earnings")
 def api_earnings():
     ticker = request.args.get("ticker", "")
