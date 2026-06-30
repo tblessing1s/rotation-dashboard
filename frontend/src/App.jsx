@@ -49,7 +49,7 @@ export default function App() {
         {tab === "Scan" && (
           <div className="grid gap-4">
             <RegimeScanner onStatus={setRegimeStatus} />
-            <Scorecard />
+            <Scorecard regimeStatus={regimeStatus} />
             <StockFilter onSelectStock={selectStock} />
           </div>
         )}

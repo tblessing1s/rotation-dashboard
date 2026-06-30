@@ -25,6 +25,21 @@ const COLUMNS = [
 
 const VERDICT_ORDER = { AVOID: 0, CAUTION: 1, GO: 2 };
 
+// When the market regime isn't green, the gate's Level 1 is the headline risk —
+// a GO here means "best CFM setup once the tape clears," not "enter now". Surface
+// that right on the table so a green verdict is never mistaken for a fresh-risk
+// signal. Keyed to the same traffic-light tones as the regime card.
+const REGIME_BANNER = {
+  yellow: {
+    cls: "border-amber-500/40 bg-amber-500/10 text-amber-200",
+    text: "Market regime YELLOW — tighten criteria, no fresh risk. Verdicts below are a relative ranking, not entry signals.",
+  },
+  red: {
+    cls: "border-rose-500/40 bg-rose-500/10 text-rose-200",
+    text: "Market regime RED — risk-off, stand down. Verdicts below are a relative ranking, not entry signals.",
+  },
+};
+
 function sortRows(rows, sort) {
   const { key, dir } = sort;
   const col = COLUMNS.find((c) => c.key === key);
@@ -90,8 +105,9 @@ function ScoreRow({ row, expanded, onToggle }) {
   );
 }
 
-export default function Scorecard() {
+export default function Scorecard({ regimeStatus }) {
   const { data, error, loading } = useApi(api.scorecard, []);
+  const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
   const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
@@ -136,6 +152,11 @@ export default function Scorecard() {
       title="Scorecard (numeric CFM lens)"
       right={loading ? <span className="flex items-center gap-1.5 text-xs text-slate-500"><Spinner size="h-3 w-3" />scoring…</span> : data?.as_of ? <span className="text-xs text-slate-500">as of {data.as_of}</span> : null}
     >
+      {banner && (
+        <div className={`mb-4 rounded-lg border px-3 py-2 text-sm ${banner.cls}`}>
+          {banner.text}
+        </div>
+      )}
       <div className="mb-4 flex flex-wrap gap-2">
         {filterBtn("ALL", `All (${results.length})`)}
         {filterBtn("GO", `GO ${counts.GO}`)}
