@@ -342,6 +342,53 @@ class SchwabClient:
     def get_order(self, account_hash: str, order_id: str) -> dict:
         return self._get_json(f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}") or {}
 
+    def cancel_order(self, account_hash: str, order_id: str) -> dict:
+        """Cancel a working order. Schwab returns 200/201 or an empty 204."""
+        resp = requests.delete(
+            f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}",
+            headers=self._auth_headers(), timeout=30,
+        )
+        if resp.status_code in (200, 201, 204):
+            return {"orderId": order_id, "canceled": True}
+        hint = self._ACCT_HINT if resp.status_code in (401, 403) else ""
+        raise SchwabError(f"schwab cancel order: HTTP {resp.status_code} {resp.text[:200]}{hint}")
+
+
+# ---------------------------------------------------------------------------
+# Order construction (module-level, provider-specific)
+# ---------------------------------------------------------------------------
+def occ_option_symbol(underlying: str, expiration: str, strike: float, call: bool = True) -> str:
+    """Build the 21-char OCC option symbol Schwab expects in an order leg.
+
+    Layout: 6-char root (left-justified, space-padded) + YYMMDD + C/P + strike×1000
+    zero-padded to 8 digits. e.g. ('AAPL', '2024-09-20', 250, call) ->
+    'AAPL  240920C00250000'. CFM trades calls, so `call` defaults True.
+    """
+    root = (underlying or "").strip().upper().ljust(6)
+    y, m, d = str(expiration).split("-")
+    yymmdd = f"{y[2:]}{int(m):02d}{int(d):02d}"
+    cp = "C" if call else "P"
+    strike_milli = int(round(float(strike) * 1000))
+    return f"{root}{yymmdd}{cp}{strike_milli:08d}"
+
+
+def build_single_leg_order(instruction: str, quantity: int, option_symbol: str,
+                           limit_price: float) -> dict:
+    """A single-leg DAY LIMIT option order in Schwab's order schema. `instruction`
+    is one of BUY_TO_OPEN / SELL_TO_OPEN / BUY_TO_CLOSE / SELL_TO_CLOSE."""
+    return {
+        "orderType": "LIMIT",
+        "session": "NORMAL",
+        "price": f"{float(limit_price):.2f}",
+        "duration": "DAY",
+        "orderStrategyType": "SINGLE",
+        "orderLegCollection": [{
+            "instruction": instruction,
+            "quantity": int(quantity),
+            "instrument": {"symbol": option_symbol, "assetType": "OPTION"},
+        }],
+    }
+
 
 # ---------------------------------------------------------------------------
 # Chain parsing (module-level, provider-specific -> normalized dicts)

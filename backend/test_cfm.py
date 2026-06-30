@@ -386,6 +386,113 @@ def test_execute_rejects_bad_action():
         executor.execute({"action": "nope", "ticker": "ON"})
 
 
+def test_execute_reports_filled_status(monkeypatch, tmp_path):
+    # The paper/logged path commits immediately, so the response status is
+    # "filled" — the frontend toasts a success on it (a future live path returns
+    # "working" and resolves the fill / auto-cancel asynchronously).
+    monkeypatch.setattr(config, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
+    import importlib
+    import logging_handler
+    importlib.reload(logging_handler)
+    import executor
+    importlib.reload(executor)
+
+    res = executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
+                            "contracts": 5, "execution_price": 3300, "stock_price": 145})
+    assert res["status"] == "filled" and res["mode"] == "logged"
+
+
+# ---- live order ticket + place/poll/cancel lifecycle -----------------------
+def test_occ_symbol_and_order_ticket():
+    import schwab_api
+    assert schwab_api.occ_option_symbol("AAPL", "2024-09-20", 250) == "AAPL  240920C00250000"
+    sym = schwab_api.occ_option_symbol("ON", "2026-07-10", 139.5)
+    assert sym == "ON    260710C00139500"  # 6-char root, half-strike ×1000
+    order = schwab_api.build_single_leg_order("SELL_TO_OPEN", 5, sym, 6.0)
+    assert order["orderType"] == "LIMIT" and order["price"] == "6.00" and order["duration"] == "DAY"
+    leg = order["orderLegCollection"][0]
+    assert leg["instruction"] == "SELL_TO_OPEN" and leg["quantity"] == 5
+    assert leg["instrument"] == {"symbol": sym, "assetType": "OPTION"}
+
+
+class _FakeSchwab:
+    """Minimal stand-in for the live Schwab client used by the order lifecycle."""
+    def __init__(self, status="WORKING", fill_price=None):
+        self._status, self._fill_price = status, fill_price
+        self.placed = self.canceled = None
+    def primary_account_hash(self):
+        return "HASH"
+    def place_order(self, account_hash, order):
+        self.placed = (account_hash, order)
+        return {"orderId": "ORD1"}
+    def get_order(self, account_hash, order_id):
+        out = {"status": self._status}
+        if self._fill_price is not None:
+            out["orderActivityCollection"] = [{"executionLegs": [{"price": self._fill_price}]}]
+        return out
+    def cancel_order(self, account_hash, order_id):
+        self.canceled = (account_hash, order_id)
+        return {"canceled": True}
+
+
+def _live_executor(monkeypatch, tmp_path, fake):
+    monkeypatch.setattr(config, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
+    import importlib
+    import logging_handler
+    importlib.reload(logging_handler)
+    import executor
+    importlib.reload(executor)
+    import data_handler
+    import schwab_api
+    monkeypatch.setattr(executor, "live_enabled", lambda: True)
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: fake)
+    return executor, logging_handler
+
+
+def test_live_order_places_then_fills_and_commits(monkeypatch, tmp_path):
+    fake = _FakeSchwab(status="FILLED", fill_price=5.0)
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+
+    res = executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                            "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                            "expiration": "2026-07-10"})
+    # Placed a working order — nothing committed to state yet.
+    assert res["status"] == "working" and res["order_id"] == "ORD1"
+    assert res["option_symbol"] == "ON    260710C00139500"
+    assert fake.placed[1]["orderLegCollection"][0]["instruction"] == "SELL_TO_OPEN"
+    state = log.load_state()
+    assert state["executions"] == [] and "ORD1" in state["pending_orders"]
+
+    # Poll: it filled → commit at the real 5.0 fill (not the 6.0 limit) and clear.
+    st = executor.order_status("ORD1")
+    assert st["status"] == "filled"
+    state = log.load_state()
+    assert "ORD1" not in state["pending_orders"]
+    pos = log.find_position(state, "ON")
+    assert len(pos["short_calls"]) == 1 and pos["short_calls"][0]["strike"] == 139.5
+    assert state["executions"][-1]["premium_per_share"] == 5.0
+
+
+def test_live_order_cancel_clears_pending(monkeypatch, tmp_path):
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+
+    res = executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                            "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                            "expiration": "2026-07-10"})
+    assert res["status"] == "working"
+    assert executor.order_status("ORD1")["status"] == "working"  # not filled yet
+
+    cancelled = executor.cancel_order("ORD1")
+    assert cancelled["status"] == "canceled"
+    assert fake.canceled == ("HASH", "ORD1")
+    state = log.load_state()
+    assert "ORD1" not in state["pending_orders"] and state["executions"] == []
+
+
 def test_roll_short_closes_old_and_opens_new(monkeypatch, tmp_path):
     # A roll is one operation: buy to close the old short and sell a new one at a
     # freely chosen week + strike. Both legs are logged; the position ends with a

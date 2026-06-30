@@ -134,6 +134,29 @@ def api_execute():
         return _err(e)
 
 
+@app.route("/api/order-status")
+def api_order_status():
+    order_id = request.args.get("order_id", "")
+    if not order_id:
+        return jsonify({"error": "order_id is required"}), 400
+    try:
+        return jsonify(executor.order_status(order_id))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/order-cancel", methods=["POST"])
+def api_order_cancel():
+    payload = request.get_json(silent=True) or {}
+    order_id = payload.get("order_id", "")
+    if not order_id:
+        return jsonify({"error": "order_id is required"}), 400
+    try:
+        return jsonify(executor.cancel_order(order_id))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 # ---------------------------------------------------------------------------
 # Track
 # ---------------------------------------------------------------------------

@@ -15,9 +15,18 @@ import config
 import data_handler
 import indicators
 import logging_handler as log
+import schwab_api
 import sector_data
 
 VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_short"}
+
+# Schwab order instruction per single-leg CFM action (all legs are calls).
+INSTRUCTION = {
+    "buy_leap": "BUY_TO_OPEN",
+    "sell_short": "SELL_TO_OPEN",
+    "close_short": "BUY_TO_CLOSE",
+    "close_leap": "SELL_TO_CLOSE",
+}
 
 
 def live_enabled() -> bool:
@@ -72,20 +81,34 @@ def execute(payload: dict) -> dict:
     if action == "roll_short":
         return _roll_short(payload, ticker, contracts, stock_price, mode, price_source)
 
-    if action == "buy_leap":
-        execution, position_update = _buy_leap(payload, ticker, strike, contracts, stock_price)
-    elif action == "sell_short":
-        execution, position_update = _sell_short(payload, ticker, strike, contracts, stock_price)
-    elif action == "close_leap":
-        execution, position_update = _close_leap(payload, ticker, strike, contracts, stock_price)
-    else:  # close_short
-        execution, position_update = _close_short(payload, ticker, strike, contracts, stock_price)
+    # Live single-leg orders go to the broker and resolve asynchronously (place ->
+    # poll -> fill/cancel); they're committed to state only once they actually
+    # fill. Everything else (paper, or live without Schwab configured) commits
+    # immediately as the honest logged path.
+    if mode == "live" and schwab_api.configured():
+        return _place_live(payload, ticker, action, contracts, strike, stock_price, price_source)
+    return _commit(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
 
+
+def _build_leg(payload, ticker, action, strike, contracts, stock_price):
+    if action == "buy_leap":
+        return _buy_leap(payload, ticker, strike, contracts, stock_price)
+    if action == "sell_short":
+        return _sell_short(payload, ticker, strike, contracts, stock_price)
+    if action == "close_leap":
+        return _close_leap(payload, ticker, strike, contracts, stock_price)
+    return _close_short(payload, ticker, strike, contracts, stock_price)
+
+
+def _commit(payload, ticker, action, contracts, strike, stock_price, price_source, mode):
+    """Record one filled leg: append the immutable execution, apply the position
+    mutation, and rebuild the derived ledgers. Shared by the paper path and the
+    live fill-confirmation path."""
+    execution, position_update = _build_leg(payload, ticker, action, strike, contracts, stock_price)
     execution["mode"] = mode
     execution["price_source"] = price_source
     stored = log.append_execution(execution)
 
-    # Re-apply the position mutation onto the freshly written state and persist.
     state = log.load_state()
     position = _ensure_position(state, ticker)
     position_update(position)
@@ -94,12 +117,123 @@ def execute(payload: dict) -> dict:
 
     return {
         "success": True,
+        "status": "filled",
         "execution_id": stored["id"],
         "timestamp": stored["date"],
         "mode": mode,
         "captured_price": stock_price,
         "execution": stored,
     }
+
+
+def _limit_price(action, payload):
+    """Per-share LIMIT price for the order leg. buy_leap/close_leap carry
+    per-contract dollars (÷100); the short legs are already per-share."""
+    if action == "buy_leap":
+        return float(payload.get("execution_price") or 0) / 100.0
+    if action == "close_leap":
+        return float(payload.get("close_price") or 0) / 100.0
+    if action == "sell_short":
+        return float(payload.get("premium_per_share") or 0)
+    return float(payload.get("close_price_per_share") or 0)  # close_short
+
+
+def _place_live(payload, ticker, action, contracts, strike, stock_price, price_source):
+    """Transmit a real single-leg LIMIT order and park it as pending. The fill is
+    confirmed (and committed) later via order_status; cancel_order drops it."""
+    client = data_handler.client()
+    account_hash = client.primary_account_hash()
+
+    option_symbol = payload.get("option_symbol")
+    if not option_symbol:
+        expiration = payload.get("expiration")
+        if not expiration:
+            raise ValueError(f"{action} live order needs option_symbol or expiration to build the contract")
+        option_symbol = schwab_api.occ_option_symbol(ticker, expiration, strike, call=True)
+
+    limit = _limit_price(action, payload)
+    order = schwab_api.build_single_leg_order(INSTRUCTION[action], contracts, option_symbol, limit)
+    placed = client.place_order(account_hash, order)
+    order_id = placed.get("orderId")
+    if not order_id:
+        raise schwab_api.SchwabError("Schwab accepted the order but returned no order id")
+
+    log.save_pending_order(order_id, {
+        "payload": payload, "ticker": ticker, "action": action, "contracts": contracts,
+        "strike": strike, "stock_price": stock_price, "price_source": price_source,
+        "account_hash": account_hash, "option_symbol": option_symbol,
+        "limit_price": limit, "placed_at": log.utcnow(),
+    })
+    return {
+        "success": True,
+        "status": "working",
+        "order_id": str(order_id),
+        "mode": "live",
+        "option_symbol": option_symbol,
+        "limit_price": limit,
+    }
+
+
+def _fill_price(order: dict):
+    """Best-effort average fill price from a Schwab order's activity legs."""
+    try:
+        for act in order.get("orderActivityCollection", []) or []:
+            for leg in act.get("executionLegs", []) or []:
+                if leg.get("price") is not None:
+                    return float(leg["price"])
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _commit_from_pending(rec: dict, fill_price):
+    """Commit a pending order once filled, overlaying the actual fill price onto
+    the right payload field so the logged execution reflects the real fill."""
+    payload = dict(rec.get("payload") or {})
+    action = rec["action"]
+    if fill_price is not None:
+        if action == "buy_leap":
+            payload["execution_price"] = fill_price * 100
+        elif action == "close_leap":
+            payload["close_price"] = fill_price * 100
+        elif action == "sell_short":
+            payload["premium_per_share"] = fill_price
+        else:  # close_short
+            payload["close_price_per_share"] = fill_price
+    return _commit(payload, rec["ticker"], action, int(rec["contracts"]),
+                   rec["strike"], rec["stock_price"], rec.get("price_source", "schwab"), "live")
+
+
+def order_status(order_id: str) -> dict:
+    """Poll a live order. On FILLED, commit it as an execution and clear the
+    pending entry; on CANCELED/REJECTED/EXPIRED, clear it; otherwise it's still
+    working."""
+    rec = log.get_pending_order(order_id)
+    if not rec:
+        # Already resolved (committed or cleared) — nothing left to confirm.
+        return {"order_id": order_id, "status": "unknown"}
+    order = data_handler.client().get_order(rec["account_hash"], order_id)
+    raw = (order.get("status") or "").upper()
+    if raw == "FILLED":
+        result = _commit_from_pending(rec, _fill_price(order))
+        log.pop_pending_order(order_id)
+        return {"order_id": order_id, "status": "filled", "raw_status": raw, **result}
+    if raw in ("CANCELED", "REJECTED", "EXPIRED"):
+        log.pop_pending_order(order_id)
+        return {"order_id": order_id, "status": "rejected" if raw == "REJECTED" else "canceled",
+                "raw_status": raw}
+    return {"order_id": order_id, "status": "working", "raw_status": raw}
+
+
+def cancel_order(order_id: str) -> dict:
+    """Cancel a working order at the broker and drop the pending entry."""
+    rec = log.get_pending_order(order_id)
+    if rec:
+        try:
+            data_handler.client().cancel_order(rec["account_hash"], order_id)
+        finally:
+            log.pop_pending_order(order_id)
+    return {"order_id": order_id, "status": "canceled"}
 
 
 def _buy_leap(payload, ticker, strike, contracts, stock_price):
@@ -270,6 +404,7 @@ def _roll_short(payload, ticker, contracts, stock_price, mode, price_source):
     new_total = float(stored_sell.get("premium_total") or 0)
     return {
         "success": True,
+        "status": "filled",
         "execution_id": stored_sell["id"],
         "close_execution_id": stored_close["id"],
         "timestamp": stored_sell["date"],

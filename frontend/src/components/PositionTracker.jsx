@@ -2,6 +2,8 @@ import React from "react";
 import { api } from "../api.js";
 import { Card, Stat, Meter, Pill, Loading, money, fmt, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
+import { useToast } from "./Toast.jsx";
+import { submitOrder } from "../orderFlow.js";
 
 // Next-earnings chip. Amber when inside the warning window (roll deep-ITM or
 // exit before the report); muted otherwise; nothing when the date is unknown.
@@ -25,8 +27,17 @@ function EarningsBadge({ earnings }) {
 }
 
 export default function PositionTracker() {
+  const toast = useToast();
   const { data, error, loading, reload } = useApi(api.positions, [], null);
   const [rolling, setRolling] = React.useState(null); // ticker being rolled
+
+  // Drive the roll through the shared toast lifecycle (submit → fill/cancel),
+  // then refresh positions. Defined before the early returns so hook order holds.
+  const runRoll = React.useCallback(async (payload) => {
+    const res = await submitOrder(api, toast, payload);
+    reload();
+    return res;
+  }, [toast, reload]);
 
   if (loading && !data) return <Card title="Positions"><Loading /></Card>;
   if (error) return <Card title="Positions"><p className="text-sm text-rose-400">{error}</p></Card>;
@@ -34,11 +45,6 @@ export default function PositionTracker() {
   const positions = data?.positions || [];
   const cap = data?.capital || {};
   const ms = cap.milestones || {};
-
-  async function runRoll(payload) {
-    await api.execute(payload);
-    reload();
-  }
 
   return (
     <div className="grid gap-4">

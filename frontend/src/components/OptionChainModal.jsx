@@ -97,18 +97,25 @@ export default function OptionChainModal({ ticker, onExecute, onClose }) {
     if (action === "buy_leap" && chosenLeap) {
       base.strike = chosenLeap.strike;
       if (chosenLeap.expiration) base.expiration = chosenLeap.expiration;
+      if (chosenLeap.symbol) base.option_symbol = chosenLeap.symbol;
       if (chosenLeap.dte != null) base.dte = chosenLeap.dte;
       if (chosenLeap.mark != null) base.execution_price = Math.round(chosenLeap.mark * 100 * 100) / 100;
     } else if (action === "sell_short" && chosenWeekly) {
       base.strike = chosenWeekly.strike;
+      if (chosenWeekly.expiration || weekly?.expiration) base.expiration = chosenWeekly.expiration || weekly.expiration;
+      if (chosenWeekly.symbol) base.option_symbol = chosenWeekly.symbol;
       if (chosenWeekly.mark != null) base.premium_per_share = chosenWeekly.mark;
     } else if (action === "close_short" && openShort) {
       base.strike = openShort.strike;
       base.contracts = qtyNum || openShort.contracts;
+      if (openShort.expiration) base.expiration = openShort.expiration;
+      if (openShort.symbol) base.option_symbol = openShort.symbol;
       if (openShort.current_mark != null) base.close_price_per_share = openShort.current_mark;
     } else if (action === "close_leap" && existingLeap) {
       base.strike = existingLeap.strike;
       base.contracts = qtyNum || existingLeap.contracts;
+      if (existingLeap.expiration) base.expiration = existingLeap.expiration;
+      if (existingLeap.symbol) base.option_symbol = existingLeap.symbol;
       // close_price is per-contract total dollars (mirrors buy_leap).
       if (existingLeap.current_mark != null) base.close_price = Math.round(existingLeap.current_mark * 100 * 100) / 100;
       if (existingLeap.cost_basis != null) base.cost_basis = existingLeap.cost_basis;
