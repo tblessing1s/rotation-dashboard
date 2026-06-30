@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 
 import config
 import data_handler
+import dividends
 import indicators
 import logging_handler as log
 import schwab_api
@@ -257,6 +258,7 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     # the deep-ITM call's own IV collapses on thin time value (delta -> ~1.0).
     put_iv = schwab_api.parse_put_iv(payload)
     put_q = schwab_api.parse_put_quotes(payload)
+    div_yield = dividends.yield_for(ticker)  # lowers a dividend payer's call delta
     for c in contracts:
         mark = c.get("mark")
         if mark is None and c.get("bid") is not None and c.get("ask") is not None:
@@ -273,12 +275,12 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
                 dte = c.get("dte")
                 if pq and pq.get("mark") and dte:
                     ivp = indicators.implied_vol_put(pq["mark"], underlying, strike,
-                                                     dte / 365.0, config.RISK_FREE_RATE)
+                                                     dte / 365.0, config.RISK_FREE_RATE, div_yield)
                     if ivp:
                         skew_iv = round(ivp * 100, 2)
             reported_iv = skew_iv or reported_iv
         d, iv = indicators.call_greeks(underlying, strike, c.get("dte"), mark,
-                                       reported_iv=reported_iv)
+                                       reported_iv=reported_iv, q=div_yield)
         if d is not None:
             c["delta"] = d
         if iv is not None:
