@@ -337,6 +337,96 @@ def test_itm_call_delta_implied_from_put_mark_when_iv_missing(monkeypatch):
     assert 0.85 < s108["delta"] < 0.95  # skew-aware (~0.91), not ~0.99 off a flat 48% IV
 
 
+def test_dividend_yield_lowers_call_delta_and_roundtrips():
+    # LEAP-like deep ITM: a 3% dividend yield should pull the call delta down a
+    # bit (forgone dividends), and implying vol back must stay q-consistent.
+    S, K, T, r, sigma = 117.7, 85.0, 171 / 365, 0.04, 0.45
+    d_nodiv = ind.bs_call_delta(S, K, T, r, sigma, 0.0)
+    d_div = ind.bs_call_delta(S, K, T, r, sigma, 0.03)
+    assert d_div < d_nodiv and 0.005 < (d_nodiv - d_div) < 0.05
+    # q defaults to 0 -> identical to the legacy no-dividend delta.
+    assert ind.bs_call_delta(S, K, T, r, sigma) == d_nodiv
+    # Dividend-consistent implied-vol roundtrips (call and put).
+    cprice = ind._bs_call_price(S, K, T, r, sigma, 0.03)
+    assert ind.implied_vol_call(cprice, S, K, T, r, 0.03) == pytest.approx(sigma, abs=1e-3)
+    pprice = ind._bs_put_price(S, K, T, r, sigma, 0.03)
+    assert ind.implied_vol_put(pprice, S, K, T, r, 0.03) == pytest.approx(sigma, abs=1e-3)
+
+
+def test_dividend_yield_override_and_unknown(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
+    import importlib
+    import dividends
+    importlib.reload(dividends)
+    # A hand-entered override given as a percent normalizes to a decimal.
+    monkeypatch.setattr(dividends.log, "load_state",
+                        lambda: {"metadata": {"dividend_overrides": {"CSCO": 3.0}}})
+    assert dividends.yield_for("CSCO") == pytest.approx(0.03)
+    # No override and no providers configured -> 0.0 (the safe no-op).
+    monkeypatch.setattr(dividends.log, "load_state", lambda: {"metadata": {}})
+    monkeypatch.setattr(dividends.schwab_api, "configured", lambda: False)
+    monkeypatch.setattr(dividends.alpha_vantage, "configured", lambda: False)
+    assert dividends.yield_for("ZZZZ", refresh=True) == 0.0
+
+
+def test_coverage_floor_and_cover_checks(monkeypatch):
+    # Delta guardrails for the PMCC diagonal: the LEAP must hold the 0.50 floor,
+    # and the long's total delta must stay >= the short's (or the short is
+    # uncovered). Stub the BS augmentation so we drive exact deltas.
+    import option_chain as oc
+    import schwab_api
+    import logging_handler as log
+
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {})
+    contracts = [
+        {"strike": 85.0, "expiration": "2026-12-18", "dte": 171, "delta": None},
+        {"strike": 115.0, "expiration": "2026-07-02", "dte": 2, "delta": None},
+    ]
+    monkeypatch.setattr(schwab_api, "parse_call_chain", lambda p: (117.7, contracts))
+    monkeypatch.setattr(log, "load_state", lambda: {})
+    monkeypatch.setattr(log, "find_position", lambda s, t: {
+        "ticker": "CSCO", "status": "active",
+        "leap": {"strike": 85.0, "contracts": 5, "expiration": "2026-12-18"},
+        "short_calls": [{"strike": 115.0, "contracts": 5, "expiration": "2026-07-02"}]})
+
+    def set_deltas(leap_d, short_d):
+        def fake(payload, cs, underlying, ticker):
+            for c in cs:
+                c["delta"] = leap_d if c["strike"] == 85.0 else short_d
+        monkeypatch.setattr(oc, "_augment_call_greeks", fake)
+
+    # Healthy: LEAP 0.90 ≥ floor and ≥ short 0.70 -> covered, green.
+    set_deltas(0.90, 0.70)
+    ok = oc.coverage("CSCO")
+    assert ok["status"] == "green" and ok["covered"] is True
+    assert ok["leap"]["delta"] == 0.90 and ok["shorts"][0]["delta"] == 0.70
+
+    # LEAP below the 0.50 floor -> red (even though still nominally covering).
+    set_deltas(0.45, 0.40)
+    floor = oc.coverage("CSCO")
+    assert floor["status"] == "red" and floor["alert"] is True
+    assert "below 0.50" in floor["message"]
+
+    # Short delta exceeds the LEAP's -> uncovered, red.
+    set_deltas(0.80, 0.85)
+    unc = oc.coverage("CSCO")
+    assert unc["status"] == "red" and unc["covered"] is False
+    assert "exceeds the LEAP" in unc["message"]
+
+
+def test_coverage_unknown_without_schwab(monkeypatch):
+    import option_chain as oc
+    import schwab_api
+    import logging_handler as log
+    monkeypatch.setattr(log, "load_state", lambda: {})
+    monkeypatch.setattr(log, "find_position", lambda s, t: {
+        "ticker": "ON", "status": "active", "leap": {"strike": 80.0, "contracts": 5},
+        "short_calls": []})
+    monkeypatch.setattr(schwab_api, "configured", lambda: False)
+    assert oc.coverage("ON")["status"] == "unknown"
+
+
 def test_iv_view_flags_rich_vs_cheap():
     import option_chain as oc
     assert oc._iv_view(weekly_iv=44.0, leap_iv=33.0, hv=20.0)["premium"] == "rich"

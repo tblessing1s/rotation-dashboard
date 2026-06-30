@@ -26,6 +26,50 @@ function EarningsBadge({ earnings }) {
   );
 }
 
+// Delta-coverage guardrail for the PMCC diagonal. Fetched lazily per position so
+// the chain hit only happens on the Positions tab. Degrades to a muted note when
+// live deltas aren't available (Schwab off / off-hours).
+function DeltaCoverage({ ticker }) {
+  const { data } = useApi(React.useCallback(() => api.coverage(ticker), [ticker]), [ticker], null);
+  if (!data || data.status === "none") return null;
+
+  const wrap = (body, tone = "text-slate-400") => (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="mb-1 text-xs uppercase tracking-wide text-slate-500">Delta coverage</div>
+      <div className={`text-xs ${tone}`}>{body}</div>
+    </div>
+  );
+  if (data.status === "unknown") return wrap(data.message || "Live deltas unavailable.");
+
+  const tone = { red: "text-rose-300", yellow: "text-amber-300", green: "text-emerald-300" }[data.status] || "text-slate-300";
+  const badge = data.status === "green" ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+    : data.status === "yellow" ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+    : "border-rose-500/40 bg-rose-500/15 text-rose-300";
+  const shorts = data.shorts || [];
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Delta coverage</span>
+        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${badge}`}>
+          {data.covered ? "covered" : "uncovered"}
+        </span>
+      </div>
+      <div className="text-sm text-slate-300">
+        LEAP Δ <span className="font-semibold text-slate-100">{fmt(data.leap?.delta, 2)}</span>
+        {shorts.length > 0 && (
+          <> · short Δ {shorts.map((s, i) => (
+            <span key={i} className="font-semibold text-slate-100">
+              {fmt(s.delta, 2)}{i < shorts.length - 1 ? ", " : ""}
+            </span>
+          ))}</>
+        )}
+        {" · net Δ "}<span className="font-semibold text-slate-100">{fmt(data.net_delta, 2)}</span>
+      </div>
+      <div className={`mt-1 text-xs ${tone}`}>{data.message}</div>
+    </div>
+  );
+}
+
 export default function PositionTracker() {
   const toast = useToast();
   const { data, error, loading, reload } = useApi(api.positions, [], null);
@@ -136,6 +180,8 @@ export default function PositionTracker() {
                 </div>
               )}
             </div>
+
+            <DeltaCoverage ticker={p.ticker} />
           </Card>
         );
       })}

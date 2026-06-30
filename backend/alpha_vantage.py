@@ -124,6 +124,12 @@ def earnings_calendar(symbol: str, horizon: str = "3month", timeout: int = 20) -
     return [dict(row) for row in csv.DictReader(io.StringIO(text)) if row.get("reportDate")]
 
 
+def overview(symbol: str, timeout: int = 20) -> dict:
+    """Company fundamentals (function=OVERVIEW). Includes `DividendYield` as a
+    decimal string (e.g. '0.0312'), or 'None'/'-' when the name pays none."""
+    return _get({"function": "OVERVIEW", "symbol": symbol}, timeout)
+
+
 def global_quote(symbol: str, timeout: int = 20) -> dict:
     """Latest price/volume snapshot for one symbol."""
     data = _get({"function": "GLOBAL_QUOTE", "symbol": symbol}, timeout)

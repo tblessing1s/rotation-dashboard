@@ -27,6 +27,7 @@ AUTHORIZE_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 PRICE_HISTORY_URL = "https://api.schwabapi.com/marketdata/v1/pricehistory"
 QUOTES_URL = "https://api.schwabapi.com/marketdata/v1/quotes"
 OPTION_CHAIN_URL = "https://api.schwabapi.com/marketdata/v1/chains"
+INSTRUMENTS_URL = "https://api.schwabapi.com/marketdata/v1/instruments"
 ACCOUNTS_BASE = "https://api.schwabapi.com/trader/v1"
 
 REFRESH_TOKEN_TTL_DAYS = 7
@@ -288,6 +289,18 @@ class SchwabClient:
         if resp.status_code != 200:
             raise SchwabError(f"schwab option chain: HTTP {resp.status_code} {resp.text[:200]}")
         return resp.json()
+
+    def get_instrument_fundamental(self, symbol: str) -> dict:
+        """Fundamental block for one symbol (projection=fundamental). Carries the
+        dividend yield (`divYield`, in percent) used to adjust call deltas."""
+        resp = requests.get(
+            INSTRUMENTS_URL, headers=self._auth_headers(),
+            params={"symbol": symbol.upper(), "projection": "fundamental"}, timeout=20,
+        )
+        if resp.status_code != 200:
+            raise SchwabError(f"schwab instruments: HTTP {resp.status_code} {resp.text[:200]}")
+        instruments = (resp.json() or {}).get("instruments") or []
+        return (instruments[0].get("fundamental") or {}) if instruments else {}
 
     # -- accounts & trading --------------------------------------------------
     _ACCT_HINT = (" — confirm the Schwab app is approved for 'Accounts and "

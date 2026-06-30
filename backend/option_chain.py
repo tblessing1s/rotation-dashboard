@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 
 import config
 import data_handler
+import dividends
 import indicators
 import logging_handler as log
 import schwab_api
@@ -212,6 +213,151 @@ def roll_options(ticker: str) -> dict:
     }
 
 
+def _augment_call_greeks(payload: dict, contracts: list[dict], underlying, ticker: str) -> None:
+    """Recompute delta + IV via Black–Scholes–Merton for every call contract, in
+    place, so strike selection (delta band), display, and the coverage check all
+    use TOS-consistent values rather than Schwab's unreliable chain greeks.
+
+    For an ITM call we prefer the same-strike PUT's IV (the OTM put's vol is
+    stable and skew-aware, whereas the deep-ITM call's own IV collapses on thin
+    time value → delta ~1.0). When that IV is missing (off-hours NaNs) we imply
+    it from the put's mark. A dividend yield lowers a payer's call delta.
+    """
+    put_iv = schwab_api.parse_put_iv(payload)
+    put_q = schwab_api.parse_put_quotes(payload)
+    div_yield = dividends.yield_for(ticker)
+    for c in contracts:
+        mark = c.get("mark")
+        if mark is None and c.get("bid") is not None and c.get("ask") is not None:
+            mark = round((c["bid"] + c["ask"]) / 2, 4)
+        strike = c.get("strike")
+        reported_iv = c.get("volatility")
+        if underlying and strike and strike < underlying:  # ITM call -> use OTM put vol
+            skew_iv = put_iv.get((c["expiration"], strike))
+            if skew_iv is None:
+                pq = put_q.get((c["expiration"], strike))
+                dte = c.get("dte")
+                if pq and pq.get("mark") and dte:
+                    ivp = indicators.implied_vol_put(pq["mark"], underlying, strike,
+                                                     dte / 365.0, config.RISK_FREE_RATE, div_yield)
+                    if ivp:
+                        skew_iv = round(ivp * 100, 2)
+            reported_iv = skew_iv or reported_iv
+        d, iv = indicators.call_greeks(underlying, strike, c.get("dte"), mark,
+                                       reported_iv=reported_iv, q=div_yield)
+        if d is not None:
+            c["delta"] = d
+        if iv is not None:
+            c["volatility"] = iv
+
+
+# Delta guardrails for the Poor Man's Covered Call (diagonal):
+#   • LEAP (long) delta must stay >= this floor or it stops acting like a
+#     deep-ITM stock proxy (too much extrinsic/theta) — roll it deeper ITM.
+#   • The short is "covered" only while the long's total delta >= the short's
+#     total delta; if the short's delta climbs past the long's, an up-move loses
+#     faster on the short than it gains on the long (effectively uncovered).
+LEAP_DELTA_FLOOR = 0.50
+_FLOOR_WATCH = 0.55       # approaching the floor
+_COVER_WATCH = 0.05       # long delta within this of short delta (per contract)
+
+
+def _match_delta(contracts, strike, expiration, prefer_far):
+    """Delta of the held contract at `strike`: prefer the exact stored
+    expiration, else the far-dated (LEAP) or nearest-dated (short) match."""
+    cands = [c for c in contracts if c.get("strike") == strike and c.get("delta") is not None]
+    if not cands:
+        return None, None
+    if expiration:
+        exact = [c for c in cands if c.get("expiration") == expiration]
+        if exact:
+            cands = exact
+    pick = max(cands, key=lambda c: c.get("dte") or 0) if prefer_far \
+        else min(cands, key=lambda c: c.get("dte") if c.get("dte") is not None else 1e9)
+    return pick.get("delta"), pick.get("expiration")
+
+
+def coverage(ticker: str) -> dict:
+    """Delta-coverage assessment for a held position: the LEAP delta vs the 0.50
+    floor, and whether the long still covers the short (total delta). Degrades to
+    status "unknown" when deltas can't be sourced (Schwab off / off-hours)."""
+    ticker = ticker.strip().upper()
+    state = log.load_state()
+    pos = log.find_position(state, ticker)
+    if not pos or pos.get("status") == "closed":
+        return {"ticker": ticker, "status": "none", "message": "No open position."}
+
+    leap = pos.get("leap") or None
+    shorts = [sc for sc in (pos.get("short_calls") or []) if sc]
+    if not schwab_api.configured():
+        return {"ticker": ticker, "status": "unknown",
+                "message": "Schwab not connected — live deltas unavailable."}
+    try:
+        payload = _fetch_chain(ticker)
+        underlying, contracts = schwab_api.parse_call_chain(payload)
+        if underlying is None:
+            quote = data_handler.latest_quote(ticker)
+            underlying = quote["price"] if quote else None
+        _augment_call_greeks(payload, contracts, underlying, ticker)
+    except Exception as e:  # noqa: BLE001 — never let a monitor crash the page
+        return {"ticker": ticker, "status": "unknown", "message": str(e)}
+
+    leap_delta = leap_contracts = None
+    if leap:
+        leap_contracts = int(leap.get("contracts") or 0)
+        leap_delta, _ = _match_delta(contracts, leap.get("strike"), leap.get("expiration"), prefer_far=True)
+    leap_view = {"strike": (leap or {}).get("strike"), "contracts": leap_contracts, "delta": leap_delta}
+
+    short_views, short_total, max_short_delta = [], 0.0, None
+    for sc in shorts:
+        d, _ = _match_delta(contracts, sc.get("strike"), sc.get("expiration"), prefer_far=False)
+        n = int(sc.get("contracts") or 0)
+        short_views.append({"strike": sc.get("strike"), "contracts": n,
+                            "expiration": sc.get("expiration"), "delta": d})
+        if d is not None:
+            short_total += d * n
+            max_short_delta = d if max_short_delta is None else max(max_short_delta, d)
+    long_total = (leap_delta or 0) * (leap_contracts or 0)
+
+    alerts, status, alert = [], "green", False
+    # LEAP delta floor (long leg only).
+    if leap_delta is not None:
+        if leap_delta < LEAP_DELTA_FLOOR:
+            status, alert = "red", True
+            alerts.append(f"LEAP delta {leap_delta:.2f} is below {LEAP_DELTA_FLOOR:.2f} — "
+                          "roll the LEAP deeper ITM (it's no longer a stock proxy).")
+        elif leap_delta < _FLOOR_WATCH and status != "red":
+            status = "yellow"
+            alerts.append(f"LEAP delta {leap_delta:.2f} is nearing the {LEAP_DELTA_FLOOR:.2f} floor.")
+    # Coverage: long total delta must stay >= short total delta.
+    if leap_delta is not None and max_short_delta is not None:
+        if short_total > long_total + 1e-9:
+            status, alert = "red", True
+            alerts.append(f"Short delta exceeds the LEAP's ({max_short_delta:.2f} vs {leap_delta:.2f}) — "
+                          "the long isn't covering the short; roll the short up/out.")
+        elif (leap_delta - max_short_delta) < _COVER_WATCH and status != "red":
+            status = "yellow"
+            alerts.append(f"Short delta {max_short_delta:.2f} is closing on the LEAP's {leap_delta:.2f} "
+                          "— coverage thinning.")
+    elif shorts and leap_delta is None:
+        status, alert = "red", True
+        alerts.append("Short open with no LEAP delta — the short is uncovered.")
+
+    return {
+        "ticker": ticker,
+        "status": status,
+        "alert": alert,
+        "leap": leap_view,
+        "shorts": short_views,
+        "long_total_delta": round(long_total, 4),
+        "short_total_delta": round(short_total, 4),
+        "net_delta": round(long_total - short_total, 4),
+        "floor": LEAP_DELTA_FLOOR,
+        "covered": (leap_delta is not None and max_short_delta is not None and short_total <= long_total + 1e-9),
+        "message": " ".join(alerts) or "Covered — LEAP delta ≥ floor and ≥ short delta.",
+    }
+
+
 def option_chain(ticker: str, strategy: str = "atr") -> dict:
     """Build the option-chain view: regime banner, auto-picked LEAP, and the
     ATR-suggested weekly short with nearby strikes.
@@ -250,39 +396,7 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
         quote = data_handler.latest_quote(ticker)
         underlying = quote["price"] if quote else None
 
-    # Recompute delta + IV via Black–Scholes for every contract up front, so
-    # strike selection (delta band) and display both use TOS-consistent values
-    # rather than Schwab's unreliable chain greeks. For an ITM call we prefer the
-    # same-strike PUT's IV — the OTM put's vol is stable and skew-aware, whereas
-    # the deep-ITM call's own IV collapses on thin time value (delta -> ~1.0).
-    put_iv = schwab_api.parse_put_iv(payload)
-    put_q = schwab_api.parse_put_quotes(payload)
-    for c in contracts:
-        mark = c.get("mark")
-        if mark is None and c.get("bid") is not None and c.get("ask") is not None:
-            mark = round((c["bid"] + c["ask"]) / 2, 4)
-        strike = c.get("strike")
-        reported_iv = c.get("volatility")
-        if underlying and strike and strike < underlying:  # ITM call -> use OTM put vol
-            # Prefer the provider's same-strike put IV; when it's missing (e.g.
-            # off-hours NaNs) imply the vol from the put's own mark so the delta
-            # stays skew-aware instead of collapsing toward 1.0 on a flat call IV.
-            skew_iv = put_iv.get((c["expiration"], strike))
-            if skew_iv is None:
-                pq = put_q.get((c["expiration"], strike))
-                dte = c.get("dte")
-                if pq and pq.get("mark") and dte:
-                    ivp = indicators.implied_vol_put(pq["mark"], underlying, strike,
-                                                     dte / 365.0, config.RISK_FREE_RATE)
-                    if ivp:
-                        skew_iv = round(ivp * 100, 2)
-            reported_iv = skew_iv or reported_iv
-        d, iv = indicators.call_greeks(underlying, strike, c.get("dte"), mark,
-                                       reported_iv=reported_iv)
-        if d is not None:
-            c["delta"] = d
-        if iv is not None:
-            c["volatility"] = iv
+    _augment_call_greeks(payload, contracts, underlying, ticker)
 
     # --- LEAP: candidate strikes in the preferred delta band (closest to 180
     # DTE) so the user can choose; the suggested one is closest to target delta.
