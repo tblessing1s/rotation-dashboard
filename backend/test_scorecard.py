@@ -187,16 +187,48 @@ def test_verdict_skips_none_metrics():
 
 
 # ---- score_ticker gate layering --------------------------------------------
-def test_score_ticker_surfaces_gate_failure(monkeypatch):
+def test_score_ticker_surfaces_stock_level_gate_failure(monkeypatch):
     import data_handler
     df = _frame(100 + np.cumsum(np.random.RandomState(5).normal(0, 1, 260)))
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    # Level 3 (stock beating peers) failed: cleared 2 -> first fail = 3 (stock-level).
     gate = {"verdict": "WAIT", "cleared_level": 2}
     row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
     assert row["verdict"] == "AVOID"
     assert "entry gate level 3" in row["reasons"][0]
     # Numeric fields are still present (nothing hidden) even on a gate failure.
     assert "atr_extension" in row and "mfi" in row and row["ticker"] == "AAPL"
+
+
+def test_score_ticker_market_regime_fail_does_not_blanket_avoid(monkeypatch):
+    # A non-green market regime (Level 1) must NOT collapse a stock to AVOID — the
+    # stock is still scored on its own merits so the table stays comparable. The
+    # gate carries all four level pass flags; Levels 3 & 4 here pass.
+    import data_handler
+    df = _frame(100 + np.cumsum(np.random.RandomState(8).normal(0, 1, 260)))
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    gate = {"verdict": "WAIT", "cleared_level": 0, "levels": [
+        {"level": 1, "pass": False}, {"level": 2, "pass": True},
+        {"level": 3, "pass": True}, {"level": 4, "pass": True}]}
+    row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
+    # Verdict came from the scorecard rules, not a blanket gate AVOID.
+    assert row["verdict"] in ("GO", "CAUTION", "AVOID")
+    assert not any("entry gate" in r for r in row["reasons"])
+    assert sc.compute_verdict(row)["verdict"] == row["verdict"]
+
+
+def test_score_ticker_stock_level_fail_behind_regime_fail_still_avoids(monkeypatch):
+    # Even when Level 1 also fails, a Level 4 (consolidating) miss is stock-level
+    # and must short-circuit to AVOID — read from the level flags, not cleared.
+    import data_handler
+    df = _frame(100 + np.cumsum(np.random.RandomState(12).normal(0, 1, 260)))
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    gate = {"verdict": "WAIT", "cleared_level": 0, "levels": [
+        {"level": 1, "pass": False}, {"level": 2, "pass": True},
+        {"level": 3, "pass": True}, {"level": 4, "pass": False}]}
+    row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
+    assert row["verdict"] == "AVOID"
+    assert "entry gate level 4" in row["reasons"][0]
 
 
 def test_score_ticker_verdict_matches_displayed_values(monkeypatch):

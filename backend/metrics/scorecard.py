@@ -289,6 +289,13 @@ _ROUND = {  # display rounding per field (verdict is computed from full precisio
 _GATE_LEVEL_NAMES = {1: "market regime", 2: "sector strength",
                      3: "stock beating peers", 4: "consolidating"}
 
+# Only STOCK-specific gate legs short-circuit a scorecard row. The market-wide
+# legs (Level 1 regime, Level 2 sector) are surfaced as context in the Scan tab
+# (the regime card) and intentionally do NOT blanket the table to AVOID — a
+# yellow regime (e.g. SPY a hair under MA21) must not collapse every ticker, or
+# the per-stock numeric comparison is useless exactly when it's most wanted.
+_STOCK_GATE_LEVELS = (3, 4)
+
 
 def _round_row(metrics: dict) -> dict:
     out = dict(metrics)
@@ -298,25 +305,53 @@ def _round_row(metrics: dict) -> dict:
     return out
 
 
+def _failed_stock_gate_level(gate: dict | None) -> int | None:
+    """First failing STOCK-level gate leg (Level 3 then 4), or None.
+
+    Reads the per-level pass flags from the gate's `levels` list when present, so
+    a stock-level miss is caught even behind an earlier (market/sector) failure —
+    the gate computes all four levels regardless of stop-on-fail. Falls back to
+    the stop-on-fail `cleared_level` (first failing = cleared+1) when `levels` is
+    absent. Market-wide Levels 1–2 never short-circuit here, by design."""
+    if not gate:
+        return None
+    levels = gate.get("levels")
+    if levels:
+        by_level = {lv.get("level"): lv for lv in levels}
+        for lvl in _STOCK_GATE_LEVELS:
+            leg = by_level.get(lvl)
+            if leg is not None and not leg.get("pass", False):
+                return lvl
+        return None
+    first_failed = (gate.get("cleared_level", 0) or 0) + 1
+    return first_failed if first_failed in _STOCK_GATE_LEVELS else None
+
+
 def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                  sector_df: pd.DataFrame | None, gate: dict | None = None) -> dict:
-    """One scorecard row: numeric metrics + the composite verdict. If the entry
-    gate is supplied and not cleared, the verdict is the gate failure itself
-    (AVOID — fails entry gate level N) and the scorecard rules are NOT re-run; the
-    numeric fields are still fully populated so nothing is hidden from the UI."""
+    """One scorecard row: numeric metrics + the composite verdict.
+
+    Only a stock-level entry-gate failure (Level 3 'beating peers' / Level 4
+    'consolidating') short-circuits the row to AVOID — a market-wide regime/sector
+    miss (Level 1/2) does NOT, so stocks stay comparable on their own merits (the
+    regime is surfaced separately in the Scan tab). The verdict is computed from
+    the SAME rounded numbers shown in the row, so a displayed value can never
+    silently disagree with its verdict. Numeric fields are always fully populated,
+    even on a gate short-circuit."""
     df = data_handler.get_daily(ticker)
     metrics = metrics_for(df, spy_df, sector_df)
     row = _round_row(metrics)
     row["ticker"] = ticker.upper()
     row["sector"] = sector_etf
+    if gate is not None:
+        row["gate_cleared_level"] = gate.get("cleared_level", 0)
 
-    if gate is not None and gate.get("verdict") != "READY TO ENTER":
-        failed = (gate.get("cleared_level", 0) or 0) + 1
+    failed = _failed_stock_gate_level(gate)
+    if failed is not None:
         name = _GATE_LEVEL_NAMES.get(failed, "")
         row["verdict"] = "AVOID"
         row["reasons"] = [f"fails entry gate level {failed}"
                           + (f" ({name})" if name else "")]
-        row["gate_cleared_level"] = gate.get("cleared_level", 0)
         return row
 
     # Judge the rounded values the UI actually shows, so a verdict can never
@@ -324,8 +359,6 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     verdict = compute_verdict(row)
     row["verdict"] = verdict["verdict"]
     row["reasons"] = verdict["reasons"]
-    if gate is not None:
-        row["gate_cleared_level"] = gate.get("cleared_level", 0)
     return row
 
 
@@ -333,8 +366,9 @@ def scorecard(tickers: list[str] | None = None) -> dict:
     """Build the scorecard for a list of tickers (default: every holding across
     every sector). Warms the cache for SPY + sector ETFs + the tickers in one
     parallel batch, then computes a row each — reusing the existing 4-level entry
-    gate so a gate failure short-circuits the verdict. Rows are grouped-friendly
-    (each carries its sector) and sorted by sector then ticker."""
+    gate, where only a stock-level (Level 3/4) failure short-circuits the verdict
+    (a yellow regime does not blanket the table). Rows are grouped-friendly (each
+    carries its sector) and sorted by sector then ticker."""
     import logging_handler as log
     import screening  # local imports avoid any import-time cycle
 
