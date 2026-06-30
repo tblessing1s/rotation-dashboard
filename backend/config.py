@@ -83,16 +83,7 @@ SECTOR_GROUPS = {
 }
 
 # ---- Benchmark / regime ----------------------------------------------------
-# Level-1 market-regime benchmark (trend + SPY breadth proxy). Stays SPY: the
-# regime is market context, separate from the per-stock strength question below.
 BENCHMARK = "SPY"
-# Relative-strength benchmark for the *stock* question — sector strength (gate
-# Level 2), stock-vs-peers (Level 3), and the scorecard all measure RS3M against
-# the broad NYSE Composite (NYA), not SPY. Index symbol, provider-dependent:
-# override via RS_BENCHMARK_SYMBOL if your data source lists it differently
-# (e.g. "$NYA"). Relative strength needs daily *history* for this symbol — if the
-# provider can't serve NYA daily bars, point this at a tradable NYSE-broad proxy.
-RS_BENCHMARK = (os.environ.get("RS_BENCHMARK_SYMBOL") or "^NYA").strip().upper() or "^NYA"
 VIX_SYMBOL = (os.environ.get("VIX_SYMBOL") or "^VIX").strip().upper() or "^VIX"
 
 # Breadth = percent of this broad universe trading above its 50-day MA.

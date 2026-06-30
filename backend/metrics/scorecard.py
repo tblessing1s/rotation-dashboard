@@ -201,10 +201,8 @@ def compute_inputs(df: pd.DataFrame | None) -> dict:
 def metrics_for(df: pd.DataFrame | None, spy_df: pd.DataFrame | None,
                 sector_df: pd.DataFrame | None) -> dict:
     """All scorecard metric values for one ticker (the row's numeric fields).
-    Pure over the three frames; relative strength reuses indicators.rs3m, measured
-    against the RS benchmark (NYA) passed in as `spy_df` — RS3M vs Sector = RS3M vs
-    benchmark - sector's RS3M vs benchmark, exactly as the entry gate does. The
-    output keys keep their `_vs_spy` names so the API/UI shape stays stable."""
+    Pure over the three frames; relative strength reuses indicators.rs3m (RS3M vs
+    Sector = RS3M vs SPY - sector's RS3M vs SPY, exactly as the entry gate does)."""
     inp = compute_inputs(df)
 
     rs_vs_spy = indicators.rs3m(df, spy_df) if (df is not None and spy_df is not None) else None
@@ -384,8 +382,8 @@ def scorecard(tickers: list[str] | None = None) -> dict:
     sector_of = {t: (sector_data.sector_for(t) or "") for t in names}
     etfs = sorted({e for e in sector_of.values() if e})
 
-    data_handler.prefetch([config.RS_BENCHMARK] + etfs + names)
-    spy = data_handler.get_daily(config.RS_BENCHMARK)
+    data_handler.prefetch([config.BENCHMARK] + etfs + names)
+    spy = data_handler.get_daily(config.BENCHMARK)
     sector_frames = {e: data_handler.get_daily(e) for e in etfs}
 
     rows = []

@@ -48,7 +48,7 @@ export default function StockFilter({ onSelectStock }) {
             <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
               <th className="py-2 pr-3">Ticker</th>
               <th className="py-2 pr-3">Sector</th>
-              <th className="py-2 pr-3">RS3M vs NYA</th>
+              <th className="py-2 pr-3">RS3M vs SPY</th>
               <th className="py-2 pr-3">RS3M vs Sector</th>
               <th className="py-2 pr-3">ATR%</th>
               <th className="py-2 pr-3">Consolidating</th>
