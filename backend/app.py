@@ -62,6 +62,19 @@ def api_stock_filter():
         return _err(e)
 
 
+@app.route("/api/scan/scorecard")
+def api_scorecard():
+    """Numeric CFM scorecard, one row per ticker (default: all holdings). Optional
+    ?tickers=AAPL,MSFT narrows it to a subset."""
+    raw = request.args.get("tickers")
+    tickers = [t for t in raw.split(",") if t.strip()] if raw else None
+    try:
+        from metrics import scorecard as scorecard_metrics
+        return jsonify(scorecard_metrics.scorecard(tickers))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/entry-gate")
 def api_entry_gate():
     ticker = request.args.get("ticker", "")

@@ -23,6 +23,7 @@ export const api = {
   regime: () => request("/api/regime"),
   sectors: () => request("/api/sectors"),
   stockFilter: (sector) => request(`/api/stock-filter${sector ? `?sector=${sector}` : ""}`),
+  scorecard: (tickers) => request(`/api/scan/scorecard${tickers ? `?tickers=${tickers}` : ""}`),
   entryGate: (ticker) => request(`/api/entry-gate?ticker=${ticker}`),
   rollSuggestion: (ticker) => request(`/api/roll-suggestion?ticker=${ticker}`),
   rollOptions: (ticker) => request(`/api/roll-options?ticker=${ticker}`),

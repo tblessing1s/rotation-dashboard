@@ -9,6 +9,10 @@ export const STATUS_COLORS = {
   ready: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40",
   wait: "bg-amber-500/15 text-amber-300 border-amber-500/40",
   no: "bg-rose-500/15 text-rose-300 border-rose-500/40",
+  // Scorecard verdicts share the Kill Switch traffic-light convention.
+  go: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40",
+  caution: "bg-amber-500/15 text-amber-300 border-amber-500/40",
+  avoid: "bg-rose-500/15 text-rose-300 border-rose-500/40",
   unknown: "bg-slate-700/30 text-slate-300 border-slate-600/40",
 };
 
