@@ -300,6 +300,43 @@ def test_itm_call_delta_uses_otm_put_iv(monkeypatch):
     assert 0.80 < s180["delta"] < 0.90  # ~0.85 from the 90% put IV, not ~1.0
 
 
+def test_implied_vol_put_roundtrip():
+    p = ind._bs_put_price(117.7, 108.0, 2 / 365, 0.04, 0.90)
+    assert ind.implied_vol_put(p, 117.7, 108.0, 2 / 365, 0.04) == pytest.approx(0.90, abs=1e-3)
+    # Above the no-arbitrage ceiling -> no solution.
+    assert ind.implied_vol_put(10_000, 117.7, 108.0, 2 / 365, 0.04) is None
+
+
+def test_itm_call_delta_implied_from_put_mark_when_iv_missing(monkeypatch):
+    # Off-hours (CSCO-like): Schwab returns NaN IV on the put, so the skew can't
+    # come from its IV field. We imply it from the put's mark, or the deep-ITM
+    # call's delta collapses toward 1.0 on the flat call IV. Spot 117.7, a 2-DTE
+    # 108 call near intrinsic — TOS shows ~0.92, not ~0.99.
+    import option_chain as oc
+    import data_handler
+    import logging_handler as log
+    import screening
+
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "yellow"})
+    df = _frame([117.7] * 60)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 117.7, "source": "t"})
+    monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {}})
+    monkeypatch.setattr(log, "find_position", lambda s, t: None)
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {
+        "status": "SUCCESS", "underlyingPrice": 117.7,
+        "callExpDateMap": {"2026-07-02:2": {"108.0": [
+            {"symbol": "C", "strikePrice": 108.0, "daysToExpiration": 2,
+             "bid": 9.50, "ask": 9.85, "mark": 9.68, "volatility": 48.0}]}},
+        "putExpDateMap": {"2026-07-02:2": {"108.0": [
+            {"symbol": "P", "strikePrice": 108.0, "daysToExpiration": 2,
+             "bid": 0.30, "ask": 0.34, "mark": 0.32, "volatility": "NaN"}]}},
+    })
+    out = oc.option_chain("CSCO")
+    s108 = next(s for s in out["weekly"]["strikes"] if s["strike"] == 108.0)
+    assert 0.85 < s108["delta"] < 0.95  # skew-aware (~0.91), not ~0.99 off a flat 48% IV
+
+
 def test_iv_view_flags_rich_vs_cheap():
     import option_chain as oc
     assert oc._iv_view(weekly_iv=44.0, leap_iv=33.0, hv=20.0)["premium"] == "rich"

@@ -224,6 +224,36 @@ def implied_vol_call(price: float | None, S: float, K: float, T: float, r: float
     return 0.5 * (lo + hi)
 
 
+def _bs_put_price(S: float, K: float, T: float, r: float, sigma: float) -> float:
+    d1 = (math.log(S / K) + (r + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
+    d2 = d1 - sigma * math.sqrt(T)
+    return K * math.exp(-r * T) * _norm_cdf(-d2) - S * _norm_cdf(-d1)
+
+
+def implied_vol_put(price: float | None, S: float, K: float, T: float, r: float) -> float | None:
+    """Implied volatility of a put from its price, via bisection. Used to recover
+    a skew-aware vol for a deep-ITM CALL from its same-strike OTM put: the put
+    carries real time value (so its price implies a usable vol) even when the
+    provider's IV field is missing — e.g. off-hours, when Schwab returns NaN IVs
+    and the ITM call's own near-intrinsic mark can't imply anything."""
+    if price is None or not (S and S > 0 and K and K > 0 and T and T > 0):
+        return None
+    lo, hi = 1e-4, 5.0
+    p_lo, p_hi = _bs_put_price(S, K, T, r, lo), _bs_put_price(S, K, T, r, hi)
+    if not (p_lo - 1e-9 <= price <= p_hi + 1e-9):
+        return None
+    for _ in range(100):
+        mid = 0.5 * (lo + hi)
+        pm = _bs_put_price(S, K, T, r, mid)
+        if abs(pm - price) < 1e-6:
+            return mid
+        if pm < price:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
 def call_greeks(S: float | None, K: float | None, dte: int | None, mark: float | None,
                 reported_iv: float | None = None,
                 r: float = config.RISK_FREE_RATE) -> tuple[float | None, float | None]:
