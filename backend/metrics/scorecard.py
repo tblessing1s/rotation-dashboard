@@ -201,8 +201,10 @@ def compute_inputs(df: pd.DataFrame | None) -> dict:
 def metrics_for(df: pd.DataFrame | None, spy_df: pd.DataFrame | None,
                 sector_df: pd.DataFrame | None) -> dict:
     """All scorecard metric values for one ticker (the row's numeric fields).
-    Pure over the three frames; relative strength reuses indicators.rs3m (RS3M vs
-    Sector = RS3M vs SPY - sector's RS3M vs SPY, exactly as the entry gate does)."""
+    Pure over the three frames; relative strength reuses indicators.rs3m, measured
+    against the RS benchmark (NYA) passed in as `spy_df` — RS3M vs Sector = RS3M vs
+    benchmark - sector's RS3M vs benchmark, exactly as the entry gate does. The
+    output keys keep their `_vs_spy` names so the API/UI shape stays stable."""
     inp = compute_inputs(df)
 
     rs_vs_spy = indicators.rs3m(df, spy_df) if (df is not None and spy_df is not None) else None
@@ -289,12 +291,12 @@ _ROUND = {  # display rounding per field (verdict is computed from full precisio
 _GATE_LEVEL_NAMES = {1: "market regime", 2: "sector strength",
                      3: "stock beating peers", 4: "consolidating"}
 
-# Only STOCK-specific gate legs short-circuit a scorecard row. The market-wide
-# legs (Level 1 regime, Level 2 sector) are surfaced as context in the Scan tab
-# (the regime card) and intentionally do NOT blanket the table to AVOID — a
-# yellow regime (e.g. SPY a hair under MA21) must not collapse every ticker, or
-# the per-stock numeric comparison is useless exactly when it's most wanted.
-_STOCK_GATE_LEVELS = (3, 4)
+# The stock verdict starts at Level 2: sector strength (L2) plus the stock's own
+# legs (L3 beats peers, L4 consolidating) gate the row. Level 1 (market regime)
+# is deliberately EXCLUDED — it's market-wide context shown on the regime card,
+# and letting a yellow regime (e.g. SPY a hair under MA21) blanket the table to
+# AVOID would make the per-stock comparison useless exactly when it's most wanted.
+_STOCK_GATE_LEVELS = (2, 3, 4)
 
 
 def _round_row(metrics: dict) -> dict:
@@ -306,13 +308,14 @@ def _round_row(metrics: dict) -> dict:
 
 
 def _failed_stock_gate_level(gate: dict | None) -> int | None:
-    """First failing STOCK-level gate leg (Level 3 then 4), or None.
+    """First failing gate leg in the stock verdict's range (Level 2, then 3, 4),
+    or None.
 
     Reads the per-level pass flags from the gate's `levels` list when present, so
-    a stock-level miss is caught even behind an earlier (market/sector) failure —
-    the gate computes all four levels regardless of stop-on-fail. Falls back to
-    the stop-on-fail `cleared_level` (first failing = cleared+1) when `levels` is
-    absent. Market-wide Levels 1–2 never short-circuit here, by design."""
+    a stock/sector miss is caught even behind an earlier (Level 1) failure — the
+    gate computes all four levels regardless of stop-on-fail. Falls back to the
+    stop-on-fail `cleared_level` (first failing = cleared+1) when `levels` is
+    absent. Level 1 (market regime) never short-circuits here, by design."""
     if not gate:
         return None
     levels = gate.get("levels")
@@ -331,13 +334,13 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                  sector_df: pd.DataFrame | None, gate: dict | None = None) -> dict:
     """One scorecard row: numeric metrics + the composite verdict.
 
-    Only a stock-level entry-gate failure (Level 3 'beating peers' / Level 4
-    'consolidating') short-circuits the row to AVOID — a market-wide regime/sector
-    miss (Level 1/2) does NOT, so stocks stay comparable on their own merits (the
-    regime is surfaced separately in the Scan tab). The verdict is computed from
-    the SAME rounded numbers shown in the row, so a displayed value can never
-    silently disagree with its verdict. Numeric fields are always fully populated,
-    even on a gate short-circuit."""
+    The verdict starts at Level 2: a sector-strength (L2), beats-peers (L3), or
+    consolidating (L4) gate failure short-circuits the row to AVOID. A Level-1
+    market-regime miss does NOT — it's market-wide context (the regime card), so
+    stocks stay comparable on their own merits. The verdict is computed from the
+    SAME rounded numbers shown in the row, so a displayed value can never silently
+    disagree with its verdict. Numeric fields are always fully populated, even on a
+    gate short-circuit."""
     df = data_handler.get_daily(ticker)
     metrics = metrics_for(df, spy_df, sector_df)
     row = _round_row(metrics)
@@ -381,8 +384,8 @@ def scorecard(tickers: list[str] | None = None) -> dict:
     sector_of = {t: (sector_data.sector_for(t) or "") for t in names}
     etfs = sorted({e for e in sector_of.values() if e})
 
-    data_handler.prefetch([config.BENCHMARK] + etfs + names)
-    spy = data_handler.get_daily(config.BENCHMARK)
+    data_handler.prefetch([config.RS_BENCHMARK] + etfs + names)
+    spy = data_handler.get_daily(config.RS_BENCHMARK)
     sector_frames = {e: data_handler.get_daily(e) for e in etfs}
 
     rows = []

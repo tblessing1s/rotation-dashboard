@@ -217,6 +217,21 @@ def test_score_ticker_market_regime_fail_does_not_blanket_avoid(monkeypatch):
     assert sc.compute_verdict(row)["verdict"] == row["verdict"]
 
 
+def test_score_ticker_weak_sector_gates_to_avoid(monkeypatch):
+    # The verdict starts at Level 2: a weak sector (Level 2 fail) short-circuits to
+    # AVOID even when the stock's own legs (3/4) pass, since CFM won't sell premium
+    # in a sector that isn't leading.
+    import data_handler
+    df = _frame(100 + np.cumsum(np.random.RandomState(13).normal(0, 1, 260)))
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    gate = {"verdict": "WAIT", "cleared_level": 1, "levels": [
+        {"level": 1, "pass": True}, {"level": 2, "pass": False},
+        {"level": 3, "pass": True}, {"level": 4, "pass": True}]}
+    row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
+    assert row["verdict"] == "AVOID"
+    assert "entry gate level 2" in row["reasons"][0]
+
+
 def test_score_ticker_stock_level_fail_behind_regime_fail_still_avoids(monkeypatch):
     # Even when Level 1 also fails, a Level 4 (consolidating) miss is stock-level
     # and must short-circuit to AVOID — read from the level flags, not cleared.

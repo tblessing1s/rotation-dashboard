@@ -99,6 +99,9 @@ def generate_market_cache(strong_tickers: set[str], anchors: dict[str, float]) -
     # Benchmark + broad-breadth proxies. Low noise so the trend (not endpoint
     # noise) decides MA position — a clean risk-on tape for the preview.
     emit(config.BENCHMARK, 540.0, 0.0010, 0.0012)  # steady uptrend, close above MA21
+    if config.RS_BENCHMARK != config.BENCHMARK:
+        # RS benchmark (NYSE Composite) — same calm uptrend so demo RS3M is meaningful.
+        emit(config.RS_BENCHMARK, 18500.0, 0.0010, 0.0012)
     emit("QQQ", 470.0, SPY_DRIFT + 0.0015, 0.003)
     emit("IWM", 220.0, SPY_DRIFT + 0.0004, 0.003)
 

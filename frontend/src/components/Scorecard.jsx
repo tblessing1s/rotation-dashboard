@@ -12,7 +12,7 @@ const VERDICT_STATUS = { GO: "go", CAUTION: "caution", AVOID: "avoid" };
 const COLUMNS = [
   { key: "ticker", label: "Ticker", num: false },
   { key: "price", label: "Price", num: true, render: (r) => fmt(r.price, 2) },
-  { key: "rs3m_vs_spy", label: "RS vs SPY", num: true, render: (r) => pct(r.rs3m_vs_spy) },
+  { key: "rs3m_vs_spy", label: "RS vs NYA", num: true, render: (r) => pct(r.rs3m_vs_spy) },
   { key: "rs3m_vs_sector", label: "RS vs Sec", num: true, render: (r) => pct(r.rs3m_vs_sector) },
   { key: "pct_above_ma21", label: "%>MA21", num: true, render: (r) => pct(r.pct_above_ma21) },
   { key: "atr_extension", label: "ATR ext", num: true, render: (r) => fmt(r.atr_extension, 2) },

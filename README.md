@@ -32,9 +32,14 @@ hand-maintained.
 **Entry gate (4 levels, stop on first fail):**
 
 1. **Market regime green** — SPY breadth positive, VIX calm.
-2. **Sector strong** — RS3M vs SPY > +10%, breadth > 60%, ATR expanding.
-3. **Stock beats peers** — RS3M vs SPY > +5%, RS3M vs Sector > 0%.
+2. **Sector strong** — RS3M vs NYA > +10%, breadth > 60%, ATR expanding.
+3. **Stock beats peers** — RS3M vs NYA > +5%, RS3M vs Sector > 0%.
 4. **Consolidating, not breaking** — low ATR%, price near MA21.
+
+Relative strength (Levels 2–3, the stock filter, and the scorecard) is measured
+against the broad **NYSE Composite (NYA)** — "is this name leading the market?" —
+while the Level-1 **regime** and the kill switch stay on SPY. The RS benchmark is
+configurable via `RS_BENCHMARK_SYMBOL` (default `^NYA`).
 
 **Weekly routine:** roll the short ITM call (strike = stock − 1.5×ATR), log the
 extrinsic sold and paid back, check the kill switch. The **Positions** tab rolls
@@ -97,7 +102,7 @@ maxes out.
 |---|---|
 | `GET /api/regime` | Market regime: status (green/yellow/red), breadth, VIX, SPY trend. |
 | `GET /api/sectors` | Per-sector RS3M, breadth, ATR-expanding, status. |
-| `GET /api/stock-filter?sector=XLK` | Candidates with RS3M vs SPY/Sector, ATR%, consolidating, status. |
+| `GET /api/stock-filter?sector=XLK` | Candidates with RS3M vs NYA/Sector, ATR%, consolidating, status. |
 | `GET /api/entry-gate?ticker=ON` | The 4-level gate, pass/fail per level, verdict. |
 | `GET /api/roll-suggestion?ticker=ON` | Suggested weekly short strike (stock − 1.5×ATR). |
 | `GET /api/roll-options?ticker=ON` | Roll picker data: current short + live buyback, plus every expiration to ROLL_MAX_DTE with nearby strikes (choose week + strike). |
