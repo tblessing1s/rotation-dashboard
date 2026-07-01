@@ -170,6 +170,34 @@ execution until it actually fills. The UI toasts the submit, polls
 doesn't fill within 3 seconds — so an unfilled, cancelled order leaves no trace.
 Paper mode keeps committing immediately and just toasts the success.
 
+### Authentication
+
+A single-password gate guards the whole dashboard (every `/api` route and the
+Schwab re-auth link). A successful login sets a signed, HttpOnly, Secure session
+cookie that lasts **30 days**, so you sign in once per device.
+
+Set one secret in production — a *hash* of your password, never the password
+itself:
+
+```bash
+# generate the hash (paste your password at the prompt)
+python -c "from werkzeug.security import generate_password_hash as g; print(g(input('password: ')))"
+fly secrets set DASHBOARD_PASSWORD_HASH='pbkdf2:sha256:...'   # the value printed above
+```
+
+That's it — redeploy and the login screen appears. Notes:
+
+- **No password configured → the gate is disabled** (open). This keeps local dev
+  frictionless; the app is only unprotected if you never set the secret, so
+  *always* set `DASHBOARD_PASSWORD_HASH` on Fly.
+- The cookie-signing key is generated once and persisted to
+  `DATA_DIR/.session_secret` (on the `/data` volume), so logins survive deploys
+  and restarts. Override with `DASHBOARD_SECRET_KEY` if you prefer to manage it.
+  Rotating it (or the volume) signs everyone out.
+- Env vars: `DASHBOARD_PASSWORD_HASH` (preferred), `DASHBOARD_PASSWORD`
+  (plaintext, local only), `DASHBOARD_SECRET_KEY` (optional),
+  `DASHBOARD_COOKIE_INSECURE=1` (only if testing over plain http locally).
+
 ---
 
 ## Deploy to Fly.io
@@ -182,6 +210,7 @@ the Schwab token across deploys.
 fly launch
 fly volume create data --region iad --size 1
 fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=… ALPHAVANTAGE_API_KEY=…
+fly secrets set DASHBOARD_PASSWORD_HASH='pbkdf2:sha256:…'   # login gate — see Authentication
 fly deploy && fly scale count 1
 ```
 

@@ -13,6 +13,7 @@ import secrets
 from flask import Flask, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
 
+import auth
 import config
 import data_handler
 import earnings
@@ -29,10 +30,39 @@ DIST_DIR = os.path.join(config.REPO_DIR, "frontend", "dist")
 
 app = Flask(__name__, static_folder=None)
 CORS(app)
+auth.init_app(app)
+
+
+@app.before_request
+def _auth_gate():
+    return auth.gate()
 
 
 def _err(e: Exception, code: int = 500):
     return jsonify({"error": str(e)}), code
+
+
+# ---------------------------------------------------------------------------
+# Auth (single-user password gate; see auth.py)
+# ---------------------------------------------------------------------------
+@app.route("/api/auth/status")
+def api_auth_status():
+    return jsonify({"required": auth.enabled(), "authenticated": auth.is_authenticated()})
+
+
+@app.route("/api/login", methods=["POST"])
+def api_login():
+    payload = request.get_json(silent=True) or {}
+    if auth.verify_password(payload.get("password", "")):
+        auth.login()
+        return jsonify({"ok": True})
+    return jsonify({"error": "invalid password"}), 401
+
+
+@app.route("/api/logout", methods=["POST"])
+def api_logout():
+    auth.logout()
+    return jsonify({"ok": True})
 
 
 # ---------------------------------------------------------------------------

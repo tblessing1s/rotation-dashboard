@@ -14,6 +14,9 @@ data/cache/
 backend/state.demo.json
 backend/cache_demo/
 backend/mode.json
+# Auto-generated cookie-signing key (persisted so sessions survive restarts)
+backend/.session_secret
+.session_secret
 
 # Node/Vite
 frontend/node_modules/

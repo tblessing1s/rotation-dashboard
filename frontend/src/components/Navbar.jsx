@@ -21,7 +21,7 @@ function DemoToggle({ demo, busy, onToggle }) {
   );
 }
 
-export default function Navbar({ tabs, active, onChange, regimeStatus, demo, modeBusy, onToggleDemo }) {
+export default function Navbar({ tabs, active, onChange, regimeStatus, demo, modeBusy, onToggleDemo, onLogout }) {
   return (
     <nav className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3">
@@ -50,6 +50,15 @@ export default function Navbar({ tabs, active, onChange, regimeStatus, demo, mod
             <Light status={regimeStatus} />
             <span className="hidden sm:inline">Regime</span>
           </div>
+          {onLogout && (
+            <button
+              onClick={onLogout}
+              title="Sign out"
+              className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 transition hover:bg-slate-800 hover:text-slate-100"
+            >
+              Sign out
+            </button>
+          )}
         </div>
       </div>
     </nav>
