@@ -289,12 +289,13 @@ _ROUND = {  # display rounding per field (verdict is computed from full precisio
 _GATE_LEVEL_NAMES = {1: "market regime", 2: "sector strength",
                      3: "stock beating peers", 4: "consolidating"}
 
-# The stock verdict starts at Level 2: sector strength (L2) plus the stock's own
-# legs (L3 beats peers, L4 consolidating) gate the row. Level 1 (market regime)
-# is deliberately EXCLUDED — it's market-wide context shown on the regime card,
-# and letting a yellow regime (e.g. SPY a hair under MA21) blanket the table to
-# AVOID would make the per-stock comparison useless exactly when it's most wanted.
-_STOCK_GATE_LEVELS = (2, 3, 4)
+# Only the stock's OWN gate legs decide the verdict: Level 3 (beats peers) and
+# Level 4 (consolidating). The market-wide legs — Level 1 (regime) and Level 2
+# (sector strength) — are EXCLUDED: they're context, not a property of the stock,
+# and letting them blanket the table to AVOID would defeat the per-stock
+# comparison exactly when it's most wanted (e.g. a yellow regime, or a sector
+# that's merely lagging while the stock itself leads its peers and consolidates).
+_STOCK_GATE_LEVELS = (3, 4)
 
 
 def _round_row(metrics: dict) -> dict:
@@ -306,14 +307,14 @@ def _round_row(metrics: dict) -> dict:
 
 
 def _failed_stock_gate_level(gate: dict | None) -> int | None:
-    """First failing gate leg in the stock verdict's range (Level 2, then 3, 4),
-    or None.
+    """First failing stock-level gate leg (Level 3, then 4), or None.
 
     Reads the per-level pass flags from the gate's `levels` list when present, so
-    a stock/sector miss is caught even behind an earlier (Level 1) failure — the
-    gate computes all four levels regardless of stop-on-fail. Falls back to the
-    stop-on-fail `cleared_level` (first failing = cleared+1) when `levels` is
-    absent. Level 1 (market regime) never short-circuits here, by design."""
+    a stock-level miss is caught even behind an earlier (regime/sector) failure —
+    the gate computes all four levels regardless of stop-on-fail. Falls back to
+    the stop-on-fail `cleared_level` (first failing = cleared+1) when `levels` is
+    absent. The market-wide legs (Level 1 regime, Level 2 sector) never
+    short-circuit here, by design."""
     if not gate:
         return None
     levels = gate.get("levels")
@@ -332,13 +333,13 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                  sector_df: pd.DataFrame | None, gate: dict | None = None) -> dict:
     """One scorecard row: numeric metrics + the composite verdict.
 
-    The verdict starts at Level 2: a sector-strength (L2), beats-peers (L3), or
-    consolidating (L4) gate failure short-circuits the row to AVOID. A Level-1
-    market-regime miss does NOT — it's market-wide context (the regime card), so
-    stocks stay comparable on their own merits. The verdict is computed from the
-    SAME rounded numbers shown in the row, so a displayed value can never silently
-    disagree with its verdict. Numeric fields are always fully populated, even on a
-    gate short-circuit."""
+    Only the stock's own gate legs decide it: a beats-peers (L3) or consolidating
+    (L4) failure short-circuits the row to AVOID. The market-wide legs — Level 1
+    (regime) and Level 2 (sector strength) — are excluded, so stocks stay
+    comparable on their own merits. The verdict is computed from the SAME rounded
+    numbers shown in the row, so a displayed value can never silently disagree with
+    its verdict. Numeric fields are always fully populated, even on a gate
+    short-circuit."""
     df = data_handler.get_daily(ticker)
     metrics = metrics_for(df, spy_df, sector_df)
     row = _round_row(metrics)
