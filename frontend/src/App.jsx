@@ -1,6 +1,7 @@
 import React from "react";
 import { api } from "./api.js";
 import Navbar from "./components/Navbar.jsx";
+import Login from "./components/Login.jsx";
 import SchwabStatus from "./components/SchwabStatus.jsx";
 import RegimeScanner from "./components/RegimeScanner.jsx";
 import StockFilter from "./components/StockFilter.jsx";
@@ -20,10 +21,30 @@ export default function App() {
   const [execNonce, setExecNonce] = React.useState(0);
   const [demo, setDemo] = React.useState(false);
   const [modeBusy, setModeBusy] = React.useState(false);
+  // null = still checking, true = signed in (or auth disabled), false = show login.
+  const [authed, setAuthed] = React.useState(null);
 
   React.useEffect(() => {
-    api.mode().then((m) => setDemo(!!m.demo)).catch(() => {});
+    api.authStatus()
+      .then((s) => setAuthed(!s.required || s.authenticated))
+      .catch(() => setAuthed(false));
+    const onAuthRequired = () => setAuthed(false);
+    window.addEventListener("auth-required", onAuthRequired);
+    return () => window.removeEventListener("auth-required", onAuthRequired);
   }, []);
+
+  React.useEffect(() => {
+    if (authed !== true) return;
+    api.mode().then((m) => setDemo(!!m.demo)).catch(() => {});
+  }, [authed]);
+
+  async function logout() {
+    try {
+      await api.logout();
+    } finally {
+      setAuthed(false);
+    }
+  }
 
   async function toggleDemo() {
     setModeBusy(true);
@@ -40,10 +61,19 @@ export default function App() {
     setTab("Execute");
   }
 
+  if (authed === null) {
+    return (
+      <div className="flex min-h-full items-center justify-center bg-slate-950 text-sm text-slate-500">
+        Loading…
+      </div>
+    );
+  }
+  if (!authed) return <Login onSuccess={() => setAuthed(true)} />;
+
   return (
     <div className="min-h-full bg-slate-950 text-slate-100">
       <Navbar tabs={TABS} active={tab} onChange={setTab} regimeStatus={regimeStatus}
-              demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo} />
+              demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo} onLogout={logout} />
       <main className="mx-auto max-w-7xl px-4 py-6">
         <SchwabStatus demo={demo} />
         {tab === "Scan" && (

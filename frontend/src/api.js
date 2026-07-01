@@ -3,6 +3,7 @@ const BASE = "";
 
 async function request(path, opts = {}) {
   const res = await fetch(BASE + path, {
+    credentials: "same-origin", // send/receive the session cookie
     headers: { "Content-Type": "application/json" },
     ...opts,
   });
@@ -12,6 +13,11 @@ async function request(path, opts = {}) {
     data = text ? JSON.parse(text) : {};
   } catch {
     data = { error: text };
+  }
+  // The session expired or is missing — let the app swap in the login screen
+  // instead of surfacing the error inside whichever tab made the call.
+  if (res.status === 401 && data.auth_required && path !== "/api/login") {
+    window.dispatchEvent(new CustomEvent("auth-required"));
   }
   if (!res.ok || data.error) {
     throw new Error(data.error || `HTTP ${res.status}`);
@@ -45,4 +51,7 @@ export const api = {
   saveState: (payload) => request("/api/state", { method: "POST", body: JSON.stringify(payload) }),
   accountStatus: () => request("/api/account/status"),
   schwabAuth: () => request("/auth/schwab"),
+  authStatus: () => request("/api/auth/status"),
+  login: (password) => request("/api/login", { method: "POST", body: JSON.stringify({ password }) }),
+  logout: () => request("/api/logout", { method: "POST" }),
 };
