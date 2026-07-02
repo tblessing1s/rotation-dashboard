@@ -177,6 +177,46 @@ def alerts_dry_run_default() -> bool:
     return os.environ.get("CFM_ALERTS_DRY_RUN", "").strip() in ("1", "true", "yes")
 
 
+# ---- Level 5 entry gate: Account & Juice ------------------------------------
+# The 4-level gate checks the market/sector/stock/chart; Level 5 checks the
+# ACCOUNT (cash, concentration) and the TRADE's income math before entry.
+
+# HARD_CFM_RULE — CFM runs at most 2 concurrent positions at this capital tier;
+# a third position leaves no reserve to defend either of the first two.
+MAX_CFM_POSITIONS = 2
+
+# PROPOSED_DEFAULT — max capital deployed into LEAPs (CFM sizing: $35-40K band).
+MAX_DEPLOYED_CAPITAL = 38000
+
+# PROPOSED_DEFAULT — the entry filters funnel into the hottest sector, so cap
+# same-sector positions to keep one correlated tail from hitting the whole book.
+MAX_POSITIONS_PER_SECTOR = 1
+
+# PROPOSED_DEFAULT — post-trade free cash must cover a defensive reserve of
+# 2xATR (in dollars) per share-equivalent for every open position:
+#   reserve = sum over positions of RESERVE_ATR_MULT * ATR * contracts * 100
+# (equivalently stock_price x contracts x 100 x 2 x ATR%, ATR as a fraction of
+# price) — enough to buy back / roll every short through a 2-ATR adverse move.
+RESERVE_ATR_MULT = 2.0
+
+# HARD_CFM_RULE — the CFM cycle targets a 15-25% return on deployed capital
+# over a 4-8 week cycle; the implied weekly juice floor is
+# CYCLE_RETURN_MIN / CYCLE_WEEKS_MAX (~1.9%/week of LEAP cost basis).
+CYCLE_RETURN_MIN = 0.15
+CYCLE_RETURN_MAX = 0.25
+CYCLE_WEEKS_MIN = 4
+CYCLE_WEEKS_MAX = 8
+
+# PROPOSED_DEFAULT — implied weekly yield more than this multiple of the
+# ticker's own history-implied extrinsic = the market is pricing risk, not
+# income ("juice too rich"). Warn, don't block.
+JUICE_RICH_FACTOR = 1.75
+
+# PROPOSED_DEFAULT — circuit-breaker (line-in-the-sand) default suggestion:
+# max(MA50, entry - CIRCUIT_BREAKER_ATR_MULT * ATR). Operator-editable at entry;
+# storing SOME line is required (HARD_CFM_RULE), only the formula is tunable.
+CIRCUIT_BREAKER_ATR_MULT = 2.0
+
 # ---- Capital ---------------------------------------------------------------
 CAPITAL = 35000
 RESERVE_REQUIRED = 13000

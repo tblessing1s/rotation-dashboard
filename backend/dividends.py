@@ -114,3 +114,90 @@ def yield_for(ticker: str, refresh: bool = False) -> float:
             _write_cache(cache)
     q = rec.get("yield")
     return q if isinstance(q, (int, float)) and q >= 0 else 0.0
+
+
+# ---------------------------------------------------------------------------
+# Next dividend EVENT (ex-date + per-payment amount) — assignment-risk input.
+# ---------------------------------------------------------------------------
+def _parse_amount(annual, freq) -> float | None:
+    """Per-payment dividend from an annual amount and payment frequency
+    (defaults to quarterly when the provider omits the frequency)."""
+    try:
+        a = float(annual)
+    except (TypeError, ValueError):
+        return None
+    if a != a or a <= 0:
+        return None
+    try:
+        f = int(freq) or 4
+    except (TypeError, ValueError):
+        f = 4
+    return round(a / f, 4)
+
+
+def _fetch_event(ticker: str) -> dict:
+    """Best-effort {ex_date, amount} from Schwab fundamentals, then Alpha
+    Vantage OVERVIEW. Field names vary by provider vintage, so several
+    candidates are tried; amount falls back to annual/frequency."""
+    if schwab_api.configured():
+        try:
+            import data_handler
+            fund = data_handler.client().get_instrument_fundamental(ticker)
+            ex = next((str(fund[k])[:10] for k in
+                       ("nextDivExDate", "divExDate", "dividendDate", "divDate")
+                       if fund.get(k)), None)
+            amount = _parse_amount(fund.get("divPayAmount") or fund.get("divAmount"),
+                                   fund.get("divFreq"))
+            # divPayAmount is already per-payment on newer payloads; prefer it raw.
+            try:
+                pay = float(fund.get("divPayAmount"))
+                if pay == pay and 0 < pay:
+                    amount = round(pay, 4)
+            except (TypeError, ValueError):
+                pass
+            if ex or amount:
+                return {"ex_date": ex, "amount": amount, "source": "schwab"}
+        except Exception:  # noqa: BLE001 — degrade to the next source
+            pass
+    if alpha_vantage.configured():
+        try:
+            ov = alpha_vantage.overview(ticker)
+            ex = str(ov.get("ExDividendDate") or "")[:10] or None
+            if ex in ("None", "0000-00-00"):
+                ex = None
+            amount = _parse_amount(ov.get("DividendPerShare"), 4)  # annual, quarterly payer
+            if ex or amount:
+                return {"ex_date": ex, "amount": amount, "source": "alpha_vantage"}
+        except Exception:  # noqa: BLE001
+            pass
+    return {"ex_date": None, "amount": None, "source": "none"}
+
+
+def next_dividend(ticker: str, refresh: bool = False) -> dict:
+    """Next dividend event for a ticker: {ex_date, amount, source}.
+
+    Resolution: manual override in state metadata (``dividend_event_overrides:
+    {TICKER: {ex_date, amount}}``) -> day-cached provider value -> live fetch.
+    Unknown fields come back None (treated as "no dividend risk").
+    """
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return {"ex_date": None, "amount": None, "source": "none"}
+    try:
+        meta = log.load_state().get("metadata", {})
+        ov = (meta.get("dividend_event_overrides") or {}).get(ticker)
+        if ov:
+            return {"ex_date": ov.get("ex_date"), "amount": ov.get("amount"),
+                    "source": "override"}
+    except Exception:  # noqa: BLE001
+        pass
+    with _lock:
+        cache = _read_cache()
+        rec = (cache.get("events") or {}).get(ticker)
+        fresh = rec and (time.time() - float(rec.get("fetched_at") or 0) < _TTL_SECONDS)
+        if refresh or not fresh:
+            rec = {**_fetch_event(ticker), "fetched_at": time.time()}
+            cache.setdefault("events", {})[ticker] = rec
+            _write_cache(cache)
+    return {"ex_date": rec.get("ex_date"), "amount": rec.get("amount"),
+            "source": rec.get("source", "none")}

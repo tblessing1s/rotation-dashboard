@@ -26,7 +26,7 @@ const ACTION_LABELS = {
  * short juice takes to cover the LEAP's extrinsic. The user typically only sets
  * quantity, then executes straight from the chain (or just fills the form).
  */
-export default function OptionChainModal({ ticker, onExecute, onClose }) {
+export default function OptionChainModal({ ticker, accountGate, onExecute, onClose }) {
   const [chain, setChain] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -36,6 +36,15 @@ export default function OptionChainModal({ ticker, onExecute, onClose }) {
   const [qty, setQty] = React.useState("");
   const [execErr, setExecErr] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
+  // Level 5 (Account & Juice): entries must store a line-in-the-sand price, and
+  // a blocked gate needs a typed, logged override reason before executing.
+  const [cbPrice, setCbPrice] = React.useState("");
+  const [overrideReason, setOverrideReason] = React.useState("");
+
+  React.useEffect(() => {
+    const sug = accountGate?.suggested_circuit_breaker?.price;
+    if (sug != null) setCbPrice(String(sug));
+  }, [accountGate]);
 
   React.useEffect(() => {
     let live = true;
@@ -100,6 +109,11 @@ export default function OptionChainModal({ ticker, onExecute, onClose }) {
       if (chosenLeap.symbol) base.option_symbol = chosenLeap.symbol;
       if (chosenLeap.dte != null) base.dte = chosenLeap.dte;
       if (chosenLeap.mark != null) base.execution_price = Math.round(chosenLeap.mark * 100 * 100) / 100;
+      // Level 5 context: the stored line-in-the-sand, real weekly juice for the
+      // server-side gate, and the typed override reason when the gate is red.
+      if (cbPrice !== "" && !Number.isNaN(Number(cbPrice))) base.circuit_breaker_price = Number(cbPrice);
+      if (chosenWeekly?.extrinsic != null) base.weekly_extrinsic_per_share = chosenWeekly.extrinsic;
+      if (overrideReason.trim()) base.override_reason = overrideReason.trim();
     } else if (action === "sell_short" && chosenWeekly) {
       base.strike = chosenWeekly.strike;
       if (chosenWeekly.expiration || weekly?.expiration) base.expiration = chosenWeekly.expiration || weekly.expiration;
@@ -123,8 +137,10 @@ export default function OptionChainModal({ ticker, onExecute, onClose }) {
     return base;
   }
 
+  const gateBlocked = action === "buy_leap" && accountGate && !accountGate.pass;
   const canExecute =
     qtyNum > 0 &&
+    (!gateBlocked || overrideReason.trim().length > 0) &&
     ((action === "buy_leap" && chosenLeap) ||
       (action === "sell_short" && chosenWeekly) ||
       (action === "close_short" && openShort) ||
@@ -217,6 +233,45 @@ export default function OptionChainModal({ ticker, onExecute, onClose }) {
                   />
                 </label>
               </div>
+
+              {/* Level 5 (Account & Juice): circuit breaker is REQUIRED at entry;
+                  a blocked gate needs a typed override reason, logged with the fill. */}
+              {action === "buy_leap" && (
+                <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3">
+                  <label className="text-sm text-slate-400">
+                    Circuit breaker — line-in-the-sand exit price (required)
+                    <input
+                      value={cbPrice}
+                      onChange={(e) => setCbPrice(e.target.value.replace(/[^0-9.]/g, ""))}
+                      inputMode="decimal"
+                      placeholder="e.g. 131.00"
+                      className="mt-1 w-40 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100"
+                    />
+                  </label>
+                  <p className="mt-1 text-xs text-slate-500">
+                    Default: max(MA50, entry − 2×ATR)
+                    {accountGate?.suggested_circuit_breaker?.price != null &&
+                      ` = ${accountGate.suggested_circuit_breaker.price}`}
+                    . Close at/below this = exit, no debate (CIRCUIT_BREAKER alert).
+                  </p>
+                  {gateBlocked && (
+                    <div className="mt-3 rounded-lg border border-rose-800 bg-rose-500/10 p-2">
+                      <p className="text-xs font-semibold text-rose-300">
+                        Level 5 gate BLOCKED: {accountGate.blocking_failures.join(", ")}
+                      </p>
+                      <label className="mt-2 block text-xs text-rose-200">
+                        Type a reason to override (logged on the execution record):
+                        <input
+                          value={overrideReason}
+                          onChange={(e) => setOverrideReason(e.target.value)}
+                          placeholder="why this entry is justified anyway"
+                          className="mt-1 w-full rounded-lg border border-rose-700 bg-slate-950 px-3 py-1.5 text-slate-100"
+                        />
+                      </label>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Payoff estimate — entry context only; irrelevant when exiting */}
               {showPayoff && (

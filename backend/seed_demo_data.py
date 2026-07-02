@@ -217,6 +217,9 @@ def seed_state(last_close: dict[str, float]) -> None:
             "contracts": CONTRACTS, "execution_price": exec_price,
             "stock_price": spec["entry_px"], "dte": spec["leap_dte"],
             "expiration": "2026-12-18",
+            # The demo book intentionally exceeds the 2-position / capital caps
+            # so every view has data; the Level-5 gate is overridden, logged.
+            "override_reason": "demo-seed book",
         })
 
         # 2) A weekly sell-then-close cycle for each paid-back week. Closing OTM
@@ -252,6 +255,7 @@ def seed_state(last_close: dict[str, float]) -> None:
         "contracts": CONTRACTS,
         "execution_price": (ad["entry_px"] - ad["leap_strike"]) * 100 + ad["extr_per_contract"],
         "stock_price": ad["entry_px"], "dte": ad["leap_dte"], "expiration": "2026-12-18",
+        "override_reason": "demo-seed book",
     })
     for _ in range(ad["weeks"]):
         k = ad["leap_strike"] + ad["extr_per_contract"] / 10

@@ -118,6 +118,31 @@ def api_entry_gate():
         return _err(e)
 
 
+@app.route("/api/account-gate")
+def api_account_gate():
+    """Level 5 (Account & Juice) pre-trade gate. Optional query params let the
+    Execute flow pass real chain numbers: contracts, leap_cost (per share),
+    weekly_extrinsic (per share)."""
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+
+    def _f(name):
+        v = request.args.get(name)
+        return float(v) if v not in (None, "") else None
+
+    try:
+        import account_gate
+        return jsonify(account_gate.evaluate(
+            ticker,
+            contracts=int(request.args.get("contracts") or 0) or None,
+            leap_cost_per_share=_f("leap_cost"),
+            weekly_extrinsic_per_share=_f("weekly_extrinsic"),
+        ))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/option-chain/<ticker>")
 def api_option_chain(ticker: str):
     strategy = request.args.get("strategy", "atr")

@@ -20,6 +20,30 @@ const COLUMNS = [
   { key: "volume_ratio", label: "Vol×", num: true, render: (r) => fmt(r.volume_ratio, 2) },
   { key: "atr_momentum", label: "ATR mom", num: true, render: (r) => fmt(r.atr_momentum, 2) },
   { key: "obv_above_ema", label: "OBV", num: false, render: (r) => (r.obv_above_ema == null ? "—" : r.obv_above_ema ? "↑" : "↓") },
+  {
+    key: "juice_weekly_pct", label: "Juice/wk", num: true,
+    render: (r) =>
+      r.juice_weekly_pct == null ? "—" : (
+        <span
+          title={`History-implied weekly extrinsic ÷ LEAP cost (target ≥ ${fmt(r.juice_target_pct, 2)}%/wk)`}
+          className={r.juice_ok === false ? "text-rose-300" : "text-emerald-300"}
+        >
+          {fmt(r.juice_weekly_pct, 2)}%
+        </span>
+      ),
+  },
+  {
+    key: "earnings_days", label: "Earnings", num: true,
+    render: (r) =>
+      r.earnings_date == null ? "—" : (
+        <span
+          title={`Next earnings ${r.earnings_date}`}
+          className={r.earnings_days != null && r.earnings_days <= 7 ? "text-amber-300" : "text-slate-400"}
+        >
+          {r.earnings_days != null ? `${r.earnings_days}d` : r.earnings_date}
+        </span>
+      ),
+  },
   { key: "verdict", label: "Verdict", num: false, render: (r) => <Pill status={VERDICT_STATUS[r.verdict] || "unknown"}>{r.verdict}</Pill> },
 ];
 

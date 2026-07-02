@@ -13,7 +13,7 @@ theta_ledger / extrinsic_payback / pending_orders).
 """
 from __future__ import annotations
 
-CURRENT_VERSION = 2
+CURRENT_VERSION = 3
 
 
 def default_alert_state() -> dict:
@@ -37,8 +37,20 @@ def _v1_to_v2(state: dict) -> dict:
     return state
 
 
+def _v2_to_v3(state: dict) -> dict:
+    """v3 (Phase 1): per-position circuit breaker (line-in-the-sand exit price,
+    required at entry from now on) and cached dividend event (ex-date/amount,
+    the ASSIGNMENT_RISK input). Pre-existing positions get None — the UI and
+    alerts treat that as "not set" and prompt the operator."""
+    for p in state.get("positions", []):
+        p.setdefault("circuit_breaker", None)
+        p.setdefault("dividend", None)
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
+    2: _v2_to_v3,
 }
 
 

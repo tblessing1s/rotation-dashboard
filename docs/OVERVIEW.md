@@ -30,6 +30,7 @@ they never rewrite executions.
 | version | adds |
 | --- | --- |
 | 2 | `alerts` (active set, capped log, settings, last_run) — Phase 0 |
+| 3 | per-position `circuit_breaker` + `dividend` snapshot — Phase 1 |
 
 ## Alerting engine (Phase 0)
 
@@ -87,3 +88,44 @@ history) plus a navbar bell with the active count.
 (`seed_demo_data.ALERT_DEMO`, PG) that trips every position-based condition in
 one evaluator run — kill switch, circuit breaker, both delta flavors, defend,
 75% buyback, assignment risk, earnings window, and expiry — exactly 9 alerts.
+
+## Level 5 entry gate — Account & Juice (Phase 1)
+
+The 4-level gate answers "right stock, right tape"; Level 5
+(`backend/account_gate.py`) answers "is the ACCOUNT ready and does the TRADE
+pay". It is enforced server-side inside `executor.execute` for every
+`buy_leap`: a blocking failure rejects the entry (HTTP 400) unless the payload
+carries a typed `override_reason`, which is logged on the immutable execution
+record together with the checks it overrode.
+
+Blocking checks:
+
+- **cash_reserve** — post-trade free cash ≥ Σ `RESERVE_ATR_MULT`(2)×ATR$×contracts×100
+  across all open positions incl. the proposed one (PROPOSED_DEFAULT formula;
+  the computed number is shown).
+- **position_limit** — ≤ `MAX_CFM_POSITIONS` (2, HARD_CFM_RULE).
+- **capital_limit** — deployed + proposed ≤ `MAX_DEPLOYED_CAPITAL`
+  ($38K, PROPOSED_DEFAULT in the $35–40K band).
+- **sector_concentration** — < `MAX_POSITIONS_PER_SECTOR` (1, PROPOSED_DEFAULT)
+  already open in the same sector (the filters funnel into the hottest sector).
+- **juice_adequacy** — weekly extrinsic ÷ LEAP cost ≥
+  `CYCLE_RETURN_MIN/CYCLE_WEEKS_MAX` (~1.88%/week; 15–25% over 4–8 weeks is
+  HARD_CFM_RULE). Uses real chain numbers when the Execute flow has them,
+  else a Black–Scholes estimate at the ticker's trailing realized vol.
+
+Warnings (non-blocking): **juice_rich** (premium > `JUICE_RICH_FACTOR`(1.75)×
+history-implied — risk pricing), **earnings_in_cycle** (report inside the
+8-week cycle window).
+
+Additionally, every entry **stores a circuit breaker** (line in the sand):
+the operator's price or the default `max(MA50, entry − 2×ATR)`
+(`CIRCUIT_BREAKER_ATR_MULT`, PROPOSED_DEFAULT) — this feeds the
+`CIRCUIT_BREAKER` alert — and a **dividend snapshot**
+(`dividends.next_dividend`: next ex-date + per-payment amount, day-cached,
+Schwab fundamentals → Alpha Vantage OVERVIEW → manual override
+`dividend_event_overrides` in metadata) — this feeds `ASSIGNMENT_RISK`.
+
+**Scorecard** gains two columns: `Juice/wk` (history-implied weekly extrinsic ÷
+LEAP cost vs the target, red when inadequate) and `Earnings` (days to the next
+report, cache/override-only — the scorecard never triggers a provider fetch
+storm). **API**: `GET /api/account-gate?ticker=&contracts=&leap_cost=&weekly_extrinsic=`.

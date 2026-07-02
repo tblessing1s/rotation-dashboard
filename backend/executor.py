@@ -72,6 +72,12 @@ def execute(payload: dict) -> dict:
     strike = payload.get("strike")
     stock_price, price_source = _capture_price(ticker, payload.get("stock_price"))
 
+    # Level 5 gate (Account & Juice) — entry only. A blocking failure stops the
+    # buy_leap unless the payload carries an explicit override_reason, which is
+    # recorded on the immutable execution (see _buy_leap).
+    if action == "buy_leap":
+        _enforce_account_gate(payload, ticker, contracts)
+
     state = log.load_state()
     position = _ensure_position(state, ticker)
     log.save_state(state)  # persist the shell position before recording the fill
@@ -88,6 +94,33 @@ def execute(payload: dict) -> dict:
     if mode == "live" and schwab_api.configured():
         return _place_live(payload, ticker, action, contracts, strike, stock_price, price_source)
     return _commit(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
+
+
+def _enforce_account_gate(payload, ticker, contracts):
+    """Run the Level 5 gate for an entry. Blocking failures raise ValueError
+    (HTTP 400) unless override_reason is supplied; the gate result is stashed on
+    the payload so _buy_leap can log the override + failed checks."""
+    import account_gate
+    leap_cost_ps = None
+    if payload.get("execution_price"):  # per-contract dollars -> per-share
+        leap_cost_ps = float(payload["execution_price"]) / 100.0
+    gate = account_gate.evaluate(
+        ticker, contracts=contracts,
+        leap_cost_per_share=leap_cost_ps,
+        weekly_extrinsic_per_share=payload.get("weekly_extrinsic_per_share"),
+    )
+    payload["_account_gate"] = gate
+    if gate["pass"]:
+        return
+    reason = (payload.get("override_reason") or "").strip()
+    if not reason:
+        failed = ", ".join(gate["blocking_failures"])
+        details = "; ".join(
+            f"{c['id']}: {c['label']}" for c in gate["checks"]
+            if c["blocking"] and not c["pass"])
+        raise ValueError(
+            f"Level 5 gate blocked entry ({failed}) — {details}. "
+            "Pass override_reason to enter anyway (logged).")
 
 
 def _build_leg(payload, ticker, action, strike, contracts, stock_price):
@@ -249,7 +282,40 @@ def _buy_leap(payload, ticker, strike, contracts, stock_price):
         "extrinsic_captured": round(extrinsic_at_entry, 2), "stock_price": stock_price,
     }
 
+    # Level-5 gate context: log any override (with what it overrode) on the
+    # immutable record, and resolve the circuit breaker + dividend to store.
+    gate = payload.get("_account_gate") or {}
+    if payload.get("override_reason"):
+        execution["override"] = {
+            "reason": str(payload["override_reason"]).strip(),
+            "failed_checks": gate.get("blocking_failures", []),
+        }
+
+    # Entry REQUIRES a line-in-the-sand: operator's price, else the suggested
+    # default max(MA50, entry - 2xATR) — the entry always stores one.
+    cb_price = payload.get("circuit_breaker_price")
+    cb_source = "operator"
+    if cb_price is None:
+        cb_price = (gate.get("suggested_circuit_breaker") or {}).get("price")
+        cb_source = "default"
+        if cb_price is None:
+            import account_gate
+            cb_price = account_gate.suggested_circuit_breaker(ticker).get("price")
+    circuit_breaker = ({"price": round(float(cb_price), 2), "source": cb_source,
+                        "set_at": log.utcnow()[:10]} if cb_price is not None else None)
+    execution["circuit_breaker_price"] = circuit_breaker["price"] if circuit_breaker else None
+
+    dividend = gate.get("dividend")
+    if dividend is None:
+        import dividends
+        try:
+            dividend = dividends.next_dividend(ticker)
+        except Exception:  # noqa: BLE001 — dividend data must never block an entry
+            dividend = {"ex_date": None, "amount": None, "source": "error"}
+
     def apply(position):
+        position["circuit_breaker"] = circuit_breaker
+        position["dividend"] = dividend
         position["leap"] = {
             "strike": strike, "contracts": contracts, "cost_basis": total,
             "current_bid": total, "intrinsic": round(intrinsic_per_contract * contracts, 2),

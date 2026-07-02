@@ -31,6 +31,13 @@ export const api = {
   stockFilter: (sector) => request(`/api/stock-filter${sector ? `?sector=${sector}` : ""}`),
   scorecard: (tickers) => request(`/api/scan/scorecard${tickers ? `?tickers=${tickers}` : ""}`),
   entryGate: (ticker) => request(`/api/entry-gate?ticker=${ticker}`),
+  accountGate: (ticker, params = {}) => {
+    const q = Object.entries(params)
+      .filter(([, v]) => v !== null && v !== undefined && v !== "")
+      .map(([k, v]) => `&${k}=${encodeURIComponent(v)}`)
+      .join("");
+    return request(`/api/account-gate?ticker=${ticker}${q}`);
+  },
   rollSuggestion: (ticker) => request(`/api/roll-suggestion?ticker=${ticker}`),
   rollOptions: (ticker) => request(`/api/roll-options?ticker=${ticker}`),
   coverage: (ticker) => request(`/api/coverage?ticker=${ticker}`),

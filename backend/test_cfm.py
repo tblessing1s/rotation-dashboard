@@ -454,7 +454,7 @@ def test_execute_flow_builds_ledger(monkeypatch, tmp_path):
 
     executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
                       "contracts": 5, "execution_price": 3300, "stock_price": 145,
-                      "expiration": "2026-12-18"})
+                      "expiration": "2026-12-18", "override_reason": "test fixture"})
     executor.execute({"action": "sell_short", "ticker": "ON", "strike": 140.5,
                       "contracts": 5, "premium_per_share": 6.0, "stock_price": 145})
     res = executor.execute({"action": "close_short", "ticker": "ON", "strike": 140.5,
@@ -493,7 +493,8 @@ def test_close_leap_clears_position_and_records_pnl(monkeypatch, tmp_path):
     importlib.reload(executor)
 
     executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
-                      "contracts": 5, "execution_price": 3300, "stock_price": 145})
+                      "contracts": 5, "execution_price": 3300, "stock_price": 145,
+                      "override_reason": "test fixture"})
     # Sell the LEAP to close: proceeds 3600*5=18000 vs cost basis 3300*5=16500.
     res = executor.execute({"action": "close_leap", "ticker": "ON", "strike": 130,
                             "contracts": 5, "close_price": 3600, "stock_price": 150})
@@ -526,7 +527,8 @@ def test_execute_reports_filled_status(monkeypatch, tmp_path):
     importlib.reload(executor)
 
     res = executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
-                            "contracts": 5, "execution_price": 3300, "stock_price": 145})
+                            "contracts": 5, "execution_price": 3300, "stock_price": 145,
+                            "override_reason": "test fixture"})
     assert res["status"] == "filled" and res["mode"] == "logged"
 
 
@@ -633,7 +635,8 @@ def test_roll_short_closes_old_and_opens_new(monkeypatch, tmp_path):
     importlib.reload(executor)
 
     executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
-                      "contracts": 5, "execution_price": 3300, "stock_price": 145})
+                      "contracts": 5, "execution_price": 3300, "stock_price": 145,
+                      "override_reason": "test fixture"})
     executor.execute({"action": "sell_short", "ticker": "ON", "strike": 140.5,
                       "contracts": 5, "premium_per_share": 6.0, "stock_price": 145,
                       "expiration": "2026-07-03"})

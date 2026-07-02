@@ -95,6 +95,20 @@ def _summary(ticker: str, date_str: str | None, source: str) -> dict:
     }
 
 
+def cached_earnings(ticker: str) -> dict:
+    """Cache/override-only earnings lookup — NEVER hits a provider. Used by
+    bulk paths (the Scorecard sweeps hundreds of tickers) where a cold-cache
+    fetch storm would blow the Alpha Vantage budget; unknowns stay None."""
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return _summary(ticker, None, "none")
+    override = _override(ticker)
+    if override:
+        return _summary(ticker, override, "override")
+    rec = _read_cache().get(ticker) or {}
+    return _summary(ticker, rec.get("date"), "cache" if rec else "none")
+
+
 def next_earnings(ticker: str, refresh: bool = False) -> dict:
     """Next earnings date for a ticker.
 

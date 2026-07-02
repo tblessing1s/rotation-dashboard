@@ -354,6 +354,22 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     if gate is not None:
         row["gate_cleared_level"] = gate.get("cleared_level", 0)
 
+    # Juice adequacy (history-implied weekly extrinsic / LEAP cost) + next
+    # earnings — so weak-premium and earnings-soon names are visible BEFORE the
+    # Execute tab. Earnings is cache/override-only here: this sweeps hundreds of
+    # tickers and must never trigger a provider fetch storm.
+    import account_gate
+    import earnings as earnings_mod
+    est = account_gate.juice_estimate(ticker, df)
+    target = account_gate.weekly_yield_target_pct()
+    row["juice_weekly_pct"] = est["weekly_yield_pct"]
+    row["juice_target_pct"] = target
+    row["juice_ok"] = (None if est["weekly_yield_pct"] is None
+                       else bool(est["weekly_yield_pct"] >= target))
+    earn = earnings_mod.cached_earnings(ticker)
+    row["earnings_date"] = earn.get("date")
+    row["earnings_days"] = earn.get("days_until")
+
     failed = _failed_stock_gate_level(gate)
     if failed is not None:
         name = _GATE_LEVEL_NAMES.get(failed, "")
