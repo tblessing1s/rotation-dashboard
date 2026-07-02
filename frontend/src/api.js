@@ -44,6 +44,15 @@ export const api = {
   thetaLedger: (params = "") => request(`/api/theta-ledger${params}`),
   killSwitch: () => request("/api/kill-switch"),
   dailyChecklist: () => request("/api/daily-checklist"),
+  alerts: () => request("/api/alerts"),
+  runAlerts: (dryRun) =>
+    request("/api/alerts/run", {
+      method: "POST",
+      body: JSON.stringify(dryRun === undefined ? {} : { dry_run: dryRun }),
+    }),
+  ackAlert: (id) => request("/api/alerts/ack", { method: "POST", body: JSON.stringify({ id }) }),
+  alertSettings: (patch) =>
+    request("/api/alerts/settings", { method: "POST", body: JSON.stringify(patch) }),
   config: () => request("/api/config"),
   mode: () => request("/api/mode"),
   setMode: (demo) => request("/api/mode", { method: "POST", body: JSON.stringify({ demo }) }),

@@ -13,6 +13,8 @@ import secrets
 from flask import Flask, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
 
+import alert_scheduler
+import alerts
 import auth
 import config
 import data_handler
@@ -266,6 +268,51 @@ def api_daily_checklist():
 
 
 # ---------------------------------------------------------------------------
+# Alerts
+# ---------------------------------------------------------------------------
+@app.route("/api/alerts")
+def api_alerts():
+    try:
+        return jsonify(alerts.view())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/alerts/run", methods=["POST"])
+def api_alerts_run():
+    """Force one evaluator pass now. Also the external-cron entry point: hitting
+    this URL wakes a stopped Fly machine, and dedup makes repeat runs no-ops."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(alerts.run(dry_run=payload.get("dry_run")))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/alerts/ack", methods=["POST"])
+def api_alerts_ack():
+    payload = request.get_json(silent=True) or {}
+    alert_id = payload.get("id", "")
+    if not alert_id:
+        return jsonify({"error": "id is required"}), 400
+    try:
+        return jsonify(alerts.acknowledge(alert_id))
+    except ValueError as e:
+        return _err(e, 404)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/alerts/settings", methods=["POST"])
+def api_alerts_settings():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(alerts.update_settings(payload))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+# ---------------------------------------------------------------------------
 # State / config
 # ---------------------------------------------------------------------------
 @app.route("/api/state", methods=["GET", "POST"])
@@ -410,6 +457,12 @@ def serve_frontend(path: str = ""):
     if os.path.exists(index):
         return send_from_directory(DIST_DIR, "index.html")
     return jsonify({"error": "frontend not built — run `npm run build` in frontend/"}), 404
+
+
+# Start the in-process alert scheduler (gunicorn imports this module; the CLI
+# path below reaches it too). start_once() is idempotent and a no-op when
+# CFM_ALERTS_SCHEDULER=0 (tests / one-off scripts).
+alert_scheduler.start_once()
 
 
 if __name__ == "__main__":

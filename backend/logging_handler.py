@@ -13,6 +13,7 @@ import threading
 from datetime import datetime, timezone
 
 import config
+import migrations
 
 _lock = threading.RLock()
 
@@ -23,6 +24,7 @@ def utcnow() -> str:
 
 def _default_state() -> dict:
     return {
+        "schema_version": migrations.CURRENT_VERSION,
         "metadata": {
             "last_updated": utcnow(),
             "reserve_required": config.RESERVE_REQUIRED,
@@ -37,6 +39,7 @@ def _default_state() -> dict:
         # order id; an entry is removed when the order fills (then committed as an
         # execution) or is cancelled/rejected.
         "pending_orders": {},
+        "alerts": migrations.default_alert_state(),
     }
 
 
@@ -51,9 +54,13 @@ def load_state() -> dict:
                 state = json.load(fh)
         except (ValueError, OSError):
             state = _default_state()
-        # Forward-fill any missing top-level keys so older state files load.
+        # Versioned migrations first (they add structure old files lack), then
+        # forward-fill any still-missing top-level keys so older state files load.
+        state, migrated = migrations.migrate(state)
         for k, v in _default_state().items():
             state.setdefault(k, v)
+        if migrated:
+            _write(state)
         return state
 
 

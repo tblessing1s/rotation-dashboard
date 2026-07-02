@@ -11,6 +11,7 @@ import ThetaLedger from "./components/ThetaLedger.jsx";
 import KillSwitchMonitor from "./components/KillSwitchMonitor.jsx";
 import PositionTracker from "./components/PositionTracker.jsx";
 import DailyChecklist from "./components/DailyChecklist.jsx";
+import AlertsPanel from "./components/AlertsPanel.jsx";
 
 const TABS = ["Scan", "Execute", "Theta", "Kill Switch", "Positions", "Checklist"];
 
@@ -23,6 +24,18 @@ export default function App() {
   const [modeBusy, setModeBusy] = React.useState(false);
   // null = still checking, true = signed in (or auth disabled), false = show login.
   const [authed, setAuthed] = React.useState(null);
+  const [alertCount, setAlertCount] = React.useState(0);
+
+  // Navbar bell badge: poll the active-alert count once a minute.
+  React.useEffect(() => {
+    if (authed !== true) return;
+    let stop = false;
+    const poll = () =>
+      api.alerts().then((a) => !stop && setAlertCount((a.active || []).length)).catch(() => {});
+    poll();
+    const id = setInterval(poll, 60000);
+    return () => { stop = true; clearInterval(id); };
+  }, [authed, execNonce]);
 
   React.useEffect(() => {
     api.authStatus()
@@ -73,7 +86,8 @@ export default function App() {
   return (
     <div className="min-h-full bg-slate-950 text-slate-100">
       <Navbar tabs={TABS} active={tab} onChange={setTab} regimeStatus={regimeStatus}
-              demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo} onLogout={logout} />
+              demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo} onLogout={logout}
+              alertCount={alertCount} onAlertsClick={() => setTab("Checklist")} />
       <main className="mx-auto max-w-7xl px-4 py-6">
         <SchwabStatus demo={demo} />
         {tab === "Scan" && (
@@ -92,7 +106,12 @@ export default function App() {
         {tab === "Theta" && <ThetaLedger key={execNonce} />}
         {tab === "Kill Switch" && <KillSwitchMonitor />}
         {tab === "Positions" && <PositionTracker key={execNonce} />}
-        {tab === "Checklist" && <DailyChecklist />}
+        {tab === "Checklist" && (
+          <div className="grid gap-4">
+            <AlertsPanel />
+            <DailyChecklist />
+          </div>
+        )}
       </main>
       <footer className="mx-auto max-w-7xl px-4 pb-8 pt-4 text-center text-xs text-slate-600">
         CFM dashboard · scan → gate → execute → track · state.json is the source of truth

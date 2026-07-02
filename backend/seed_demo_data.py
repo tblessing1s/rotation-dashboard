@@ -85,7 +85,8 @@ def _frame(base: float, mu: float, sigma: float, consolidate_tail: int = 0,
     )
 
 
-def generate_market_cache(strong_tickers: set[str], anchors: dict[str, float]) -> dict[str, float]:
+def generate_market_cache(strong_tickers: set[str], anchors: dict[str, float],
+                          weak_tickers: set[str] = frozenset()) -> dict[str, float]:
     """Write the synthetic parquet cache and return each symbol's last close."""
     os.makedirs(config.active_cache_dir(), exist_ok=True)
     last_close: dict[str, float] = {}
@@ -134,6 +135,11 @@ def generate_market_cache(strong_tickers: set[str], anchors: dict[str, float]) -
                 mu = SPY_DRIFT + 0.0048
                 tail = 12
                 anchor = anchors.get(tkr)
+            elif tkr in weak_tickers:
+                # Clearly lag both SPY and the sector, so the kill switch reads
+                # red — the alert-demo position (see ALERT_DEMO) rides this name.
+                mu = SPY_DRIFT - 0.0045
+                anchor = anchors.get(tkr)
             emit(tkr, base, mu, 0.006, tail=tail, anchor=anchor)
 
     return last_close
@@ -153,22 +159,46 @@ def _fridays(n: int, end: str = "2026-06-26") -> list[str]:
 # # of paid-back weeks, weekly (sold, paid) per share, current LEAP time value,
 # open short (strike, dte, sold/sh), shares held, share cost basis, LEAP dte.
 # `cur_px` is today's (synthetic) stock price the cache is anchored to — kept a
-# touch below each open short strike so the weekly call is still OTM and working.
+# touch ABOVE each open short strike: CFM sells the weekly ITM (strike ≈ stock −
+# 1.5×ATR), so a healthy short is in the money and its premium carries intrinsic
+# plus ~1.00 of juice. Stock above strike = working as designed; stock below
+# strike is the DEFEND_POSITION alert case (see the ALERT_DEMO position).
 BOOK = [
     dict(ticker="NVDA", strike=90, entry_px=112, cur_px=128, extr_per_contract=480,
-         weeks=8, sold=0.95, paid=0.35, leap_tv=1700, short=(132, 5, 1.05),
+         weeks=8, sold=0.95, paid=0.35, leap_tv=1700, short=(124, 5, 5.00),
          shares=300, share_cost=104.0, leap_dte=158),
     dict(ticker="AVGO", strike=140, entry_px=168, cur_px=189, extr_per_contract=520,
-         weeks=5, sold=0.90, paid=0.33, leap_tv=2050, short=(196, 4, 1.00),
+         weeks=5, sold=0.90, paid=0.33, leap_tv=2050, short=(185, 4, 5.20),
          shares=100, share_cost=158.0, leap_dte=143),
     dict(ticker="UBER", strike=58, entry_px=72, cur_px=81, extr_per_contract=440,
-         weeks=5, sold=0.82, paid=0.30, leap_tv=1500, short=(83, 3, 0.92),
+         weeks=5, sold=0.82, paid=0.30, leap_tv=1500, short=(78.5, 3, 3.30),
          shares=200, share_cost=68.0, leap_dte=131),
     dict(ticker="AMD", strike=120, entry_px=146, cur_px=164, extr_per_contract=400,
-         weeks=2, sold=0.88, paid=0.36, leap_tv=1650, short=(168, 2, 1.10),
+         weeks=2, sold=0.88, paid=0.36, leap_tv=1650, short=(160, 2, 5.10),
          shares=0, share_cost=None, leap_dte=28),
 ]
 CONTRACTS = config.LEAP_CONTRACTS  # 5
+
+# A 5th, deliberately broken position that trips every position-based alert
+# condition (see alerts.py) in one evaluator run — the Alerts panel demo.
+# Bought at 160 with a 140 LEAP strike, the stock has collapsed to 128:
+#   - PG lags SPY and XLP in the cache (weak_tickers) -> KILL_SWITCH_SECTOR
+#   - price 128 <= circuit breaker 131                -> CIRCUIT_BREAKER
+#   - LEAP now OTM (mark 6.00 -> delta ~0.39)          -> DELTA_UNCOVERED (floor)
+#   - ITM 1-DTE short's delta > LEAP delta             -> DELTA_UNCOVERED (inverted)
+#   - price 128 below the 132 short                    -> DEFEND_POSITION
+#   - 132 short sold 1.20 now 0.25 (~79%) with 4 DTE   -> BUYBACK_75
+#   - 0.25 extrinsic < 0.55 dividend, ex-div in 2d     -> ASSIGNMENT_RISK
+#   - earnings override 3 days out                     -> EARNINGS_WINDOW
+#   - 126 short at 1 DTE, not rolled                   -> EXPIRY_FRIDAY
+ALERT_DEMO = dict(
+    ticker="PG", leap_strike=140, entry_px=160, cur_px=128, extr_per_contract=450,
+    weeks=2, sold=1.10, paid=0.40, leap_mark_per_share=6.00, leap_dte=150,
+    shorts=[dict(strike=132, dte=4, sold=1.20, current=0.25),
+            dict(strike=126, dte=1, sold=0.90, current=2.30)],
+    circuit_breaker=131.0, dividend_amount=0.55,
+    earnings_in_days=3, ex_div_in_days=2,
+)
 
 
 def seed_state(last_close: dict[str, float]) -> None:
@@ -205,13 +235,36 @@ def seed_state(last_close: dict[str, float]) -> None:
                 "stock_price": k - 1, "extrinsic_sold": spec["sold"],
             })
 
-        # 3) Leave one short open (this week's juice still working).
+        # 3) Leave one short open (this week's juice still working). The short is
+        # ITM, so the captured extrinsic = premium − (stock − strike).
         sk, sdte, ssold = spec["short"]
         executor.execute({
             "action": "sell_short", "ticker": t, "strike": sk,
-            "contracts": CONTRACTS, "premium_per_share": ssold, "stock_price": sk,
-            "dte": sdte,
+            "contracts": CONTRACTS, "premium_per_share": ssold,
+            "stock_price": spec["cur_px"], "dte": sdte,
         })
+
+    # The alert-demo position: same execution-derived path, rigged numbers.
+    ad = ALERT_DEMO
+    t = ad["ticker"]
+    executor.execute({
+        "action": "buy_leap", "ticker": t, "strike": ad["leap_strike"],
+        "contracts": CONTRACTS,
+        "execution_price": (ad["entry_px"] - ad["leap_strike"]) * 100 + ad["extr_per_contract"],
+        "stock_price": ad["entry_px"], "dte": ad["leap_dte"], "expiration": "2026-12-18",
+    })
+    for _ in range(ad["weeks"]):
+        k = ad["leap_strike"] + ad["extr_per_contract"] / 10
+        executor.execute({"action": "sell_short", "ticker": t, "strike": k,
+                          "contracts": CONTRACTS, "premium_per_share": ad["sold"],
+                          "stock_price": k})
+        executor.execute({"action": "close_short", "ticker": t, "strike": k,
+                          "contracts": CONTRACTS, "close_price_per_share": ad["paid"],
+                          "stock_price": k - 1, "extrinsic_sold": ad["sold"]})
+    for s in ad["shorts"]:
+        executor.execute({"action": "sell_short", "ticker": t, "strike": s["strike"],
+                          "contracts": CONTRACTS, "premium_per_share": s["sold"],
+                          "stock_price": ad["cur_px"], "dte": s["dte"]})
 
     # Backdate the execution log + open shorts so the ledger spreads across weeks
     # (executor stamps everything "now"), then patch the live-market fields a
@@ -255,6 +308,47 @@ def seed_state(last_close: dict[str, float]) -> None:
             sc["open_date"] = "2026-06-25"
             sc["dte"] = spec["short"][1]
 
+    # Patch the alert-demo position with the rigged live-market fields.
+    today = datetime.utcnow().date()
+    ad = ALERT_DEMO
+    t = ad["ticker"]
+    fridays = _fridays(ad["weeks"])
+    closes = [e for e in state["executions"] if e["ticker"] == t and e["action"] == "close_short"]
+    sells = [e for e in state["executions"] if e["ticker"] == t and e["action"] == "sell_short"]
+    for e, fri in zip(closes, fridays):
+        e["date"] = f"{fri}T20:00:00Z"
+    for i, e in enumerate(sells):
+        if i < len(fridays):
+            d = datetime.strptime(fridays[i], "%Y-%m-%d") - timedelta(days=4)
+            e["date"] = d.strftime("%Y-%m-%dT15:30:00Z")
+        else:
+            e["date"] = "2026-06-25T15:30:00Z"
+    pos = log.find_position(state, t)
+    pos["entry_date"] = "2026-04-20"
+    pos["thesis"] = {"fundamentals": f"{t}: alert-demo — RS3M broken, stock through the LEAP strike.",
+                     "intact": False}
+    leap = pos["leap"]
+    leap["dte"] = ad["leap_dte"]
+    leap["current_bid"] = round(ad["leap_mark_per_share"] * CONTRACTS * 100, 2)
+    for sc, s in zip(pos["short_calls"], ad["shorts"]):
+        sc["open_date"] = "2026-06-25"
+        sc["dte"] = s["dte"]
+        sc["current_bid"] = s["current"]
+        sc["current_cost"] = round(s["current"] * CONTRACTS * 100, 2)
+    # Line-in-the-sand above today's price, so the circuit breaker reads breached.
+    pos["circuit_breaker"] = {"price": ad["circuit_breaker"], "source": "demo-seed",
+                              "set_at": "2026-04-20"}
+    pos["dividend"] = {"ex_date": (today + timedelta(days=ad["ex_div_in_days"])).isoformat(),
+                       "amount": ad["dividend_amount"], "source": "demo-seed"}
+
+    # Pin earnings for every held name so demo alerts don't depend on a live
+    # provider: the alert-demo name reports inside the warning window, the
+    # healthy book far outside it.
+    overrides = {t: (today + timedelta(days=ad["earnings_in_days"])).isoformat()}
+    for spec in BOOK:
+        overrides[spec["ticker"]] = (today + timedelta(days=45)).isoformat()
+    state["metadata"]["earnings_overrides"] = overrides
+
     # Portfolio capital + reserve (drives the Positions capital card + milestones).
     state["metadata"].update({
         "capital_deployed": 31200,
@@ -273,9 +367,10 @@ def seed() -> int:
     config.set_demo_enabled(True)
     strong = {s["ticker"] for s in BOOK}
     anchors = {s["ticker"]: float(s["cur_px"]) for s in BOOK}
-    last_close = generate_market_cache(strong, anchors)
+    anchors[ALERT_DEMO["ticker"]] = float(ALERT_DEMO["cur_px"])
+    last_close = generate_market_cache(strong, anchors, weak_tickers={ALERT_DEMO["ticker"]})
     seed_state(last_close)
-    return len(BOOK)
+    return len(BOOK) + 1
 
 
 def is_seeded() -> bool:
