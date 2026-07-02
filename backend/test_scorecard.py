@@ -299,3 +299,43 @@ def test_scorecard_endpoint_shape(monkeypatch):
     # Response is JSON-serializable end to end (no numpy types leaked).
     import json
     json.dumps(body)
+
+
+# ---- full-universe caching (avoids a redundant sweep when the Scan tab's
+# Scorecard panel and Ready-to-Enter panel both request it concurrently) ------
+@pytest.fixture()
+def _reset_scan_cache():
+    import screening
+    screening.clear_cache()
+    yield
+    screening.clear_cache()  # never leak a cached full sweep into later tests
+
+
+def test_scorecard_full_universe_is_cached_ticker_subset_is_not(monkeypatch, _reset_scan_cache):
+    calls = []
+    monkeypatch.setattr(sc, "_compute_scorecard", lambda names: calls.append(names) or {"as_of": "x", "results": []})
+    monkeypatch.setattr(sc.sector_data, "all_tickers", lambda: ["AAA", "BBB"])
+
+    sc.scorecard()          # full-universe (tickers=None) -> computes once
+    sc.scorecard()          # second call within TTL -> cache hit, no recompute
+    assert len(calls) == 1
+    assert calls[0] == ["AAA", "BBB"]
+
+    sc.scorecard(["ZZZ"])   # an explicit subset always computes fresh
+    sc.scorecard(["ZZZ"])
+    assert len(calls) == 3  # the two subset calls each added one more
+
+
+def test_scorecard_cache_cleared_on_demo_live_switch(monkeypatch, _reset_scan_cache):
+    import screening
+    calls = []
+    monkeypatch.setattr(sc, "_compute_scorecard", lambda names: calls.append(1) or {"as_of": "x", "results": []})
+    monkeypatch.setattr(sc.sector_data, "all_tickers", lambda: ["AAA"])
+
+    sc.scorecard()
+    sc.scorecard()
+    assert len(calls) == 1  # cached
+
+    screening.clear_cache()  # what /api/mode calls on a demo<->live toggle
+    sc.scorecard()
+    assert len(calls) == 2  # recomputed after the cache was cleared
