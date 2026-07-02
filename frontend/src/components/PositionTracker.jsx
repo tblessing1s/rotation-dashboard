@@ -90,7 +90,8 @@ function DefendPanel({ ticker, onStage }) {
       </div>
       <p className="mt-1 text-slate-300">
         Roll down to <span className="font-semibold text-slate-100">{fmt(data.recommended_strike, 2)}</span>{" "}
-        ({data.regime?.toUpperCase()} regime: price − {data.atr_mult}×ATR {fmt(data.atr, 2)})
+        ({data.regime?.toUpperCase()} / {data.posture}: {data.atr_mult}×ATR {fmt(data.atr, 2)}
+        {data.itm_pct != null ? ` / ${(data.itm_pct * 100).toFixed(0)}% ITM floor` : ""})
         {data.net_total != null && (
           <> · est. net {data.net_total >= 0 ? "credit" : "debit"}{" "}
             <span className={data.net_total >= 0 ? "text-emerald-300" : "text-rose-300"}>

@@ -624,12 +624,14 @@ def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source):
 
 def defend_recommendation(ticker: str) -> dict:
     """Defensive roll-down for a breached short (underlying < short strike):
-    new strike = price − 1.5×ATR (GREEN) / 2.0×ATR (YELLOW), same or next weekly
-    expiry, with the estimated net credit/debit, the new short's extrinsic, and
-    the effect on effective cost basis. Prices come from the stored short mark +
-    a Black-Scholes estimate at trailing realized vol, so this works in demo /
+    new strike from the regime x posture table (strike_policy — the deeper of
+    an ATR-distance strike and an ITM% floor), same or next weekly expiry, with
+    the estimated net credit/debit, the new short's extrinsic, and the effect
+    on effective cost basis. Prices come from the stored short mark + a
+    Black-Scholes estimate at trailing realized vol, so this works in demo /
     off-hours; the staged roll itself re-prices from the live chain."""
     import screening
+    import strike_policy
 
     ticker = ticker.upper()
     state = log.load_state()
@@ -650,9 +652,9 @@ def defend_recommendation(ticker: str) -> dict:
     sc = min(breached, key=lambda s: s.get("dte") if s.get("dte") is not None else 1e9)
 
     regime = screening.regime().get("status", "yellow")
-    from option_chain import REGIME_ATR_MULT
-    atr_mult = REGIME_ATR_MULT.get(regime, REGIME_ATR_MULT["yellow"])
-    new_strike = indicators.short_strike(price, atr_val, atr_mult)
+    sp = strike_policy.suggest_strike(price, atr_val, regime)
+    atr_mult, itm_pct, posture = sp["atr_mult"], sp["itm_pct"], sp["posture"]
+    new_strike = sp["strike"]
 
     contracts = int(sc.get("contracts") or 0)
     dte = sc.get("dte")
@@ -673,6 +675,8 @@ def defend_recommendation(ticker: str) -> dict:
         "atr": round(atr_val, 2),
         "regime": regime,
         "atr_mult": atr_mult,
+        "itm_pct": itm_pct,
+        "posture": posture,
         "current_short": {"strike": sc.get("strike"), "contracts": contracts,
                           "dte": dte, "expiration": sc.get("expiration"),
                           "buyback_per_share": buyback},
@@ -688,16 +692,24 @@ def defend_recommendation(ticker: str) -> dict:
 
 
 def roll_suggestion(ticker: str) -> dict:
-    """Next weekly short strike = stock - 1.5*ATR (rounded to 0.5)."""
+    """Next weekly short strike from the regime x posture table (strike_policy)."""
+    import screening
+    import strike_policy
+
     df = data_handler.get_daily(ticker)
     price = indicators.last(df)
     atr_val = indicators.atr(df)
     if price is None or atr_val is None:
         return {"ticker": ticker, "error": "insufficient data"}
+    regime = screening.regime().get("status", "yellow")
+    sp = strike_policy.suggest_strike(price, atr_val, regime)
     return {
         "ticker": ticker,
         "stock_price": round(price, 2),
         "atr": round(atr_val, 2),
-        "atr_mult": config.SHORT_ATR_MULT,
-        "suggested_strike": indicators.short_strike(price, atr_val),
+        "regime": regime,
+        "atr_mult": sp["atr_mult"],
+        "itm_pct": sp["itm_pct"],
+        "posture": sp["posture"],
+        "suggested_strike": sp["strike"],
     }

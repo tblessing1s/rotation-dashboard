@@ -124,8 +124,30 @@ LEAP_DELTA_MIN = 0.88        # preferred LEAP delta band (offer strikes to choos
 LEAP_DELTA_MAX = 0.91
 LEAP_TARGET_DTE = 180
 RISK_FREE_RATE = 0.04        # for Black–Scholes greeks (delta recomputed to match TOS)
-SHORT_ATR_MULT = 1.5         # short strike = stock - 1.5 * ATR
+SHORT_ATR_MULT = 1.5         # short strike = stock - 1.5 * ATR (legacy flat default;
+                              # superseded by STRIKE_TABLE below for regime/posture-aware picks)
 SHARE_CAP = 500              # accumulate to 500 shares per stock, then rotate
+
+# ---- Weekly short strike selection: regime x posture table -----------------
+# HARD_CFM_RULE ("Genius System" market-timing table). The weekly short strike
+# distance below spot is set by BOTH an ATR multiplier and a minimum ITM% floor,
+# keyed by market regime (green/yellow/red) and the operator's risk posture
+# (aggressive/conservative, an editable persisted setting — see strike_policy.py).
+# The strike used is whichever candidate sits FURTHER below price (max
+# protection wins):
+#   atr_strike = price - atr_mult * ATR
+#   itm_strike = price * (1 - itm_pct)
+#   strike     = min(atr_strike, itm_strike), rounded to $0.50
+# Values are (atr_mult, itm_pct as a decimal). RED entries are still blocked
+# (Level 1 regime gate, unchanged); the RED row here only feeds the defend /
+# roll-down strike selector for an already-open position during a red tape.
+STRIKE_TABLE = {
+    "green":  {"aggressive": (0.0, 0.00), "conservative": (0.5, 0.01)},
+    "yellow": {"aggressive": (0.5, 0.02), "conservative": (1.0, 0.03)},
+    "red":    {"aggressive": (1.0, 0.04), "conservative": (1.5, 0.05)},
+}
+STRIKE_POSTURES = ("aggressive", "conservative")
+DEFAULT_STRIKE_POSTURE = "conservative"  # PROPOSED_DEFAULT until the operator picks
 LEAP_ROLL_DTE = 30           # roll/replace LEAP when it nears this DTE
 ROLL_MAX_DTE = 45            # short-roll picker offers expirations out to this DTE
 

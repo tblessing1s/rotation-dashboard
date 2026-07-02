@@ -75,19 +75,23 @@ def test_defend_recommendation_regime_atr_strike(isolated_state, monkeypatch):
     }]
     log.save_state(state)
 
+    # Default posture (no metadata.strike_posture set) is "conservative".
     monkeypatch.setattr(screening, "regime", lambda: {"status": "green"})
     rec = executor.defend_recommendation("PG")
-    # flat frame: ATR 2 -> GREEN 1.5x: 128 - 3 = 125
-    assert rec["breached"] is True and rec["recommended_strike"] == 125.0
-    assert rec["atr_mult"] == 1.5
+    # flat frame: ATR 2. GREEN/conservative = 0.5 ATR / 1% ITM floor:
+    # atr_strike=128-1=127, itm_strike=128*0.99=126.72 -> deeper (126.72) wins,
+    # rounded to $0.50 -> 126.5.
+    assert rec["breached"] is True and rec["recommended_strike"] == 126.5
+    assert rec["atr_mult"] == 0.5 and rec["itm_pct"] == 0.01 and rec["posture"] == "conservative"
     assert rec["new_premium_per_share"] is not None
     assert rec["net_total"] is not None
     assert rec["cost_basis_effect"] == -rec["net_total"]
 
     monkeypatch.setattr(screening, "regime", lambda: {"status": "yellow"})
     rec = executor.defend_recommendation("PG")
-    # YELLOW 2.0x: 128 - 4 = 124
-    assert rec["recommended_strike"] == 124.0 and rec["atr_mult"] == 2.0
+    # YELLOW/conservative = 1.0 ATR / 3% ITM floor: atr_strike=128-2=126,
+    # itm_strike=128*0.97=124.16 -> deeper (124.16) wins, rounded -> 124.0.
+    assert rec["recommended_strike"] == 124.0 and rec["atr_mult"] == 1.0 and rec["itm_pct"] == 0.03
 
     # Stock above every short strike -> nothing to defend.
     state = log.load_state()

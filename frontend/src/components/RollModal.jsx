@@ -148,7 +148,10 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
               </div>
               {data.underlying_price != null && (
                 <div className="mt-1 text-xs text-slate-500">
-                  Spot {dollars(data.underlying_price)} · ATR target {data.suggested_strike != null ? fmt(data.suggested_strike, 2) : "—"} ({data.atr_mult}×ATR {fmt(data.atr, 2)})
+                  Spot {dollars(data.underlying_price)} · target {data.suggested_strike != null ? fmt(data.suggested_strike, 2) : "—"}{" "}
+                  ({data.atr_mult}×ATR {fmt(data.atr, 2)}
+                  {data.itm_pct != null ? ` / ${(data.itm_pct * 100).toFixed(0)}% ITM floor` : ""}
+                  {data.posture ? `, ${data.posture}` : ""})
                 </div>
               )}
             </div>

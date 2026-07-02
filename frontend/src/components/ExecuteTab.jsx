@@ -182,7 +182,8 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
         {roll && !roll.error && (
           <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400">
             Suggested weekly short strike for {ticker}: <span className="font-semibold text-slate-100">{fmt(roll.suggested_strike, 1)}</span>{" "}
-            (price {fmt(roll.stock_price, 2)} − {roll.atr_mult}×ATR {fmt(roll.atr, 2)})
+            ({roll.regime ? `${roll.regime.toUpperCase()} / ` : ""}{roll.posture}: {roll.atr_mult}×ATR {fmt(roll.atr, 2)}
+            {roll.itm_pct != null ? ` / ${(roll.itm_pct * 100).toFixed(0)}% ITM floor` : ""})
           </div>
         )}
       </Card>

@@ -140,12 +140,12 @@ storm). **API**: `GET /api/account-gate?ticker=&contracts=&leap_cost=&weekly_ext
   fires the `BUYBACK_75` alert). Clicking it stages the roll with reason
   `75%-rule`.
 - **Defend / roll-down engine**: when the underlying closes below a short
-  strike, `GET /api/defend?ticker=` returns the defensive roll: new strike =
-  price − 1.5×ATR (GREEN) or 2.0×ATR (YELLOW), est. net credit/debit, the new
-  short's extrinsic, and the cost-basis effect. The Positions tab shows the
-  recommendation with one-click staging into the roll modal (reason `defend`).
-  Estimates come from trailing vol; the staged roll re-prices from the live
-  chain.
+  strike, `GET /api/defend?ticker=` returns the defensive roll: new strike
+  from the regime × posture table (see "Weekly short strike selection" below),
+  est. net credit/debit, the new short's extrinsic, and the cost-basis effect.
+  The Positions tab shows the recommendation with one-click staging into the
+  roll modal (reason `defend`). Estimates come from trailing vol; the staged
+  roll re-prices from the live chain.
 - **Atomic rolls in live mode**: `roll_short` with `CFM_LIVE_TRADING=1`
   transmits ONE two-leg NET_CREDIT/NET_DEBIT ticket
   (`schwab_api.build_roll_order`: BUY_TO_CLOSE old + SELL_TO_OPEN new) — no
@@ -171,6 +171,51 @@ storm). **API**: `GET /api/account-gate?ticker=&contracts=&leap_cost=&weekly_ext
   red (exit in progress) or yellow (RS3M thinning toward the kill line) — the
   pullback play buys weakness, the kill switch sells it; without the guard the
   two rules can add to a name the strategy is 1–2 days from exiting.
+
+### Weekly short strike selection: regime × posture table
+
+`backend/strike_policy.py` (HARD_CFM_RULE, "Genius System" reference table)
+replaces the old flat/regime-only ATR multiplier with a table keyed by market
+regime (green/yellow/red) **and** the operator's risk posture
+(aggressive/conservative). Each cell is an `(ATR multiplier, minimum ITM%
+floor)` pair (`config.STRIKE_TABLE`):
+
+| Regime | Aggressive | Conservative |
+| --- | --- | --- |
+| GREEN | 0.0×ATR, 0% ITM | 0.5×ATR, 1% ITM |
+| YELLOW | 0.5×ATR, 2% ITM | 1.0×ATR, 3% ITM |
+| RED | 1.0×ATR, 4% ITM | 1.5×ATR, 5% ITM |
+
+The strike used is whichever candidate sits **further below spot** (max
+protection wins):
+
+```
+atr_strike = price − atr_mult × ATR
+itm_strike = price × (1 − itm_pct)
+strike     = min(atr_strike, itm_strike)      # rounded to $0.50
+```
+
+(`indicators.short_strike_from_table`.) GREEN/aggressive collapses to both
+candidates equal to price — i.e. sell at the money, maximizing premium when
+the tape is calm; RED/conservative is the most protective cell.
+
+**Posture** is an operator-editable, persisted setting (`GET`/`POST
+/api/strike-posture`, a navbar toggle next to the demo/live switch) stored in
+`state.metadata.strike_posture` — per-store, so live and demo can hold
+different postures, defaulting to `conservative`
+(`config.DEFAULT_STRIKE_POSTURE`).
+
+**RED still blocks new entries** — the Level 1 regime gate is unchanged. The
+RED row only feeds the defend/roll-down strike selector for an
+already-open position during a red tape (management-only mode); it is not
+reachable from a fresh entry.
+
+Every strike-suggestion surface reads from this table: the entry option chain
+(`option_chain.option_chain`), the roll picker (`option_chain.roll_options`,
+now RED-aware — previously RED silently fell back to YELLOW's multiplier), the
+defend engine (`executor.defend_recommendation`), the standalone roll
+suggestion (`executor.roll_suggestion`), and the `DEFEND_POSITION` alert
+(`alerts.check_defend_position`).
 
 ## Exit, history & the learning loop (Phase 3)
 

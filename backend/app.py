@@ -27,6 +27,7 @@ import position_manager
 import schwab_api
 import screening
 import sector_data
+import strike_policy
 
 DIST_DIR = os.path.join(config.REPO_DIR, "frontend", "dist")
 
@@ -166,6 +167,24 @@ def api_defend():
         return jsonify(executor.defend_recommendation(ticker))
     except Exception as e:  # noqa: BLE001
         return _err(e)
+
+
+@app.route("/api/strike-posture", methods=["GET", "POST"])
+def api_strike_posture():
+    """Read or set the operator's risk posture (aggressive/conservative) for
+    weekly short strike selection (config.STRIKE_TABLE — the regime x posture
+    ATR-mult/ITM%-floor table). Persisted per store (live/demo don't share it)."""
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        try:
+            return jsonify(strike_policy.set_posture(payload.get("posture", "")))
+        except ValueError as e:
+            return _err(e, 400)
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+    return jsonify({"posture": strike_policy.get_posture(),
+                    "postures": list(config.STRIKE_POSTURES),
+                    "table": config.STRIKE_TABLE})
 
 
 @app.route("/api/roll-suggestion")
@@ -449,6 +468,8 @@ def api_config():
             "leap_target_dte": config.LEAP_TARGET_DTE,
             "short_atr_mult": config.SHORT_ATR_MULT,
             "share_cap": config.SHARE_CAP,
+            "strike_table": config.STRIKE_TABLE,
+            "strike_posture": strike_policy.get_posture(),
         },
         "live_trading": executor.live_enabled(),
         "schwab": schwab_api.token_status(),

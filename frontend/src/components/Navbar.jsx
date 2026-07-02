@@ -21,6 +21,31 @@ function DemoToggle({ demo, busy, onToggle }) {
   );
 }
 
+function PostureToggle({ posture, busy, onToggle }) {
+  const aggressive = posture === "aggressive";
+  return (
+    <button
+      onClick={onToggle}
+      disabled={busy || !posture}
+      title={
+        aggressive
+          ? "Aggressive weekly-short strikes (thinner ATR/ITM% floor, more juice, less protection) — click for Conservative"
+          : "Conservative weekly-short strikes (wider ATR/ITM% floor, more protection, less juice) — click for Aggressive"
+      }
+      className={`flex items-center gap-2 rounded-full border px-2.5 py-1 text-xs font-semibold transition disabled:opacity-50 ${
+        aggressive
+          ? "border-rose-500/50 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
+          : "border-sky-500/50 bg-sky-500/10 text-sky-300 hover:bg-sky-500/20"
+      }`}
+    >
+      <span className={`relative inline-flex h-3.5 w-6 items-center rounded-full transition ${aggressive ? "bg-rose-500/70" : "bg-sky-500/70"}`}>
+        <span className={`inline-block h-2.5 w-2.5 transform rounded-full bg-white transition ${aggressive ? "translate-x-3" : "translate-x-0.5"}`} />
+      </span>
+      {busy ? "Switching…" : !posture ? "Posture…" : aggressive ? "Aggressive" : "Conservative"}
+    </button>
+  );
+}
+
 function AlertBell({ count, onClick }) {
   const hot = count > 0;
   return (
@@ -42,7 +67,8 @@ function AlertBell({ count, onClick }) {
   );
 }
 
-export default function Navbar({ tabs, active, onChange, regimeStatus, demo, modeBusy, onToggleDemo, onLogout, alertCount = 0, onAlertsClick }) {
+export default function Navbar({ tabs, active, onChange, regimeStatus, demo, modeBusy, onToggleDemo, onLogout,
+                                alertCount = 0, onAlertsClick, posture, postureBusy, onTogglePosture }) {
   return (
     <nav className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3">
@@ -67,6 +93,7 @@ export default function Navbar({ tabs, active, onChange, regimeStatus, demo, mod
         </div>
         <div className="flex items-center gap-3 text-xs text-slate-400">
           {onAlertsClick && <AlertBell count={alertCount} onClick={onAlertsClick} />}
+          {onTogglePosture && <PostureToggle posture={posture} busy={postureBusy} onToggle={onTogglePosture} />}
           <DemoToggle demo={demo} busy={modeBusy} onToggle={onToggleDemo} />
           <div className="flex items-center gap-2">
             <Light status={regimeStatus} />
