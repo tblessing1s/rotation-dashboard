@@ -139,7 +139,17 @@ export default function PositionTracker() {
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Stat label="Deployed" value={money(cap.capital_deployed)} />
           <Stat label="Reserve req." value={money(cap.reserve_required)} tone={cap.reserve_ok ? "text-slate-100" : "text-rose-300"} />
-          <Stat label="Operating cash" value={money(cap.operating_cash)} />
+          <Stat
+            label="Operating cash"
+            value={money(cap.operating_cash)}
+            sub={
+              cap.operating_cash_source === "schwab"
+                ? "live from Schwab"
+                : cap.operating_cash_source === "manual"
+                ? (cap.operating_cash_error ? `manual (Schwab: ${cap.operating_cash_error})` : "manual entry")
+                : undefined
+            }
+          />
           <Stat label="Juice YTD" value={money(cap.juice_ytd)} tone="text-emerald-300" />
         </div>
         <div className="mt-5 grid gap-4 sm:grid-cols-2">

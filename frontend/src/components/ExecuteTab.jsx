@@ -58,7 +58,8 @@ function AccountGate({ gate }) {
               <span className="text-slate-400">{c.label}</span>
               {c.id === "cash_reserve" && c.detail?.free_cash_after != null && (
                 <span className="text-slate-500">
-                  (free after: ${fmt(c.detail.free_cash_after, 0)} vs reserve ${fmt(c.detail.reserve_required, 0)})
+                  (free after: ${fmt(c.detail.free_cash_after, 0)} vs reserve ${fmt(c.detail.reserve_required, 0)}
+                  {c.detail.operating_cash_source && `, ${c.detail.operating_cash_source} cash`})
                 </span>
               )}
               {c.id === "juice_adequacy" && c.detail?.weekly_yield_pct != null && (

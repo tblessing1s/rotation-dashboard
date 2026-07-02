@@ -223,3 +223,149 @@ def test_v2_state_migrates_positions_to_v3(isolated_state):
     assert state["schema_version"] == migrations.CURRENT_VERSION >= 3
     assert state["positions"][0]["circuit_breaker"] is None
     assert state["positions"][0]["dividend"] is None
+
+
+# ---- live Schwab cash balance ---------------------------------------------------
+def test_account_cash_parses_field_priority():
+    import schwab_api
+    # cashAvailableForTrading wins over cashBalance when both are present.
+    node = {"securitiesAccount": {"currentBalances": {
+        "cashAvailableForTrading": 1000.5, "cashBalance": 2000.0}}}
+    assert schwab_api._account_cash(node) == 1000.5
+    # Falls back down the list when the preferred field is absent.
+    node2 = {"securitiesAccount": {"currentBalances": {"cashBalance": 500.25}}}
+    assert schwab_api._account_cash(node2) == 500.25
+    # No recognizable field, or junk types -> None (never raises).
+    assert schwab_api._account_cash({"securitiesAccount": {"currentBalances": {}}}) is None
+    assert schwab_api._account_cash({}) is None
+    node3 = {"securitiesAccount": {"currentBalances": {"cashAvailableForTrading": "n/a"}}}
+    assert schwab_api._account_cash(node3) is None  # unparseable -> skip to next field, none left
+
+
+def test_cash_balance_caches_and_raises_on_empty_or_missing_field(monkeypatch):
+    import schwab_api
+    monkeypatch.setattr(schwab_api, "_accounts_cache", None)
+    calls = []
+
+    class _Client(schwab_api.SchwabClient):
+        def get_accounts(self, positions=True):
+            calls.append(1)
+            return [{"securitiesAccount": {"currentBalances": {"cashAvailableForTrading": 777.0}}}]
+
+    c = _Client()
+    assert c.cash_balance() == 777.0
+    assert c.cash_balance() == 777.0  # second call within TTL reuses the cache
+    assert len(calls) == 1
+    assert c.cash_balance(force=True) == 777.0
+    assert len(calls) == 2  # force bypasses the cache
+
+    class _EmptyClient(schwab_api.SchwabClient):
+        def get_accounts(self, positions=True):
+            return []
+
+    with pytest.raises(schwab_api.SchwabError):
+        _EmptyClient().cash_balance(force=True)
+
+    class _NoFieldClient(schwab_api.SchwabClient):
+        def get_accounts(self, positions=True):
+            return [{"securitiesAccount": {"currentBalances": {}}}]
+
+    with pytest.raises(schwab_api.SchwabError):
+        _NoFieldClient().cash_balance(force=True)
+
+
+def test_resolve_operating_cash_demo_and_unconfigured_use_manual(isolated_state, monkeypatch):
+    import schwab_api
+    state = _seed_state(operating_cash=12345.0)
+    monkeypatch.setattr(schwab_api, "configured", lambda: False)
+    info = account_gate.resolve_operating_cash(state)
+    assert info == {"amount": 12345.0, "source": "manual", "error": None}
+
+    monkeypatch.setattr(config, "_demo_mode", True)
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)  # demo wins even if "configured"
+    info = account_gate.resolve_operating_cash(state)
+    assert info["source"] == "manual" and info["amount"] == 12345.0
+
+
+class _FakeCashClient:
+    def __init__(self, cash):
+        self._cash = cash
+
+    def cash_balance(self, force=False):
+        return self._cash
+
+
+def test_resolve_operating_cash_live_success_persists_and_overrides_manual(isolated_state, monkeypatch):
+    import data_handler
+    import schwab_api
+    state = _seed_state(operating_cash=12345.0)
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: _FakeCashClient(9876.54))
+
+    info = account_gate.resolve_operating_cash(state)
+    assert info == {"amount": 9876.54, "source": "schwab", "error": None}
+    # Persisted back to state.metadata so every other reader sees the fresh value.
+    assert log.load_state()["metadata"]["operating_cash"] == 9876.54
+
+
+def test_resolve_operating_cash_live_failure_degrades_to_manual(isolated_state, monkeypatch):
+    import data_handler
+    import schwab_api
+
+    class _FailingClient:
+        def cash_balance(self, force=False):
+            raise schwab_api.SchwabError("token expired")
+
+    state = _seed_state(operating_cash=5000.0)
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: _FailingClient())
+
+    info = account_gate.resolve_operating_cash(state)
+    assert info["amount"] == 5000.0 and info["source"] == "manual"
+    assert "token expired" in info["error"]
+    # A failed live read must not clobber the manual value on disk.
+    assert log.load_state()["metadata"]["operating_cash"] == 5000.0
+
+
+def test_evaluate_cash_reserve_check_reports_live_source(isolated_state, monkeypatch):
+    import data_handler
+    import schwab_api
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _noisy_frame())
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: _FakeCashClient(100000.0))
+    _seed_state(operating_cash=1.0)  # manual value would fail the reserve check
+
+    g = account_gate.evaluate("NVDA", contracts=5,
+                              leap_cost_per_share=40.0, weekly_extrinsic_per_share=1.20)
+    cash = next(c for c in g["checks"] if c["id"] == "cash_reserve")
+    assert cash["detail"]["operating_cash_source"] == "schwab"
+    assert cash["detail"]["operating_cash"] == 100000.0
+    assert cash["pass"] is True  # the live balance, not the stale manual $1, decides it
+
+
+# ---- capital_summary / portfolio_view live-cash wiring -------------------------
+def test_capital_summary_uses_live_balance_when_configured(isolated_state, monkeypatch):
+    import data_handler
+    import position_manager as pm
+    import schwab_api
+    state = _seed_state(operating_cash=1000.0, reserve_required=500.0)
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: _FakeCashClient(42000.0))
+
+    summary = pm.capital_summary(log.load_state())
+    assert summary["operating_cash"] == 42000.0
+    assert summary["operating_cash_source"] == "schwab"
+    assert summary["reserve_ok"] is True
+
+
+def test_portfolio_view_uses_live_balance_when_configured(isolated_state, monkeypatch):
+    import data_handler
+    import portfolio_risk as pr
+    import schwab_api
+    _seed_state(operating_cash=1000.0)
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: _FakeCashClient(55000.0))
+
+    view = pr.portfolio_view(log.load_state())
+    assert view["capital"]["operating_cash"] == 55000.0
+    assert view["capital"]["operating_cash_source"] == "schwab"

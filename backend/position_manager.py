@@ -139,13 +139,20 @@ def capital_summary(state: dict) -> dict:
     meta = state.get("metadata", {})
     deployed = float(meta.get("capital_deployed") or 0)
     reserve = float(meta.get("reserve_required") or config.RESERVE_REQUIRED)
-    operating = float(meta.get("operating_cash") or 0)
+    # Live Schwab balance when connected (also persists back to state.metadata
+    # so this stays the single source other readers agree on); manual entry
+    # is the fallback in demo mode, when Schwab isn't connected, or on error.
+    import account_gate
+    cash_info = account_gate.resolve_operating_cash(state)
+    operating = cash_info["amount"]
     ytd = float(state.get("theta_ledger", {}).get("totals", {}).get("ytd") or 0)
     monthly = float(state.get("theta_ledger", {}).get("totals", {}).get("this_month") or 0)
     return {
         "capital_deployed": deployed,
         "reserve_required": reserve,
         "operating_cash": operating,
+        "operating_cash_source": cash_info["source"],
+        "operating_cash_error": cash_info["error"],
         "reserve_ok": operating >= reserve or reserve == 0,
         "milestones": {
             "half_nut": {
