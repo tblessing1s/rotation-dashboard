@@ -36,6 +36,14 @@ SYMBOL_MAP = {"^VIX": "$VIX", "^NYA": "$NYA", "^GSPC": "$SPX"}
 _TOKEN_FILE = os.path.join(config.DATA_DIR, "schwab_token.json")
 _token_lock = threading.Lock()
 
+# Short in-process cache for the accounts call (cash balance) — the Level 5
+# gate can re-evaluate several times a minute while the operator tweaks a
+# ticket, and this endpoint isn't part of the market-data rate-limit budget
+# but there's no reason to hit it on every keystroke either.
+_ACCOUNTS_TTL = 60  # seconds
+_accounts_cache: tuple[float, list] | None = None
+_accounts_lock = threading.Lock()
+
 
 class SchwabError(RuntimeError):
     pass
@@ -326,6 +334,26 @@ class SchwabClient:
         params = {"fields": "positions"} if positions else None
         return self._get_json(f"{ACCOUNTS_BASE}/accounts", params=params) or []
 
+    def cash_balance(self, force: bool = False) -> float:
+        """Tradable cash balance of the primary linked account (the same
+        account order placement uses), briefly cached so repeated Level 5 gate
+        checks don't hammer the endpoint. Raises SchwabError on failure —
+        callers degrade to the stored manual value rather than block on this."""
+        global _accounts_cache
+        with _accounts_lock:
+            now = time.time()
+            if not force and _accounts_cache and now - _accounts_cache[0] < _ACCOUNTS_TTL:
+                accounts = _accounts_cache[1]
+            else:
+                accounts = self.get_accounts(positions=False)
+                _accounts_cache = (now, accounts)
+        if not accounts:
+            raise SchwabError("schwab: no linked accounts")
+        cash = _account_cash(accounts[0])
+        if cash is None:
+            raise SchwabError("schwab: account response had no recognizable cash balance field")
+        return cash
+
     def preview_order(self, account_hash: str, order: dict) -> dict:
         resp = requests.post(
             f"{ACCOUNTS_BASE}/accounts/{account_hash}/previewOrder",
@@ -365,6 +393,26 @@ class SchwabClient:
             return {"orderId": order_id, "canceled": True}
         hint = self._ACCT_HINT if resp.status_code in (401, 403) else ""
         raise SchwabError(f"schwab cancel order: HTTP {resp.status_code} {resp.text[:200]}{hint}")
+
+
+# ---------------------------------------------------------------------------
+# Account parsing (module-level)
+# ---------------------------------------------------------------------------
+def _account_cash(node: dict) -> float | None:
+    """Tradable cash from one /accounts response node. Tries the fields in
+    order of how directly they represent 'money available to deploy right
+    now' — cashAvailableForTrading (margin/cash accounts both report it) first,
+    falling back to the raw cash balance for older/thin responses."""
+    balances = ((node or {}).get("securitiesAccount") or {}).get("currentBalances") or {}
+    for key in ("cashAvailableForTrading", "cashBalance", "availableFunds"):
+        v = balances.get(key)
+        if v is None:
+            continue
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 # ---------------------------------------------------------------------------

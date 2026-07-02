@@ -1,10 +1,16 @@
-"""Nightly maintenance — earnings & dividends as first-class cached data.
+"""Nightly maintenance — earnings, dividends & cash balance as first-class
+cached data.
 
 Instead of ad-hoc lookups, the next earnings date and the next dividend event
 (ex-date + amount) for every open-position ticker are refreshed once per night
 into their day caches, and each position's stored ``dividend`` snapshot is
-updated so ASSIGNMENT_RISK and the Positions tab read current data. Runs from
-the alert scheduler's nightly slot (config.MAINTENANCE_ET) or on demand via
+updated so ASSIGNMENT_RISK and the Positions tab read current data. The
+operating-cash balance is also synced from the live Schwab account (a
+read-only account call — doesn't require CFM_LIVE_TRADING) so the Capital
+card / portfolio risk / daily checklist stay fresh even on a day the Execute
+tab is never opened (account_gate.resolve_operating_cash refreshes it
+opportunistically too, whenever the Level 5 gate runs). Runs from the alert
+scheduler's nightly slot (config.MAINTENANCE_ET) or on demand via
 POST /api/maintenance/refresh. Skipped in demo mode — the demo store is
 synthetic and pinned by overrides.
 """
@@ -58,6 +64,14 @@ def nightly_refresh() -> dict:
                 changed = True
         if changed:
             log.save_state(state)
+
+    try:
+        import account_gate
+        cash_info = account_gate.resolve_operating_cash(log.load_state())
+        report["operating_cash"] = cash_info
+    except Exception as e:  # noqa: BLE001 — a cash-sync failure must not sink the sweep
+        report["errors"].append(f"operating_cash: {e}")
+
     logger.info("nightly maintenance refreshed %d ticker(s), %d error(s)",
                 len(report["tickers"]), len(report["errors"]))
     return report

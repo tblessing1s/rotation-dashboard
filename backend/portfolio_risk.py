@@ -137,10 +137,14 @@ def portfolio_view(state: dict) -> dict:
         return round(sum(vals), 2) if vals else None
 
     deployed = float(state.get("metadata", {}).get("capital_deployed") or 0)
-    operating = float(state.get("metadata", {}).get("operating_cash") or 0)
+
+    # Live Schwab balance when connected, else the stored manual fallback
+    # (same resolver the Level 5 gate and the Capital card use).
+    import account_gate
+    cash_info = account_gate.resolve_operating_cash(state)
+    operating = cash_info["amount"]
 
     # The 2xATR defensive reserve across the book (same formula as the gate).
-    import account_gate
     reserves = [account_gate._position_reserve(p) for p in state.get("positions", [])
                 if p.get("status") != "closed"]
     reserve_required = round(sum(r for r in reserves if r is not None), 2)
@@ -165,6 +169,7 @@ def portfolio_view(state: dict) -> dict:
             "pct_of_cap": round(deployed / config.MAX_DEPLOYED_CAPITAL * 100, 1)
                           if config.MAX_DEPLOYED_CAPITAL else None,
             "operating_cash": operating,
+            "operating_cash_source": cash_info["source"],
             "reserve_required": reserve_required,
             "reserve_ok": operating >= reserve_required,
         },

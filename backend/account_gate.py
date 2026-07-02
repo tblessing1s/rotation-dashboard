@@ -20,6 +20,7 @@ import dividends
 import earnings
 import indicators
 import logging_handler as log
+import schwab_api
 
 
 # ---------------------------------------------------------------------------
@@ -101,6 +102,33 @@ def weekly_yield_target_pct() -> float:
     return round(config.CYCLE_RETURN_MIN / config.CYCLE_WEEKS_MAX * 100, 2)
 
 
+def resolve_operating_cash(state: dict) -> dict:
+    """Operating cash for the cash_reserve check: the LIVE Schwab account
+    balance when connected, else the stored manual value (state.metadata.
+    operating_cash) — which also serves as the last-known-good fallback on any
+    live-fetch failure (token expired, network error, account not approved for
+    trading). Demo mode never touches Schwab; a Schwab connection alone is
+    enough to read live cash even with CFM_LIVE_TRADING off (this is a
+    read-only account call, not an order).
+
+    On a successful live read the fetched number is persisted back to
+    state.metadata.operating_cash so every other reader of that field (the
+    Positions Capital card, portfolio_risk, the daily checklist's reserve
+    check) picks up the fresh value too, without separate wiring.
+    """
+    manual = float((state.get("metadata") or {}).get("operating_cash") or 0)
+    if config.demo_enabled() or not schwab_api.configured():
+        return {"amount": manual, "source": "manual", "error": None}
+    try:
+        live = round(float(data_handler.client().cash_balance()), 2)
+    except Exception as e:  # noqa: BLE001 — degrade to the manual fallback
+        return {"amount": manual, "source": "manual", "error": str(e)}
+    if live != manual:
+        state.setdefault("metadata", {})["operating_cash"] = live
+        log.save_state(state)
+    return {"amount": live, "source": "schwab", "error": None}
+
+
 # ---------------------------------------------------------------------------
 # The gate
 # ---------------------------------------------------------------------------
@@ -168,8 +196,10 @@ def evaluate(ticker: str, contracts: int | None = None,
     checks = []
 
     # 1) Cash reserve: post-trade free cash >= 2xATR defensive reserve across
-    #    the whole book including this position.
-    operating = float(meta.get("operating_cash") or 0)
+    #    the whole book including this position. operating_cash is the live
+    #    Schwab balance when connected, else the stored manual fallback.
+    cash_info = resolve_operating_cash(state)
+    operating = cash_info["amount"]
     reserves = [_position_reserve(p) for p in open_pos]
     new_atr = indicators.atr(df) if df is not None else None
     reserves.append(config.RESERVE_ATR_MULT * new_atr * contracts * 100
@@ -181,7 +211,8 @@ def evaluate(ticker: str, contracts: int | None = None,
         f"Post-trade cash ≥ {config.RESERVE_ATR_MULT:g}×ATR reserve (${reserve_required:,.0f})",
         free_after is not None and free_after >= reserve_required,
         True,
-        {"operating_cash": operating, "proposed_cost": proposed_cost,
+        {"operating_cash": operating, "operating_cash_source": cash_info["source"],
+         "operating_cash_error": cash_info["error"], "proposed_cost": proposed_cost,
          "free_cash_after": round(free_after, 2) if free_after is not None else None,
          "reserve_required": round(reserve_required, 2),
          "reserve_incomplete": any(r is None for r in reserves)}))

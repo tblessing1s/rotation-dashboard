@@ -104,7 +104,19 @@ Blocking checks:
 
 - **cash_reserve** — post-trade free cash ≥ Σ `RESERVE_ATR_MULT`(2)×ATR$×contracts×100
   across all open positions incl. the proposed one (PROPOSED_DEFAULT formula;
-  the computed number is shown).
+  the computed number is shown). "Free cash" is the **live Schwab account cash
+  balance** (`account_gate.resolve_operating_cash` → `schwab_api.cash_balance`,
+  `GET /accounts?fields=positions`, `currentBalances.cashAvailableForTrading`,
+  60s-cached) whenever Schwab is connected — a read-only account call, so it
+  works even with `CFM_LIVE_TRADING` off. It falls back to the manually-entered
+  `state.metadata.operating_cash` in demo mode, when Schwab isn't connected, or
+  on any fetch error (stale token, network). A successful live read is
+  persisted back to `state.metadata.operating_cash` so the Positions Capital
+  card, the portfolio risk card, and the daily checklist's reserve check all
+  agree on the same fresh number; each surfaces `operating_cash_source`
+  (`"schwab"` | `"manual"`) for transparency. Also synced during nightly
+  maintenance (`maintenance.py`) so it stays fresh even on a day Execute is
+  never opened.
 - **position_limit** — ≤ `MAX_CFM_POSITIONS` (2, HARD_CFM_RULE).
 - **capital_limit** — deployed + proposed ≤ `MAX_DEPLOYED_CAPITAL`
   ($38K, PROPOSED_DEFAULT in the $35–40K band).
