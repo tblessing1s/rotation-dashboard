@@ -95,6 +95,20 @@ def _summary(ticker: str, date_str: str | None, source: str) -> dict:
     }
 
 
+def cache_health() -> dict:
+    """Staleness summary of the earnings cache for the data-health panel."""
+    cache = _read_cache()
+    stamps = [float(r.get("fetched_at") or 0) for r in cache.values()
+              if isinstance(r, dict)]
+    return {
+        "entries": len(stamps),
+        "oldest_fetched_at": (datetime.fromtimestamp(min(stamps)).strftime("%Y-%m-%dT%H:%M:%S")
+                              if stamps else None),
+        "newest_fetched_at": (datetime.fromtimestamp(max(stamps)).strftime("%Y-%m-%dT%H:%M:%S")
+                              if stamps else None),
+    }
+
+
 def cached_earnings(ticker: str) -> dict:
     """Cache/override-only earnings lookup — NEVER hits a provider. Used by
     bulk paths (the Scorecard sweeps hundreds of tickers) where a cold-cache

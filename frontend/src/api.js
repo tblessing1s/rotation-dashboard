@@ -53,6 +53,9 @@ export const api = {
   killSwitch: () => request("/api/kill-switch"),
   dailyChecklist: () => request("/api/daily-checklist"),
   history: () => request("/api/history"),
+  portfolioRisk: () => request("/api/portfolio-risk"),
+  dataHealth: () => request("/api/data-health"),
+  maintenanceRefresh: () => request("/api/maintenance/refresh", { method: "POST" }),
   alerts: () => request("/api/alerts"),
   runAlerts: (dryRun) =>
     request("/api/alerts/run", {

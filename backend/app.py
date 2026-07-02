@@ -462,6 +462,50 @@ def api_data_status():
     return jsonify({s: {"cache_age_hours": data_handler.cache_age_hours(s)} for s in syms})
 
 
+@app.route("/api/portfolio-risk")
+def api_portfolio_risk():
+    """Aggregate book exposure: delta (raw + SPY-beta-adjusted), theta/day,
+    vega, capital vs cap, reserve status, sector exposure breakdown."""
+    try:
+        import portfolio_risk
+        return jsonify(portfolio_risk.portfolio_view(log.load_state()))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/data-health")
+def api_data_health():
+    """Last-successful-fetch per source + cache staleness, so silent data
+    failures are visible instead of quietly serving stale frames."""
+    try:
+        import dividends
+        key_syms = [config.BENCHMARK, config.VIX_SYMBOL]
+        state = log.load_state()
+        key_syms += [p.get("ticker", "") for p in state.get("positions", [])
+                     if p.get("status") != "closed"]
+        return jsonify({
+            "providers": data_handler.health(),
+            "ohlcv_cache_age_hours": {s: data_handler.cache_age_hours(s) for s in key_syms if s},
+            "earnings_cache": earnings.cache_health(),
+            "dividends_cache": dividends.cache_health(),
+            "schwab_token": schwab_api.token_status(),
+            "demo": config.demo_enabled(),
+        })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/maintenance/refresh", methods=["POST"])
+def api_maintenance_refresh():
+    """Force the nightly earnings/dividends refresh now (also runs on the
+    scheduler's MAINTENANCE_ET slot)."""
+    try:
+        import maintenance
+        return jsonify(maintenance.nightly_refresh())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/diagnostics/vix")
 def api_diag_vix():
     """Live, cache-bypassing probe of the VIX so a missing value can be

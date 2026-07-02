@@ -81,7 +81,11 @@ export default function SchwabStatus({ demo = false }) {
     return (
       <div className="mb-3 flex items-center justify-end gap-2 text-xs text-slate-500">
         <Pill status="green">Schwab connected</Pill>
-        {tok?.daysLeft != null && <span>{tok.daysLeft.toFixed(1)}d left</span>}
+        {tok?.daysLeft != null && (
+          <span title={`Refresh token minted ${tok.mintedAt || "?"} — dies at 7 days, alert fires at day 5`}>
+            token age {(7 - tok.daysLeft).toFixed(1)}d · {tok.daysLeft.toFixed(1)}d left
+          </span>
+        )}
         <button onClick={reauthorize} disabled={busy} className="underline hover:text-slate-300">
           re-authorize
         </button>

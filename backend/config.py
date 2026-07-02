@@ -170,6 +170,10 @@ EXPIRY_WARN_DTE = 1
 ALERT_SCHEDULE_ET = ["08:30", "10:00", "12:30", "15:30"]
 ALERT_LOG_MAX = 500            # PROPOSED_DEFAULT — alert history cap in state.json
 
+# PROPOSED_DEFAULT — nightly maintenance slot (ET, every calendar day): refresh
+# the earnings/dividend caches for held names and sync position snapshots.
+MAINTENANCE_ET = "17:30"
+
 
 def alerts_dry_run_default() -> bool:
     """Dry-run (log instead of send) via env; per-store override lives in the

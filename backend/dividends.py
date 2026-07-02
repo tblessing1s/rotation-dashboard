@@ -116,6 +116,22 @@ def yield_for(ticker: str, refresh: bool = False) -> float:
     return q if isinstance(q, (int, float)) and q >= 0 else 0.0
 
 
+def cache_health() -> dict:
+    """Staleness summary of the dividends cache for the data-health panel."""
+    from datetime import datetime
+    cache = _read_cache()
+    stamps = [float(r.get("fetched_at") or 0)
+              for r in list(cache.values()) + list((cache.get("events") or {}).values())
+              if isinstance(r, dict) and r.get("fetched_at")]
+    return {
+        "entries": len(stamps),
+        "oldest_fetched_at": (datetime.fromtimestamp(min(stamps)).strftime("%Y-%m-%dT%H:%M:%S")
+                              if stamps else None),
+        "newest_fetched_at": (datetime.fromtimestamp(max(stamps)).strftime("%Y-%m-%dT%H:%M:%S")
+                              if stamps else None),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Next dividend EVENT (ex-date + per-payment amount) — assignment-risk input.
 # ---------------------------------------------------------------------------

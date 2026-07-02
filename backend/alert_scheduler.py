@@ -38,6 +38,8 @@ _stop = threading.Event()
 # slot "HH:MM" -> last date it ran; in-memory only (a restart may re-run a slot,
 # which dedup makes a no-op).
 _last_run: dict[str, date] = {}
+# Nightly maintenance (earnings/dividends cache refresh) — last date it ran.
+_last_maintenance: date | None = None
 
 
 def enabled() -> bool:
@@ -58,9 +60,25 @@ def due_slots(now: datetime, last_run: dict[str, date] | None = None) -> list[st
             if slot <= hhmm_now and last_run.get(slot) != today]
 
 
+def maintenance_due(now: datetime, last: date | None) -> bool:
+    """Nightly maintenance runs once per calendar day after MAINTENANCE_ET
+    (weekends included — providers publish calendar updates any day)."""
+    return now.strftime("%H:%M") >= config.MAINTENANCE_ET and last != now.date()
+
+
 def _tick() -> None:
     import alerts  # local import: keep module import side-effect free
+    global _last_maintenance
     now = datetime.now(ET)
+
+    if maintenance_due(now, _last_maintenance):
+        _last_maintenance = now.date()
+        try:
+            import maintenance
+            maintenance.nightly_refresh()
+        except Exception as e:  # noqa: BLE001 — a failed refresh must not kill the thread
+            logger.error("nightly maintenance failed: %s", e)
+
     due = due_slots(now)
     if not due:
         return

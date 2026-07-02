@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import { Card, Stat, Meter, Pill, Loading, money, fmt, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
+import PortfolioRisk from "./PortfolioRisk.jsx";
 import { useToast } from "./Toast.jsx";
 import { submitOrder } from "../orderFlow.js";
 
@@ -132,6 +133,7 @@ export default function PositionTracker() {
 
   return (
     <div className="grid gap-4">
+      <PortfolioRisk />
       <Card title="Capital">
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Stat label="Deployed" value={money(cap.capital_deployed)} />

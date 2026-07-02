@@ -25,10 +25,30 @@ _mem_cache: dict[str, pd.DataFrame] = {}
 # Last fetch error per symbol, so endpoints can explain a missing value instead
 # of silently showing a blank.
 _last_error: dict[str, str] = {}
+# Last SUCCESSFUL fetch per source (schwab_bars / alpha_vantage_bars /
+# schwab_quote / alpha_vantage_quote), so silent data failures are visible:
+# a source that hasn't succeeded all day on a market day is a red flag even
+# when the cache is quietly serving stale frames.
+_last_success: dict[str, dict] = {}
+_fallback_events = 0  # times Alpha Vantage had to cover for Schwab (bars)
 
 
 def last_error(symbol: str) -> str | None:
     return _last_error.get(symbol.upper())
+
+
+def _record_success(source: str, symbol: str) -> None:
+    _last_success[source] = {"at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                             "symbol": symbol}
+
+
+def health() -> dict:
+    """Per-source last-success timestamps + recent errors for the health panel."""
+    return {
+        "sources": dict(_last_success),
+        "fallback_events": _fallback_events,
+        "recent_errors": dict(list(_last_error.items())[-10:]),
+    }
 
 # Shared, bounded pool so batch reads fetch in parallel without spawning an
 # unbounded number of provider connections (which would trip rate limits).
@@ -90,16 +110,23 @@ def _write_cache(symbol: str, df: pd.DataFrame) -> None:
 
 
 def _fetch(symbol: str) -> pd.DataFrame:
+    global _fallback_events
     start = (datetime.now() - timedelta(days=config.HISTORY_DAYS)).strftime("%Y-%m-%d")
     errors = []
     if schwab_api.configured():
         try:
-            return client().get_daily_bars(symbol, start)
+            df = client().get_daily_bars(symbol, start)
+            _record_success("schwab_bars", symbol)
+            return df
         except Exception as e:  # noqa: BLE001 — fall through to the next source
             errors.append(f"schwab: {e}")
     if alpha_vantage.configured():
         try:
-            return alpha_vantage.daily_bars(symbol).tail(config.HISTORY_DAYS)
+            df = alpha_vantage.daily_bars(symbol).tail(config.HISTORY_DAYS)
+            _record_success("alpha_vantage_bars", symbol)
+            if schwab_api.configured():
+                _fallback_events += 1
+            return df
         except Exception as e:  # noqa: BLE001
             errors.append(f"alphavantage: {e}")
     raise RuntimeError(f"no data source produced {symbol} ({'; '.join(errors) or 'no provider configured'})")
@@ -178,6 +205,7 @@ def latest_quote(symbol: str) -> dict | None:
             price = (q or {}).get("last") or (q or {}).get("mark") or (q or {}).get("close")
             if price:
                 _last_error.pop(symbol, None)
+                _record_success("schwab_quote", symbol)
                 return {"symbol": symbol, "price": price, "source": "schwab"}
         except Exception as e:  # noqa: BLE001
             _last_error[symbol] = str(e)
@@ -186,6 +214,7 @@ def latest_quote(symbol: str) -> dict | None:
             q = alpha_vantage.global_quote(symbol)
             if q.get("last"):
                 _last_error.pop(symbol, None)
+                _record_success("alpha_vantage_quote", symbol)
                 return {"symbol": symbol, "price": q["last"], "source": "alphavantage"}
         except Exception as e:  # noqa: BLE001
             _last_error[symbol] = str(e)

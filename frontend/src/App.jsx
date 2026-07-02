@@ -13,6 +13,7 @@ import PositionTracker from "./components/PositionTracker.jsx";
 import DailyChecklist from "./components/DailyChecklist.jsx";
 import AlertsPanel from "./components/AlertsPanel.jsx";
 import HistoryTab from "./components/HistoryTab.jsx";
+import DataHealth from "./components/DataHealth.jsx";
 
 const TABS = ["Scan", "Execute", "Theta", "Kill Switch", "Positions", "History", "Checklist"];
 
@@ -112,6 +113,7 @@ export default function App() {
           <div className="grid gap-4">
             <AlertsPanel />
             <DailyChecklist />
+            <DataHealth />
           </div>
         )}
       </main>

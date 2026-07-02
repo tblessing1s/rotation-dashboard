@@ -203,3 +203,29 @@ storm). **API**: `GET /api/account-gate?ticker=&contracts=&leap_cost=&weekly_ext
   marked `window_open` so a new entry knows before it happens.
 - **Demo**: seeding includes two completed cycles (PLTR target-hit winner,
   COIN kill-switch loser) so History/aggregates/export are populated.
+
+## Portfolio risk & ops hardening (Phase 4)
+
+- **Portfolio risk card** (top of Positions tab; `GET /api/portfolio-risk`,
+  `backend/portfolio_risk.py`): per-position and aggregate delta in share
+  equivalents and dollars — raw and **SPY-beta-adjusted** (beta regressed from
+  the cached daily history, ~250 sessions) — theta/day (net decay the diagonal
+  collects), vega ($/vol-point), capital deployed vs `MAX_DEPLOYED_CAPITAL`,
+  the 2×ATR defensive-reserve status, and the sector-exposure breakdown.
+  Greeks imply vol from each leg's stored mark, so the card works offline and
+  in demo mode; partially-priced positions are marked.
+- **Earnings & dividends as first-class cached data**
+  (`backend/maintenance.py`): a nightly slot (`MAINTENANCE_ET`, 17:30 ET,
+  every calendar day) refreshes the earnings + dividend day-caches for every
+  held name and syncs each open position's `dividend` snapshot — Phases 0–2
+  read from these caches instead of ad-hoc lookups. Manual trigger:
+  `POST /api/maintenance/refresh`. Skipped in demo mode.
+- **Token lifecycle UX**: the Schwab card shows token age and days remaining
+  with the one-click re-auth flow; the Phase 0 `TOKEN_EXPIRY` alert fires at
+  day 5 (of the ~7-day token life).
+- **Data health panel** (Checklist tab; `GET /api/data-health`):
+  last-successful-fetch timestamp per source (Schwab bars/quotes, Alpha
+  Vantage fallbacks), count of fallback events, recent per-symbol errors,
+  OHLCV cache age for key symbols, and earnings/dividends cache staleness —
+  silent data failures become visible instead of quietly serving stale
+  frames.
