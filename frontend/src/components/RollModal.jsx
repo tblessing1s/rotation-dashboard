@@ -19,7 +19,7 @@ function bigDollars(n) {
  * The modal shows the live buy-to-close cost of the current short and the new
  * premium for the chosen leg, nets them, and submits a single roll_short action.
  */
-export default function RollModal({ ticker, onExecute, onClose }) {
+export default function RollModal({ ticker, reason = "scheduled", onExecute, onClose }) {
   const [data, setData] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -95,12 +95,14 @@ export default function RollModal({ ticker, onExecute, onClose }) {
         ticker: data.ticker,
         contracts: qtyNum,
         from_strike: cur.strike,
+        from_expiration: cur.expiration,
         close_price_per_share: cur.current_mark,
         to_strike: chosen.strike,
         to_expiration: selectedExp.expiration,
         to_dte: selectedExp.dte,
         premium_per_share: chosen.mark,
         stock_price: data.underlying_price,
+        roll_reason: reason, // whipsaw-ledger key: scheduled | 75%-rule | defend | earnings | kill-switch-exit
       });
       onClose?.();
     } catch (e) { setExecErr(e.message); }

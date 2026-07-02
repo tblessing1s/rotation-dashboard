@@ -20,6 +20,15 @@ import sector_data
 
 VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_short"}
 
+# Why a roll happened — the whipsaw ledger key. Unrecognized values fall back to
+# "scheduled" so the ledger enum stays clean for later calibration.
+ROLL_REASONS = {"scheduled", "75%-rule", "defend", "earnings", "kill-switch-exit"}
+
+# Why a cycle ended — logged on the close_leap execution, carried onto the
+# derived cycle record. Unrecognized values fall back to "discretionary".
+EXIT_REASONS = {"target hit", "trailing stop", "kill switch", "circuit breaker",
+                "earnings", "discretionary"}
+
 # Schwab order instruction per single-leg CFM action (all legs are calls).
 INSTRUCTION = {
     "buy_leap": "BUY_TO_OPEN",
@@ -72,6 +81,12 @@ def execute(payload: dict) -> dict:
     strike = payload.get("strike")
     stock_price, price_source = _capture_price(ticker, payload.get("stock_price"))
 
+    # Level 5 gate (Account & Juice) — entry only. A blocking failure stops the
+    # buy_leap unless the payload carries an explicit override_reason, which is
+    # recorded on the immutable execution (see _buy_leap).
+    if action == "buy_leap":
+        _enforce_account_gate(payload, ticker, contracts)
+
     state = log.load_state()
     position = _ensure_position(state, ticker)
     log.save_state(state)  # persist the shell position before recording the fill
@@ -88,6 +103,33 @@ def execute(payload: dict) -> dict:
     if mode == "live" and schwab_api.configured():
         return _place_live(payload, ticker, action, contracts, strike, stock_price, price_source)
     return _commit(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
+
+
+def _enforce_account_gate(payload, ticker, contracts):
+    """Run the Level 5 gate for an entry. Blocking failures raise ValueError
+    (HTTP 400) unless override_reason is supplied; the gate result is stashed on
+    the payload so _buy_leap can log the override + failed checks."""
+    import account_gate
+    leap_cost_ps = None
+    if payload.get("execution_price"):  # per-contract dollars -> per-share
+        leap_cost_ps = float(payload["execution_price"]) / 100.0
+    gate = account_gate.evaluate(
+        ticker, contracts=contracts,
+        leap_cost_per_share=leap_cost_ps,
+        weekly_extrinsic_per_share=payload.get("weekly_extrinsic_per_share"),
+    )
+    payload["_account_gate"] = gate
+    if gate["pass"]:
+        return
+    reason = (payload.get("override_reason") or "").strip()
+    if not reason:
+        failed = ", ".join(gate["blocking_failures"])
+        details = "; ".join(
+            f"{c['id']}: {c['label']}" for c in gate["checks"]
+            if c["blocking"] and not c["pass"])
+        raise ValueError(
+            f"Level 5 gate blocked entry ({failed}) — {details}. "
+            "Pass override_reason to enter anyway (logged).")
 
 
 def _build_leg(payload, ticker, action, strike, contracts, stock_price):
@@ -204,6 +246,20 @@ def _commit_from_pending(rec: dict, fill_price):
                    rec["strike"], rec["stock_price"], rec.get("price_source", "schwab"), "live")
 
 
+def _commit_roll_from_pending(rec: dict, order: dict):
+    """Commit a filled two-leg roll: overlay the actual per-leg fill prices onto
+    the payload (falling back to the staged estimates) and record both legs."""
+    payload = dict(rec.get("payload") or {})
+    close_px, open_px = _roll_leg_fills(order, rec.get("close_option_symbol", ""),
+                                        rec.get("open_option_symbol", ""))
+    if close_px is not None:
+        payload["close_price_per_share"] = close_px
+    if open_px is not None:
+        payload["premium_per_share"] = open_px
+    return _commit_roll(payload, rec["ticker"], int(rec["contracts"]),
+                        rec.get("stock_price"), "live", rec.get("price_source", "schwab"))
+
+
 def order_status(order_id: str) -> dict:
     """Poll a live order. On FILLED, commit it as an execution and clear the
     pending entry; on CANCELED/REJECTED/EXPIRED, clear it; otherwise it's still
@@ -215,7 +271,10 @@ def order_status(order_id: str) -> dict:
     order = data_handler.client().get_order(rec["account_hash"], order_id)
     raw = (order.get("status") or "").upper()
     if raw == "FILLED":
-        result = _commit_from_pending(rec, _fill_price(order))
+        if rec.get("kind") == "roll_short":
+            result = _commit_roll_from_pending(rec, order)
+        else:
+            result = _commit_from_pending(rec, _fill_price(order))
         log.pop_pending_order(order_id)
         return {"order_id": order_id, "status": "filled", "raw_status": raw, **result}
     if raw in ("CANCELED", "REJECTED", "EXPIRED"):
@@ -236,6 +295,17 @@ def cancel_order(order_id: str) -> dict:
     return {"order_id": order_id, "status": "canceled"}
 
 
+def _entry_snapshot(ticker: str) -> dict | None:
+    """One scorecard row for the ticker, computed at entry time. Best-effort:
+    offline/missing data degrades to a row of Nones, never an error."""
+    try:
+        from metrics import scorecard as scorecard_metrics
+        rows = scorecard_metrics.scorecard([ticker]).get("results") or []
+        return rows[0] if rows else None
+    except Exception:  # noqa: BLE001 — a snapshot must never block an entry
+        return None
+
+
 def _buy_leap(payload, ticker, strike, contracts, stock_price):
     # execution_price is per-contract total dollars; execution_total is the trade.
     price_per_contract = float(payload.get("execution_price") or 0)
@@ -249,7 +319,46 @@ def _buy_leap(payload, ticker, strike, contracts, stock_price):
         "extrinsic_captured": round(extrinsic_at_entry, 2), "stock_price": stock_price,
     }
 
+    # Level-5 gate context: log any override (with what it overrode) on the
+    # immutable record, and resolve the circuit breaker + dividend to store.
+    gate = payload.get("_account_gate") or {}
+    if payload.get("override_reason"):
+        execution["override"] = {
+            "reason": str(payload["override_reason"]).strip(),
+            "failed_checks": gate.get("blocking_failures", []),
+        }
+
+    # Entry REQUIRES a line-in-the-sand: operator's price, else the suggested
+    # default max(MA50, entry - 2xATR) — the entry always stores one.
+    cb_price = payload.get("circuit_breaker_price")
+    cb_source = "operator"
+    if cb_price is None:
+        cb_price = (gate.get("suggested_circuit_breaker") or {}).get("price")
+        cb_source = "default"
+        if cb_price is None:
+            import account_gate
+            cb_price = account_gate.suggested_circuit_breaker(ticker).get("price")
+    circuit_breaker = ({"price": round(float(cb_price), 2), "source": cb_source,
+                        "set_at": log.utcnow()[:10]} if cb_price is not None else None)
+    execution["circuit_breaker_price"] = circuit_breaker["price"] if circuit_breaker else None
+
+    dividend = gate.get("dividend")
+    if dividend is None:
+        import dividends
+        try:
+            dividend = dividends.next_dividend(ticker)
+        except Exception:  # noqa: BLE001 — dividend data must never block an entry
+            dividend = {"ex_date": None, "amount": None, "source": "error"}
+
+    # Scorecard verdict + metric snapshot AT ENTRY, frozen onto the immutable
+    # execution — the closed-cycle record later shows what the numbers said the
+    # day the trade went on (this cannot be re-derived after the fact).
+    execution["entry_snapshot"] = _entry_snapshot(ticker)
+
     def apply(position):
+        position["entry_date"] = log.utcnow()[:10]  # a new LEAP starts a new cycle
+        position["circuit_breaker"] = circuit_breaker
+        position["dividend"] = dividend
         position["leap"] = {
             "strike": strike, "contracts": contracts, "cost_basis": total,
             "current_bid": total, "intrinsic": round(intrinsic_per_contract * contracts, 2),
@@ -282,11 +391,13 @@ def _close_leap(payload, ticker, strike, contracts, stock_price):
     cost_basis = float(cost_basis if cost_basis is not None else leap.get("cost_basis") or 0)
     realized_pnl = round(close_total - cost_basis, 2)
 
+    exit_reason = (payload.get("exit_reason") or "").strip()
     execution = {
         "ticker": ticker, "action": "close_leap", "strike": strike, "contracts": contracts,
         "close_price": close_per_contract, "close_total": close_total, "stock_price": stock_price,
         "cost_basis": round(cost_basis, 2), "realized_pnl": realized_pnl,
         "extrinsic_remaining": round(extrinsic_remaining, 2),
+        "exit_reason": exit_reason if exit_reason in EXIT_REASONS else "discretionary",
     }
 
     def apply(position):
@@ -351,18 +462,109 @@ def _close_short(payload, ticker, strike, contracts, stock_price):
     return execution, apply
 
 
+def _roll_reason(payload) -> str:
+    reason = (payload.get("roll_reason") or "").strip()
+    return reason if reason in ROLL_REASONS else "scheduled"
+
+
+def _next_roll_id(state) -> str:
+    n = sum(1 for e in state.get("executions", [])
+            if e.get("roll_id") and e.get("action") == "close_short")
+    return f"roll_{n + 1:03d}"
+
+
 def _roll_short(payload, ticker, contracts, stock_price, mode, price_source):
     """Roll an open short in one operation: buy to close the existing leg, then
     sell a new one. The caller chooses the new week (``to_expiration``/``to_dte``)
     and strike (``to_strike``) independently — same week / different week and same
-    strike / different strike are all just different values here. Two immutable
-    executions are recorded (a close_short then a sell_short) so the theta ledger
-    and extrinsic-payback meters derive exactly as they do for a manual two-step
-    roll; only the position mutation is applied once, atomically, at the end."""
+    strike / different strike are all just different values here.
+
+    Paper (logged) mode records both legs immediately at the supplied/midpoint
+    prices. LIVE mode transmits ONE two-leg net-credit/debit ticket (no legging
+    risk) and commits both legs only when the ticket fills, via the same
+    pending -> poll -> commit/auto-cancel lifecycle as single-leg orders."""
     from_strike = payload.get("from_strike", payload.get("strike"))
     to_strike = payload.get("to_strike")
     if from_strike is None or to_strike is None:
         raise ValueError("roll_short requires from_strike and to_strike")
+    contracts = int(contracts or 0)
+    if mode == "live" and schwab_api.configured():
+        return _place_live_roll(payload, ticker, contracts, stock_price, price_source)
+    return _commit_roll(payload, ticker, contracts, stock_price, mode, price_source)
+
+
+def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
+    """Transmit the roll as a single two-leg NET order and park it as pending."""
+    client = data_handler.client()
+    account_hash = client.primary_account_hash()
+
+    def _symbol(prefix):
+        sym = payload.get(f"{prefix}_option_symbol")
+        if sym:
+            return sym
+        expiration = payload.get(f"{prefix}_expiration")
+        strike = payload.get(f"{prefix}_strike")
+        if not expiration:
+            raise ValueError(
+                f"live roll needs {prefix}_option_symbol or {prefix}_expiration to build the contract")
+        return schwab_api.occ_option_symbol(ticker, expiration, strike, call=True)
+
+    close_symbol = _symbol("from")
+    open_symbol = _symbol("to")
+    buyback = float(payload.get("close_price_per_share") or 0)
+    new_premium = float(payload.get("premium_per_share") or 0)
+    net = round(new_premium - buyback, 2)
+    order = schwab_api.build_roll_order(contracts, close_symbol, open_symbol, net)
+    placed = client.place_order(account_hash, order)
+    order_id = placed.get("orderId")
+    if not order_id:
+        raise schwab_api.SchwabError("Schwab accepted the roll but returned no order id")
+
+    log.save_pending_order(order_id, {
+        "kind": "roll_short",
+        "payload": payload, "ticker": ticker, "action": "roll_short",
+        "contracts": contracts, "stock_price": stock_price,
+        "price_source": price_source, "account_hash": account_hash,
+        "close_option_symbol": close_symbol, "open_option_symbol": open_symbol,
+        "net_limit": net, "placed_at": log.utcnow(),
+    })
+    return {
+        "success": True,
+        "status": "working",
+        "order_id": str(order_id),
+        "mode": "live",
+        "option_symbols": [close_symbol, open_symbol],
+        "net_limit": net,
+    }
+
+
+def _roll_leg_fills(order: dict, close_symbol: str, open_symbol: str):
+    """(close_fill, open_fill) per-share prices from a filled two-leg order's
+    activity, matched by legId -> orderLegCollection symbol. None when absent."""
+    leg_symbol = {}
+    for i, leg in enumerate(order.get("orderLegCollection") or [], start=1):
+        sym = ((leg.get("instrument") or {}).get("symbol") or "").strip()
+        leg_symbol[leg.get("legId") or i] = sym
+    close_px = open_px = None
+    try:
+        for act in order.get("orderActivityCollection", []) or []:
+            for leg in act.get("executionLegs", []) or []:
+                price = leg.get("price")
+                if price is None:
+                    continue
+                sym = leg_symbol.get(leg.get("legId"))
+                if sym == close_symbol.strip():
+                    close_px = float(price)
+                elif sym == open_symbol.strip():
+                    open_px = float(price)
+    except (TypeError, ValueError):
+        pass
+    return close_px, open_px
+
+
+def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source):
+    from_strike = payload.get("from_strike", payload.get("strike"))
+    to_strike = payload.get("to_strike")
     contracts = int(contracts or 0)
 
     close_payload = {
@@ -384,10 +586,15 @@ def _roll_short(payload, ticker, contracts, stock_price, mode, price_source):
     }
     sell_exec, sell_apply = _sell_short(sell_payload, ticker, to_strike, contracts, stock_price)
 
+    # Link the pair for the roll ledger (derived in recompute_derived).
+    roll_id = _next_roll_id(log.load_state())
+    reason = _roll_reason(payload)
     for leg_exec, leg in ((close_exec, "close"), (sell_exec, "open")):
         leg_exec["mode"] = mode
         leg_exec["price_source"] = price_source
         leg_exec["roll_leg"] = leg
+        leg_exec["roll_id"] = roll_id
+        leg_exec["roll_reason"] = reason
 
     stored_close = log.append_execution(close_exec)
     stored_sell = log.append_execution(sell_exec)
@@ -412,6 +619,71 @@ def _roll_short(payload, ticker, contracts, stock_price, mode, price_source):
         "captured_price": stock_price,
         "net_credit": round(new_total - close_total, 2),
         "executions": [stored_close, stored_sell],
+    }
+
+
+def defend_recommendation(ticker: str) -> dict:
+    """Defensive roll-down for a breached short (underlying < short strike):
+    new strike = price − 1.5×ATR (GREEN) / 2.0×ATR (YELLOW), same or next weekly
+    expiry, with the estimated net credit/debit, the new short's extrinsic, and
+    the effect on effective cost basis. Prices come from the stored short mark +
+    a Black-Scholes estimate at trailing realized vol, so this works in demo /
+    off-hours; the staged roll itself re-prices from the live chain."""
+    import screening
+
+    ticker = ticker.upper()
+    state = log.load_state()
+    pos = log.find_position(state, ticker)
+    if not pos:
+        return {"ticker": ticker, "error": "no position"}
+    df = data_handler.get_daily(ticker)
+    price = indicators.last(df)
+    atr_val = indicators.atr(df) if df is not None else None
+    hv = indicators.hist_vol(df) if df is not None else None
+    if price is None or atr_val is None:
+        return {"ticker": ticker, "error": "insufficient data"}
+
+    breached = [sc for sc in pos.get("short_calls", [])
+                if sc.get("strike") is not None and price < float(sc["strike"])]
+    if not breached:
+        return {"ticker": ticker, "breached": False, "stock_price": round(price, 2)}
+    sc = min(breached, key=lambda s: s.get("dte") if s.get("dte") is not None else 1e9)
+
+    regime = screening.regime().get("status", "yellow")
+    from option_chain import REGIME_ATR_MULT
+    atr_mult = REGIME_ATR_MULT.get(regime, REGIME_ATR_MULT["yellow"])
+    new_strike = indicators.short_strike(price, atr_val, atr_mult)
+
+    contracts = int(sc.get("contracts") or 0)
+    dte = sc.get("dte")
+    roll_dte = int(dte) if dte else 5  # same week when it has time, else next weekly
+    buyback = sc.get("current_bid")
+    new_premium = new_extrinsic = None
+    if hv:
+        bs = indicators._bs_call_price(price, new_strike, max(roll_dte, 1) / 365.0,
+                                       config.RISK_FREE_RATE, hv / 100.0)
+        new_premium = round(bs, 2)
+        new_extrinsic = round(max(bs - max(price - new_strike, 0.0), 0.0), 2)
+    net = (round((new_premium - float(buyback)) * contracts * 100, 2)
+           if (new_premium is not None and buyback is not None) else None)
+    return {
+        "ticker": ticker,
+        "breached": True,
+        "stock_price": round(price, 2),
+        "atr": round(atr_val, 2),
+        "regime": regime,
+        "atr_mult": atr_mult,
+        "current_short": {"strike": sc.get("strike"), "contracts": contracts,
+                          "dte": dte, "expiration": sc.get("expiration"),
+                          "buyback_per_share": buyback},
+        "recommended_strike": new_strike,
+        "recommended_dte": roll_dte,
+        "new_premium_per_share": new_premium,
+        "new_extrinsic_per_share": new_extrinsic,
+        "net_total": net,
+        # A net credit lowers the effective LEAP cost basis; a debit raises it.
+        "cost_basis_effect": -net if net is not None else None,
+        "source": "estimate",
     }
 
 

@@ -39,10 +39,54 @@ function GateLevel({ lv }) {
   );
 }
 
+// Level 5 — Account & Juice: is the ACCOUNT ready and does the TRADE pay.
+// Blocking failures stop the entry server-side (override requires a typed,
+// logged reason inside the order ticket).
+function AccountGate({ gate }) {
+  if (!gate) return null;
+  return (
+    <div className="flex items-start gap-3 border-t border-slate-800 py-2">
+      <Light status={gate.pass ? "green" : "red"} />
+      <div className="flex-1">
+        <div className="text-sm font-medium text-slate-200">Level 5: Account &amp; Juice</div>
+        <div className="mt-1 space-y-0.5">
+          {gate.checks?.map((c) => (
+            <div key={c.id} className="flex items-center gap-2 text-xs">
+              <span className={c.pass ? "text-emerald-400" : c.blocking ? "text-rose-400" : "text-amber-400"}>
+                {c.pass ? "✓" : c.blocking ? "✗" : "!"}
+              </span>
+              <span className="text-slate-400">{c.label}</span>
+              {c.id === "cash_reserve" && c.detail?.free_cash_after != null && (
+                <span className="text-slate-500">
+                  (free after: ${fmt(c.detail.free_cash_after, 0)} vs reserve ${fmt(c.detail.reserve_required, 0)})
+                </span>
+              )}
+              {c.id === "juice_adequacy" && c.detail?.weekly_yield_pct != null && (
+                <span className="text-slate-500">
+                  ({fmt(c.detail.weekly_yield_pct, 2)}%/wk, {c.detail.source})
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+        {gate.suggested_circuit_breaker?.price != null && (
+          <p className="mt-1 text-xs text-slate-500">
+            Suggested circuit breaker (line in the sand): <span className="font-semibold text-slate-300">
+            {fmt(gate.suggested_circuit_breaker.price, 2)}</span> = max(MA50 {fmt(gate.suggested_circuit_breaker.ma50, 2)},
+            price − 2×ATR {fmt(gate.suggested_circuit_breaker.atr_stop, 2)})
+          </p>
+        )}
+      </div>
+      <Pill status={gate.pass ? "ready" : "no"}>{gate.pass ? "PASS" : "BLOCKED"}</Pill>
+    </div>
+  );
+}
+
 export default function ExecuteTab({ initialTicker, onExecuted }) {
   const toast = useToast();
   const [ticker, setTicker] = React.useState(initialTicker || "");
   const [gate, setGate] = React.useState(null);
+  const [acctGate, setAcctGate] = React.useState(null);
   const [roll, setRoll] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [chainOpen, setChainOpen] = React.useState(false);
@@ -52,11 +96,15 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
 
   const loadGate = React.useCallback(async (t) => {
     if (!t) return;
-    setError(null); setGate(null); setRoll(null); setChainOpen(false);
+    setError(null); setGate(null); setAcctGate(null); setRoll(null); setChainOpen(false);
     setGateLoading(true);
     try {
-      const [g, r] = await Promise.all([api.entryGate(t), api.rollSuggestion(t).catch(() => null)]);
-      setGate(g); setRoll(r);
+      const [g, a, r] = await Promise.all([
+        api.entryGate(t),
+        api.accountGate(t).catch(() => null),
+        api.rollSuggestion(t).catch(() => null),
+      ]);
+      setGate(g); setAcctGate(a); setRoll(r);
     } catch (e) { setError(e.message); }
     finally { setGateLoading(false); }
   }, []);
@@ -97,10 +145,16 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
         {error && <p className="text-sm text-rose-400">{error}</p>}
         {gateLoading && <Loading label="Running gate…" />}
         {gate?.levels?.map((lv) => <GateLevel key={lv.level} lv={lv} />)}
+        {gate && <AccountGate gate={acctGate} />}
         {gate && (
           <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3 text-sm">
-            Cleared <span className="font-semibold text-emerald-300">{gate.cleared_level}/4</span> levels.{" "}
-            {ready ? "READY TO ENTER." : "Gate not cleared — wait."}
+            Cleared <span className="font-semibold text-emerald-300">{gate.cleared_level}/4</span> levels
+            {acctGate ? (
+              acctGate.pass
+                ? <> · Level 5 <span className="font-semibold text-emerald-300">PASS</span></>
+                : <> · Level 5 <span className="font-semibold text-rose-300">BLOCKED</span></>
+            ) : null}
+            . {ready ? "READY TO ENTER." : "Gate not cleared — wait."}
           </div>
         )}
       </Card>
@@ -136,6 +190,7 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
       {chainOpen && (
         <OptionChainModal
           ticker={ticker}
+          accountGate={acctGate}
           onExecute={runExecute}
           onClose={() => setChainOpen(false)}
         />

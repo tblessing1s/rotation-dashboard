@@ -21,7 +21,28 @@ function DemoToggle({ demo, busy, onToggle }) {
   );
 }
 
-export default function Navbar({ tabs, active, onChange, regimeStatus, demo, modeBusy, onToggleDemo, onLogout }) {
+function AlertBell({ count, onClick }) {
+  const hot = count > 0;
+  return (
+    <button
+      onClick={onClick}
+      title={hot ? `${count} active alert(s) — open the Alerts panel` : "No active alerts"}
+      className={`relative flex items-center rounded-full border px-2.5 py-1 text-xs font-semibold transition ${
+        hot
+          ? "border-rose-500/50 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"
+          : "border-slate-700 bg-slate-800/60 text-slate-400 hover:bg-slate-800"
+      }`}
+    >
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="h-4 w-4">
+        <path strokeLinecap="round" strokeLinejoin="round"
+              d="M15 17h5l-1.4-1.4a2 2 0 0 1-.6-1.4V11a6 6 0 1 0-12 0v3.2a2 2 0 0 1-.6 1.4L4 17h5m6 0v1a3 3 0 1 1-6 0v-1m6 0H9" />
+      </svg>
+      {hot && <span className="ml-1">{count}</span>}
+    </button>
+  );
+}
+
+export default function Navbar({ tabs, active, onChange, regimeStatus, demo, modeBusy, onToggleDemo, onLogout, alertCount = 0, onAlertsClick }) {
   return (
     <nav className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950/90 backdrop-blur">
       <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3">
@@ -45,6 +66,7 @@ export default function Navbar({ tabs, active, onChange, regimeStatus, demo, mod
           ))}
         </div>
         <div className="flex items-center gap-3 text-xs text-slate-400">
+          {onAlertsClick && <AlertBell count={alertCount} onClick={onAlertsClick} />}
           <DemoToggle demo={demo} busy={modeBusy} onToggle={onToggleDemo} />
           <div className="flex items-center gap-2">
             <Light status={regimeStatus} />

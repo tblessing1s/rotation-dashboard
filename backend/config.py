@@ -139,6 +139,96 @@ WEEKLIES_CACHE_TTL = 7 * 24 * 3600
 # position entirely, so the next report date is surfaced on every open position.
 EARNINGS_WARN_DAYS = 7       # flag a position when earnings is within this many days
 
+# ---- Alerting --------------------------------------------------------------
+# The operator works a day job — "exit immediately" rules are only followable
+# if the app notifies. Threshold provenance is labelled per constant:
+#   HARD_CFM_RULE     — a stated CFM rule; changing it changes the strategy.
+#   PROPOSED_DEFAULT  — a sensible default pending calibration / preference.
+
+# HARD_CFM_RULE — 75% buyback: CFM roll guideline. When the short has lost >=75%
+# of its sale premium with meaningful time left, roll early to capture juice.
+BUYBACK_DECAY_PCT = 0.75
+BUYBACK_MIN_DTE = 2            # HARD_CFM_RULE — ">2 days to expiration" leg of the rule
+
+# HARD_CFM_RULE — coverage floor: a LEAP below 0.50 delta no longer behaves like
+# stock, so the short call is effectively uncovered risk.
+LEAP_DELTA_FLOOR = 0.50
+
+# PROPOSED_DEFAULT — Schwab refresh tokens die at 7 days (no programmatic
+# renewal); alert at day 5 so re-auth happens before data goes dark.
+TOKEN_WARN_AGE_DAYS = 5
+
+# PROPOSED_DEFAULT — cached daily OHLCV older than this on a market day means a
+# silent fetch failure (the cache normally refreshes every ~12h trading day).
+DATA_STALE_HOURS = 30.0
+
+# PROPOSED_DEFAULT — shorts expiring within this many days and not yet rolled.
+EXPIRY_WARN_DTE = 1
+
+# PROPOSED_DEFAULT — evaluator schedule, ET, market days only: pre-market,
+# ~30 min after open, mid-day, ~30 min before close.
+ALERT_SCHEDULE_ET = ["08:30", "10:00", "12:30", "15:30"]
+ALERT_LOG_MAX = 500            # PROPOSED_DEFAULT — alert history cap in state.json
+
+# PROPOSED_DEFAULT — nightly maintenance slot (ET, every calendar day): refresh
+# the earnings/dividend caches for held names and sync position snapshots.
+MAINTENANCE_ET = "17:30"
+
+
+def alerts_dry_run_default() -> bool:
+    """Dry-run (log instead of send) via env; per-store override lives in the
+    alert settings persisted to state."""
+    return os.environ.get("CFM_ALERTS_DRY_RUN", "").strip() in ("1", "true", "yes")
+
+
+# ---- Level 5 entry gate: Account & Juice ------------------------------------
+# The 4-level gate checks the market/sector/stock/chart; Level 5 checks the
+# ACCOUNT (cash, concentration) and the TRADE's income math before entry.
+
+# HARD_CFM_RULE — CFM runs at most 2 concurrent positions at this capital tier;
+# a third position leaves no reserve to defend either of the first two.
+MAX_CFM_POSITIONS = 2
+
+# PROPOSED_DEFAULT — max capital deployed into LEAPs (CFM sizing: $35-40K band).
+MAX_DEPLOYED_CAPITAL = 38000
+
+# PROPOSED_DEFAULT — the entry filters funnel into the hottest sector, so cap
+# same-sector positions to keep one correlated tail from hitting the whole book.
+MAX_POSITIONS_PER_SECTOR = 1
+
+# PROPOSED_DEFAULT — post-trade free cash must cover a defensive reserve of
+# 2xATR (in dollars) per share-equivalent for every open position:
+#   reserve = sum over positions of RESERVE_ATR_MULT * ATR * contracts * 100
+# (equivalently stock_price x contracts x 100 x 2 x ATR%, ATR as a fraction of
+# price) — enough to buy back / roll every short through a 2-ATR adverse move.
+RESERVE_ATR_MULT = 2.0
+
+# HARD_CFM_RULE — the CFM cycle targets a 15-25% return on deployed capital
+# over a 4-8 week cycle; the implied weekly juice floor is
+# CYCLE_RETURN_MIN / CYCLE_WEEKS_MAX (~1.9%/week of LEAP cost basis).
+CYCLE_RETURN_MIN = 0.15
+CYCLE_RETURN_MAX = 0.25
+CYCLE_WEEKS_MIN = 4
+CYCLE_WEEKS_MAX = 8
+
+# PROPOSED_DEFAULT — implied weekly yield more than this multiple of the
+# ticker's own history-implied extrinsic = the market is pricing risk, not
+# income ("juice too rich"). Warn, don't block.
+JUICE_RICH_FACTOR = 1.75
+
+# PROPOSED_DEFAULT — circuit-breaker (line-in-the-sand) default suggestion:
+# max(MA50, entry - CIRCUIT_BREAKER_ATR_MULT * ATR). Operator-editable at entry;
+# storing SOME line is required (HARD_CFM_RULE), only the formula is tunable.
+CIRCUIT_BREAKER_ATR_MULT = 2.0
+
+# HARD_CFM_RULE (candidate — OFF by default, pending confirmation): block
+# pullback share-accumulation on any ticker whose kill switch reads non-green
+# (red = exit in progress, yellow = RS3M thinning toward the kill line). The
+# accumulation play buys weakness, the kill switch sells it — without this
+# guard the two rules can add to a name the strategy is 1-2 days from exiting.
+# Flip to True to enforce; the Positions tab surfaces the block either way.
+BLOCK_ACCUMULATION_ON_RS_DETERIORATION = False
+
 # ---- Capital ---------------------------------------------------------------
 CAPITAL = 35000
 RESERVE_REQUIRED = 13000
@@ -146,3 +236,13 @@ RESERVE_REQUIRED = 13000
 # Income milestones (monthly net juice) used by the position tracker.
 MILESTONE_HALF_NUT = 2150
 MILESTONE_QUIT_SAFE = 7500
+
+# HARD_CFM_RULE — the weekly net-juice target band: 1-2% of deployed capital
+# per week (the History tab draws this band on the weekly juice chart).
+WEEKLY_JUICE_TARGET_PCT_MIN = 1.0
+WEEKLY_JUICE_TARGET_PCT_MAX = 2.0
+
+# PROPOSED_DEFAULT — wash-sale window (IRS: 30 days either side of a loss
+# sale). Not tax software: the app only FLAGS re-entries inside the window so
+# year-end isn't a surprise.
+WASH_SALE_WINDOW_DAYS = 30

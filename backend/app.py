@@ -13,6 +13,8 @@ import secrets
 from flask import Flask, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
 
+import alert_scheduler
+import alerts
 import auth
 import config
 import data_handler
@@ -116,6 +118,31 @@ def api_entry_gate():
         return _err(e)
 
 
+@app.route("/api/account-gate")
+def api_account_gate():
+    """Level 5 (Account & Juice) pre-trade gate. Optional query params let the
+    Execute flow pass real chain numbers: contracts, leap_cost (per share),
+    weekly_extrinsic (per share)."""
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+
+    def _f(name):
+        v = request.args.get(name)
+        return float(v) if v not in (None, "") else None
+
+    try:
+        import account_gate
+        return jsonify(account_gate.evaluate(
+            ticker,
+            contracts=int(request.args.get("contracts") or 0) or None,
+            leap_cost_per_share=_f("leap_cost"),
+            weekly_extrinsic_per_share=_f("weekly_extrinsic"),
+        ))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/option-chain/<ticker>")
 def api_option_chain(ticker: str):
     strategy = request.args.get("strategy", "atr")
@@ -123,6 +150,20 @@ def api_option_chain(ticker: str):
         return jsonify(option_chain.option_chain(ticker, strategy))
     except option_chain.RegimeBlocked as e:
         return jsonify({"error": str(e), "regime": "red"}), 403
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/defend")
+def api_defend():
+    """Defensive roll-down recommendation for a position whose short strike has
+    been breached (underlying < strike): regime-aware new strike, est. net
+    credit/debit, new extrinsic, and cost-basis effect."""
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify(executor.defend_recommendation(ticker))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
@@ -238,13 +279,51 @@ def api_theta_ledger():
         if ticker:
             weeks = [w for w in weeks if w.get("ticker", "").upper() == ticker.upper()]
         totals = ledger.get("totals", {})
+        roll_ledger = state.get("roll_ledger", {"rolls": [], "by_ticker": {}})
+        if ticker:
+            roll_ledger = {
+                "rolls": [r for r in roll_ledger.get("rolls", [])
+                          if r.get("ticker", "").upper() == ticker.upper()],
+                "by_ticker": {k: v for k, v in roll_ledger.get("by_ticker", {}).items()
+                              if k.upper() == ticker.upper()},
+            }
         out = {"weeks": weeks, "totals": totals,
                "extrinsic_summary": ledger.get("extrinsic_summary", {}),
-               "extrinsic_payback": state.get("extrinsic_payback", {})}
+               "extrinsic_payback": state.get("extrinsic_payback", {}),
+               "roll_ledger": roll_ledger}
         if period in ("week", "month", "ytd"):
             key = {"week": "this_week", "month": "this_month", "ytd": "ytd"}[period]
             out["period"] = {"period": period, "net_juice": totals.get(key)}
         return jsonify(out)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/history")
+def api_history():
+    """Closed-cycle records + aggregate stats + the weekly net-juice chart."""
+    try:
+        import history
+        return jsonify(history.view(log.load_state()))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/export/juice-journal")
+def api_export_juice_journal():
+    """The operator's off-system record (CFM 'juice journal' rule): weekly
+    ledger + roll ledger + closed cycles as CSV (default) or markdown."""
+    fmt = (request.args.get("format") or "csv").lower()
+    try:
+        import history
+        state = log.load_state()
+        if fmt in ("md", "markdown"):
+            body, mime, name = history.juice_journal_markdown(state), "text/markdown", "juice_journal.md"
+        else:
+            body, mime, name = history.juice_journal_csv(state), "text/csv", "juice_journal.csv"
+        return app.response_class(
+            body, mimetype=mime,
+            headers={"Content-Disposition": f"attachment; filename={name}"})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
@@ -261,6 +340,51 @@ def api_kill_switch():
 def api_daily_checklist():
     try:
         return jsonify({"items": screening.daily_checklist(log.load_state())})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+# ---------------------------------------------------------------------------
+# Alerts
+# ---------------------------------------------------------------------------
+@app.route("/api/alerts")
+def api_alerts():
+    try:
+        return jsonify(alerts.view())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/alerts/run", methods=["POST"])
+def api_alerts_run():
+    """Force one evaluator pass now. Also the external-cron entry point: hitting
+    this URL wakes a stopped Fly machine, and dedup makes repeat runs no-ops."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(alerts.run(dry_run=payload.get("dry_run")))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/alerts/ack", methods=["POST"])
+def api_alerts_ack():
+    payload = request.get_json(silent=True) or {}
+    alert_id = payload.get("id", "")
+    if not alert_id:
+        return jsonify({"error": "id is required"}), 400
+    try:
+        return jsonify(alerts.acknowledge(alert_id))
+    except ValueError as e:
+        return _err(e, 404)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/alerts/settings", methods=["POST"])
+def api_alerts_settings():
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(alerts.update_settings(payload))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
@@ -338,6 +462,50 @@ def api_data_status():
     return jsonify({s: {"cache_age_hours": data_handler.cache_age_hours(s)} for s in syms})
 
 
+@app.route("/api/portfolio-risk")
+def api_portfolio_risk():
+    """Aggregate book exposure: delta (raw + SPY-beta-adjusted), theta/day,
+    vega, capital vs cap, reserve status, sector exposure breakdown."""
+    try:
+        import portfolio_risk
+        return jsonify(portfolio_risk.portfolio_view(log.load_state()))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/data-health")
+def api_data_health():
+    """Last-successful-fetch per source + cache staleness, so silent data
+    failures are visible instead of quietly serving stale frames."""
+    try:
+        import dividends
+        key_syms = [config.BENCHMARK, config.VIX_SYMBOL]
+        state = log.load_state()
+        key_syms += [p.get("ticker", "") for p in state.get("positions", [])
+                     if p.get("status") != "closed"]
+        return jsonify({
+            "providers": data_handler.health(),
+            "ohlcv_cache_age_hours": {s: data_handler.cache_age_hours(s) for s in key_syms if s},
+            "earnings_cache": earnings.cache_health(),
+            "dividends_cache": dividends.cache_health(),
+            "schwab_token": schwab_api.token_status(),
+            "demo": config.demo_enabled(),
+        })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/maintenance/refresh", methods=["POST"])
+def api_maintenance_refresh():
+    """Force the nightly earnings/dividends refresh now (also runs on the
+    scheduler's MAINTENANCE_ET slot)."""
+    try:
+        import maintenance
+        return jsonify(maintenance.nightly_refresh())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/diagnostics/vix")
 def api_diag_vix():
     """Live, cache-bypassing probe of the VIX so a missing value can be
@@ -410,6 +578,12 @@ def serve_frontend(path: str = ""):
     if os.path.exists(index):
         return send_from_directory(DIST_DIR, "index.html")
     return jsonify({"error": "frontend not built — run `npm run build` in frontend/"}), 404
+
+
+# Start the in-process alert scheduler (gunicorn imports this module; the CLI
+# path below reaches it too). start_once() is idempotent and a no-op when
+# CFM_ALERTS_SCHEDULER=0 (tests / one-off scripts).
+alert_scheduler.start_once()
 
 
 if __name__ == "__main__":

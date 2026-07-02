@@ -31,7 +31,15 @@ export const api = {
   stockFilter: (sector) => request(`/api/stock-filter${sector ? `?sector=${sector}` : ""}`),
   scorecard: (tickers) => request(`/api/scan/scorecard${tickers ? `?tickers=${tickers}` : ""}`),
   entryGate: (ticker) => request(`/api/entry-gate?ticker=${ticker}`),
+  accountGate: (ticker, params = {}) => {
+    const q = Object.entries(params)
+      .filter(([, v]) => v !== null && v !== undefined && v !== "")
+      .map(([k, v]) => `&${k}=${encodeURIComponent(v)}`)
+      .join("");
+    return request(`/api/account-gate?ticker=${ticker}${q}`);
+  },
   rollSuggestion: (ticker) => request(`/api/roll-suggestion?ticker=${ticker}`),
+  defend: (ticker) => request(`/api/defend?ticker=${ticker}`),
   rollOptions: (ticker) => request(`/api/roll-options?ticker=${ticker}`),
   coverage: (ticker) => request(`/api/coverage?ticker=${ticker}`),
   earnings: (ticker, refresh = false) => request(`/api/earnings?ticker=${ticker}${refresh ? "&refresh=1" : ""}`),
@@ -44,6 +52,19 @@ export const api = {
   thetaLedger: (params = "") => request(`/api/theta-ledger${params}`),
   killSwitch: () => request("/api/kill-switch"),
   dailyChecklist: () => request("/api/daily-checklist"),
+  history: () => request("/api/history"),
+  portfolioRisk: () => request("/api/portfolio-risk"),
+  dataHealth: () => request("/api/data-health"),
+  maintenanceRefresh: () => request("/api/maintenance/refresh", { method: "POST" }),
+  alerts: () => request("/api/alerts"),
+  runAlerts: (dryRun) =>
+    request("/api/alerts/run", {
+      method: "POST",
+      body: JSON.stringify(dryRun === undefined ? {} : { dry_run: dryRun }),
+    }),
+  ackAlert: (id) => request("/api/alerts/ack", { method: "POST", body: JSON.stringify({ id }) }),
+  alertSettings: (patch) =>
+    request("/api/alerts/settings", { method: "POST", body: JSON.stringify(patch) }),
   config: () => request("/api/config"),
   mode: () => request("/api/mode"),
   setMode: (demo) => request("/api/mode", { method: "POST", body: JSON.stringify({ demo }) }),
