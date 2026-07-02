@@ -24,6 +24,8 @@ export default function App() {
   const [execNonce, setExecNonce] = React.useState(0);
   const [demo, setDemo] = React.useState(false);
   const [modeBusy, setModeBusy] = React.useState(false);
+  const [posture, setPosture] = React.useState(null);
+  const [postureBusy, setPostureBusy] = React.useState(false);
   // null = still checking, true = signed in (or auth disabled), false = show login.
   const [authed, setAuthed] = React.useState(null);
   const [alertCount, setAlertCount] = React.useState(0);
@@ -53,6 +55,11 @@ export default function App() {
     api.mode().then((m) => setDemo(!!m.demo)).catch(() => {});
   }, [authed]);
 
+  React.useEffect(() => {
+    if (authed !== true) return;
+    api.strikePosture().then((p) => setPosture(p.posture)).catch(() => {});
+  }, [authed, demo]); // re-read on demo/live switch — posture is per-store
+
   async function logout() {
     try {
       await api.logout();
@@ -68,6 +75,19 @@ export default function App() {
       window.location.reload(); // refetch every tab against the newly active source
     } catch {
       setModeBusy(false);
+    }
+  }
+
+  async function togglePosture() {
+    const next = posture === "aggressive" ? "conservative" : "aggressive";
+    setPostureBusy(true);
+    try {
+      const r = await api.setStrikePosture(next);
+      setPosture(r.posture);
+    } catch {
+      // leave the previous posture displayed on failure
+    } finally {
+      setPostureBusy(false);
     }
   }
 
@@ -89,7 +109,8 @@ export default function App() {
     <div className="min-h-full bg-slate-950 text-slate-100">
       <Navbar tabs={TABS} active={tab} onChange={setTab} regimeStatus={regimeStatus}
               demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo} onLogout={logout}
-              alertCount={alertCount} onAlertsClick={() => setTab("Checklist")} />
+              alertCount={alertCount} onAlertsClick={() => setTab("Checklist")}
+              posture={posture} postureBusy={postureBusy} onTogglePosture={togglePosture} />
       <main className="mx-auto max-w-7xl px-4 py-6">
         <SchwabStatus demo={demo} />
         {tab === "Scan" && (

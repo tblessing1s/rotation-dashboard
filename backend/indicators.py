@@ -174,6 +174,18 @@ def short_strike(price: float, atr_value: float, mult: float = config.SHORT_ATR_
     return round(raw * 2) / 2
 
 
+def short_strike_from_table(price: float, atr_value: float, atr_mult: float,
+                            itm_pct: float) -> float:
+    """Weekly short strike from the regime x posture table (config.STRIKE_TABLE):
+    the DEEPER (more protective, further below price) of an ATR-distance strike
+    and an ITM%-floor strike, rounded to $0.50. `itm_pct` is a decimal (0.03 = 3%).
+    """
+    atr_strike = price - atr_mult * atr_value
+    itm_strike = price * (1 - itm_pct)
+    raw = min(atr_strike, itm_strike)
+    return round(raw * 2) / 2
+
+
 # ---------------------------------------------------------------------------
 # Black–Scholes greeks
 # ---------------------------------------------------------------------------

@@ -62,6 +62,15 @@ def test_short_strike_spacing():
     assert ind.short_strike(150.0, 4.0) == 144.0
 
 
+def test_short_strike_from_table_takes_the_deeper_candidate():
+    # price 150, ATR 4: ATR leg 1.0x -> 146; ITM leg 5% -> 142.5. ITM is deeper -> wins.
+    assert ind.short_strike_from_table(150.0, 4.0, 1.0, 0.05) == 142.5
+    # ATR leg 3.0x -> 138; ITM leg 1% -> 148.5. ATR is deeper -> wins.
+    assert ind.short_strike_from_table(150.0, 4.0, 3.0, 0.01) == 138.0
+    # 0 ATR / 0% ITM -> both candidates equal price -> ATM.
+    assert ind.short_strike_from_table(150.0, 4.0, 0.0, 0.0) == 150.0
+
+
 def test_black_scholes_delta_and_implied_vol_roundtrip():
     # ATM, 1y, r=0, sigma=0.20 -> delta = N(0.1) ≈ 0.5398
     assert ind.bs_call_delta(100, 100, 1.0, 0.0, 0.20) == pytest.approx(0.5398, abs=1e-3)

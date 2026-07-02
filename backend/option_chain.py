@@ -5,10 +5,10 @@ live bid/ask/extrinsic, so the user can eyeball both before executing.
 Chains come from Schwab only (Alpha Vantage has no usable options data) and are
 cached for 5 minutes per ticker so repeated modal opens don't hammer the API.
 
-Market regime sets the ATR multiplier on the weekly short strike:
-    GREEN  -> 1.5x  (more juice, less protection)
-    YELLOW -> 2.0x  (balanced protection)
-    RED    -> entry blocked (RegimeBlocked is raised; the route returns 403)
+Market regime + the operator's risk posture set the weekly short strike via
+strike_policy.suggest_strike (config.STRIKE_TABLE — the ATR-mult/ITM%-floor
+table, "Genius System" reference). New entries are still blocked on a RED tape
+(RegimeBlocked is raised; the route returns 403) regardless of posture.
 """
 from __future__ import annotations
 
@@ -24,9 +24,7 @@ import indicators
 import logging_handler as log
 import schwab_api
 import screening
-
-# ATR multiplier by regime. RED is intentionally absent — it blocks entry.
-REGIME_ATR_MULT = {"green": 1.5, "yellow": 2.0}
+import strike_policy
 
 _CHAIN_TTL = 300  # seconds — 5-minute per-ticker cache
 _chain_cache: dict[str, tuple[float, dict]] = {}
@@ -145,14 +143,19 @@ def roll_options(ticker: str) -> dict:
     if not contracts:
         raise schwab_api.SchwabError(f"no call contracts returned for {ticker}")
 
-    # Regime-aware ATR target strike (same rule the entry chain uses).
+    # Regime + posture aware target strike (same rule the entry chain uses;
+    # RED is fully supported here since rolling an open short is allowed even
+    # on a red tape — only fresh entries are blocked).
     reg = screening.regime()
-    atr_mult = REGIME_ATR_MULT.get(reg.get("status"), REGIME_ATR_MULT["yellow"])
     df = data_handler.get_daily(ticker)
     atr_val = indicators.atr(df)
     price = underlying if underlying is not None else indicators.last(df)
-    suggested_strike = (indicators.short_strike(price, atr_val, atr_mult)
-                        if atr_val is not None and price is not None else None)
+    sp = (strike_policy.suggest_strike(price, atr_val, reg.get("status"))
+          if atr_val is not None and price is not None else None)
+    atr_mult = sp["atr_mult"] if sp else None
+    itm_pct = sp["itm_pct"] if sp else None
+    posture = sp["posture"] if sp else None
+    suggested_strike = sp["strike"] if sp else None
 
     # The current short to roll = the nearest-dated open leg, with a live buyback.
     current = min(open_shorts, key=lambda s: s.get("dte") if s.get("dte") is not None else 1e9)
@@ -207,6 +210,8 @@ def roll_options(ticker: str) -> dict:
         "regime": reg.get("status"),
         "atr": round(atr_val, 2) if atr_val is not None else None,
         "atr_mult": atr_mult,
+        "itm_pct": itm_pct,
+        "posture": posture,
         "suggested_strike": suggested_strike,
         "current_short": current_view,
         "expirations": expirations,
@@ -383,7 +388,6 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     if management_only and not (has_leap or open_shorts):
         # Nothing to manage and entries are blocked — there's nothing to show.
         raise RegimeBlocked("Market is RED. No entries.")
-    atr_mult = REGIME_ATR_MULT.get(regime_status, REGIME_ATR_MULT["yellow"])
     suggested_action, action_reason = _detect_action(has_leap, open_shorts, management_only)
 
     payload = _fetch_chain(ticker)
@@ -419,7 +423,8 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     weekly: dict | None = None
     weekly_iv = None
     if atr_val is not None and price is not None:
-        suggested_strike = indicators.short_strike(price, atr_val, atr_mult)
+        sp = strike_policy.suggest_strike(price, atr_val, regime_status)
+        suggested_strike = sp["strike"]
         # Nearest expiration with at least one day left = this week's short.
         # dte > 0 (not >= 0): a 0-DTE contract expires today, so it has almost no
         # time value left and its delta collapses to ~1.0/~0.0 near expiration —
@@ -437,7 +442,9 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
             "dte": exp_contracts[0]["dte"] if exp_contracts else None,
             "suggested_strike": suggested_strike,
             "atr": round(atr_val, 2),
-            "atr_mult": atr_mult,
+            "atr_mult": sp["atr_mult"],
+            "itm_pct": sp["itm_pct"],
+            "posture": sp["posture"],
             "strikes": strikes,
         }
 
@@ -515,7 +522,9 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
         "strategy": strategy,
         "regime": regime_status,
         "management_only": management_only,
-        "atr_mult": atr_mult,
+        "atr_mult": (weekly or {}).get("atr_mult"),
+        "itm_pct": (weekly or {}).get("itm_pct"),
+        "posture": (weekly or {}).get("posture"),
         "underlying_price": round(underlying, 2) if underlying is not None else None,
         "suggested_action": suggested_action,
         "action_reason": action_reason,

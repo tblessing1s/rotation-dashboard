@@ -192,7 +192,10 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
               <div className="flex items-center gap-2">
                 <span className="text-slate-400">Regime</span>
                 <Pill status={chain.regime}>{regimeBanner}</Pill>
-                <span className="text-slate-400">ATR ×<span className="font-semibold text-slate-100">{chain.atr_mult}</span></span>
+                <span className="text-slate-400">
+                  {chain.posture && <span className="mr-1 capitalize">{chain.posture}</span>}
+                  {chain.atr_mult}×ATR{chain.itm_pct != null ? ` / ${(chain.itm_pct * 100).toFixed(0)}% ITM floor` : ""}
+                </span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-slate-400">IV</span>
@@ -406,8 +409,14 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
             {!mgmt && (
             <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-slate-200">Weekly short call (ATR-suggested)</h3>
-                {weekly && <span className="text-xs text-slate-500">{weekly.expiration ? `exp ${weekly.expiration} · ` : ""}{weekly.dte} DTE · {weekly.atr_mult}×ATR {fmt(weekly.atr, 2)}</span>}
+                <h3 className="text-sm font-semibold text-slate-200">Weekly short call ({weekly?.posture || "…"}-suggested)</h3>
+                {weekly && (
+                  <span className="text-xs text-slate-500">
+                    {weekly.expiration ? `exp ${weekly.expiration} · ` : ""}{weekly.dte} DTE ·{" "}
+                    {weekly.atr_mult}×ATR {fmt(weekly.atr, 2)}
+                    {weekly.itm_pct != null ? ` / ${(weekly.itm_pct * 100).toFixed(0)}% ITM floor` : ""}
+                  </span>
+                )}
               </div>
               {weekly?.strikes?.length ? (
                 <>

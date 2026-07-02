@@ -108,13 +108,20 @@ def test_buyback_75_requires_decay_and_dte():
 
 def test_defend_position_suggests_atr_roll_down(monkeypatch):
     import data_handler
+    import screening
+    import strike_policy
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "yellow"})
+    monkeypatch.setattr(strike_policy, "get_posture", lambda state=None: "conservative")
     p = _pos(short_calls=[{"strike": 132, "contracts": 5, "dte": 4, "current_bid": 0.25,
                            "entry_premium_total": 600.0}])
     out = alerts.check_defend_position(_state(p))
     assert len(out) == 1 and out[0]["type"] == "DEFEND_POSITION"
-    # flat frame with +/-1 range -> ATR 2, suggestion = 128 - 1.5*2 = 125
-    assert out[0]["data"]["suggested_strike"] == 125.0
+    # flat frame with +/-1 range -> ATR 2. YELLOW/conservative (default posture)
+    # = 1.0 ATR / 3% ITM floor: atr_strike=128-2=126, itm_strike=128*0.97=124.16
+    # -> the deeper (lower) candidate wins, rounded to $0.50 -> 124.0.
+    assert out[0]["data"]["suggested_strike"] == 124.0
+    assert out[0]["data"]["posture"] == "conservative"
     # stock above the strike -> nothing to defend
     p2 = _pos(short_calls=[{"strike": 126, "contracts": 5, "dte": 4, "current_bid": 2.0,
                             "entry_premium_total": 450.0}])

@@ -160,7 +160,11 @@ def check_buyback_75(state: dict) -> list[dict]:
 
 
 def check_defend_position(state: dict) -> list[dict]:
+    import screening
+    import strike_policy
+
     out = []
+    regime_status = None
     for p in _open_positions(state):
         t = p.get("ticker", "")
         price = _last_close(t)
@@ -171,15 +175,24 @@ def check_defend_position(state: dict) -> list[dict]:
             strike = sc.get("strike")
             if strike is None or price >= strike:
                 continue
-            suggestion = indicators.short_strike(price, atr_val) if atr_val else None
+            sp = None
+            if atr_val:
+                if regime_status is None:
+                    regime_status = screening.regime().get("status")
+                sp = strike_policy.suggest_strike(price, atr_val, regime_status)
+            suggestion = sp["strike"] if sp else None
             out.append(_alert(
                 "DEFEND_POSITION", t,
                 f"{t} closed at {price:.2f}, below the short strike {strike}.",
                 (f"Defensive roll-down: new strike ≈ {suggestion} "
-                 f"(price − {config.SHORT_ATR_MULT}×ATR)." if suggestion
-                 else "Defensive roll-down: new strike at price − 1.5×ATR."),
+                 f"({sp['atr_mult']:g}×ATR / {sp['itm_pct'] * 100:g}% ITM floor, "
+                 f"{sp['posture']} posture)." if sp
+                 else "Defensive roll-down: roll to a strike further below price."),
                 {"price": round(price, 2), "short_strike": strike,
-                 "suggested_strike": suggestion, "atr": round(atr_val, 2) if atr_val else None},
+                 "suggested_strike": suggestion, "atr": round(atr_val, 2) if atr_val else None,
+                 "atr_mult": sp["atr_mult"] if sp else None,
+                 "itm_pct": sp["itm_pct"] if sp else None,
+                 "posture": sp["posture"] if sp else None},
                 key=str(strike)))
     return out
 
