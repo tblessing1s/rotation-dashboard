@@ -16,14 +16,25 @@ import sector_data
 
 
 def _rs_pair(ticker: str) -> tuple[float | None, float | None]:
-    """(RS3M vs SPY, RS3M vs Sector) for a ticker, in percent."""
+    """(RS3M vs SPY, RS3M vs Sector) for a ticker, in percent.
+
+    A sector ETF HELD as its own CFM position has no distinct peer sector to
+    compare against — the comparison is tautologically itself, which computes
+    to exactly 0 every time. Left unguarded that reads as a REAL number and
+    quietly breaks the kill switch for an ETF position: the YELLOW "thinning"
+    leg (rs_vs_sector < STOCK_RS_VS_SECTOR_MIN + 2) would fire permanently
+    since 0 is always < 2. So rs_vs_sector is None (not applicable) for an
+    ETF's own position — the kill switch then relies solely on RS3M vs SPY,
+    a fully meaningful check for an ETF against the broad market.
+    """
     spy = data_handler.get_daily(config.BENCHMARK)
     stock = data_handler.get_daily(ticker)
     rs_vs_spy = indicators.rs3m(stock, spy) if stock is not None else None
 
     sector_etf = sector_data.sector_for(ticker)
+    is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
     rs_vs_sector = None
-    if sector_etf and rs_vs_spy is not None:
+    if sector_etf and not is_sector_etf and rs_vs_spy is not None:
         sector_df = data_handler.get_daily(sector_etf)
         sector_rs_vs_spy = indicators.rs3m(sector_df, spy) if sector_df is not None else None
         if sector_rs_vs_spy is not None:

@@ -257,6 +257,26 @@ def test_score_ticker_verdict_matches_displayed_values(monkeypatch):
     assert sc.compute_verdict(row)["verdict"] == row["verdict"]
 
 
+def test_score_ticker_nulls_sector_leg_for_a_sector_etf_candidate(monkeypatch):
+    # XLK scored as its own candidate (ticker == sector_etf) has no distinct
+    # peer sector to beat — rs3m_vs_sector would otherwise compute to a
+    # tautological ~0 every time (identical frame vs itself), which reads as
+    # a real, borderline number rather than "not applicable".
+    import data_handler
+    df = _frame(100 + np.cumsum(np.random.RandomState(21).normal(0, 1, 260)))
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    gate = {"verdict": "READY TO ENTER", "cleared_level": 4}
+    row = sc.score_ticker("XLK", df, "XLK", df, gate=gate)
+    assert row["is_sector_etf"] is True
+    assert row["rs3m_vs_sector"] is None
+    # The (now-null) sector leg must not spuriously trigger the AVOID rule.
+    assert sc.compute_verdict(row)["verdict"] == row["verdict"]
+
+    # A regular constituent (ticker != sector_etf) is unaffected.
+    normal = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
+    assert normal["is_sector_etf"] is False
+
+
 def test_score_ticker_runs_scorecard_when_gate_passes(monkeypatch):
     import data_handler
     df = _frame(100 + np.cumsum(np.random.RandomState(6).normal(0, 1, 260)))

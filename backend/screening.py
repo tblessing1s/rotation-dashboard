@@ -138,15 +138,21 @@ def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str
                regime_green: bool = False, sector_strong: bool = False) -> dict:
     df = data_handler.get_daily(ticker)
     rs_vs_spy = indicators.rs3m(df, spy) if df is not None else None
+    # A sector ETF entered as its own candidate has no distinct peer sector to
+    # beat — comparing it to itself is tautologically zero every time, so that
+    # leg is waived (not applicable) rather than scored as a fail.
+    is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
     rs_vs_sector = None
-    if rs_vs_spy is not None and sector_rs_vs_spy is not None:
+    if not is_sector_etf and rs_vs_spy is not None and sector_rs_vs_spy is not None:
         rs_vs_sector = round(rs_vs_spy - sector_rs_vs_spy, 2)
     atrp = indicators.atr_pct(df) if df is not None else None
     cons = indicators.consolidating(df) if df is not None else None
 
-    # Stock-level legs (gate Levels 3 & 4).
+    # Stock-level legs (gate Levels 3 & 4). The "beats sector" leg is waived
+    # (treated as satisfied) for a sector ETF entered as its own candidate.
     beats = (rs_vs_spy is not None and rs_vs_spy > config.STOCK_RS_VS_SPY_MIN
-             and rs_vs_sector is not None and rs_vs_sector > config.STOCK_RS_VS_SECTOR_MIN)
+             and (is_sector_etf
+                  or (rs_vs_sector is not None and rs_vs_sector > config.STOCK_RS_VS_SECTOR_MIN)))
 
     # "ready" means the FULL gate would pass, so it matches the entry gate's
     # READY TO ENTER verdict — regime + sector must also be green, not just the
@@ -173,6 +179,7 @@ def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str
         "sector": sector_etf,
         "rs3m_vs_spy": rs_vs_spy,
         "rs3m_vs_sector": rs_vs_sector,
+        "is_sector_etf": is_sector_etf,
         "atr_pct": atrp,
         "consolidating": cons,
         "stock_strong": beats,
@@ -203,6 +210,10 @@ def _compute_stock_filter(sector: str | None = None) -> list[dict]:
         sector_df = data_handler.get_daily(etf)
         sector_rs = indicators.rs3m(sector_df, spy) if sector_df is not None else None
         sector_strong = sector_status.get(etf, {}).get("status") == "green"
+        # The ETF itself is a valid CFM candidate alongside its constituents —
+        # liquid, weekly-optionable, and a real entry choice in its own right.
+        rows.append(_stock_row(etf, spy, sector_rs, etf,
+                               regime_green=regime_green, sector_strong=sector_strong))
         for ticker in sector_data.constituents(etf):
             rows.append(_stock_row(ticker, spy, sector_rs, etf,
                                    regime_green=regime_green, sector_strong=sector_strong))
@@ -261,13 +272,18 @@ def entry_gate(ticker: str) -> dict:
                      regime_green=_all(l1_checks), sector_strong=_all(l2_checks))
 
     # The two legs are checked separately: "beats SPY" and "beats its sector"
-    # are distinct conditions, so the UI can show exactly which one failed.
+    # are distinct conditions, so the UI can show exactly which one failed. A
+    # sector ETF entered as its own candidate has no peer sector to beat — the
+    # comparison is tautologically itself, so that leg is waived (N/A, not a
+    # fail) rather than blocking a real ETF entry on a meaningless self-check.
     rs_spy, rs_sec = row["rs3m_vs_spy"], row["rs3m_vs_sector"]
+    is_etf = row.get("is_sector_etf", False)
     l3_checks = [
         _check(f"RS3M vs SPY > +{config.STOCK_RS_VS_SPY_MIN:g}%", rs_spy,
                rs_spy is not None and rs_spy > config.STOCK_RS_VS_SPY_MIN),
-        _check(f"RS3M vs Sector > {config.STOCK_RS_VS_SECTOR_MIN:g}%", rs_sec,
-               rs_sec is not None and rs_sec > config.STOCK_RS_VS_SECTOR_MIN),
+        _check(f"RS3M vs Sector > {config.STOCK_RS_VS_SECTOR_MIN:g}%"
+               + (" (N/A — is the sector)" if is_etf else ""),
+               rs_sec, is_etf or (rs_sec is not None and rs_sec > config.STOCK_RS_VS_SECTOR_MIN)),
     ]
     levels.append({"level": 3, "name": "Stock beating peers", "pass": _all(l3_checks),
                    "checks": l3_checks, "detail": row})

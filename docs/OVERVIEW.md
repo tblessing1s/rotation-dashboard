@@ -317,3 +317,44 @@ suggestion (`executor.roll_suggestion`), and the `DEFEND_POSITION` alert
   OHLCV cache age for key symbols, and earnings/dividends cache staleness —
   silent data failures become visible instead of quietly serving stale
   frames.
+
+## Sector ETFs as CFM entries
+
+`sector_data.all_tickers()` includes the 11 sector ETFs (XLK, XLE, …)
+themselves alongside every constituent — they're liquid, weekly-optionable
+tickers and valid CFM candidates in their own right. Since every scan
+(Scorecard, Ready-to-Enter, `scripts/calibrate.py`) sweeps this one list, the
+ETFs are automatically selectable everywhere without per-caller wiring;
+`stock_filter(sector=X)` also lists the sector's own ETF as a row alongside
+its constituents (`screening._compute_stock_filter`).
+
+A sector ETF entered as its own candidate has no distinct peer sector to
+beat — comparing it to itself is tautologically ~0 every time (the same
+cached price frame vs itself). Left unguarded this reads as a real, borderline
+number instead of "not applicable" and silently breaks three places:
+
+- **Entry gate Level 3** ("RS3M vs Sector > 0%") would permanently fail for
+  an ETF, since exactly 0 is never > 0. `screening._stock_row` / `entry_gate`
+  now waive that leg for `ticker == sector_etf` (label shows "N/A — is the
+  sector"); Level 3 passes on the RS3M-vs-SPY leg alone.
+- **Kill switch** (`kill_switch._rs_pair`) had a worse version of the same
+  bug: the YELLOW "thinning" leg (`rs_vs_sector < STOCK_RS_VS_SECTOR_MIN + 2`)
+  would fire *permanently* for any ETF position, since 0 is always < 2 —
+  every healthy sector-ETF CFM position would show a false "watch, thinning
+  toward the kill line." `rs_vs_sector` is now `None` (waived) for a
+  ticker-is-its-own-sector position; the kill switch relies solely on RS3M vs
+  SPY, a fully meaningful check for an ETF against the broad market.
+- **Scorecard** (`metrics/scorecard.py::score_ticker`) nulls
+  `rs3m_vs_sector` the same way, so the (now-null) sector leg can't spuriously
+  trigger `compute_verdict`'s AVOID rule, and the UI shows "—" instead of a
+  misleading 0.00%.
+
+`sector_concentration` (Level 5) needed no change: an existing position's
+`sector` field already equals its own ETF for a sector-ETF holding, so
+entering the ETF itself correctly counts as one more position in that sector
+if any constituent is already held.
+
+**UI**: an "ETF" badge next to the ticker on the Scorecard and Stock Filter
+rows (tooltip explains the N/A sector leg); the Execute tab's ticker box
+already accepts any symbol, so typing a sector ETF there worked mechanically
+once the Level 3 / kill-switch waivers above were in place.

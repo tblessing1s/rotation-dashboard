@@ -84,9 +84,15 @@ def constituents(etf: str) -> list[str]:
 
 
 def all_tickers() -> list[str]:
-    """Every constituent across every sector, de-duplicated, order-stable."""
+    """Every constituent across every sector PLUS the sector ETFs themselves,
+    de-duplicated, order-stable. The ETFs are liquid, weekly-optionable
+    tickers in their own right, so they're valid CFM candidates alongside
+    their constituents — every scan (Scorecard, Ready-to-Enter, calibration)
+    sweeps this list, so including them here is what makes them selectable
+    everywhere without separate wiring per caller."""
     seen: dict[str, None] = {}
-    for s in _load().values():
+    for etf, s in _load().items():
+        seen.setdefault(etf, None)
         for t in s.tickers:
             seen.setdefault(t, None)
     return list(seen.keys())
