@@ -35,6 +35,7 @@ def _default_state() -> dict:
         "executions": [],
         "theta_ledger": {"weeks": [], "totals": {"this_week": 0, "this_month": 0, "ytd": 0, "pct_deployed": 0}},
         "extrinsic_payback": {},
+        "roll_ledger": {"rolls": [], "by_ticker": {}},
         # Live orders placed at the broker but not yet filled. Keyed by Schwab
         # order id; an entry is removed when the order fills (then committed as an
         # execution) or is cancelled/rejected.
@@ -60,6 +61,9 @@ def load_state() -> dict:
         for k, v in _default_state().items():
             state.setdefault(k, v)
         if migrated:
+            # Rebuild the derived ledgers so migration-added derived structures
+            # (e.g. the roll ledger) are populated from day one, not first-write.
+            recompute_derived(state)
             _write(state)
         return state
 
@@ -219,5 +223,42 @@ def recompute_derived(state: dict) -> dict:
         "remaining_to_payback": round(agg_remaining, 2),
         "net_income": round(agg_collected - agg_at_entry, 2),
         "income_positive": agg_at_entry > 0 and agg_remaining <= 0,
+    }
+
+    # Roll-cost / whipsaw ledger — derived from the paired roll executions
+    # (executor stamps both legs with roll_id + roll_reason). This is the data
+    # that later validates 1.5x vs 2x ATR strike placement.
+    rolls: dict[str, dict] = {}
+    for e in execs:
+        rid = e.get("roll_id")
+        if not rid:
+            continue
+        entry = rolls.setdefault(rid, {
+            "roll_id": rid, "ticker": e.get("ticker", ""), "date": e.get("date", ""),
+            "reason": e.get("roll_reason") or "scheduled",
+            "from_strike": None, "to_strike": None,
+            "buyback_cost": None, "new_premium": None, "net": None,
+        })
+        if e.get("action") == "close_short":
+            entry["buyback_cost"] = float(e.get("close_total") or 0)
+            entry["from_strike"] = e.get("strike")
+            entry["date"] = e.get("date", entry["date"])
+        elif e.get("action") == "sell_short":
+            entry["new_premium"] = float(e.get("premium_total") or 0)
+            entry["to_strike"] = e.get("strike")
+    by_ticker: dict[str, dict] = {}
+    for entry in rolls.values():
+        if entry["buyback_cost"] is not None and entry["new_premium"] is not None:
+            entry["net"] = round(entry["new_premium"] - entry["buyback_cost"], 2)
+        agg = by_ticker.setdefault(entry["ticker"], {"count": 0, "net_total": 0.0,
+                                                     "drag_total": 0.0})
+        agg["count"] += 1
+        if entry["net"] is not None:
+            agg["net_total"] = round(agg["net_total"] + entry["net"], 2)
+            if entry["net"] < 0:  # drag = the debits paid rolling defensively
+                agg["drag_total"] = round(agg["drag_total"] + entry["net"], 2)
+    state["roll_ledger"] = {
+        "rolls": sorted(rolls.values(), key=lambda r: r["date"]),
+        "by_ticker": by_ticker,
     }
     return state

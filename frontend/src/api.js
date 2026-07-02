@@ -39,6 +39,7 @@ export const api = {
     return request(`/api/account-gate?ticker=${ticker}${q}`);
   },
   rollSuggestion: (ticker) => request(`/api/roll-suggestion?ticker=${ticker}`),
+  defend: (ticker) => request(`/api/defend?ticker=${ticker}`),
   rollOptions: (ticker) => request(`/api/roll-options?ticker=${ticker}`),
   coverage: (ticker) => request(`/api/coverage?ticker=${ticker}`),
   earnings: (ticker, refresh = false) => request(`/api/earnings?ticker=${ticker}${refresh ? "&refresh=1" : ""}`),

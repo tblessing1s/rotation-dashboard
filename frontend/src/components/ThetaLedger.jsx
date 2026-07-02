@@ -12,6 +12,11 @@ export default function ThetaLedger() {
   const payback = data?.extrinsic_payback || {};
   const summary = data?.extrinsic_summary || {};
   const hurdle = summary.leap_extrinsic_at_entry || 0;
+  const rollByTicker = data?.roll_ledger?.by_ticker || {};
+  const rollTotals = Object.values(rollByTicker).reduce(
+    (a, r) => ({ count: a.count + (r.count || 0), net: a.net + (r.net_total || 0), drag: a.drag + (r.drag_total || 0) }),
+    { count: 0, net: 0, drag: 0 },
+  );
 
   return (
     <div className="grid gap-4">
@@ -29,6 +34,17 @@ export default function ThetaLedger() {
             <Stat label="Net income" value={money(summary.net_income)}
                   tone={summary.income_positive ? "text-emerald-300" : "text-rose-300"}
                   sub={summary.income_positive ? "income-positive ✓" : "still filling the LEAP"} />
+          </div>
+        )}
+        {rollTotals.count > 0 && (
+          <div className="mt-4 grid grid-cols-3 gap-4 border-t border-slate-800 pt-4">
+            <Stat label="Rolls executed" value={rollTotals.count} sub="paired close+open tickets" />
+            <Stat label="Roll net" value={money(rollTotals.net)}
+                  tone={rollTotals.net >= 0 ? "text-emerald-300" : "text-rose-300"}
+                  sub="credits − buybacks across all rolls" />
+            <Stat label="Roll drag" value={money(rollTotals.drag)}
+                  tone={rollTotals.drag < 0 ? "text-rose-300" : "text-slate-100"}
+                  sub="debits paid on defensive rolls (whipsaw cost)" />
           </div>
         )}
       </Card>

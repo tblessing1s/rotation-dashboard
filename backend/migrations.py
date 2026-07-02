@@ -13,7 +13,7 @@ theta_ledger / extrinsic_payback / pending_orders).
 """
 from __future__ import annotations
 
-CURRENT_VERSION = 3
+CURRENT_VERSION = 4
 
 
 def default_alert_state() -> dict:
@@ -48,9 +48,18 @@ def _v2_to_v3(state: dict) -> dict:
     return state
 
 
+def _v3_to_v4(state: dict) -> dict:
+    """v4 (Phase 2): roll-cost / whipsaw ledger. Fully DERIVED from executions
+    (recompute_derived rebuilds it after every write); the migration just seeds
+    the empty structure so readers never key-error on an un-recomputed load."""
+    state.setdefault("roll_ledger", {"rolls": [], "by_ticker": {}})
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
+    3: _v3_to_v4,
 }
 
 

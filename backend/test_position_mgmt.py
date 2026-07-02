@@ -1,0 +1,261 @@
+"""Phase 2 tests — 75% buyback surfacing, defend roll-down math, atomic live
+roll payload (asserted, never transmitted), the derived roll ledger, assignment
+risk on the Positions view, and the accumulation-vs-kill-switch guard."""
+import os
+import tempfile
+from datetime import date, timedelta
+
+import pandas as pd
+import pytest
+
+os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="cfm-test-"))
+
+import config  # noqa: E402
+import executor  # noqa: E402
+import logging_handler as log  # noqa: E402
+import position_manager as pm  # noqa: E402
+import schwab_api  # noqa: E402
+
+
+def _frame(values, vol=1e6):
+    idx = pd.bdate_range("2024-01-01", periods=len(values))
+    c = pd.Series(values, index=idx, dtype=float)
+    return pd.DataFrame({"Open": c, "High": c + 1, "Low": c - 1, "Close": c, "Volume": vol}, index=idx)
+
+
+@pytest.fixture()
+def isolated_state(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(config, "_demo_mode", False)
+    return tmp_path
+
+
+# ---- 75% buyback surfacing ---------------------------------------------------
+def test_enrich_short_decay_and_roll_now():
+    sc = {"strike": 132, "contracts": 5, "dte": 4, "current_bid": 0.25,
+          "entry_premium_total": 600.0}  # sold 1.20/sh, now 0.25 -> 79.2% decayed
+    out = pm.enrich_short(sc, stock_price=134.0, dividend=None)
+    assert out["sold_per_share"] == 1.20
+    assert out["decay_pct"] == pytest.approx(79.2, abs=0.1)
+    assert out["roll_now"] is True
+    assert out["below_strike"] is False
+    # Inside expiry week (<=2 DTE) the 75% rule hands off to the normal roll.
+    assert pm.enrich_short(dict(sc, dte=2), 134.0, None)["roll_now"] is False
+    # Barely decayed -> no badge.
+    assert pm.enrich_short(dict(sc, current_bid=0.90), 134.0, None)["roll_now"] is False
+
+
+def test_enrich_short_assignment_risk_flag():
+    today = date.today()
+    sc = {"strike": 132, "contracts": 5, "dte": 4, "current_bid": 0.25,
+          "entry_premium_total": 600.0}
+    div = {"ex_date": (today + timedelta(days=2)).isoformat(), "amount": 0.55}
+    out = pm.enrich_short(sc, stock_price=128.0, dividend=div)
+    assert out["assignment_risk"]["dividend"] == 0.55
+    assert "SHORT STOCK" in out["assignment_risk"]["note"]
+    assert out["below_strike"] is True
+    # Rich extrinsic -> no flag.
+    assert pm.enrich_short(dict(sc, current_bid=1.50), 128.0, div)["assignment_risk"] is None
+
+
+# ---- defend recommendation -----------------------------------------------------
+def test_defend_recommendation_regime_atr_strike(isolated_state, monkeypatch):
+    import data_handler
+    import screening
+    # Tiny close oscillation (ends exactly at 128) keeps realized vol nonzero
+    # while the +/-1 High/Low range still pins ATR at 2.
+    wiggle = ([128.1, 128.0, 127.9, 128.0] * 65)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame(wiggle))
+    state = log.load_state()
+    state["positions"] = [{
+        "ticker": "PG", "sector": "XLP", "status": "active",
+        "leap": {"strike": 140, "contracts": 5},
+        "short_calls": [{"strike": 132, "contracts": 5, "dte": 4, "current_bid": 0.25,
+                         "entry_premium_total": 600.0}],
+    }]
+    log.save_state(state)
+
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "green"})
+    rec = executor.defend_recommendation("PG")
+    # flat frame: ATR 2 -> GREEN 1.5x: 128 - 3 = 125
+    assert rec["breached"] is True and rec["recommended_strike"] == 125.0
+    assert rec["atr_mult"] == 1.5
+    assert rec["new_premium_per_share"] is not None
+    assert rec["net_total"] is not None
+    assert rec["cost_basis_effect"] == -rec["net_total"]
+
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "yellow"})
+    rec = executor.defend_recommendation("PG")
+    # YELLOW 2.0x: 128 - 4 = 124
+    assert rec["recommended_strike"] == 124.0 and rec["atr_mult"] == 2.0
+
+    # Stock above every short strike -> nothing to defend.
+    state = log.load_state()
+    state["positions"][0]["short_calls"][0]["strike"] = 120
+    log.save_state(state)
+    assert executor.defend_recommendation("PG")["breached"] is False
+
+
+# ---- roll ledger (derived) ------------------------------------------------------
+def test_roll_writes_ledger_with_reason_and_net(isolated_state):
+    executor.execute({"action": "sell_short", "ticker": "NVDA", "strike": 130,
+                      "contracts": 5, "premium_per_share": 1.20, "stock_price": 128})
+    res = executor.execute({
+        "action": "roll_short", "ticker": "NVDA", "contracts": 5,
+        "from_strike": 130, "close_price_per_share": 0.25,
+        "to_strike": 125, "to_expiration": "2026-07-10", "to_dte": 7,
+        "premium_per_share": 1.10, "stock_price": 128,
+        "roll_reason": "defend",
+    })
+    assert res["net_credit"] == pytest.approx((1.10 - 0.25) * 5 * 100)
+
+    state = log.load_state()
+    ledger = state["roll_ledger"]
+    assert len(ledger["rolls"]) == 1
+    roll = ledger["rolls"][0]
+    assert roll["reason"] == "defend"
+    assert roll["from_strike"] == 130 and roll["to_strike"] == 125
+    assert roll["buyback_cost"] == 125.0 and roll["new_premium"] == 550.0
+    assert roll["net"] == 425.0
+    agg = ledger["by_ticker"]["NVDA"]
+    assert agg["count"] == 1 and agg["net_total"] == 425.0 and agg["drag_total"] == 0.0
+    # Both execution legs carry the same roll_id + reason.
+    legs = [e for e in state["executions"] if e.get("roll_id")]
+    assert len(legs) == 2 and len({e["roll_id"] for e in legs}) == 1
+    assert all(e["roll_reason"] == "defend" for e in legs)
+
+
+def test_roll_debit_counts_as_drag(isolated_state):
+    executor.execute({"action": "sell_short", "ticker": "NVDA", "strike": 130,
+                      "contracts": 5, "premium_per_share": 0.50, "stock_price": 128})
+    executor.execute({
+        "action": "roll_short", "ticker": "NVDA", "contracts": 5,
+        "from_strike": 130, "close_price_per_share": 2.00,  # buying back ITM, dear
+        "to_strike": 124, "to_dte": 7, "premium_per_share": 1.50,
+        "stock_price": 126, "roll_reason": "not-a-valid-reason",
+    })
+    state = log.load_state()
+    roll = state["roll_ledger"]["rolls"][0]
+    assert roll["reason"] == "scheduled"  # unknown reasons normalize
+    assert roll["net"] == -250.0
+    assert state["roll_ledger"]["by_ticker"]["NVDA"]["drag_total"] == -250.0
+
+
+# ---- atomic live roll ------------------------------------------------------------
+def test_live_roll_builds_single_two_leg_net_order(isolated_state, monkeypatch):
+    placed = {}
+
+    class _FakeClient:
+        def primary_account_hash(self):
+            return "HASH"
+
+        def place_order(self, account_hash, order):
+            placed["account_hash"] = account_hash
+            placed["order"] = order
+            return {"orderId": "9001"}
+
+    import data_handler
+    # Seed the open short on the paper path, then flip live for the roll.
+    executor.execute({"action": "sell_short", "ticker": "NVDA", "strike": 130,
+                      "contracts": 5, "premium_per_share": 1.20, "stock_price": 128,
+                      "expiration": "2026-07-02"})
+    monkeypatch.setenv("CFM_LIVE_TRADING", "1")
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: _FakeClient())
+    res = executor.execute({
+        "action": "roll_short", "ticker": "NVDA", "contracts": 5,
+        "from_strike": 130, "from_expiration": "2026-07-02",
+        "close_price_per_share": 0.25,
+        "to_strike": 125, "to_expiration": "2026-07-10", "to_dte": 7,
+        "premium_per_share": 1.10, "stock_price": 128, "roll_reason": "75%-rule",
+    })
+    assert res["status"] == "working" and res["order_id"] == "9001"
+
+    order = placed["order"]
+    assert order["orderType"] == "NET_CREDIT"  # 1.10 - 0.25 = +0.85 credit
+    assert order["price"] == "0.85"
+    assert order["orderStrategyType"] == "SINGLE"
+    assert order["complexOrderStrategyType"] == "CUSTOM"
+    legs = order["orderLegCollection"]
+    assert [l["instruction"] for l in legs] == ["BUY_TO_CLOSE", "SELL_TO_OPEN"]
+    assert legs[0]["instrument"]["symbol"] == schwab_api.occ_option_symbol("NVDA", "2026-07-02", 130)
+    assert legs[1]["instrument"]["symbol"] == schwab_api.occ_option_symbol("NVDA", "2026-07-10", 125)
+    assert all(l["quantity"] == 5 for l in legs)
+
+    # Nothing committed yet — the roll is pending, the old short still open.
+    state = log.load_state()
+    assert "9001" in state["pending_orders"]
+    assert state["pending_orders"]["9001"]["kind"] == "roll_short"
+    assert not any(e.get("roll_id") for e in state["executions"])
+
+
+def test_live_roll_fill_commits_both_legs_at_leg_prices(isolated_state, monkeypatch):
+    close_sym = schwab_api.occ_option_symbol("NVDA", "2026-07-02", 130)
+    open_sym = schwab_api.occ_option_symbol("NVDA", "2026-07-10", 125)
+
+    class _FakeClient:
+        def primary_account_hash(self):
+            return "HASH"
+
+        def place_order(self, account_hash, order):
+            return {"orderId": "9001"}
+
+        def get_order(self, account_hash, order_id):
+            return {
+                "status": "FILLED",
+                "orderLegCollection": [
+                    {"legId": 1, "instrument": {"symbol": close_sym}},
+                    {"legId": 2, "instrument": {"symbol": open_sym}},
+                ],
+                "orderActivityCollection": [{
+                    "executionLegs": [
+                        {"legId": 1, "price": 0.30},   # actual buyback fill
+                        {"legId": 2, "price": 1.15},   # actual new-premium fill
+                    ],
+                }],
+            }
+
+    import data_handler
+    # Seed the open short on the paper path, then flip live for the roll.
+    executor.execute({"action": "sell_short", "ticker": "NVDA", "strike": 130,
+                      "contracts": 5, "premium_per_share": 1.20, "stock_price": 128,
+                      "expiration": "2026-07-02"})
+    monkeypatch.setenv("CFM_LIVE_TRADING", "1")
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: _FakeClient())
+    executor.execute({
+        "action": "roll_short", "ticker": "NVDA", "contracts": 5,
+        "from_strike": 130, "from_expiration": "2026-07-02",
+        "close_price_per_share": 0.25,
+        "to_strike": 125, "to_expiration": "2026-07-10", "to_dte": 7,
+        "premium_per_share": 1.10, "stock_price": 128, "roll_reason": "75%-rule",
+    })
+    out = executor.order_status("9001")
+    assert out["status"] == "filled"
+
+    state = log.load_state()
+    assert state["pending_orders"] == {}
+    roll = state["roll_ledger"]["rolls"][0]
+    # Committed at the ACTUAL leg fills, not the staged estimates.
+    assert roll["buyback_cost"] == pytest.approx(0.30 * 5 * 100)
+    assert roll["new_premium"] == pytest.approx(1.15 * 5 * 100)
+    assert roll["reason"] == "75%-rule"
+    pos = log.find_position(state, "NVDA")
+    assert [sc["strike"] for sc in pos["short_calls"]] == [125]
+
+
+# ---- accumulation guard -------------------------------------------------------
+def test_accumulation_blocked_on_kill_switch(isolated_state, monkeypatch):
+    import kill_switch
+    monkeypatch.setattr(kill_switch, "evaluate",
+                        lambda t: {"ticker": t, "status": "yellow",
+                                   "rs3m_vs_spy": 1.0, "rs3m_vs_sector": 0.5})
+    state = log.load_state()
+    # Flag off (default): the cap is the only limit.
+    assert pm.can_add_shares(state, "NVDA") is True
+    monkeypatch.setattr(config, "BLOCK_ACCUMULATION_ON_RS_DETERIORATION", True)
+    assert pm.can_add_shares(state, "NVDA") is False
+    monkeypatch.setattr(kill_switch, "evaluate",
+                        lambda t: {"ticker": t, "status": "green",
+                                   "rs3m_vs_spy": 8.0, "rs3m_vs_sector": 3.0})
+    assert pm.can_add_shares(state, "NVDA") is True

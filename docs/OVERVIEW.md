@@ -31,6 +31,7 @@ they never rewrite executions.
 | --- | --- |
 | 2 | `alerts` (active set, capped log, settings, last_run) — Phase 0 |
 | 3 | per-position `circuit_breaker` + `dividend` snapshot — Phase 1 |
+| 4 | `roll_ledger` (derived from paired roll executions) — Phase 2 |
 
 ## Alerting engine (Phase 0)
 
@@ -129,3 +130,43 @@ Schwab fundamentals → Alpha Vantage OVERVIEW → manual override
 LEAP cost vs the target, red when inadequate) and `Earnings` (days to the next
 report, cache/override-only — the scorecard never triggers a provider fetch
 storm). **API**: `GET /api/account-gate?ticker=&contracts=&leap_cost=&weekly_extrinsic=`.
+
+## Position management mechanics (Phase 2)
+
+- **75% buyback rule** (HARD_CFM_RULE): every open short shows `% decayed`
+  (sale premium vs current value, both derived from stored execution data);
+  ≥75% decayed with >2 DTE shows a ROLL NOW badge on the Positions tab (and
+  fires the `BUYBACK_75` alert). Clicking it stages the roll with reason
+  `75%-rule`.
+- **Defend / roll-down engine**: when the underlying closes below a short
+  strike, `GET /api/defend?ticker=` returns the defensive roll: new strike =
+  price − 1.5×ATR (GREEN) or 2.0×ATR (YELLOW), est. net credit/debit, the new
+  short's extrinsic, and the cost-basis effect. The Positions tab shows the
+  recommendation with one-click staging into the roll modal (reason `defend`).
+  Estimates come from trailing vol; the staged roll re-prices from the live
+  chain.
+- **Atomic rolls in live mode**: `roll_short` with `CFM_LIVE_TRADING=1`
+  transmits ONE two-leg NET_CREDIT/NET_DEBIT ticket
+  (`schwab_api.build_roll_order`: BUY_TO_CLOSE old + SELL_TO_OPEN new) — no
+  legging risk — through the same pending → poll → commit/auto-cancel
+  lifecycle; the commit overlays the actual per-leg fill prices. Paper mode
+  logs both legs immediately at the staged prices.
+- **Roll-cost / whipsaw ledger** (`state.roll_ledger`, fully derived): both
+  legs of every roll carry `roll_id` + `roll_reason`
+  (scheduled | 75%-rule | defend | earnings | kill-switch-exit);
+  `recompute_derived` rebuilds per-roll entries (buyback cost, new premium,
+  net) and per-ticker aggregates (count, net_total, drag_total = debits paid).
+  Positions tab shows cumulative roll drag per position; Theta tab nets rolls
+  against juice. This is the dataset that later validates 1.5× vs 2×ATR strike
+  placement.
+- **Assignment-risk monitor**: each short is checked against the position's
+  stored dividend (extrinsic < dividend before ex-div → flag + alert). The
+  flag's tooltip explains the PMCC nuance: the short is covered by a LEAP, not
+  stock, so assignment creates SHORT STOCK that owes the dividend — roll
+  before ex-div.
+- **Accumulation vs kill-switch** (`BLOCK_ACCUMULATION_ON_RS_DETERIORATION`,
+  HARD_CFM_RULE candidate, OFF by default pending confirmation): when on,
+  `can_add_shares` refuses accumulation on any name whose kill switch reads
+  red (exit in progress) or yellow (RS3M thinning toward the kill line) — the
+  pullback play buys weakness, the kill switch sells it; without the guard the
+  two rules can add to a name the strategy is 1–2 days from exiting.

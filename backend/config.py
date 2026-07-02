@@ -217,6 +217,14 @@ JUICE_RICH_FACTOR = 1.75
 # storing SOME line is required (HARD_CFM_RULE), only the formula is tunable.
 CIRCUIT_BREAKER_ATR_MULT = 2.0
 
+# HARD_CFM_RULE (candidate — OFF by default, pending confirmation): block
+# pullback share-accumulation on any ticker whose kill switch reads non-green
+# (red = exit in progress, yellow = RS3M thinning toward the kill line). The
+# accumulation play buys weakness, the kill switch sells it — without this
+# guard the two rules can add to a name the strategy is 1-2 days from exiting.
+# Flip to True to enforce; the Positions tab surfaces the block either way.
+BLOCK_ACCUMULATION_ON_RS_DETERIORATION = False
+
 # ---- Capital ---------------------------------------------------------------
 CAPITAL = 35000
 RESERVE_REQUIRED = 13000

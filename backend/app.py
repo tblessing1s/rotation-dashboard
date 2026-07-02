@@ -154,6 +154,20 @@ def api_option_chain(ticker: str):
         return _err(e)
 
 
+@app.route("/api/defend")
+def api_defend():
+    """Defensive roll-down recommendation for a position whose short strike has
+    been breached (underlying < strike): regime-aware new strike, est. net
+    credit/debit, new extrinsic, and cost-basis effect."""
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify(executor.defend_recommendation(ticker))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/roll-suggestion")
 def api_roll_suggestion():
     ticker = request.args.get("ticker", "")
@@ -265,9 +279,18 @@ def api_theta_ledger():
         if ticker:
             weeks = [w for w in weeks if w.get("ticker", "").upper() == ticker.upper()]
         totals = ledger.get("totals", {})
+        roll_ledger = state.get("roll_ledger", {"rolls": [], "by_ticker": {}})
+        if ticker:
+            roll_ledger = {
+                "rolls": [r for r in roll_ledger.get("rolls", [])
+                          if r.get("ticker", "").upper() == ticker.upper()],
+                "by_ticker": {k: v for k, v in roll_ledger.get("by_ticker", {}).items()
+                              if k.upper() == ticker.upper()},
+            }
         out = {"weeks": weeks, "totals": totals,
                "extrinsic_summary": ledger.get("extrinsic_summary", {}),
-               "extrinsic_payback": state.get("extrinsic_payback", {})}
+               "extrinsic_payback": state.get("extrinsic_payback", {}),
+               "roll_ledger": roll_ledger}
         if period in ("week", "month", "ytd"):
             key = {"week": "this_week", "month": "this_month", "ytd": "ytd"}[period]
             out["period"] = {"period": period, "net_juice": totals.get(key)}

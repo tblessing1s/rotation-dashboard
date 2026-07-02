@@ -403,6 +403,36 @@ def build_single_leg_order(instruction: str, quantity: int, option_symbol: str,
     }
 
 
+def build_roll_order(quantity: int, buy_to_close_symbol: str, sell_to_open_symbol: str,
+                     net_price: float) -> dict:
+    """A single two-leg NET_CREDIT/NET_DEBIT DAY order for a short-call roll:
+    buy-to-close the old short + sell-to-open the new one on ONE ticket, so the
+    roll cannot leg out (fill one side, miss the other). `net_price` is per
+    share: positive = credit received, negative = debit paid. CUSTOM covers any
+    strike/expiration combination (vertical or diagonal)."""
+    credit = float(net_price) >= 0
+    return {
+        "orderType": "NET_CREDIT" if credit else "NET_DEBIT",
+        "session": "NORMAL",
+        "price": f"{abs(float(net_price)):.2f}",
+        "duration": "DAY",
+        "orderStrategyType": "SINGLE",
+        "complexOrderStrategyType": "CUSTOM",
+        "orderLegCollection": [
+            {
+                "instruction": "BUY_TO_CLOSE",
+                "quantity": int(quantity),
+                "instrument": {"symbol": buy_to_close_symbol, "assetType": "OPTION"},
+            },
+            {
+                "instruction": "SELL_TO_OPEN",
+                "quantity": int(quantity),
+                "instrument": {"symbol": sell_to_open_symbol, "assetType": "OPTION"},
+            },
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Chain parsing (module-level, provider-specific -> normalized dicts)
 # ---------------------------------------------------------------------------
