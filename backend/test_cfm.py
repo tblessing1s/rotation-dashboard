@@ -31,6 +31,17 @@ def test_sectors_parse():
     assert sector_data.sector_for("XLK") == "XLK"  # ETFs map to themselves
 
 
+def test_all_tickers_includes_sector_etfs_as_candidates():
+    # Sector ETFs are liquid, weekly-optionable tickers in their own right —
+    # every scan (Scorecard, Ready-to-Enter, calibration) sweeps all_tickers(),
+    # so including them here is what makes them selectable everywhere.
+    names = sector_data.all_tickers()
+    for etf in sector_data.sector_etfs():
+        assert etf in names
+    assert "NVDA" in names  # constituents are still present too
+    assert len(names) == len(set(names))  # de-duplicated
+
+
 # ---- indicators ------------------------------------------------------------
 def test_sma_and_pct_from_ma():
     df = _frame(list(range(1, 60)))
@@ -810,6 +821,88 @@ def test_entry_gate_level3_splits_spy_and_sector_legs(monkeypatch):
     assert l3["pass"] is False         # combined fails
     assert spy_check["pass"] is False  # vs SPY +2 is not > +5
     assert sector_check["pass"] is True  # vs Sector +3 IS > 0 — the leg that confused the user
+
+
+def test_stock_row_waives_self_sector_leg_for_a_sector_etf(monkeypatch):
+    # XLK entered as its own CFM candidate has no distinct peer sector to beat
+    # — comparing it to itself would otherwise compute to a tautological 0
+    # every time, permanently failing the "beats sector" leg. That leg must be
+    # waived (N/A), not scored as a fail, and rs3m_vs_sector shown as None
+    # rather than a misleading 0.00%.
+    import data_handler
+    import screening
+
+    df = _frame([100.0] * 70)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(ind, "rs3m", lambda d, b, **k: 8.0)  # beats SPY either way
+    monkeypatch.setattr(ind, "atr_pct", lambda d, **k: 2.0)
+    monkeypatch.setattr(ind, "consolidating", lambda d: True)
+
+    row = screening._stock_row("XLK", df, 8.0, "XLK", regime_green=True, sector_strong=True)
+    assert row["is_sector_etf"] is True
+    assert row["rs3m_vs_sector"] is None
+    assert row["stock_strong"] is True    # waived, not failed
+    assert "stock" not in row["blocked_by"]
+    assert row["status"] == "ready"
+
+    # A regular constituent (ticker != sector_etf) is unaffected.
+    normal = screening._stock_row("NVDA", df, 8.0, "XLK", regime_green=True, sector_strong=True)
+    assert normal["is_sector_etf"] is False
+    assert normal["rs3m_vs_sector"] == 0.0  # 8 - 8, a REAL (if coincidental) number here
+
+
+def test_entry_gate_level3_waives_sector_leg_for_a_sector_etf(monkeypatch):
+    import data_handler
+    import screening
+    screening._results.clear()
+
+    n = 260
+    spy = _frame([100.0] * n)
+    xlk = _frame([100 + i * 0.6 for i in range(n)])  # trending, consolidating-ish
+
+    def fake_get_daily(symbol, force=False):
+        return spy if symbol.upper() == "SPY" else xlk
+
+    monkeypatch.setattr(data_handler, "get_daily", fake_get_daily)
+    monkeypatch.setattr(data_handler, "get_many", lambda syms, force=False: {s.upper(): xlk for s in syms})
+    monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
+    monkeypatch.setattr(screening, "regime",
+                        lambda: {"status": "green", "breadth": 70, "vix": 15, "spy_trend": "up"})
+    monkeypatch.setattr(screening, "sectors",
+                        lambda: {"XLK": {"name": "Technology", "rs3m": 20, "breadth": 70,
+                                         "atr_expanding": False, "status": "green"}})
+
+    gate = screening.entry_gate("XLK")
+    l3 = next(l for l in gate["levels"] if l["level"] == 3)
+    spy_check, sector_check = l3["checks"]
+    assert sector_check["pass"] is True            # waived, not a real fail
+    assert "N/A" in sector_check["label"]
+    assert spy_check["pass"] is True                # XLK genuinely beats SPY here
+    assert l3["pass"] is True
+    assert l3["detail"]["is_sector_etf"] is True
+    assert l3["detail"]["rs3m_vs_sector"] is None
+
+
+def test_stock_filter_includes_the_sector_etf_alongside_constituents(monkeypatch):
+    import data_handler
+    import screening
+    screening._results.clear()
+
+    df = _frame([100.0] * 70)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "green"})
+    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {"status": "green"}})
+    monkeypatch.setattr(ind, "rs3m", lambda d, b, **k: 5.0)
+    monkeypatch.setattr(ind, "atr_pct", lambda d, **k: 2.0)
+    monkeypatch.setattr(ind, "consolidating", lambda d: True)
+
+    rows = screening._compute_stock_filter("XLK")
+    tickers = [r["ticker"] for r in rows]
+    assert "XLK" in tickers  # the ETF is a row in its own sector's filter view
+    etf_row = next(r for r in rows if r["ticker"] == "XLK")
+    assert etf_row["is_sector_etf"] is True
+    assert "NVDA" in tickers  # constituents are still present
 
 
 def test_filter_ready_requires_regime_and_sector(monkeypatch):

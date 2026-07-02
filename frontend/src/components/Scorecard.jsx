@@ -101,6 +101,14 @@ function ScoreRow({ row, expanded, onToggle }) {
               <span className="flex items-center gap-1.5">
                 <span className="text-slate-500">{expanded ? "▾" : "▸"}</span>
                 {row.ticker}
+                {row.is_sector_etf && (
+                  <span
+                    title="Sector ETF — a valid CFM candidate in its own right. RS vs Sector is N/A (it IS the sector)."
+                    className="rounded border border-sky-600/50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-400"
+                  >
+                    ETF
+                  </span>
+                )}
                 {row.has_weeklies === false && (
                   <span
                     title="No weekly options — can't run CFM (weekly short) on this name"

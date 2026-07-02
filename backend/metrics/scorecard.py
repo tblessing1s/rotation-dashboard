@@ -347,9 +347,16 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     verdict (a strong name that simply lacks weeklies still scores on its merits)."""
     df = data_handler.get_daily(ticker)
     metrics = metrics_for(df, spy_df, sector_df)
+    # A sector ETF scored as its own candidate has no distinct peer sector to
+    # beat — rs3m_vs_sector would otherwise compute to a tautological ~0 every
+    # time (same frame vs itself), which reads as a real number, not "N/A".
+    is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
+    if is_sector_etf:
+        metrics["rs3m_vs_sector"] = None
     row = _round_row(metrics)
     row["ticker"] = ticker.upper()
     row["sector"] = sector_etf
+    row["is_sector_etf"] = is_sector_etf
     row["has_weeklies"] = has_weeklies
     if gate is not None:
         row["gate_cleared_level"] = gate.get("cleared_level", 0)

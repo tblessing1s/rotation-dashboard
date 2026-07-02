@@ -61,7 +61,19 @@ export default function StockFilter({ onSelectStock }) {
               const weak = row.rs3m_vs_sector != null && row.rs3m_vs_sector < 0;
               return (
                 <tr key={row.ticker} className={`border-t border-slate-800 ${weak ? "bg-rose-500/5" : ""}`}>
-                  <td className="py-2 pr-3 font-semibold text-slate-100">{row.ticker}</td>
+                  <td className="py-2 pr-3 font-semibold text-slate-100">
+                    <span className="flex items-center gap-1.5">
+                      {row.ticker}
+                      {row.is_sector_etf && (
+                        <span
+                          title="Sector ETF — a valid CFM candidate in its own right. RS3M vs Sector is N/A (it IS the sector)."
+                          className="rounded border border-sky-600/50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-400"
+                        >
+                          ETF
+                        </span>
+                      )}
+                    </span>
+                  </td>
                   <td className="py-2 pr-3 text-slate-400">{row.sector}</td>
                   <td className="py-2 pr-3">{pct(row.rs3m_vs_spy)}</td>
                   <td className={`py-2 pr-3 ${weak ? "text-rose-400" : "text-slate-200"}`}>{pct(row.rs3m_vs_sector)}</td>
