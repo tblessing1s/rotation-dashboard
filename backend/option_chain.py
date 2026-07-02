@@ -421,7 +421,10 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     if atr_val is not None and price is not None:
         suggested_strike = indicators.short_strike(price, atr_val, atr_mult)
         # Nearest expiration with at least one day left = this week's short.
-        dated = [c for c in contracts if c.get("dte") is not None and c["dte"] >= 0]
+        # dte > 0 (not >= 0): a 0-DTE contract expires today, so it has almost no
+        # time value left and its delta collapses to ~1.0/~0.0 near expiration —
+        # useless for a fresh entry, which wants a full week of premium to sell.
+        dated = [c for c in contracts if c.get("dte") is not None and c["dte"] > 0]
         weekly_exp = None
         if dated:
             weekly_exp = min(dated, key=lambda c: c["dte"])["expiration"]

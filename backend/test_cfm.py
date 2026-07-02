@@ -300,6 +300,38 @@ def test_itm_call_delta_uses_otm_put_iv(monkeypatch):
     assert 0.80 < s180["delta"] < 0.90  # ~0.85 from the 90% put IV, not ~1.0
 
 
+def test_weekly_short_skips_0dte_expiration(monkeypatch):
+    # A chain that includes a same-day (0 DTE) expiration alongside a proper
+    # week-out one must never pick the 0-DTE leg as "this week's short" — its
+    # near-zero time value collapses delta to ~1.0 and is useless to sell fresh.
+    import option_chain as oc
+    import data_handler
+    import logging_handler as log
+    import screening
+
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "green"})
+    df = _frame([112.5] * 60)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 112.5, "source": "t"})
+    monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {}})
+    monkeypatch.setattr(log, "find_position", lambda s, t: None)
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {
+        "status": "SUCCESS", "underlyingPrice": 112.5,
+        "callExpDateMap": {
+            "2026-07-02:0": {"105.0": [
+                {"symbol": "C0", "strikePrice": 105.0, "daysToExpiration": 0,
+                 "bid": 6.85, "ask": 8.30, "mark": 7.58, "delta": 1.0, "volatility": 45.1}]},
+            "2026-07-10:5": {"105.0": [
+                {"symbol": "C5", "strikePrice": 105.0, "daysToExpiration": 5,
+                 "bid": 7.10, "ask": 8.50, "mark": 7.80, "volatility": 42.0}]},
+        },
+        "putExpDateMap": {},
+    })
+    out = oc.option_chain("ON")
+    assert out["weekly"]["expiration"] == "2026-07-10"
+    assert out["weekly"]["dte"] == 5
+
+
 def test_implied_vol_put_roundtrip():
     p = ind._bs_put_price(117.7, 108.0, 2 / 365, 0.04, 0.90)
     assert ind.implied_vol_put(p, 117.7, 108.0, 2 / 365, 0.04) == pytest.approx(0.90, abs=1e-3)
