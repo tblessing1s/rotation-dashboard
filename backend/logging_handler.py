@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config
 import migrations
@@ -36,6 +36,7 @@ def _default_state() -> dict:
         "theta_ledger": {"weeks": [], "totals": {"this_week": 0, "this_month": 0, "ytd": 0, "pct_deployed": 0}},
         "extrinsic_payback": {},
         "roll_ledger": {"rolls": [], "by_ticker": {}},
+        "cycles": [],
         # Live orders placed at the broker but not yet filled. Keyed by Schwab
         # order id; an entry is removed when the order fills (then committed as an
         # execution) or is cancelled/rejected.
@@ -261,4 +262,110 @@ def recompute_derived(state: dict) -> dict:
         "rolls": sorted(rolls.values(), key=lambda r: r["date"]),
         "by_ticker": by_ticker,
     }
+
+    # Closed-cycle records — one immutable summary per buy_leap -> close_leap
+    # window, entirely derived from the executions between them. The entry
+    # scorecard snapshot and the exit reason live ON those executions (captured
+    # at trade time; they can't be reconstructed later), so this recompute is
+    # deterministic and idempotent.
+    def _parse_day(s):
+        try:
+            return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            return None
+
+    cycles: list[dict] = []
+    open_cycle: dict[str, dict] = {}
+    for e in execs:
+        t = e.get("ticker", "")
+        a = e.get("action")
+        if a == "buy_leap":
+            open_cycle[t] = {"entry": e, "juice": 0.0, "roll_pairs": {}}
+            continue
+        cyc = open_cycle.get(t)
+        if not cyc:
+            continue
+        rid = e.get("roll_id")
+        if a == "close_short":
+            cyc["juice"] += float(e.get("net_juice_total") or 0)
+            if rid:
+                cyc["roll_pairs"].setdefault(rid, {})["buy"] = float(e.get("close_total") or 0)
+        elif a == "sell_short" and rid:
+            cyc["roll_pairs"].setdefault(rid, {})["sell"] = float(e.get("premium_total") or 0)
+        elif a == "close_leap":
+            entry = cyc["entry"]
+            capital = float(entry.get("execution_total") or 0)
+            leap_pnl = float(e.get("realized_pnl") or 0)
+            gross_juice = round(cyc["juice"], 2)
+            roll_nets = [p["sell"] - p["buy"] for p in cyc["roll_pairs"].values()
+                         if "sell" in p and "buy" in p]
+            roll_net = round(sum(roll_nets), 2)
+            roll_drag = round(sum(n for n in roll_nets if n < 0), 2)
+            net_result = round(leap_pnl + gross_juice, 2)
+            d_in, d_out = _parse_day(entry.get("date")), _parse_day(e.get("date"))
+            days_held = (d_out - d_in).days if d_in and d_out else None
+            net_return_pct = round(net_result / capital * 100, 2) if capital else None
+            cycles.append({
+                "id": f"cycle_{len(cycles) + 1:03d}",
+                "ticker": t,
+                "entry_date": str(entry.get("date", ""))[:10],
+                "exit_date": str(e.get("date", ""))[:10],
+                "days_held": days_held,
+                "capital_deployed": round(capital, 2),
+                "gross_juice": gross_juice,
+                "roll_count": len(cyc["roll_pairs"]),
+                "roll_net": roll_net,
+                "roll_drag": roll_drag,
+                "leap_pnl": round(leap_pnl, 2),
+                "net_result": net_result,
+                "net_return_pct": net_return_pct,
+                # HARD_CFM_RULE: the 15-25% per 4-8 week cycle target.
+                "target_range_pct": [config.CYCLE_RETURN_MIN * 100, config.CYCLE_RETURN_MAX * 100],
+                "target_met": (net_return_pct is not None
+                               and net_return_pct >= config.CYCLE_RETURN_MIN * 100),
+                "exit_reason": e.get("exit_reason") or "discretionary",
+                "entry_snapshot": entry.get("entry_snapshot"),
+                "wash_sale": None,
+            })
+            del open_cycle[t]
+
+    # Wash-sale flagging (visibility only, not tax software): a loss-closing
+    # cycle re-entered in the same underlying within the window is flagged;
+    # a recent loss with the window still open is marked so a NEW entry knows.
+    def _parse_ts(s):
+        try:
+            return datetime.strptime(str(s)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            return None
+
+    window = timedelta(days=config.WASH_SALE_WINDOW_DAYS)
+    buys_by_ticker: dict[str, list] = {}      # ticker -> [(exec_index, ts)]
+    close_by_cycle: dict[str, tuple] = {}     # "ticker|exit_date" -> (exec_index, ts)
+    for i, e in enumerate(execs):
+        ts = _parse_ts(e.get("date"))
+        if ts is None:
+            continue
+        if e.get("action") == "buy_leap":
+            buys_by_ticker.setdefault(e.get("ticker", ""), []).append((i, ts))
+        elif e.get("action") == "close_leap":
+            close_by_cycle[f"{e.get('ticker', '')}|{e.get('date', '')[:10]}"] = (i, ts)
+    for c in cycles:
+        if c["leap_pnl"] >= 0:
+            continue
+        hit = close_by_cycle.get(f"{c['ticker']}|{c['exit_date']}")
+        if hit is None:
+            continue
+        close_idx, exit_ts = hit
+        # "After the exit" is decided by append order (the log is append-only),
+        # so a same-day rebuy counts while the cycle's own entry never does;
+        # the 30-day window is a timestamp comparison.
+        reentry = next((ts for bi, ts in buys_by_ticker.get(c["ticker"], [])
+                        if bi > close_idx and ts <= exit_ts + window), None)
+        if reentry:
+            c["wash_sale"] = {"status": "flagged", "loss": c["leap_pnl"],
+                              "reentry_date": reentry.date().isoformat()}
+        elif datetime.now(timezone.utc) <= exit_ts + window:
+            c["wash_sale"] = {"status": "window_open", "loss": c["leap_pnl"],
+                              "window_ends": (exit_ts + window).date().isoformat()}
+    state["cycles"] = cycles
     return state

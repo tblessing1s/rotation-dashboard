@@ -179,6 +179,18 @@ BOOK = [
 ]
 CONTRACTS = config.LEAP_CONTRACTS  # 5
 
+# Two completed cycles (a target-hit winner and a kill-switch loser) so the
+# History tab, aggregates and juice-journal export have demo data. Derived
+# math: net = leap P&L + weekly juice; return % vs the 15-25% cycle target.
+CLOSED_DEMO = [
+    dict(ticker="PLTR", strike=75, entry_px=95, exec_price=2400, weeks=6,
+         sold=0.80, paid=0.30, close_price=2600, close_px=98,
+         exit_reason="target hit", entry_date="2026-01-12", exit_date="2026-03-06"),
+    dict(ticker="COIN", strike=210, entry_px=250, exec_price=4600, weeks=3,
+         sold=1.10, paid=0.85, close_price=3680, close_px=242,
+         exit_reason="kill switch", entry_date="2026-03-23", exit_date="2026-04-17"),
+]
+
 # A 5th, deliberately broken position that trips every position-based alert
 # condition (see alerts.py) in one evaluator run — the Alerts panel demo.
 # Bought at 160 with a 140 LEAP strike, the stock has collapsed to 128:
@@ -270,6 +282,29 @@ def seed_state(last_close: dict[str, float]) -> None:
                           "contracts": CONTRACTS, "premium_per_share": s["sold"],
                           "stock_price": ad["cur_px"], "dte": s["dte"]})
 
+    # Completed cycles: full enter -> weekly juice -> exit flow, backdated below.
+    for spec in CLOSED_DEMO:
+        t = spec["ticker"]
+        executor.execute({
+            "action": "buy_leap", "ticker": t, "strike": spec["strike"],
+            "contracts": CONTRACTS, "execution_price": spec["exec_price"],
+            "stock_price": spec["entry_px"], "expiration": "2026-06-19",
+            "override_reason": "demo-seed book",
+        })
+        for _ in range(spec["weeks"]):
+            k = spec["strike"] + 20
+            executor.execute({"action": "sell_short", "ticker": t, "strike": k,
+                              "contracts": CONTRACTS, "premium_per_share": spec["sold"],
+                              "stock_price": k})
+            executor.execute({"action": "close_short", "ticker": t, "strike": k,
+                              "contracts": CONTRACTS, "close_price_per_share": spec["paid"],
+                              "stock_price": k - 1, "extrinsic_sold": spec["sold"]})
+        executor.execute({
+            "action": "close_leap", "ticker": t, "strike": spec["strike"],
+            "contracts": CONTRACTS, "close_price": spec["close_price"],
+            "stock_price": spec["close_px"], "exit_reason": spec["exit_reason"],
+        })
+
     # Backdate the execution log + open shorts so the ledger spreads across weeks
     # (executor stamps everything "now"), then patch the live-market fields a
     # quote feed would supply (current LEAP bid, shares, DTEs).
@@ -345,10 +380,29 @@ def seed_state(last_close: dict[str, float]) -> None:
     pos["dividend"] = {"ex_date": (today + timedelta(days=ad["ex_div_in_days"])).isoformat(),
                        "amount": ad["dividend_amount"], "source": "demo-seed"}
 
+    # Backdate the completed cycles so entry/exit dates and days-held derive
+    # correctly (the cycle records rebuild from these dates on recompute).
+    for spec in CLOSED_DEMO:
+        t = spec["ticker"]
+        entry_d = datetime.strptime(spec["entry_date"], "%Y-%m-%d")
+        for e in state["executions"]:
+            if e["ticker"] != t:
+                continue
+            if e["action"] == "buy_leap":
+                e["date"] = entry_d.strftime("%Y-%m-%dT15:00:00Z")
+            elif e["action"] == "close_leap":
+                e["date"] = f"{spec['exit_date']}T19:30:00Z"
+        cyc_sells = [e for e in state["executions"] if e["ticker"] == t and e["action"] == "sell_short"]
+        cyc_closes = [e for e in state["executions"] if e["ticker"] == t and e["action"] == "close_short"]
+        for i, (se, ce) in enumerate(zip(cyc_sells, cyc_closes)):
+            wk = entry_d + timedelta(days=7 * i)
+            se["date"] = (wk + timedelta(days=1)).strftime("%Y-%m-%dT15:30:00Z")
+            ce["date"] = (wk + timedelta(days=4)).strftime("%Y-%m-%dT20:00:00Z")
+
     # Pin earnings for every held name so demo alerts don't depend on a live
     # provider: the alert-demo name reports inside the warning window, the
     # healthy book far outside it.
-    overrides = {t: (today + timedelta(days=ad["earnings_in_days"])).isoformat()}
+    overrides = {ad["ticker"]: (today + timedelta(days=ad["earnings_in_days"])).isoformat()}
     for spec in BOOK:
         overrides[spec["ticker"]] = (today + timedelta(days=45)).isoformat()
     state["metadata"]["earnings_overrides"] = overrides

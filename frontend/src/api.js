@@ -52,6 +52,7 @@ export const api = {
   thetaLedger: (params = "") => request(`/api/theta-ledger${params}`),
   killSwitch: () => request("/api/kill-switch"),
   dailyChecklist: () => request("/api/daily-checklist"),
+  history: () => request("/api/history"),
   alerts: () => request("/api/alerts"),
   runAlerts: (dryRun) =>
     request("/api/alerts/run", {

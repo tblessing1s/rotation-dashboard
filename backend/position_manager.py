@@ -116,8 +116,23 @@ def enrich_position(position: dict, roll_summary: dict | None = None) -> dict:
 
 def positions_view(state: dict) -> list[dict]:
     by_ticker = (state.get("roll_ledger") or {}).get("by_ticker", {})
-    return [enrich_position(p, by_ticker.get(p.get("ticker", "")))
-            for p in state.get("positions", [])]
+    out = [enrich_position(p, by_ticker.get(p.get("ticker", "")))
+           for p in state.get("positions", [])]
+    # Wash-sale visibility on OPEN positions: the cycle derivation marks a
+    # loss-closing cycle "flagged" when the underlying is re-entered inside the
+    # window — carry that onto the currently open position for the same name.
+    flagged: dict[str, dict] = {}
+    for c in state.get("cycles", []):
+        ws = c.get("wash_sale")
+        if ws and ws.get("status") == "flagged":
+            flagged[c["ticker"]] = {"loss_exit_date": c.get("exit_date"),
+                                    "loss": ws.get("loss"),
+                                    "note": "Re-entry within 30 days of a loss exit "
+                                            "— wash-sale rules likely defer the loss."}
+    for p in out:
+        p["wash_sale_flag"] = (flagged.get(p.get("ticker", ""))
+                               if p.get("status") != "closed" else None)
+    return out
 
 
 def capital_summary(state: dict) -> dict:

@@ -12,8 +12,9 @@ import KillSwitchMonitor from "./components/KillSwitchMonitor.jsx";
 import PositionTracker from "./components/PositionTracker.jsx";
 import DailyChecklist from "./components/DailyChecklist.jsx";
 import AlertsPanel from "./components/AlertsPanel.jsx";
+import HistoryTab from "./components/HistoryTab.jsx";
 
-const TABS = ["Scan", "Execute", "Theta", "Kill Switch", "Positions", "Checklist"];
+const TABS = ["Scan", "Execute", "Theta", "Kill Switch", "Positions", "History", "Checklist"];
 
 export default function App() {
   const [tab, setTab] = React.useState("Scan");
@@ -106,6 +107,7 @@ export default function App() {
         {tab === "Theta" && <ThetaLedger key={execNonce} />}
         {tab === "Kill Switch" && <KillSwitchMonitor />}
         {tab === "Positions" && <PositionTracker key={execNonce} />}
+        {tab === "History" && <HistoryTab key={execNonce} />}
         {tab === "Checklist" && (
           <div className="grid gap-4">
             <AlertsPanel />

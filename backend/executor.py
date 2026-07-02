@@ -24,6 +24,11 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
 # "scheduled" so the ledger enum stays clean for later calibration.
 ROLL_REASONS = {"scheduled", "75%-rule", "defend", "earnings", "kill-switch-exit"}
 
+# Why a cycle ended — logged on the close_leap execution, carried onto the
+# derived cycle record. Unrecognized values fall back to "discretionary".
+EXIT_REASONS = {"target hit", "trailing stop", "kill switch", "circuit breaker",
+                "earnings", "discretionary"}
+
 # Schwab order instruction per single-leg CFM action (all legs are calls).
 INSTRUCTION = {
     "buy_leap": "BUY_TO_OPEN",
@@ -290,6 +295,17 @@ def cancel_order(order_id: str) -> dict:
     return {"order_id": order_id, "status": "canceled"}
 
 
+def _entry_snapshot(ticker: str) -> dict | None:
+    """One scorecard row for the ticker, computed at entry time. Best-effort:
+    offline/missing data degrades to a row of Nones, never an error."""
+    try:
+        from metrics import scorecard as scorecard_metrics
+        rows = scorecard_metrics.scorecard([ticker]).get("results") or []
+        return rows[0] if rows else None
+    except Exception:  # noqa: BLE001 — a snapshot must never block an entry
+        return None
+
+
 def _buy_leap(payload, ticker, strike, contracts, stock_price):
     # execution_price is per-contract total dollars; execution_total is the trade.
     price_per_contract = float(payload.get("execution_price") or 0)
@@ -334,7 +350,13 @@ def _buy_leap(payload, ticker, strike, contracts, stock_price):
         except Exception:  # noqa: BLE001 — dividend data must never block an entry
             dividend = {"ex_date": None, "amount": None, "source": "error"}
 
+    # Scorecard verdict + metric snapshot AT ENTRY, frozen onto the immutable
+    # execution — the closed-cycle record later shows what the numbers said the
+    # day the trade went on (this cannot be re-derived after the fact).
+    execution["entry_snapshot"] = _entry_snapshot(ticker)
+
     def apply(position):
+        position["entry_date"] = log.utcnow()[:10]  # a new LEAP starts a new cycle
         position["circuit_breaker"] = circuit_breaker
         position["dividend"] = dividend
         position["leap"] = {
@@ -369,11 +391,13 @@ def _close_leap(payload, ticker, strike, contracts, stock_price):
     cost_basis = float(cost_basis if cost_basis is not None else leap.get("cost_basis") or 0)
     realized_pnl = round(close_total - cost_basis, 2)
 
+    exit_reason = (payload.get("exit_reason") or "").strip()
     execution = {
         "ticker": ticker, "action": "close_leap", "strike": strike, "contracts": contracts,
         "close_price": close_per_contract, "close_total": close_total, "stock_price": stock_price,
         "cost_basis": round(cost_basis, 2), "realized_pnl": realized_pnl,
         "extrinsic_remaining": round(extrinsic_remaining, 2),
+        "exit_reason": exit_reason if exit_reason in EXIT_REASONS else "discretionary",
     }
 
     def apply(position):

@@ -299,6 +299,35 @@ def api_theta_ledger():
         return _err(e)
 
 
+@app.route("/api/history")
+def api_history():
+    """Closed-cycle records + aggregate stats + the weekly net-juice chart."""
+    try:
+        import history
+        return jsonify(history.view(log.load_state()))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/export/juice-journal")
+def api_export_juice_journal():
+    """The operator's off-system record (CFM 'juice journal' rule): weekly
+    ledger + roll ledger + closed cycles as CSV (default) or markdown."""
+    fmt = (request.args.get("format") or "csv").lower()
+    try:
+        import history
+        state = log.load_state()
+        if fmt in ("md", "markdown"):
+            body, mime, name = history.juice_journal_markdown(state), "text/markdown", "juice_journal.md"
+        else:
+            body, mime, name = history.juice_journal_csv(state), "text/csv", "juice_journal.csv"
+        return app.response_class(
+            body, mimetype=mime,
+            headers={"Content-Disposition": f"attachment; filename={name}"})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/kill-switch")
 def api_kill_switch():
     try:

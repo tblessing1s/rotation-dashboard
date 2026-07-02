@@ -232,3 +232,13 @@ RESERVE_REQUIRED = 13000
 # Income milestones (monthly net juice) used by the position tracker.
 MILESTONE_HALF_NUT = 2150
 MILESTONE_QUIT_SAFE = 7500
+
+# HARD_CFM_RULE — the weekly net-juice target band: 1-2% of deployed capital
+# per week (the History tab draws this band on the weekly juice chart).
+WEEKLY_JUICE_TARGET_PCT_MIN = 1.0
+WEEKLY_JUICE_TARGET_PCT_MAX = 2.0
+
+# PROPOSED_DEFAULT — wash-sale window (IRS: 30 days either side of a loss
+# sale). Not tax software: the app only FLAGS re-entries inside the window so
+# year-end isn't a surprise.
+WASH_SALE_WINDOW_DAYS = 30

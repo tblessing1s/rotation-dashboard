@@ -32,6 +32,7 @@ they never rewrite executions.
 | 2 | `alerts` (active set, capped log, settings, last_run) — Phase 0 |
 | 3 | per-position `circuit_breaker` + `dividend` snapshot — Phase 1 |
 | 4 | `roll_ledger` (derived from paired roll executions) — Phase 2 |
+| 5 | `cycles` (derived closed-cycle records) — Phase 3 |
 
 ## Alerting engine (Phase 0)
 
@@ -170,3 +171,35 @@ storm). **API**: `GET /api/account-gate?ticker=&contracts=&leap_cost=&weekly_ext
   red (exit in progress) or yellow (RS3M thinning toward the kill line) — the
   pullback play buys weakness, the kill switch sells it; without the guard the
   two rules can add to a name the strategy is 1–2 days from exiting.
+
+## Exit, history & the learning loop (Phase 3)
+
+- **Closed-cycle records** (`state.cycles`, derived): one immutable summary per
+  buy_leap → close_leap window — entry/exit dates, days held, capital deployed
+  (LEAP cost), gross juice, roll count/net/drag, LEAP P&L, net result and
+  return % vs the 15–25% target, exit reason, and the **scorecard snapshot at
+  entry**. The snapshot and exit reason are captured onto the executions at
+  trade time (`entry_snapshot` on buy_leap, `exit_reason` on close_leap —
+  enum: target hit | trailing stop | kill switch | circuit breaker | earnings |
+  discretionary); everything else re-derives deterministically.
+- **History tab**: cycle table (expand a row for the at-entry snapshot),
+  aggregates (win rate, avg return, avg juice/week, avg roll drag, target hit
+  rate), and a weekly net-juice chart against the 1–2%/week-of-deployed target
+  band (`WEEKLY_JUICE_TARGET_PCT_MIN/MAX`, HARD_CFM_RULE).
+  API: `GET /api/history`.
+- **Calibration harness** (`scripts/calibrate.py` → `backend/calibration.py`):
+  replays the scorecard over the cached OHLCV history (same metric functions
+  as production), pairs each (ticker, as-of) sample with forward 4- and 8-week
+  returns, buckets by verdict, and sweeps the ATR-extension cutoff (2.0–4.0)
+  and MFI band variants — a markdown report that upgrades PROPOSED_DEFAULT
+  thresholds from guess to measured. Offline only; reads the parquet cache.
+- **Juice journal export**: `GET /api/export/juice-journal?format=csv|md` —
+  weekly juice ledger + roll ledger + closed cycles (the operator's off-system
+  record per CFM's juice-journal rule). Buttons on the History tab.
+- **Wash-sale flagging** (visibility, not tax software;
+  `WASH_SALE_WINDOW_DAYS`=30 PROPOSED_DEFAULT): a loss-closing cycle
+  re-entered in the same underlying within 30 days is flagged on the cycle
+  AND on the open position; a recent loss with the window still open is
+  marked `window_open` so a new entry knows before it happens.
+- **Demo**: seeding includes two completed cycles (PLTR target-hit winner,
+  COIN kill-switch loser) so History/aggregates/export are populated.

@@ -125,7 +125,8 @@ export default function PositionTracker() {
   if (loading && !data) return <Card title="Positions"><Loading /></Card>;
   if (error) return <Card title="Positions"><p className="text-sm text-rose-400">{error}</p></Card>;
 
-  const positions = data?.positions || [];
+  // Closed positions live on the History tab as cycle records.
+  const positions = (data?.positions || []).filter((p) => p.status !== "closed");
   const cap = data?.capital || {};
   const ms = cap.milestones || {};
 
@@ -164,6 +165,14 @@ export default function PositionTracker() {
             title={`${p.ticker} · ${p.sector || ""}`}
             right={
               <div className="flex items-center gap-2">
+                {p.wash_sale_flag && (
+                  <span
+                    title={p.wash_sale_flag.note}
+                    className="cursor-help rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300"
+                  >
+                    wash-sale window
+                  </span>
+                )}
                 <EarningsBadge earnings={p.earnings} />
                 <Pill status={p.status === "active" ? "green" : "unknown"}>{p.status}</Pill>
               </div>

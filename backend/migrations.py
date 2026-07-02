@@ -13,7 +13,7 @@ theta_ledger / extrinsic_payback / pending_orders).
 """
 from __future__ import annotations
 
-CURRENT_VERSION = 4
+CURRENT_VERSION = 5
 
 
 def default_alert_state() -> dict:
@@ -56,10 +56,18 @@ def _v3_to_v4(state: dict) -> dict:
     return state
 
 
+def _v4_to_v5(state: dict) -> dict:
+    """v5 (Phase 3): closed-cycle records. DERIVED from executions (rebuilt by
+    recompute_derived after migration/writes); the migration seeds the key."""
+    state.setdefault("cycles", [])
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
     3: _v3_to_v4,
+    4: _v4_to_v5,
 }
 
 
