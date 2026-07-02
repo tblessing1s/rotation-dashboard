@@ -77,6 +77,14 @@ function ScoreRow({ row, expanded, onToggle }) {
               <span className="flex items-center gap-1.5">
                 <span className="text-slate-500">{expanded ? "▾" : "▸"}</span>
                 {row.ticker}
+                {row.has_weeklies === false && (
+                  <span
+                    title="No weekly options — can't run CFM (weekly short) on this name"
+                    className="rounded border border-slate-600/60 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-slate-400"
+                  >
+                    no weeklies
+                  </span>
+                )}
               </span>
             ) : c.render ? (
               c.render(row)
@@ -109,17 +117,28 @@ export default function Scorecard({ regimeStatus }) {
   const { data, error, loading } = useApi(api.scorecard, []);
   const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
+  const [weekliesOnly, setWeekliesOnly] = React.useState(true);
   const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
 
   const results = data?.results || [];
+  // Monthly-only names can't run CFM (no weekly short); count them so the toggle
+  // can show how many are being hidden. `null` = undetermined, treated as tradeable.
+  const noWeeklies = React.useMemo(
+    () => results.filter((r) => r.has_weeklies === false).length,
+    [results],
+  );
   const counts = React.useMemo(() => {
     const c = { GO: 0, CAUTION: 0, AVOID: 0 };
     results.forEach((r) => { if (c[r.verdict] != null) c[r.verdict] += 1; });
     return c;
   }, [results]);
 
-  const filtered = verdictFilter === "ALL" ? results : results.filter((r) => r.verdict === verdictFilter);
+  const filtered = results.filter(
+    (r) =>
+      (verdictFilter === "ALL" || r.verdict === verdictFilter) &&
+      (!weekliesOnly || r.has_weeklies !== false),
+  );
 
   // Group by sector, then sort within each group by the active column.
   const groups = React.useMemo(() => {
@@ -157,11 +176,23 @@ export default function Scorecard({ regimeStatus }) {
           {banner.text}
         </div>
       )}
-      <div className="mb-4 flex flex-wrap gap-2">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         {filterBtn("ALL", `All (${results.length})`)}
         {filterBtn("GO", `GO ${counts.GO}`)}
         {filterBtn("CAUTION", `CAUTION ${counts.CAUTION}`)}
         {filterBtn("AVOID", `AVOID ${counts.AVOID}`)}
+        <label
+          className="ml-auto flex cursor-pointer items-center gap-2 text-sm text-slate-400"
+          title="CFM sells a weekly short — hide names whose option chain has no weeklies"
+        >
+          <input
+            type="checkbox"
+            checked={weekliesOnly}
+            onChange={(e) => setWeekliesOnly(e.target.checked)}
+            className="h-4 w-4 accent-emerald-500"
+          />
+          Weeklies only{noWeeklies > 0 ? ` (${noWeeklies} hidden)` : ""}
+        </label>
       </div>
       {error && <p className="text-sm text-rose-400">{error}</p>}
       <div className="overflow-x-auto">
