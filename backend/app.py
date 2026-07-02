@@ -641,6 +641,13 @@ def serve_frontend(path: str = ""):
     return jsonify({"error": "frontend not built — run `npm run build` in frontend/"}), 404
 
 
+# Durability startup check: clear orphaned write-temp files and eagerly load the
+# active store so a corrupt state.json fails fast HERE (refuse to serve) instead
+# of silently re-initializing empty state over the live trading record. Skipped
+# only if explicitly disabled (some one-off scripts import app without a store).
+if os.environ.get("CFM_SKIP_STARTUP_CHECK", "").strip() not in ("1", "true", "yes"):
+    log.startup_check()
+
 # Start the in-process alert scheduler (gunicorn imports this module; the CLI
 # path below reaches it too). start_once() is idempotent and a no-op when
 # CFM_ALERTS_SCHEDULER=0 (tests / one-off scripts).
