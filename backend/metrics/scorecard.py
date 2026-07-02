@@ -330,7 +330,8 @@ def _failed_stock_gate_level(gate: dict | None) -> int | None:
 
 
 def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
-                 sector_df: pd.DataFrame | None, gate: dict | None = None) -> dict:
+                 sector_df: pd.DataFrame | None, gate: dict | None = None,
+                 has_weeklies: bool | None = None) -> dict:
     """One scorecard row: numeric metrics + the composite verdict.
 
     Only the stock's own gate legs decide it: a beats-peers (L3) or consolidating
@@ -339,12 +340,17 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     comparable on their own merits. The verdict is computed from the SAME rounded
     numbers shown in the row, so a displayed value can never silently disagree with
     its verdict. Numeric fields are always fully populated, even on a gate
-    short-circuit."""
+    short-circuit.
+
+    `has_weeklies` (True/False/None) is carried through untouched — CFM can't trade
+    a monthly-only chain, so the UI hides/flags those, but it does NOT change the
+    verdict (a strong name that simply lacks weeklies still scores on its merits)."""
     df = data_handler.get_daily(ticker)
     metrics = metrics_for(df, spy_df, sector_df)
     row = _round_row(metrics)
     row["ticker"] = ticker.upper()
     row["sector"] = sector_etf
+    row["has_weeklies"] = has_weeklies
     if gate is not None:
         row["gate_cleared_level"] = gate.get("cleared_level", 0)
 
@@ -373,6 +379,7 @@ def scorecard(tickers: list[str] | None = None) -> dict:
     carries its sector) and sorted by sector then ticker."""
     import logging_handler as log
     import screening  # local imports avoid any import-time cycle
+    import weeklies
 
     if tickers:
         names = [t.strip().upper() for t in tickers if t.strip()]
@@ -384,6 +391,7 @@ def scorecard(tickers: list[str] | None = None) -> dict:
     etfs = sorted({e for e in sector_of.values() if e})
 
     data_handler.prefetch([config.BENCHMARK] + etfs + names)
+    weeklies.prefetch(names)  # warm the weeklies cache in parallel (no-op if disabled)
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_frames = {e: data_handler.get_daily(e) for e in etfs}
 
@@ -394,7 +402,8 @@ def scorecard(tickers: list[str] | None = None) -> dict:
             gate = screening.entry_gate(t) if etf else None
         except Exception:  # noqa: BLE001 — a gate failure must never sink the row
             gate = None
-        rows.append(score_ticker(t, spy, etf, sector_frames.get(etf), gate))
+        rows.append(score_ticker(t, spy, etf, sector_frames.get(etf), gate,
+                                 has_weeklies=weeklies.has_weeklies(t)))
 
     rows.sort(key=lambda r: (r["sector"], r["ticker"]))
     return {"as_of": log.utcnow(), "results": rows}

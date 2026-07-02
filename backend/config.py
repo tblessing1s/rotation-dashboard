@@ -129,6 +129,11 @@ SHARE_CAP = 500              # accumulate to 500 shares per stock, then rotate
 LEAP_ROLL_DTE = 30           # roll/replace LEAP when it nears this DTE
 ROLL_MAX_DTE = 45            # short-roll picker offers expirations out to this DTE
 
+# CFM sells a weekly short, so a monthly-only chain can't run the strategy. The
+# scorecard flags names without weeklies; the status is near-static so it's cached
+# for a week (override the TTL via WEEKLIES_TTL; disable via SCORECARD_CHECK_WEEKLIES=0).
+WEEKLIES_CACHE_TTL = 7 * 24 * 3600
+
 # ---- Earnings --------------------------------------------------------------
 # Around earnings we either roll the short deep-ITM for protection or exit the
 # position entirely, so the next report date is surfaced on every open position.
