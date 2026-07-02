@@ -14,6 +14,7 @@ import DailyChecklist from "./components/DailyChecklist.jsx";
 import AlertsPanel from "./components/AlertsPanel.jsx";
 import HistoryTab from "./components/HistoryTab.jsx";
 import DataHealth from "./components/DataHealth.jsx";
+import ReadyToEnter from "./components/ReadyToEnter.jsx";
 
 const TABS = ["Scan", "Execute", "Theta", "Kill Switch", "Positions", "History", "Checklist"];
 
@@ -116,6 +117,7 @@ export default function App() {
         {tab === "Scan" && (
           <div className="grid gap-4">
             <RegimeScanner onStatus={setRegimeStatus} />
+            <ReadyToEnter onSelectStock={selectStock} />
             <Scorecard regimeStatus={regimeStatus} />
             <StockFilter onSelectStock={selectStock} />
           </div>

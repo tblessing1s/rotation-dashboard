@@ -144,6 +144,37 @@ LEAP cost vs the target, red when inadequate) and `Earnings` (days to the next
 report, cache/override-only — the scorecard never triggers a provider fetch
 storm). **API**: `GET /api/account-gate?ticker=&contracts=&leap_cost=&weekly_extrinsic=`.
 
+### Ready-to-enter shortlist (Levels 3 + 4 + 5 combined)
+
+`GET /api/scan/ready` returns tickers that clear the Scorecard's own GO
+verdict (Level 3 beats peers + Level 4 consolidating + the scorecard's
+CFM-suitability rules) **and** Level 5 (Account & Juice), right now — a
+one-glance shortlist instead of checking each ticker in Execute one at a time.
+Level 1 (regime) / Level 2 (sector) are deliberately excluded, same rationale
+as the Scorecard verdict (market-wide context, not stock-specific merit) — so
+the list stays useful even on a yellow/red tape. RED still hard-blocks actual
+execution at the entry-gate/executor level regardless of what's listed here.
+
+Only runs Level 5 on the (usually small) GO subset, not the whole universe —
+`account_gate.evaluate_many` loads state.json once and reuses it across every
+candidate (rather than once per ticker) and juice always uses the
+history-implied estimate (no live chain in a bulk sweep). Response:
+`{"ready": [...], "near_misses": [...]}` — `ready` is sorted by juice/wk
+descending; each `near_misses` entry carries `level5.blocking_failures` so a
+GO-verdict ticker's specific Level 5 blocker (cash reserve, position limit,
+capital cap, sector cap, thin juice) is visible, not just "no."
+
+The full-universe Scorecard sweep (`metrics/scorecard.py::scorecard()` with no
+ticker filter) is memoized with `screening`'s existing short-TTL cache
+(`SCAN_CACHE_TTL`, default 300s) — the Scan tab mounts both the Scorecard
+panel and this Ready-to-Enter panel, which would otherwise each trigger their
+own ~500-ticker sweep concurrently on every page load. An explicit ticker
+subset (e.g. one ticker's frozen entry snapshot, `executor._entry_snapshot`)
+always computes fresh, never cached. The cache is cleared on every demo/live
+mode switch, same as regime/sector data. **UI**: a "Ready to Enter" panel on
+the Scan tab, clickable straight into Execute, with a collapsible near-misses
+list.
+
 ## Position management mechanics (Phase 2)
 
 - **75% buyback rule** (HARD_CFM_RULE): every open short shows `% decayed`

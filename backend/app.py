@@ -108,6 +108,46 @@ def api_scorecard():
         return _err(e)
 
 
+@app.route("/api/scan/ready")
+def api_scan_ready():
+    """Tickers that clear Level 3 (beats peers), Level 4 (consolidating), AND
+    Level 5 (Account & Juice) right now — a ready-to-enter shortlist.
+
+    Level 1 (market regime) and Level 2 (sector strength) are deliberately
+    excluded, same as the Scorecard's own verdict: they're market-wide
+    context, not a property of the stock, so this stays a useful relative
+    ranking even on a yellow/red tape. RED still hard-blocks actual execution
+    regardless of what appears here (Level 1 entry-gate rule, unchanged).
+
+    Only evaluates Level 5 for tickers the Scorecard already verdicts GO (a
+    proxy for clearing gate levels 3 & 4 plus its own CFM-suitability rules)
+    — cheaper than running Level 5 across the whole universe, and consistent
+    with "GO" already meaning stock-level-ready. Juice numbers are always the
+    history-implied estimate (no live chain in a bulk sweep); optional
+    ?contracts= sizes the capital/reserve checks (default LEAP_CONTRACTS)."""
+    raw = request.args.get("tickers")
+    tickers = [t.strip().upper() for t in raw.split(",") if t.strip()] if raw else None
+    contracts = int(request.args.get("contracts") or 0) or None
+    try:
+        from metrics import scorecard as scorecard_metrics
+        import account_gate
+        sc = scorecard_metrics.scorecard(tickers)
+        go_rows = [r for r in sc["results"] if r["verdict"] == "GO"]
+        level5 = account_gate.evaluate_many([r["ticker"] for r in go_rows], contracts=contracts)
+
+        ready, near_misses = [], []
+        for r in go_rows:
+            l5 = level5.get(r["ticker"])
+            entry = {"ticker": r["ticker"], "sector": r["sector"],
+                     "juice_weekly_pct": r.get("juice_weekly_pct"),
+                     "earnings_date": r.get("earnings_date"), "level5": l5}
+            (ready if l5 and l5["pass"] else near_misses).append(entry)
+        ready.sort(key=lambda r: r.get("juice_weekly_pct") or 0, reverse=True)
+        return jsonify({"as_of": sc["as_of"], "ready": ready, "near_misses": near_misses})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/entry-gate")
 def api_entry_gate():
     ticker = request.args.get("ticker", "")

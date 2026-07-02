@@ -369,3 +369,105 @@ def test_portfolio_view_uses_live_balance_when_configured(isolated_state, monkey
     view = pr.portfolio_view(log.load_state())
     assert view["capital"]["operating_cash"] == 55000.0
     assert view["capital"]["operating_cash_source"] == "schwab"
+
+
+# ---- bulk Level 5 (evaluate_many) -----------------------------------------------
+def test_evaluate_many_empty_list_short_circuits():
+    assert account_gate.evaluate_many([]) == {}
+
+
+def test_evaluate_many_shares_one_state_object_across_tickers(isolated_state, monkeypatch):
+    # dividends/earnings each do their own log.load_state() for manual-override
+    # lookups (unrelated, pre-existing, cheap) — the optimization this targets
+    # is evaluate_many's OWN top-level state, which every per-ticker evaluate()
+    # call should reuse rather than re-reading state.json itself.
+    import data_handler
+    seen_state_ids = []
+    real_evaluate = account_gate.evaluate
+
+    def _tracking_evaluate(ticker, contracts=None, leap_cost_per_share=None,
+                           weekly_extrinsic_per_share=None, state=None):
+        seen_state_ids.append(id(state))
+        return real_evaluate(ticker, contracts, leap_cost_per_share,
+                             weekly_extrinsic_per_share, state)
+
+    monkeypatch.setattr(account_gate, "evaluate", _tracking_evaluate)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _noisy_frame(seed=hash(s) % 100))
+    monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
+    _seed_state(operating_cash=100000)
+
+    out = account_gate.evaluate_many(["NVDA", "amd", " msft "], contracts=5)
+    assert set(out.keys()) == {"NVDA", "AMD", "MSFT"}
+    assert all(r["ticker"] == t for t, r in out.items())
+    assert all("checks" in r for r in out.values())
+    assert len(seen_state_ids) == 3
+    assert len(set(seen_state_ids)) == 1  # every call reused the exact same state object
+    assert None not in seen_state_ids
+
+
+def test_evaluate_many_reflects_shared_book_state_across_tickers(isolated_state, monkeypatch):
+    # With MAX_CFM_POSITIONS already open, every candidate should fail
+    # position_limit using the SAME shared state (not a stale per-call load).
+    import data_handler
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _noisy_frame())
+    monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
+    state = _seed_state(operating_cash=200000)
+    state["positions"] = [
+        {"ticker": "AAPL", "sector": "XLK", "status": "active", "leap": {"contracts": 5, "strike": 100}},
+        {"ticker": "GOOGL", "sector": "XLC", "status": "active", "leap": {"contracts": 5, "strike": 100}},
+    ]
+    log.save_state(state)
+
+    out = account_gate.evaluate_many(["NVDA", "MSFT"], contracts=5)
+    for r in out.values():
+        assert "position_limit" in r["blocking_failures"]
+
+
+# ---- GET /api/scan/ready ---------------------------------------------------------
+def test_scan_ready_splits_go_rows_by_level5_and_sorts_by_juice(isolated_state, monkeypatch):
+    from metrics import scorecard as scorecard_metrics
+    import app as app_module
+
+    rows = [
+        {"ticker": "AAA", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 1.0, "earnings_date": None},
+        {"ticker": "BBB", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 3.0, "earnings_date": None},
+        {"ticker": "CCC", "sector": "XLK", "verdict": "CAUTION", "juice_weekly_pct": 5.0, "earnings_date": None},
+    ]
+    monkeypatch.setattr(scorecard_metrics, "scorecard",
+                        lambda tickers=None: {"as_of": "2026-07-02T00:00:00Z", "results": rows})
+
+    def _fake_evaluate_many(tickers, contracts=None):
+        # AAA blocked (thin juice), BBB passes — CCC is excluded before this
+        # is even called since it isn't a GO row.
+        assert set(tickers) == {"AAA", "BBB"}
+        return {
+            "AAA": {"pass": False, "blocking_failures": ["juice_adequacy"]},
+            "BBB": {"pass": True, "blocking_failures": []},
+        }
+    monkeypatch.setattr(account_gate, "evaluate_many", _fake_evaluate_many)
+
+    client = app_module.app.test_client()
+    resp = client.get("/api/scan/ready")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert [r["ticker"] for r in body["ready"]] == ["BBB"]
+    assert [r["ticker"] for r in body["near_misses"]] == ["AAA"]
+    assert body["near_misses"][0]["level5"]["blocking_failures"] == ["juice_adequacy"]
+
+
+def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state, monkeypatch):
+    from metrics import scorecard as scorecard_metrics
+    import app as app_module
+
+    rows = [
+        {"ticker": "LOW", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 2.0, "earnings_date": None},
+        {"ticker": "HIGH", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 6.0, "earnings_date": None},
+    ]
+    monkeypatch.setattr(scorecard_metrics, "scorecard",
+                        lambda tickers=None: {"as_of": "x", "results": rows})
+    monkeypatch.setattr(account_gate, "evaluate_many", lambda tickers, contracts=None: {
+        t: {"pass": True, "blocking_failures": []} for t in tickers})
+
+    client = app_module.app.test_client()
+    body = client.get("/api/scan/ready").get_json()
+    assert [r["ticker"] for r in body["ready"]] == ["HIGH", "LOW"]

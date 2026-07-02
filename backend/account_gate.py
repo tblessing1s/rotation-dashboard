@@ -171,16 +171,21 @@ def _check(id_: str, label: str, ok, blocking: bool, detail: dict) -> dict:
 
 def evaluate(ticker: str, contracts: int | None = None,
              leap_cost_per_share: float | None = None,
-             weekly_extrinsic_per_share: float | None = None) -> dict:
+             weekly_extrinsic_per_share: float | None = None,
+             state: dict | None = None) -> dict:
     """Run every Level-5 check for a proposed entry.
 
     `leap_cost_per_share` / `weekly_extrinsic_per_share` come from the live
     chain when the Execute flow has one; missing values fall back to the
     history-implied estimate so the gate always produces numbers.
+
+    `state` lets a bulk caller (see evaluate_many) pass one already-loaded
+    state dict across many tickers instead of re-reading state.json each
+    time; a single-ticker caller can omit it and a fresh load is used.
     """
     ticker = ticker.upper()
     contracts = int(contracts or config.LEAP_CONTRACTS)
-    state = log.load_state()
+    state = state if state is not None else log.load_state()
     meta = state.get("metadata", {})
     open_pos = [p for p in _open_positions(state) if p.get("ticker") != ticker]
 
@@ -304,3 +309,19 @@ def evaluate(ticker: str, contracts: int | None = None,
         "juice": {"weekly_yield_pct": weekly_yield, "target_pct": target,
                   "source": juice_source},
     }
+
+
+def evaluate_many(tickers: list[str], contracts: int | None = None) -> dict[str, dict]:
+    """Level 5 for many tickers against ONE shared account snapshot — state is
+    loaded once (not once per ticker) and the live Schwab cash balance is
+    resolved once and reused (schwab_api.cash_balance's own 60s cache makes
+    this cheap regardless, but loading state.json per ticker isn't). For bulk
+    screening (see GET /api/scan/ready), not per-trade execution — juice
+    always uses the history-implied estimate here, never a live chain.
+    """
+    tickers = [t.strip().upper() for t in tickers if t.strip()]
+    if not tickers:
+        return {}
+    state = log.load_state()
+    data_handler.prefetch(tickers)  # warm the OHLCV cache in parallel first
+    return {t: evaluate(t, contracts=contracts, state=state) for t in tickers}

@@ -386,21 +386,10 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     return row
 
 
-def scorecard(tickers: list[str] | None = None) -> dict:
-    """Build the scorecard for a list of tickers (default: every holding across
-    every sector). Warms the cache for SPY + sector ETFs + the tickers in one
-    parallel batch, then computes a row each — reusing the existing 4-level entry
-    gate, where only a stock-level (Level 3/4) failure short-circuits the verdict
-    (a yellow regime does not blanket the table). Rows are grouped-friendly (each
-    carries its sector) and sorted by sector then ticker."""
+def _compute_scorecard(names: list[str]) -> dict:
     import logging_handler as log
     import screening  # local imports avoid any import-time cycle
     import weeklies
-
-    if tickers:
-        names = [t.strip().upper() for t in tickers if t.strip()]
-    else:
-        names = sector_data.all_tickers()
 
     # Resolve each ticker's sector once; collect the sector ETFs we'll need.
     sector_of = {t: (sector_data.sector_for(t) or "") for t in names}
@@ -423,3 +412,27 @@ def scorecard(tickers: list[str] | None = None) -> dict:
 
     rows.sort(key=lambda r: (r["sector"], r["ticker"]))
     return {"as_of": log.utcnow(), "results": rows}
+
+
+def scorecard(tickers: list[str] | None = None) -> dict:
+    """Build the scorecard for a list of tickers (default: every holding across
+    every sector). Warms the cache for SPY + sector ETFs + the tickers in one
+    parallel batch, then computes a row each — reusing the existing 4-level entry
+    gate, where only a stock-level (Level 3/4) failure short-circuits the verdict
+    (a yellow regime does not blanket the table). Rows are grouped-friendly (each
+    carries its sector) and sorted by sector then ticker.
+
+    The full-universe sweep (tickers=None) is expensive (indicator math across
+    every holding) and purely market-driven — it doesn't depend on the
+    operator's own account state — so it's memoized with screening's short-TTL
+    cache. This matters because the Scan tab mounts both the Scorecard panel
+    and the Ready-to-Enter panel, which would otherwise each trigger their own
+    full sweep concurrently on every page load. An explicit ticker subset
+    (e.g. one ticker's entry snapshot at trade time) always computes fresh."""
+    if tickers:
+        names = [t.strip().upper() for t in tickers if t.strip()]
+        return _compute_scorecard(names)
+
+    import screening  # local import avoids any import-time cycle
+    names = sector_data.all_tickers()
+    return screening._cached("scorecard:full", lambda: _compute_scorecard(names))
