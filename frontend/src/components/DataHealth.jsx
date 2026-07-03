@@ -131,6 +131,7 @@ function UniverseCheck() {
           {msg && (
             <p className={`mt-1 text-xs ${msg.err ? "text-rose-400" : "text-emerald-300"}`}>{msg.err || msg.ok}</p>
           )}
+          <VetCandidates />
         </div>
       )}
       {res?.error && <p className="mt-2 text-sm text-rose-400">{res.error}</p>}
@@ -179,6 +180,95 @@ function UniverseCheck() {
               ))}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Vet arbitrary candidate symbols against the CFM criteria (data + weekly
+// options + Scorecard verdict) and add the ones that fit — the repeatable way to
+// grow the universe from any source (QQQ, a screener, a tip).
+function VetCandidates() {
+  const [input, setInput] = React.useState("");
+  const [res, setRes] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [sel, setSel] = React.useState({});     // ticker -> chosen sector
+  const [added, setAdded] = React.useState({}); // ticker -> sector | "ERR:.."
+
+  const vet = async () => {
+    setBusy(true); setRes(null); setAdded({});
+    try {
+      const r = await api.universeVet(input);
+      setRes(r);
+      const first = r.sectors?.[0] || "";
+      const s = {};
+      (r.candidates || []).forEach((c) => { if (c.fit) s[c.ticker] = first; });
+      setSel(s);
+    } catch (e) { setRes({ error: String(e.message || e) }); }
+    finally { setBusy(false); }
+  };
+
+  const add = async (t) => {
+    try { await api.universeAdd(t, sel[t]); setAdded((a) => ({ ...a, [t]: sel[t] })); }
+    catch (e) { setAdded((a) => ({ ...a, [t]: `ERR:${e.message || e}` })); }
+  };
+
+  return (
+    <div className="mt-2 rounded-lg border border-slate-800 bg-slate-950/50 p-2">
+      <div className="text-xs uppercase tracking-wide text-slate-500">Vet candidates</div>
+      <div className="mt-1 flex flex-wrap items-start gap-2">
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value.toUpperCase())}
+          placeholder="SMH, XBI, PLTR …"
+          className="min-w-[16rem] flex-1 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-100 placeholder:text-slate-600"
+        />
+        <button onClick={vet} disabled={busy || !input.trim()}
+                className="rounded border border-sky-700 bg-sky-500/10 px-2.5 py-1 text-sm font-semibold text-sky-300 hover:bg-sky-500/20 disabled:opacity-50">
+          {busy ? "Vetting…" : "Vet"}
+        </button>
+      </div>
+      <p className="mt-1 text-xs text-slate-600">Paste any symbols — checks data, weekly options, and the Scorecard verdict, then lets you add the ones that fit.</p>
+      {res?.error && <p className="mt-1 text-xs text-rose-400">{res.error}</p>}
+      {res && !res.error && res.skipped && <p className="mt-1 text-xs text-slate-500">{res.skipped}</p>}
+      {res && !res.error && !res.skipped && (
+        <div className="mt-2 space-y-1">
+          <div className="text-xs text-slate-400">{res.fit_count} of {res.candidates.length} fit CFM (add-ready)</div>
+          {res.candidates.map((c) => {
+            const done = added[c.ticker];
+            return (
+              <div key={c.ticker} className="flex flex-wrap items-center gap-2 rounded bg-slate-900/60 px-2 py-1 text-sm">
+                <span className="w-16 font-semibold text-slate-100">{c.ticker}</span>
+                {c.fit ? (
+                  <>
+                    <span className="rounded-full border border-emerald-600/50 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">FITS CFM</span>
+                    <span className="text-xs text-slate-500">
+                      {c.verdict ? `${c.verdict} · ` : ""}{c.juice_weekly_pct != null ? `${fmt(c.juice_weekly_pct, 2)}%/wk` : "juice —"}
+                    </span>
+                    {done ? (
+                      <span className={`ml-auto text-xs ${String(done).startsWith("ERR") ? "text-rose-400" : "text-emerald-300"}`}>
+                        {String(done).startsWith("ERR") ? done.slice(4) : `added to ${done}`}
+                      </span>
+                    ) : (
+                      <span className="ml-auto flex items-center gap-1">
+                        <select value={sel[c.ticker] || ""} onChange={(e) => setSel((s) => ({ ...s, [c.ticker]: e.target.value }))}
+                                className="rounded border border-slate-700 bg-slate-900 px-1.5 py-0.5 text-xs text-slate-200">
+                          {(res.sectors || []).map((etf) => <option key={etf} value={etf}>{etf}</option>)}
+                        </select>
+                        <button onClick={() => add(c.ticker)}
+                                className="rounded border border-emerald-700 bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20">
+                          Add
+                        </button>
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className="text-xs text-slate-500">{c.reason}</span>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

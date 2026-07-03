@@ -27,8 +27,11 @@ def test_seeds_from_repo_file_on_first_load(universe):
     tickers = sector_data.all_tickers()
     # Seed written to the volume, and it contains the fixed universe.
     assert os.path.exists(config.UNIVERSE_PATH)
-    assert len(sector_data.sector_etfs()) == 11
+    assert len(sector_data.sector_etfs()) == 12   # 11 SPDR sectors + SPY (Broad Market)
     assert "NVDA" in tickers and "XLK" in tickers
+    # Curated CFM-fit ETFs are seeded with sensible sector homes.
+    assert sector_data.sector_for("SMH") == "XLK" and sector_data.sector_for("GDX") == "XLB"
+    assert sector_data.sector_for("QQQ") == "SPY" and "IWM" in tickers
     # The stale tickers we removed are gone; the renames are present.
     for dead in ("Q", "FISV", "MRSH", "FDXF", "ECHO"):
         assert dead not in tickers

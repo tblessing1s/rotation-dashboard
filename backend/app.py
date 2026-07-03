@@ -628,6 +628,24 @@ def api_universe_remove():
         return _err(e)
 
 
+@app.route("/api/universe/vet", methods=["POST"])
+def api_universe_vet():
+    """Vet candidate symbols against the CFM criteria (data + weeklies + Scorecard
+    verdict): {symbols: [...] or "AAPL, MSFT"}. Returns which are add-ready."""
+    payload = request.get_json(silent=True) or {}
+    syms = payload.get("symbols")
+    if isinstance(syms, str):
+        import re
+        syms = [s for s in re.split(r"[,\s]+", syms) if s]
+    if not isinstance(syms, list):
+        return jsonify({"error": "symbols must be a list or a comma/space-separated string"}), 400
+    try:
+        import universe_health
+        return jsonify(universe_health.vet_candidates(syms))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/maintenance/refresh", methods=["POST"])
 def api_maintenance_refresh():
     """Force the nightly earnings/dividends refresh now (also runs on the

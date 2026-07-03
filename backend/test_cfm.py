@@ -25,7 +25,8 @@ def _frame(values, vol=1e6):
 # ---- sector data -----------------------------------------------------------
 def test_sectors_parse():
     etfs = sector_data.sector_etfs()
-    assert "XLK" in etfs and len(etfs) == 11
+    # 11 SPDR sectors + SPY (the Broad Market ETF group: QQQ/IWM/DIA).
+    assert "XLK" in etfs and len(etfs) == 12
     assert "NVDA" in sector_data.constituents("XLK")
     assert sector_data.sector_for("NVDA") == "XLK"
     assert sector_data.sector_for("XLK") == "XLK"  # ETFs map to themselves

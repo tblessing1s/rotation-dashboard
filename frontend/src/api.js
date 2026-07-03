@@ -50,6 +50,8 @@ export const api = {
     request("/api/universe/remove", { method: "POST", body: JSON.stringify({ ticker }) }),
   universeRemoveBulk: (tickers) =>
     request("/api/universe/remove", { method: "POST", body: JSON.stringify({ tickers }) }),
+  universeVet: (symbols) =>
+    request("/api/universe/vet", { method: "POST", body: JSON.stringify({ symbols }) }),
   strikePosture: () => request("/api/strike-posture"),
   setStrikePosture: (posture) =>
     request("/api/strike-posture", { method: "POST", body: JSON.stringify({ posture }) }),
