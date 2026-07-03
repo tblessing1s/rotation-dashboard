@@ -66,6 +66,17 @@ function UniverseCheck() {
     } catch (e) { setMsg({ err: String(e.message || e) }); }
   };
 
+  const removeAllDead = async () => {
+    const dead = (res?.no_data || []).map((d) => d.ticker);
+    if (!dead.length || !window.confirm(`Remove ${dead.length} dead ticker(s) from the universe?`)) return;
+    setMsg(null);
+    try {
+      const r = await api.universeRemoveBulk(dead);
+      setMsg({ ok: `Removed ${r.removed.length} dead ticker(s)` });
+      setRes((prev) => prev && !prev.error ? { ...prev, no_data: [] } : prev);
+    } catch (e) { setMsg({ err: String(e.message || e) }); }
+  };
+
   const group = (rows) => {
     const by = {};
     (rows || []).forEach((r) => { (by[r.sector || "?"] ||= []).push(r.ticker); });
@@ -135,8 +146,15 @@ function UniverseCheck() {
           </p>
           {res.no_data.length > 0 && (
             <div className="mt-1">
-              <div className="text-xs uppercase tracking-wide text-rose-400/80">
-                No data — {manage ? "click ✕ to remove a dead ticker" : "Manage to remove, or fix in the seed file"}
+              <div className="flex items-center justify-between">
+                <span className="text-xs uppercase tracking-wide text-rose-400/80">
+                  No data — {manage ? "click ✕ to remove one" : "dead / renamed / typo'd"}
+                </span>
+                <button onClick={removeAllDead}
+                        title="Remove every dead ticker shown from the universe (they never scan and waste a fetch each sweep)"
+                        className="rounded-full border border-rose-800 bg-rose-500/10 px-2.5 py-0.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/20">
+                  Remove all dead ({res.no_data.length})
+                </button>
               </div>
               {group(res.no_data).map(([sector, ts]) => (
                 <div key={sector} className="flex flex-wrap items-center gap-1.5 text-xs text-slate-400">

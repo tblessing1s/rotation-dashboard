@@ -615,9 +615,12 @@ def api_universe_add():
 
 @app.route("/api/universe/remove", methods=["POST"])
 def api_universe_remove():
-    """Remove a constituent from the universe: {ticker}."""
+    """Remove from the universe. {ticker} for one, or {tickers:[...]} to bulk
+    remove (e.g. 'remove all dead' after a universe health check)."""
     payload = request.get_json(silent=True) or {}
     try:
+        if isinstance(payload.get("tickers"), list):
+            return jsonify(sector_data.remove_tickers(payload["tickers"]))
         return jsonify(sector_data.remove_ticker(payload.get("ticker", "")))
     except ValueError as e:
         return _err(e, 400)

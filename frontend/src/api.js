@@ -48,6 +48,8 @@ export const api = {
     request("/api/universe/add", { method: "POST", body: JSON.stringify({ ticker, sector }) }),
   universeRemove: (ticker) =>
     request("/api/universe/remove", { method: "POST", body: JSON.stringify({ ticker }) }),
+  universeRemoveBulk: (tickers) =>
+    request("/api/universe/remove", { method: "POST", body: JSON.stringify({ tickers }) }),
   strikePosture: () => request("/api/strike-posture"),
   setStrikePosture: (posture) =>
     request("/api/strike-posture", { method: "POST", body: JSON.stringify({ posture }) }),

@@ -71,6 +71,19 @@ def test_self_heals_when_store_deleted(universe):
     assert os.path.exists(config.UNIVERSE_PATH)
 
 
+def test_bulk_remove_skips_etfs_and_absent(universe):
+    sector_data.all_tickers()
+    sector_data.add_ticker("DEAD1", "XLK")
+    sector_data.add_ticker("DEAD2", "XLE")
+    r = sector_data.remove_tickers(["DEAD1", "DEAD2", "XLK", "NOPE"])
+    assert set(r["removed"]) == {"DEAD1", "DEAD2"}
+    reasons = {s["ticker"]: s["reason"] for s in r["skipped"]}
+    assert reasons["XLK"] == "sector ETF" and reasons["NOPE"] == "not in universe"
+    sector_data._clear_caches()
+    assert sector_data.sector_for("DEAD1") is None
+    assert sector_data.sector_for("XLK") == "XLK"   # ETF preserved
+
+
 def test_reseed_discards_runtime_edits(universe):
     sector_data.all_tickers()
     sector_data.add_ticker("TSM", "XLK")
