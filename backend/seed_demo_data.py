@@ -418,6 +418,98 @@ def seed_state(last_close: dict[str, float]) -> None:
     log.save_state(state)
 
 
+# ---------------------------------------------------------------------------
+# Synthetic broker view for reconciliation (Section 5): a deliberately-divergent
+# Schwab /accounts?fields=positions payload that exercises every classification.
+# ---------------------------------------------------------------------------
+def _broker_option_node(ticker: str, strike: float, expiration: str, qty: int) -> dict:
+    """One Schwab OPTION position node (qty signed: negative = short)."""
+    import schwab_api
+    sym = schwab_api.occ_option_symbol(ticker, expiration, strike, call=True)
+    node = {"instrument": {"assetType": "OPTION", "symbol": sym, "putCall": "CALL",
+                           "underlyingSymbol": ticker}}
+    node["longQuantity"], node["shortQuantity"] = (qty, 0) if qty >= 0 else (0, -qty)
+    return node
+
+
+def _broker_equity_node(ticker: str, qty: int) -> dict:
+    node = {"instrument": {"assetType": "EQUITY", "symbol": ticker}}
+    node["longQuantity"], node["shortQuantity"] = (qty, 0) if qty >= 0 else (0, -qty)
+    return node
+
+
+def _build_demo_broker(state: dict) -> list:
+    """Mirror the demo book into a broker payload, then perturb it so the demo
+    reconciliation surfaces every classification:
+      - healthy positions MATCH exactly (CLEAN),
+      - NVDA carries a synthetic expired-worthless short omitted here
+        -> EXPIRED_WORTHLESS_PENDING (benign one-click),
+      - PG's shorts are dropped and short stock added -> SHORT_STOCK_DETECTED
+        (+ the paired MISSING_AT_BROKER for the vanished short),
+      - AVGO's share count is off by 50 -> QUANTITY_MISMATCH,
+      - an extra TSLA lot the book never bought -> UNEXPECTED_AT_BROKER.
+    """
+    nodes = []
+    for p in state.get("positions", []):
+        if p.get("status") == "closed":
+            continue
+        t = p["ticker"]
+        leap = p.get("leap") or {}
+        if leap.get("contracts"):
+            nodes.append(_broker_option_node(
+                t, leap["strike"], leap.get("expiration") or "2026-12-18", int(leap["contracts"])))
+        for sc in p.get("short_calls", []):
+            if t == "PG":
+                continue  # assignment: the short vanished (paired with short stock below)
+            if t == "NVDA" and float(sc.get("strike") or 0) == 200.0:
+                continue  # the synthetic expired-worthless short -> carve-out
+            nodes.append(_broker_option_node(
+                t, sc["strike"], sc.get("expiration") or "2026-12-18", -int(sc["contracts"])))
+        shares = p.get("shares") or {}
+        cnt = int(shares.get("count") or 0)
+        if cnt:
+            if t == "AVGO":
+                cnt -= 50  # QUANTITY_MISMATCH
+            nodes.append(_broker_equity_node(t, cnt))
+    nodes.append(_broker_equity_node("PG", -500))   # SHORT_STOCK_DETECTED (assignment)
+    nodes.append(_broker_equity_node("TSLA", 100))  # UNEXPECTED_AT_BROKER
+    return [{"securitiesAccount": {"positions": nodes}}]
+
+
+def seed_reconciliation() -> None:
+    """Write the synthetic broker fixture into the demo cache and run a demo
+    reconciliation so the Positions/Checklist tabs render the freeze + diff UI.
+    Extends the deliberately-broken demo-position pattern."""
+    import reconcile
+
+    state = log.load_state()
+    today = datetime.utcnow().date()
+    # Demo shorts store only a dte; give them concrete expirations so the broker
+    # fixture's option symbols line up (real live orders always carry one).
+    for p in state.get("positions", []):
+        for sc in p.get("short_calls", []):
+            if not sc.get("expiration") and sc.get("dte") is not None:
+                sc["expiration"] = (today + timedelta(days=int(sc["dte"]))).isoformat()
+    # A synthetic expired-worthless short on NVDA (strike far above the ~128 price
+    # so its expiry-day close is below strike -> the benign carve-out).
+    nvda = log.find_position(state, "NVDA")
+    if nvda is not None:
+        exp = pd.bdate_range(end=today, periods=8)[0].date().isoformat()
+        nvda.setdefault("short_calls", []).append({
+            "strike": 200, "contracts": 5, "open_date": exp, "expiration": exp,
+            "dte": -10, "entry_premium_total": 500.0, "entry_extrinsic_per_share": 1.0,
+            "current_bid": 0.0})
+    log.save_state(state)
+
+    accounts = _build_demo_broker(state)
+    path = os.path.join(config.active_cache_dir(), "broker_positions.json")
+    os.makedirs(config.active_cache_dir(), exist_ok=True)
+    import json as _json
+    with open(path, "w", encoding="utf-8") as fh:
+        _json.dump(accounts, fh, indent=2)
+    reconcile.run_reconciliation()
+
+
 def seed() -> int:
     """(Re)build the demo dataset (synthetic cache + sample book). Always targets
     the demo store — never the live one — by switching the process into demo mode
@@ -428,6 +520,7 @@ def seed() -> int:
     anchors[ALERT_DEMO["ticker"]] = float(ALERT_DEMO["cur_px"])
     last_close = generate_market_cache(strong, anchors, weak_tickers={ALERT_DEMO["ticker"]})
     seed_state(last_close)
+    seed_reconciliation()
     return len(BOOK) + 1
 
 

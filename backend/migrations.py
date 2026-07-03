@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 6
+CURRENT_VERSION = 7
 
 
 class MigrationAbortedError(RuntimeError):
@@ -86,12 +86,36 @@ def _v5_to_v6(state: dict) -> dict:
     return state
 
 
+def _v6_to_v7(state: dict) -> dict:
+    """v7 (position reconciliation vs Schwab): a ``reconciliation`` store (last
+    report + capped history), a per-position ``needs_review`` freeze flag, and an
+    explicit ``live_transmitted`` flag on every execution so the reconciler's
+    expected-view can exclude paper positions.
+
+    All additive. ``live_transmitted`` is backfilled from each execution's
+    historical ``mode`` (live -> True, logged -> False); executions with no
+    recognizable mode are marked None (unknown) and the reconciler excludes them
+    from the expected-view rather than guessing. Existing open positions default
+    to needs_review=False (nothing verified yet, nothing frozen)."""
+    state.setdefault("reconciliation", {"last": None, "history": [], "last_success": None})
+    for p in state.get("positions", []):
+        p.setdefault("needs_review", False)
+        p.setdefault("review", None)
+    for e in state.get("executions", []):
+        if "live_transmitted" in e:
+            continue
+        mode = e.get("mode")
+        e["live_transmitted"] = True if mode == "live" else False if mode == "logged" else None
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
     3: _v3_to_v4,
     4: _v4_to_v5,
     5: _v5_to_v6,
+    6: _v6_to_v7,
 }
 
 

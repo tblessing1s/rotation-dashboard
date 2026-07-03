@@ -15,7 +15,7 @@ operational guards with tunable thresholds (see config.py).
 from __future__ import annotations
 
 import threading
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import config
@@ -45,6 +45,9 @@ ALERT_TYPES = {
     "LEAP_ROLL_DUE": ("HIGH", "PROPOSED_DEFAULT: LEAP DTE below the floor or extrinsic runway too short -> roll the long leg"),
     "CAPITAL_BURN": ("HIGH", "PROPOSED_DEFAULT: weekly juice not covering LEAP decay -> the flywheel is running backwards"),
     "DELTA_VELOCITY": ("MEDIUM", "PROPOSED_DEFAULT: LEAP delta bleeding fast while still above the 0.50 floor"),
+    "SHORT_STOCK_DETECTED": ("CRITICAL", "HARD_CFM_RULE: assignment created short stock against the LEAP -> buy back the stock, never exercise the LEAP"),
+    "RECONCILE_DIRTY": ("HIGH", "HARD_CFM_RULE: state.json diverged from the broker account -> freeze the position, resolve before trading it"),
+    "RECONCILE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: reconciliation has not run successfully within the expected window -> the safety check is silent"),
 }
 
 
@@ -439,6 +442,93 @@ def check_delta_velocity(state: dict) -> list[dict]:
     return out
 
 
+def _open_recon_diffs(state: dict) -> list[dict]:
+    """Still-open diffs from the last reconciliation report (unresolved, unacked,
+    non-benign). Empty when the last run failed or the report is clean."""
+    import reconcile
+    report = (state.get("reconciliation") or {}).get("last") or {}
+    if not report.get("broker_ok"):
+        return []
+    return [d for d in report.get("diffs", []) if reconcile._diff_open(d)]
+
+
+def check_short_stock_detected(state: dict) -> list[dict]:
+    """Assignment happened: the broker holds SHORT STOCK against an open LEAP.
+    Highest severity, its OWN fingerprint so it escalates even when
+    RECONCILE_DIRTY has already fired for the same ticker."""
+    import reconcile
+    out = []
+    for d in _open_recon_diffs(state):
+        if d["classification"] != reconcile.SHORT_STOCK_DETECTED:
+            continue
+        t = d["ticker"]
+        out.append(_alert(
+            "SHORT_STOCK_DETECTED", t,
+            (f"{t}: {d['broker_qty']} short shares detected against an open LEAP — "
+             f"assignment likely occurred."),
+            ("Assignment likely occurred. Do NOT exercise the LEAP to cover — buy back "
+             "the short stock or close the position. Exercising forfeits all remaining "
+             "LEAP extrinsic."),
+            {"diff": d}, key=d["id"]))
+    return out
+
+
+def check_reconcile_dirty(state: dict) -> list[dict]:
+    """state.json diverged from the broker on at least one non-benign diff. One
+    alert per frozen ticker; the payload carries the per-diff one-liners."""
+    import reconcile
+    by_ticker: dict[str, list[dict]] = {}
+    for d in _open_recon_diffs(state):
+        by_ticker.setdefault(d["ticker"], []).append(d)
+    out = []
+    for t, diffs in by_ticker.items():
+        # Non-short-stock diffs still fire RECONCILE_DIRTY; the short-stock ones
+        # ALSO get SHORT_STOCK_DETECTED. Keep the count honest — include all.
+        lines = [d["summary"] for d in diffs]
+        classes = sorted({d["classification"] for d in diffs})
+        out.append(_alert(
+            "RECONCILE_DIRTY", t,
+            f"{t}: reconciliation found {len(diffs)} unresolved diff(s) — " + "; ".join(lines),
+            "Position frozen for review — resolve each diff (book expiry / record an "
+            "adjustment / acknowledge) before trading it again.",
+            {"diffs": diffs, "classifications": classes},
+            key="|".join(d["id"] for d in diffs)))
+    return out
+
+
+def check_reconcile_stale(state: dict) -> list[dict]:
+    """Reconciliation hasn't run successfully within RECONCILE_STALE_HOURS while
+    Schwab is connected and positions are open. Silence is itself a failure
+    signal (the positions call failing, the scheduler wedged, etc.)."""
+    if config.demo_enabled():  # ops condition about the real provider / scheduler
+        return []
+    if not schwab_api.configured():
+        return []
+    open_pos = _open_positions(state)
+    if not open_pos:
+        return []
+    recon = state.get("reconciliation") or {}
+    last_success = recon.get("last_success")
+    age_h = None
+    if last_success:
+        try:
+            ts = datetime.strptime(str(last_success)[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+            age_h = (datetime.now(timezone.utc) - ts).total_seconds() / 3600.0
+        except ValueError:
+            age_h = None
+    if last_success and age_h is not None and age_h <= config.RECONCILE_STALE_HOURS:
+        return []
+    detail = (f"last successful run {age_h:.0f}h ago" if age_h is not None
+              else "no successful run recorded")
+    return [_alert(
+        "RECONCILE_STALE", None,
+        f"Position reconciliation is stale — {detail} (threshold {config.RECONCILE_STALE_HOURS}h).",
+        "Check the Schwab connection and the scheduler — the state-vs-broker safety "
+        "check is not running. Trigger it from the Checklist tab (Reconcile now).",
+        {"last_success": last_success, "age_hours": round(age_h, 1) if age_h is not None else None},
+        key="stale")]
+
+
 EVALUATORS = [
     check_kill_switch,
     check_circuit_breaker,
@@ -453,6 +543,9 @@ EVALUATORS = [
     check_leap_roll_due,
     check_capital_burn,
     check_delta_velocity,
+    check_short_stock_detected,
+    check_reconcile_dirty,
+    check_reconcile_stale,
 ]
 
 

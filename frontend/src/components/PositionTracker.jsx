@@ -144,6 +144,152 @@ function LeapHealth({ ticker, health }) {
   );
 }
 
+// Reconciliation review panel — shown when the position has open diffs against
+// the broker (state.json vs Schwab). A frozen position (needs_review) blocks new
+// entries/rolls until resolved; closing it is always allowed. Each diff gets its
+// resolution action: one-click expiry booking for the benign carve-out; a
+// compensating adjustment (typed reason) or acknowledgement for everything else.
+function ReviewPanel({ ticker, diffs, onDone }) {
+  const toast = useToast();
+  if (!diffs || diffs.length === 0) return null;
+  return (
+    <div className="mt-4 rounded-lg border border-rose-800 bg-rose-500/10 p-3">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-rose-300">
+        Reconciliation review — state.json diverged from the broker
+      </div>
+      <div className="space-y-2">
+        {diffs.map((d) => <DiffRow key={d.id} ticker={ticker} diff={d} toast={toast} onDone={onDone} />)}
+      </div>
+    </div>
+  );
+}
+
+const CLASS_LABEL = {
+  MATCH: "match",
+  MISSING_AT_BROKER: "missing at broker",
+  UNEXPECTED_AT_BROKER: "unexpected at broker",
+  QUANTITY_MISMATCH: "quantity mismatch",
+  SHORT_STOCK_DETECTED: "SHORT STOCK — assignment",
+  EXPIRED_WORTHLESS_PENDING: "expired worthless",
+};
+
+function DiffRow({ ticker, diff, toast, onDone }) {
+  const [busy, setBusy] = React.useState(false);
+  const [form, setForm] = React.useState({
+    instrument_type: diff.instrument_type || "OPTION",
+    strike: diff.strike ?? "",
+    quantity_delta: "",
+    reason: "",
+  });
+  const benign = diff.classification === "EXPIRED_WORTHLESS_PENDING";
+  const critical = diff.classification === "SHORT_STOCK_DETECTED";
+
+  const run = async (fn) => {
+    setBusy(true);
+    try { await fn(); onDone && onDone(); }
+    catch (e) { toast.show(String(e.message || e), { type: "error" }); }
+    finally { setBusy(false); }
+  };
+
+  const bookExpiry = () => run(async () => {
+    await api.resolveExpiry(diff.id);
+    toast.show(`Booked ${ticker} ${diff.strike} expiry at $0.00`, { type: "success" });
+  });
+
+  const submitAdjustment = () => run(async () => {
+    if (!form.reason.trim()) throw new Error("a typed reason is required");
+    if (form.quantity_delta === "") throw new Error("quantity delta is required");
+    await api.execute({
+      action: "adjustment", ticker,
+      instrument_type: form.instrument_type,
+      strike: form.strike === "" ? null : Number(form.strike),
+      quantity_delta: Number(form.quantity_delta),
+      reason: form.reason.trim(),
+      linked_diff_id: diff.id,
+    });
+    toast.show(`Recorded adjustment for ${ticker}`, { type: "success" });
+  });
+
+  const acknowledge = () => {
+    const reason = window.prompt(
+      "Acknowledge this diff as a non-issue — a typed reason is required (logged):");
+    if (!reason || !reason.trim()) return;
+    run(async () => {
+      await api.acknowledgeDiff(diff.id, reason.trim());
+      toast.show("Diff acknowledged", { type: "success" });
+    });
+  };
+
+  return (
+    <div className={`rounded-lg border px-3 py-2 text-sm ${
+      critical ? "border-rose-600 bg-rose-500/10" : benign ? "border-amber-700 bg-amber-500/5" : "border-slate-700 bg-slate-950/60"}`}>
+      <div className="flex items-center gap-2">
+        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${
+          critical ? "border-rose-500/50 bg-rose-500/20 text-rose-200"
+            : benign ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
+            : "border-slate-600 bg-slate-800/60 text-slate-300"}`}>
+          {CLASS_LABEL[diff.classification] || diff.classification}
+        </span>
+        <span className="text-xs text-slate-500">{diff.id}</span>
+      </div>
+      <p className="mt-1 text-slate-300">{diff.summary}</p>
+      {critical && (
+        <p className="mt-1 text-xs font-medium text-rose-300">
+          Do NOT exercise the LEAP to cover — buy back the short stock or close the position.
+          Exercising forfeits all remaining LEAP extrinsic.
+        </p>
+      )}
+
+      {benign ? (
+        <button onClick={bookExpiry} disabled={busy}
+                className="mt-2 rounded-lg border border-amber-700 bg-amber-500/10 px-3 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/20 disabled:opacity-50">
+          {busy ? "Booking…" : "Book expiry at $0.00"}
+        </button>
+      ) : (
+        <div className="mt-2 flex flex-wrap items-end gap-2">
+          <label className="flex flex-col text-[10px] uppercase tracking-wide text-slate-500">
+            leg
+            <select value={form.instrument_type}
+                    onChange={(e) => setForm((f) => ({ ...f, instrument_type: e.target.value }))}
+                    className="mt-0.5 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-sm text-slate-200">
+              <option value="OPTION">OPTION</option>
+              <option value="EQUITY">EQUITY</option>
+            </select>
+          </label>
+          {form.instrument_type === "OPTION" && (
+            <label className="flex flex-col text-[10px] uppercase tracking-wide text-slate-500">
+              strike
+              <input value={form.strike} onChange={(e) => setForm((f) => ({ ...f, strike: e.target.value }))}
+                     className="mt-0.5 w-20 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-sm text-slate-100" />
+            </label>
+          )}
+          <label className="flex flex-col text-[10px] uppercase tracking-wide text-slate-500">
+            qty Δ (signed)
+            <input value={form.quantity_delta} onChange={(e) => setForm((f) => ({ ...f, quantity_delta: e.target.value }))}
+                   placeholder="+5 / -500"
+                   className="mt-0.5 w-24 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-sm text-slate-100 placeholder:text-slate-600" />
+          </label>
+          <label className="flex min-w-[12rem] flex-1 flex-col text-[10px] uppercase tracking-wide text-slate-500">
+            reason (required)
+            <input value={form.reason} onChange={(e) => setForm((f) => ({ ...f, reason: e.target.value }))}
+                   placeholder="e.g. assignment booked; short stock bought back"
+                   className="mt-0.5 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-sm text-slate-100 placeholder:text-slate-600" />
+          </label>
+          <button onClick={submitAdjustment} disabled={busy}
+                  className="rounded-lg border border-emerald-700 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50">
+            {busy ? "Recording…" : "Record adjustment"}
+          </button>
+          <button onClick={acknowledge} disabled={busy}
+                  title="Mark this diff a non-issue (typed reason logged) without an execution"
+                  className="rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+            Acknowledge
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Defensive roll-down recommendation, shown when a short strike is breached.
 function DefendPanel({ ticker, onStage }) {
   const { data } = useApi(React.useCallback(() => api.defend(ticker), [ticker]), [ticker], null);
@@ -187,7 +333,22 @@ function DefendPanel({ ticker, onStage }) {
 export default function PositionTracker() {
   const toast = useToast();
   const { data, error, loading, reload } = useApi(api.positions, [], null);
+  const { data: recon, reload: reloadRecon } = useApi(api.reconcile, [], null);
   const [rolling, setRolling] = React.useState(null); // {ticker, reason}
+
+  // Open (unresolved) reconciliation diffs indexed by ticker — drives the review
+  // panel + the state-unverified marker on frozen positions.
+  const openDiffsByTicker = React.useMemo(() => {
+    const out = {};
+    const diffs = recon?.last?.broker_ok ? (recon.last.diffs || []) : [];
+    for (const d of diffs) {
+      if (d.resolution && d.resolution.status) continue; // resolved / acknowledged
+      (out[d.ticker] ||= []).push(d);
+    }
+    return out;
+  }, [recon]);
+
+  const afterResolve = React.useCallback(() => { reload(); reloadRecon(); }, [reload, reloadRecon]);
 
   // Drive the roll through the shared toast lifecycle (submit → fill/cancel),
   // then refresh positions. Defined before the early returns so hook order holds.
@@ -251,6 +412,14 @@ export default function PositionTracker() {
             title={`${p.ticker} · ${p.sector || ""}`}
             right={
               <div className="flex items-center gap-2">
+                {p.needs_review && (
+                  <span
+                    title={p.review?.summary || "state.json diverged from the broker — resolve before trading this position"}
+                    className="cursor-help rounded-full border border-rose-500/50 bg-rose-500/20 px-2 py-0.5 text-xs font-semibold uppercase text-rose-200"
+                  >
+                    ⚠ needs review
+                  </span>
+                )}
                 {p.wash_sale_flag && (
                   <span
                     title={p.wash_sale_flag.note}
@@ -264,7 +433,16 @@ export default function PositionTracker() {
               </div>
             }
           >
-            <div className="grid gap-4 sm:grid-cols-3">
+            <ReviewPanel ticker={p.ticker} diffs={openDiffsByTicker[p.ticker]} onDone={afterResolve} />
+
+            {p.needs_review && (
+              <p className="mt-3 text-xs italic text-rose-400/80">
+                State unverified against the broker — the metrics below are computed off
+                state.json and may not reflect the account until this position is resolved.
+              </p>
+            )}
+
+            <div className="mt-4 grid gap-4 sm:grid-cols-3">
               <div>
                 <div className="text-xs uppercase tracking-wide text-slate-500">LEAP</div>
                 <div className="text-sm text-slate-200">{leap.contracts || 0} × {fmt(leap.strike, 0)}C · {leap.dte ?? "—"} DTE</div>

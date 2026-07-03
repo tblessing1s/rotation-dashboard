@@ -40,6 +40,10 @@ _stop = threading.Event()
 _last_run: dict[str, date] = {}
 # Nightly maintenance (earnings/dividends cache refresh) — last date it ran.
 _last_maintenance: date | None = None
+# Pre-market position reconciliation (state.json vs Schwab) — last date it ran.
+# The morning run is the important one: assignments materialize overnight and
+# pre-market is when the operator can act calmly.
+_last_reconcile: date | None = None
 
 
 def enabled() -> bool:
@@ -82,6 +86,9 @@ def _tick() -> None:
     due = due_slots(now)
     if not due:
         return
+    # Pre-market reconciliation runs on the FIRST morning slot, before the alert
+    # pass, so reconcile_dirty / short_stock_detected fire off a fresh report.
+    _maybe_morning_reconcile(now, due)
     # A restart mid-day makes several slots due at once; one evaluator pass
     # covers them all (the conditions are the same state either way).
     for slot in due:
@@ -93,6 +100,29 @@ def _tick() -> None:
                     result["active_count"])
     except Exception as e:  # noqa: BLE001 — a failed run must not kill the thread
         logger.error("scheduled alert run (%s ET) failed: %s", "+".join(due), e)
+
+
+def _maybe_morning_reconcile(now: datetime, due: list[str]) -> None:
+    """Run position reconciliation once per day on the first morning slot, but
+    only when Schwab is connected (read-only connected mode is enough —
+    CFM_LIVE_TRADING is not required) or in demo mode (report-only). A failure is
+    logged and recorded (feeding reconcile_stale), never fatal to the tick."""
+    global _last_reconcile
+    slots = config.ALERT_SCHEDULE_ET
+    first_slot = slots[0] if slots else None
+    if not first_slot or first_slot not in due or _last_reconcile == now.date():
+        return
+    import schwab_api
+    if not (schwab_api.configured() or config.demo_enabled()):
+        return
+    _last_reconcile = now.date()
+    try:
+        import reconcile
+        report = reconcile.run_reconciliation()
+        logger.info("pre-market reconciliation: status=%s diffs=%d",
+                    report.get("status"), len(report.get("diffs", [])))
+    except Exception as e:  # noqa: BLE001 — a failed reconcile must not kill the thread
+        logger.error("pre-market reconciliation failed: %s", e)
 
 
 def _loop() -> None:
