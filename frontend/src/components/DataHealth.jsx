@@ -289,6 +289,59 @@ function VetCandidates() {
   );
 }
 
+// Position reconciliation status (state.json vs Schwab): last run timestamp,
+// CLEAN/DIRTY (or FAILED), the diff count, and a manual "Reconcile now" trigger.
+function ReconcileStatus() {
+  const { data, reload } = useApi(api.reconcile, [], null);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+
+  const run = async () => {
+    setBusy(true); setErr(null);
+    try { await api.runReconcile(); await reload(); }
+    catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+
+  const last = data?.last;
+  const status = last?.broker_ok === false ? "FAILED" : last?.status || "never run";
+  const light = status === "CLEAN" ? "green" : status === "DIRTY" ? "yellow" : status === "never run" ? "yellow" : "red";
+  const diffs = (last?.diffs || []).filter((d) => !(d.resolution && d.resolution.status));
+  const nonBenign = diffs.filter((d) => d.classification !== "EXPIRED_WORTHLESS_PENDING");
+
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Position reconciliation (vs Schwab)</span>
+        <button onClick={run} disabled={busy}
+                className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          {busy ? "Reconciling…" : "Reconcile now"}
+        </button>
+      </div>
+      <div className="mt-2 flex items-center gap-2 text-sm">
+        <Light status={light} size="h-2.5 w-2.5" />
+        <span className="font-semibold text-slate-200">{status}</span>
+        {last?.as_of && <span className="text-xs text-slate-500">· {last.as_of.replace("T", " ").replace("Z", "")}</span>}
+        {last?.broker_ok !== false && diffs.length > 0 && (
+          <span className="text-xs text-slate-400">
+            · {nonBenign.length} to resolve{diffs.length - nonBenign.length > 0 ? `, ${diffs.length - nonBenign.length} benign` : ""}
+          </span>
+        )}
+      </div>
+      {last?.broker_ok === false && (
+        <p className="mt-1 text-xs text-rose-400">Broker fetch failed: {last.error} — no diffs generated; the stale clock keeps running.</p>
+      )}
+      {last?.broker_ok !== false && status === "CLEAN" && (
+        <p className="mt-1 text-xs text-slate-500">state.json matches the brokerage account.</p>
+      )}
+      {last?.broker_ok !== false && nonBenign.length > 0 && (
+        <p className="mt-1 text-xs text-slate-400">Resolve each diff on the Positions tab (the affected position shows a NEEDS REVIEW badge).</p>
+      )}
+      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
 export default function DataHealth() {
   const { data, error, loading, reload } = useApi(api.dataHealth, [], 120000);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -371,6 +424,7 @@ export default function DataHealth() {
           </div>
         </div>
       )}
+      <ReconcileStatus />
       {!data?.demo && <UniverseCheck />}
     </Card>
   );

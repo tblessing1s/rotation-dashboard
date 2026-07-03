@@ -20,7 +20,10 @@ async function request(path, opts = {}) {
     window.dispatchEvent(new CustomEvent("auth-required"));
   }
   if (!res.ok || data.error) {
-    throw new Error(data.error || `HTTP ${res.status}`);
+    const err = new Error(data.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.data = data; // e.g. a 409 freeze carries {frozen, ticker, review}
+    throw err;
   }
   return data;
 }
@@ -79,6 +82,12 @@ export const api = {
       body: JSON.stringify(dryRun === undefined ? {} : { dry_run: dryRun }),
     }),
   ackAlert: (id) => request("/api/alerts/ack", { method: "POST", body: JSON.stringify({ id }) }),
+  reconcile: () => request("/api/reconcile"),
+  runReconcile: () => request("/api/reconcile", { method: "POST" }),
+  resolveExpiry: (diffId) =>
+    request("/api/reconcile/resolve-expiry", { method: "POST", body: JSON.stringify({ diff_id: diffId }) }),
+  acknowledgeDiff: (diffId, ackReason) =>
+    request("/api/reconcile/acknowledge", { method: "POST", body: JSON.stringify({ diff_id: diffId, ack_reason: ackReason }) }),
   alertSettings: (patch) =>
     request("/api/alerts/settings", { method: "POST", body: JSON.stringify(patch) }),
   config: () => request("/api/config"),

@@ -19,7 +19,30 @@ import schwab_api
 import sector_data
 
 VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_short",
-                 "roll_leap", "close_position_atomic"}
+                 "roll_leap", "close_position_atomic", "adjustment"}
+
+# Actions REJECTED on a frozen (needs_review) position — new risk cannot be added
+# to a position whose state is unverified. Closing actions (close_short,
+# close_leap, close_position_atomic) are deliberately NOT here: a freeze must
+# never trap the operator in a position during a kill-switch event — exiting is
+# safe in either state of the world. ``adjustment`` is the resolution path, also
+# allowed. See docs/reconciliation.md.
+FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap"}
+
+
+class PositionFrozenError(RuntimeError):
+    """A new-risk action was attempted on a position frozen by reconciliation
+    (needs_review). The API surfaces this as HTTP 409 (distinct from the 400
+    gate-rejection) with the diff summary in the body. Closing actions bypass
+    this — a freeze protects against acting on wrong state, but exiting is safe."""
+
+    def __init__(self, ticker: str, review: dict | None):
+        self.ticker = ticker
+        self.review = review or {}
+        summary = self.review.get("summary") or "state is unverified against the broker"
+        super().__init__(
+            f"{ticker} is frozen for review — {summary}. New entries/rolls are blocked "
+            f"until the reconciliation diff is resolved; closing the position is still allowed.")
 
 # Why a roll happened — the whipsaw ledger key. Unrecognized values fall back to
 # "scheduled" so the ledger enum stays clean for later calibration.
@@ -79,6 +102,18 @@ def execute(payload: dict) -> dict:
         raise ValueError(f"unknown action '{action}' (expected one of {sorted(VALID_ACTIONS)})")
     if not ticker:
         raise ValueError("ticker is required")
+
+    # Reconciliation freeze: reject new-risk actions on a position whose state is
+    # unverified against the broker (checked BEFORE the account gate so a freeze
+    # wins over a gate rejection). Closing actions + adjustments fall through.
+    if action in FROZEN_BLOCKED_ACTIONS:
+        _enforce_not_frozen(ticker)
+
+    # Compensating adjustment (a reconciliation resolution) — its own path: an
+    # immutable execution + a position holding correction, no gate/price capture.
+    if action == "adjustment":
+        return _adjustment(payload, ticker)
+
     contracts = int(payload.get("contracts") or 0)
     strike = payload.get("strike")
     stock_price, price_source = _capture_price(ticker, payload.get("stock_price"))
@@ -121,6 +156,158 @@ def execute(payload: dict) -> dict:
     if mode == "live" and schwab_api.configured():
         return _place_live(payload, ticker, action, contracts, strike, stock_price, price_source)
     return _commit(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
+
+
+def _enforce_not_frozen(ticker: str) -> None:
+    """Raise PositionFrozenError if the ticker's position is frozen for review."""
+    state = log.load_state()
+    p = log.find_position(state, ticker)
+    if p and p.get("needs_review"):
+        raise PositionFrozenError(ticker, p.get("review"))
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation resolution paths (compensating adjustment / expiry booking / ack)
+# ---------------------------------------------------------------------------
+def _strike_eq(a, b) -> bool:
+    try:
+        return abs(float(a) - float(b)) < 1e-6
+    except (TypeError, ValueError):
+        return False
+
+
+def _apply_adjustment(position: dict, itype: str, strike, qty_delta: int) -> None:
+    """Apply a compensating quantity_delta (signed) to the identified leg. This
+    is the operator committing truth forward — never auto-correction."""
+    if itype == "EQUITY":
+        shares = position.setdefault("shares", {"count": 0, "cap": config.SHARE_CAP})
+        shares["count"] = int(shares.get("count") or 0) + qty_delta
+        return
+    if itype == "OPTION":
+        # A short call is stored with a positive contract count but is SHORT, so
+        # its signed quantity is -contracts; applying the delta toward zero closes
+        # it. Match a short by strike first, else fall to the LEAP (long call).
+        for sc in list(position.get("short_calls") or []):
+            if strike is not None and _strike_eq(sc.get("strike"), strike):
+                new_signed = -int(sc.get("contracts") or 0) + qty_delta
+                if new_signed >= 0:
+                    position["short_calls"] = [x for x in position["short_calls"] if x is not sc]
+                else:
+                    sc["contracts"] = -new_signed
+                return
+        leap = position.get("leap") or {}
+        if leap and (strike is None or _strike_eq(leap.get("strike"), strike)):
+            new = int(leap.get("contracts") or 0) + qty_delta
+            if new <= 0:
+                position["leap"] = None
+                shares = position.get("shares") or {}
+                if not position.get("short_calls") and int(shares.get("count") or 0) == 0:
+                    position["status"] = "closed"
+            else:
+                leap["contracts"] = new
+            return
+    # Unrecognized leg: the immutable adjustment record still stands; the operator
+    # can follow with another adjustment. Nothing is silently invented.
+
+
+def _adjustment(payload: dict, ticker: str) -> dict:
+    """Record a compensating ``adjustment`` execution (append-only) and apply the
+    holding correction. Required fields: instrument_type, quantity_delta, reason.
+    An optional linked_diff_id ties it to the reconciliation diff it resolves (and
+    marks that diff resolved, lifting the freeze once the position is clean)."""
+    import reconcile
+
+    itype = (payload.get("instrument_type") or "").upper()
+    qty_delta = payload.get("quantity_delta")
+    reason = (payload.get("reason") or "").strip()
+    if qty_delta is None:
+        raise ValueError("adjustment requires quantity_delta (signed)")
+    if not reason:
+        raise ValueError("adjustment requires a typed reason")
+    if itype not in ("EQUITY", "OPTION"):
+        raise ValueError("adjustment requires instrument_type EQUITY or OPTION")
+    qty_delta = int(round(float(qty_delta)))
+    strike = payload.get("strike")
+    price = payload.get("price")
+    linked = payload.get("linked_diff_id")
+    mode = "live" if live_enabled() else "logged"
+    execution = {
+        "ticker": ticker, "action": "adjustment",
+        "instrument": payload.get("instrument"), "instrument_type": itype,
+        "strike": strike, "quantity_delta": qty_delta,
+        "price": float(price) if price is not None else None,
+        "reason": reason, "linked_diff_id": linked, "mode": mode,
+    }
+    stored = log.append_execution(execution)
+
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if position is not None:
+        _apply_adjustment(position, itype, strike, qty_delta)
+    if linked:
+        try:
+            reconcile.mark_diff_resolved(state, linked, "adjustment",
+                                         {"execution_id": stored["id"]})
+        except ValueError:
+            pass  # diff already rolled off the latest report — the execution still stands
+    log.recompute_derived(state)
+    log.save_state(state)
+    return {"success": True, "status": "adjusted", "execution_id": stored["id"],
+            "timestamp": stored["date"], "mode": mode, "execution": stored}
+
+
+def resolve_expiry(diff_id: str) -> dict:
+    """One-click resolution for an EXPIRED_WORTHLESS_PENDING diff: book a
+    close_short at $0.00 with reason ``expired_worthless``, timestamped to the
+    expiry date, and clear the diff. Append-only — history is corrected forward."""
+    import reconcile
+
+    state = log.load_state()
+    _report, diff = reconcile._find_diff(state, diff_id)
+    if diff is None:
+        raise ValueError(f"unknown diff id {diff_id!r} in the latest reconciliation report")
+    if diff["classification"] != reconcile.EXPIRED_WORTHLESS_PENDING:
+        raise ValueError(
+            f"resolve_expiry only applies to EXPIRED_WORTHLESS_PENDING diffs "
+            f"(diff {diff_id} is {diff['classification']}); use an adjustment instead")
+    ticker = diff["ticker"]
+    strike = diff["strike"]
+    contracts = abs(int(diff.get("expected_qty") or 0))
+    expiry = diff.get("expiry")
+    stock_price = diff.get("expiry_close")
+
+    close_payload = {"ticker": ticker, "strike": strike, "contracts": contracts,
+                     "close_price_per_share": 0.0, "stock_price": stock_price}
+    execution, apply = _close_short(close_payload, ticker, strike, contracts, stock_price)
+    execution["mode"] = "live" if live_enabled() else "logged"
+    execution["reason"] = "expired_worthless"
+    execution["linked_diff_id"] = diff_id
+    if expiry:
+        execution["date"] = f"{str(expiry)[:10]}T20:00:00Z"  # timestamp to expiry day
+    stored = log.append_execution(execution)
+
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if position is not None:
+        apply(position)
+    reconcile.mark_diff_resolved(state, diff_id, "resolve_expiry", {"execution_id": stored["id"]})
+    log.recompute_derived(state)
+    log.save_state(state)
+    return {"success": True, "status": "resolved", "execution_id": stored["id"],
+            "timestamp": stored["date"], "diff_id": diff_id, "execution": stored}
+
+
+def acknowledge_diff(diff_id: str, ack_reason: str) -> dict:
+    """Acknowledge a reconciliation diff as a non-issue (typed reason required),
+    logged onto the reconciliation record. Lifts the freeze once the position's
+    diffs are all resolved/acked. No execution is recorded — nothing changed at
+    the broker, the operator is asserting the state is already correct."""
+    import reconcile
+
+    state = log.load_state()
+    d = reconcile.ack_diff(state, diff_id, ack_reason)
+    log.save_state(state)
+    return {"success": True, "status": "acknowledged", "diff_id": diff_id, "diff": d}
 
 
 def _enforce_account_gate(payload, ticker, contracts):

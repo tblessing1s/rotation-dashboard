@@ -347,3 +347,19 @@ WEEKLY_JUICE_TARGET_PCT_MAX = 2.0
 # sale). Not tax software: the app only FLAGS re-entries inside the window so
 # year-end isn't a surprise.
 WASH_SALE_WINDOW_DAYS = 30
+
+# ---- Position reconciliation (state.json vs Schwab) ------------------------
+# Nothing else verifies that state.json matches what the brokerage account
+# actually holds. The reconciler detects divergence (assignment, expiry,
+# partial fill, corporate action, or a bug), freezes the affected position, and
+# alerts — the operator resolves. It never auto-corrects state.
+
+# PROPOSED_DEFAULT — how many past reconciliation reports to retain in
+# state.reconciliation.history (the last full report is kept separately).
+RECONCILE_HISTORY_MAX = 30
+
+# PROPOSED_DEFAULT — reconciliation is expected to run at least nightly + each
+# pre-market slot; if the last SUCCESSFUL run is older than this while Schwab is
+# connected and positions are open, reconcile_stale fires. Silence is itself a
+# failure signal (the positions call failing, the scheduler wedged, etc.).
+RECONCILE_STALE_HOURS = 36

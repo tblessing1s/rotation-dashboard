@@ -298,6 +298,12 @@ def api_execute():
     payload = request.get_json(silent=True) or {}
     try:
         return jsonify(executor.execute(payload))
+    except executor.PositionFrozenError as e:
+        # 409 (distinct from the 400 gate-rejection): the position is frozen for
+        # reconciliation review. The diff summary rides in the body. Closing
+        # actions are never rejected here, so the operator can still exit.
+        return jsonify({"error": str(e), "frozen": True, "ticker": e.ticker,
+                        "review": e.review}), 409
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001
@@ -460,6 +466,61 @@ def api_alerts_settings():
     payload = request.get_json(silent=True) or {}
     try:
         return jsonify(alerts.update_settings(payload))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation (state.json vs Schwab)
+# ---------------------------------------------------------------------------
+@app.route("/api/reconcile", methods=["GET", "POST"])
+def api_reconcile():
+    """GET: the last reconciliation report + history. POST: run reconciliation
+    now (fetches live Schwab positions; report-only in demo/paper). Then also
+    fires the alert pass so a fresh dirty/short-stock report surfaces at once."""
+    if request.method == "POST":
+        try:
+            import reconcile
+            report = reconcile.run_reconciliation()
+            try:
+                alerts.run()  # surface reconcile_dirty / short_stock immediately
+            except Exception:  # noqa: BLE001 — a notify failure must not fail the run
+                pass
+            return jsonify(report)
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+    state = log.load_state()
+    return jsonify(state.get("reconciliation") or {"last": None, "history": []})
+
+
+@app.route("/api/reconcile/resolve-expiry", methods=["POST"])
+def api_reconcile_resolve_expiry():
+    """One-click resolution for an EXPIRED_WORTHLESS_PENDING diff: books the $0
+    close_short and clears the diff."""
+    payload = request.get_json(silent=True) or {}
+    diff_id = payload.get("diff_id", "")
+    if not diff_id:
+        return jsonify({"error": "diff_id is required"}), 400
+    try:
+        return jsonify(executor.resolve_expiry(diff_id))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/reconcile/acknowledge", methods=["POST"])
+def api_reconcile_acknowledge():
+    """Acknowledge a diff the operator deems a non-issue (typed ack_reason
+    required), logged onto the reconciliation record."""
+    payload = request.get_json(silent=True) or {}
+    diff_id = payload.get("diff_id", "")
+    if not diff_id:
+        return jsonify({"error": "diff_id is required"}), 400
+    try:
+        return jsonify(executor.acknowledge_diff(diff_id, payload.get("ack_reason", "")))
+    except ValueError as e:
+        return _err(e, 400)
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

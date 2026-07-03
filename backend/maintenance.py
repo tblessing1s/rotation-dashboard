@@ -111,6 +111,21 @@ def nightly_refresh() -> dict:
     except Exception as e:  # noqa: BLE001 — a cash-sync failure must not sink the sweep
         report["errors"].append(f"operating_cash: {e}")
 
+    # Nightly position reconciliation (state.json vs Schwab), only when connected
+    # — a read-only account call. A failed run records a failure (feeding
+    # reconcile_stale); it never produces an empty broker view. (Demo mode never
+    # reaches here — nightly_refresh returns early above.)
+    try:
+        import schwab_api
+        if schwab_api.configured():
+            import reconcile
+            recon = reconcile.run_reconciliation()
+            report["reconciliation"] = {"status": recon.get("status"),
+                                        "diffs": len(recon.get("diffs", [])),
+                                        "broker_ok": recon.get("broker_ok")}
+    except Exception as e:  # noqa: BLE001 — a reconcile failure must not sink the sweep
+        report["errors"].append(f"reconcile: {e}")
+
     # Nightly rotating backup + off-machine copy of state.json. Runs last so a
     # backup failure (which self-alerts through the Notifier) never blocks the
     # data refresh above.

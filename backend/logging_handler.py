@@ -56,6 +56,8 @@ def _default_state() -> dict:
         # execution) or is cancelled/rejected.
         "pending_orders": {},
         "alerts": migrations.default_alert_state(),
+        # Position reconciliation vs Schwab: last report + capped history.
+        "reconciliation": {"last": None, "history": [], "last_success": None},
     }
 
 
@@ -214,6 +216,13 @@ def append_execution(execution: dict) -> dict:
         execution = dict(execution)
         execution.setdefault("id", _next_exec_id(state))
         execution.setdefault("date", utcnow())
+        # Explicit live-transmission provenance for the reconciler's expected-view
+        # (paper positions won't exist at the broker). Derived from the execution's
+        # own mode: live -> True, logged -> False, anything else -> None (unknown).
+        if "live_transmitted" not in execution:
+            mode = execution.get("mode")
+            execution["live_transmitted"] = (
+                True if mode == "live" else False if mode == "logged" else None)
         state["executions"].append(execution)
         recompute_derived(state)
         save_state(state)

@@ -161,10 +161,12 @@ def test_v5_fixture_migrates_and_seeds_delta_history(store):
         json.dump(v5, fh)
 
     state = log.load_state()
-    assert state["schema_version"] == migrations.CURRENT_VERSION == 6
-    assert state["positions"][0]["delta_history"] == []
-    # Pre-migration snapshot was taken (v5 bytes) before the migrated save.
-    snaps = glob.glob(os.path.join(backups.backups_dir(), "pre-migration-v5-to-v6-*.json"))
+    assert state["schema_version"] == migrations.CURRENT_VERSION
+    assert state["positions"][0]["delta_history"] == []  # v5->v6 seeding still applies
+    # Pre-migration snapshot was taken (v5 bytes) before the migrated save; the
+    # chain now runs v5 all the way to CURRENT_VERSION in one pass.
+    snaps = glob.glob(os.path.join(backups.backups_dir(),
+                                   f"pre-migration-v5-to-v{migrations.CURRENT_VERSION}-*.json"))
     assert len(snaps) == 1
     assert json.load(open(snaps[0], encoding="utf-8"))["schema_version"] == 5
 
