@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 5
+CURRENT_VERSION = 6
 
 
 class MigrationAbortedError(RuntimeError):
@@ -72,11 +72,26 @@ def _v4_to_v5(state: dict) -> dict:
     return state
 
 
+def _v5_to_v6(state: dict) -> dict:
+    """v6 (LEAP capital preservation): a per-position rolling snapshot of the
+    long leg's daily delta, appended nightly, for the delta-velocity early
+    warning. Seed the empty list on existing open positions so readers never
+    key-error; it fills in from the first nightly run (ships cold). The other
+    LEAP-lifecycle fields (leap_dte, extrinsic remaining/weeks, juice-vs-burn)
+    are DERIVED in recompute_derived, and the ``leap_roll_id`` link that ties a
+    long-leg roll's close_leap+buy_leap together is an optional field on the
+    immutable executions — neither needs migrating."""
+    for p in state.get("positions", []):
+        p.setdefault("delta_history", [])
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
     3: _v3_to_v4,
     4: _v4_to_v5,
+    5: _v5_to_v6,
 }
 
 

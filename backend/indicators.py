@@ -202,6 +202,10 @@ def _norm_cdf(x: float) -> float:
     return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
 
 
+def _norm_pdf(x: float) -> float:
+    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+
 def _d1(S: float, K: float, T: float, r: float, sigma: float, q: float = 0.0) -> float:
     return (math.log(S / K) + (r - q + 0.5 * sigma * sigma) * T) / (sigma * math.sqrt(T))
 
@@ -273,6 +277,48 @@ def implied_vol_put(price: float | None, S: float, K: float, T: float, r: float,
         else:
             hi = mid
     return 0.5 * (lo + hi)
+
+
+def call_greeks_full(S: float, K: float, T: float, r: float, sigma: float,
+                     q: float = 0.0) -> tuple[float | None, float | None, float | None]:
+    """(delta, theta_per_calendar_day, vega_per_vol_point) for a call, per share.
+
+    Black-Scholes-Merton with a continuous dividend yield q. theta is the full
+    BSM theta annualized then divided by 365 — for a long call it is negative
+    (the position bleeds time value), and it steepens (more negative) as T
+    shrinks, which is exactly why LEAP burn must be measured this way rather
+    than by straight-line extrinsic ÷ DTE. Returns (None, None, None) when
+    inputs are insufficient."""
+    if not (S and S > 0 and K and K > 0 and T and T > 0 and sigma and sigma > 0):
+        return None, None, None
+    d1 = _d1(S, K, T, r, sigma, q)
+    d2 = d1 - sigma * math.sqrt(T)
+    delta = math.exp(-q * T) * _norm_cdf(d1)
+    theta_year = (-S * math.exp(-q * T) * _norm_pdf(d1) * sigma / (2 * math.sqrt(T))
+                  - r * K * math.exp(-r * T) * _norm_cdf(d2)
+                  + q * S * math.exp(-q * T) * _norm_cdf(d1))
+    vega = S * math.exp(-q * T) * _norm_pdf(d1) * math.sqrt(T) / 100.0  # per vol point
+    return delta, theta_year / 365.0, vega
+
+
+def leap_weekly_burn(S: float | None, K: float | None, dte: int | None,
+                     mark_per_share: float | None, contracts: int,
+                     q: float = 0.0) -> float | None:
+    """The LEAP's extrinsic decay in dollars per 7 calendar days for the whole
+    position (contracts × 100 shares). Implies vol from the leg's stored mark,
+    computes BS theta/day, scales to a week, and returns it as a POSITIVE burn
+    number (theta is negative for a long call). None when unpriceable."""
+    T = (dte or 0) / 365.0
+    n = int(contracts or 0)
+    if not (S and K and T > 0 and n):
+        return None
+    sigma = implied_vol_call(mark_per_share, S, K, T, config.RISK_FREE_RATE, q)
+    if not sigma:
+        return None
+    _, theta_day, _ = call_greeks_full(S, K, T, config.RISK_FREE_RATE, sigma, q)
+    if theta_day is None:
+        return None
+    return round(-theta_day * 7.0 * n * 100, 2)
 
 
 def call_greeks(S: float | None, K: float | None, dte: int | None, mark: float | None,

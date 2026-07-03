@@ -71,6 +71,79 @@ function DeltaCoverage({ ticker }) {
   );
 }
 
+// Compact LEAP long-leg health strip: DTE, extrinsic remaining (+ weeks-of-juice
+// runway), net weekly maintenance (self-funding green / burning red), delta with
+// a velocity trend arrow, and a ROLL LEAP DUE badge (mirrors the ROLL NOW badge).
+// Tapping the badge fetches the roll-cost estimate + reserve check inline.
+function LeapHealth({ ticker, health }) {
+  const [est, setEst] = React.useState(null);
+  const [open, setOpen] = React.useState(false);
+  if (!health) return null;
+
+  const m = health.net_weekly_maintenance;
+  const mTone = m == null ? "text-slate-400" : m >= 0 ? "text-emerald-300" : "text-rose-300";
+  const drop = health.delta_velocity?.drop;
+  const arrow = drop == null ? "" : drop > 0.0001 ? " ▼" : drop < -0.0001 ? " ▲" : "";
+  const arrowTone = drop > 0.0001 ? "text-rose-300" : drop < -0.0001 ? "text-emerald-300" : "text-slate-400";
+
+  const showEstimate = async () => {
+    setOpen((v) => !v);
+    if (!est) {
+      try { setEst(await api.leapRollEstimate(ticker)); } catch (e) { setEst({ error: String(e.message || e) }); }
+    }
+  };
+
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-500">LEAP health</span>
+        {health.roll_due && (
+          <button
+            onClick={showEstimate}
+            title={(health.roll_reasons || []).join("; ") || "LEAP roll recommended"}
+            className="rounded-full border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300 hover:bg-amber-500/25"
+          >
+            ROLL LEAP DUE
+          </button>
+        )}
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-300">
+        <span>DTE <span className="font-semibold text-slate-100">{health.leap_dte ?? "—"}</span></span>
+        <span title={health.leap_extrinsic_below_intrinsic ? "Mark quoted below intrinsic — a liquidity signal, not real negative extrinsic" : ""}>
+          extrinsic <span className="font-semibold text-slate-100">{money(health.leap_extrinsic_remaining)}</span>
+          {health.leap_extrinsic_weeks_remaining != null && (
+            <span className="text-slate-500"> (~{fmt(health.leap_extrinsic_weeks_remaining, 1)} wk juice)</span>
+          )}
+          {health.leap_extrinsic_below_intrinsic && <span className="text-amber-400"> ⚠</span>}
+        </span>
+        <span>maint. <span className={`font-semibold ${mTone}`}>{m == null ? "—" : `${m >= 0 ? "+" : ""}${money(m)}/wk`}</span></span>
+        <span>Δ <span className="font-semibold text-slate-100">{fmt(health.leap_delta, 2)}</span>
+          {arrow && <span className={arrowTone}>{arrow}</span>}
+        </span>
+      </div>
+      {open && (
+        <div className="mt-2 rounded-lg border border-amber-800 bg-amber-500/10 p-3 text-xs text-slate-300">
+          {!est ? (
+            <span className="text-slate-500">Estimating roll cost…</span>
+          ) : est.error || est.new_leap == null ? (
+            <span className="text-slate-500">{est.error || "Roll estimate unavailable."}</span>
+          ) : (
+            <>
+              Roll into <span className="font-semibold text-slate-100">{fmt(est.new_leap?.strike, 1)}C</span> ~{est.new_leap?.target_dte} DTE ·
+              {" "}est. net {est.net_debit >= 0 ? "debit" : "credit"}{" "}
+              <span className={est.net_debit >= 0 ? "text-rose-300" : "text-emerald-300"}>{money(Math.abs(est.net_debit))}</span>
+              {" · "}reserve{" "}
+              <span className={est.reserve_ok ? "text-emerald-300" : "text-rose-300"}>{est.reserve_ok ? "OK" : "BREACH"}</span>
+              {" "}(free after {money(est.free_cash_after)} vs {money(est.reserve_required)})
+              <div className="mt-1 text-slate-500">Estimated from trailing vol; the staged roll re-prices from the live chain. The operator transmits.</div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Defensive roll-down recommendation, shown when a short strike is breached.
 function DefendPanel({ ticker, onStage }) {
   const { data } = useApi(React.useCallback(() => api.defend(ticker), [ticker]), [ticker], null);
@@ -208,6 +281,8 @@ export default function PositionTracker() {
                 <div className="text-xs text-slate-500">{shorts.length} open short(s)</div>
               </div>
             </div>
+
+            <LeapHealth ticker={p.ticker} health={p.leap_health} />
 
             {/* Open shorts — each rollable in place (pick week + strike) */}
             <div className="mt-4 border-t border-slate-800 pt-3">

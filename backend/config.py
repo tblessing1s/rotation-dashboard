@@ -148,7 +148,8 @@ STRIKE_TABLE = {
 }
 STRIKE_POSTURES = ("aggressive", "conservative")
 DEFAULT_STRIKE_POSTURE = "conservative"  # PROPOSED_DEFAULT until the operator picks
-LEAP_ROLL_DTE = 30           # roll/replace LEAP when it nears this DTE
+LEAP_ROLL_DTE = 30           # (legacy, unused) superseded by LEAP_ROLL_DTE_FLOOR
+                              # in the LEAP capital-preservation section below
 ROLL_MAX_DTE = 45            # short-roll picker offers expirations out to this DTE
 
 # CFM sells a weekly short, so a monthly-only chain can't run the strategy. The
@@ -215,6 +216,46 @@ BACKUP_EMAIL_MAX_BYTES = 5 * 1024 * 1024
 # env: BACKUP_S3_BUCKET, BACKUP_S3_ENDPOINT, BACKUP_S3_KEY_PREFIX, plus AWS_*
 # credentials. Lets an operator point backups off-machine without a code change.
 BACKUP_S3_ENABLED = os.environ.get("CFM_BACKUP_S3", "").strip() in ("1", "true", "yes")
+
+
+# ---- LEAP capital preservation (long-leg lifecycle) ------------------------
+# In a PMCC the LEAP *is* the deployed capital. The short side has a full
+# management engine; these thresholds give the long leg the same discipline —
+# when to roll it, whether juice is still covering its decay, and an early
+# warning that its delta is bleeding before the 0.50 floor fires.
+
+# PROPOSED_DEFAULT — roll the LEAP when it drops below this DTE. Theta on the
+# long leg steepens meaningfully under ~90 DTE (a LEAP stops behaving like a
+# calm stock proxy and starts decaying like a shorter-dated option), so roll
+# before that. Supersedes the older, unused LEAP_ROLL_DTE constant above.
+LEAP_ROLL_DTE_FLOOR = 90
+
+# PROPOSED_DEFAULT — roll the LEAP when its remaining extrinsic is worth less
+# than this many weeks of the position's own trailing juice: at that point the
+# leg's decay is about to outrun what the shorts collect against it.
+LEAP_MIN_EXTRINSIC_WEEKS = 4
+
+# PROPOSED_DEFAULT — trailing window (completed weeks) for a position's average
+# weekly juice, the denominator of leap_extrinsic_weeks_remaining and the
+# juice-vs-burn maintenance number.
+JUICE_TRAILING_WEEKS = 4
+
+# PROPOSED_DEFAULT — consecutive completed weeks of net-negative maintenance
+# (juice < LEAP decay) before the capital_burn alert fires. One bad week is
+# noise; a sustained run means the flywheel is running backwards.
+MAINTENANCE_NEGATIVE_WEEKS = 2
+
+# PROPOSED_DEFAULT — days of per-position daily LEAP delta retained (the nightly
+# maintenance job appends one point/day) to power the delta-velocity warning.
+DELTA_HISTORY_DAYS = 30
+
+# PROPOSED_DEFAULT — delta-velocity early warning: fire when the LEAP delta has
+# fallen by more than this much over DELTA_VELOCITY_WINDOW sessions, while still
+# ABOVE the 0.50 floor (below the floor, DELTA_UNCOVERED owns it). The existing
+# floor alert fires late — most convexity damage is done by 0.50; this is the
+# rate-based earlier tier.
+DELTA_VELOCITY_DROP = 0.08
+DELTA_VELOCITY_WINDOW = 5
 
 
 def alerts_dry_run_default() -> bool:

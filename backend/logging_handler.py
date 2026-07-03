@@ -271,7 +271,6 @@ def recompute_derived(state: dict) -> dict:
 
     weeks: dict[tuple[str, str], dict] = {}
     totals = {"this_week": 0.0, "this_month": 0.0, "ytd": 0.0}
-    collected_by_ticker: dict[str, float] = {}
 
     for e in execs:
         if e.get("action") != "close_short":
@@ -287,7 +286,6 @@ def recompute_derived(state: dict) -> dict:
         row["extrinsic_sold"] += sold
         row["extrinsic_paid_back"] += paid
         row["net_juice"] += net
-        collected_by_ticker[ticker] = collected_by_ticker.get(ticker, 0.0) + net
 
         d = e.get("date", "")[:10]
         if wk == cur_week:
@@ -306,15 +304,48 @@ def recompute_derived(state: dict) -> dict:
         "totals": totals,
     }
 
+    # LEAP-cycle payback accounting (respecting long-leg rolls). A LEAP roll is
+    # logged as close_leap + buy_leap sharing a leap_roll_id; across a roll the
+    # position's capital story is CONTINUOUS — collected juice carries and the
+    # new LEAP's entry extrinsic is ADDED to the outstanding payback target. A
+    # true exit + re-entry (no shared id) starts a fresh cycle. This is why the
+    # meter is cycle-scoped rather than summing a ticker's whole juice history
+    # against only the current LEAP's entry extrinsic. See docs/leap-lifecycle.md.
+    cycle_collected: dict[str, float] = {}
+    cycle_target: dict[str, float] = {}
+    _pending_close_roll: dict[str, str] = {}
+    for e in execs:
+        t = e.get("ticker", "")
+        a = e.get("action")
+        if a == "buy_leap":
+            rid = e.get("leap_roll_id")
+            extr = float(e.get("extrinsic_captured") or 0)
+            if rid and _pending_close_roll.get(t) == rid:
+                cycle_target[t] = cycle_target.get(t, 0.0) + extr   # roll: add extrinsic, carry juice
+            else:
+                cycle_collected[t] = 0.0                            # fresh cycle
+                cycle_target[t] = extr
+            _pending_close_roll.pop(t, None)
+        elif a == "close_short":
+            cycle_collected[t] = cycle_collected.get(t, 0.0) + float(e.get("net_juice_total") or 0)
+        elif a == "close_leap":
+            rid = e.get("leap_roll_id")
+            if rid:
+                _pending_close_roll[t] = rid    # a roll IF a matching buy_leap follows
+            else:
+                cycle_collected.pop(t, None)     # true exit — cycle ends, juice does not carry
+                cycle_target.pop(t, None)
+                _pending_close_roll.pop(t, None)
+
     # Extrinsic payback meter per position: how much of the LEAP's entry
-    # extrinsic the collected short juice has paid back.
+    # extrinsic the collected short juice has paid back (current cycle only).
     payback: dict[str, dict] = {}
     agg_at_entry = agg_collected = agg_remaining = 0.0
     for p in state.get("positions", []):
         ticker = p.get("ticker", "")
         leap = p.get("leap") or {}
-        at_entry = float(leap.get("extrinsic_at_entry") or 0)
-        collected = collected_by_ticker.get(ticker, 0.0)
+        at_entry = float(cycle_target.get(ticker, leap.get("extrinsic_at_entry") or 0))
+        collected = float(cycle_collected.get(ticker, 0.0))
         remaining = max(at_entry - collected, 0.0)
         payback[ticker] = {
             "leap_extrinsic_at_entry": round(at_entry, 2),
@@ -485,4 +516,35 @@ def recompute_derived(state: dict) -> dict:
             c["wash_sale"] = {"status": "window_open", "loss": c["leap_pnl"],
                               "window_ends": (exit_ts + window).date().isoformat()}
     state["cycles"] = cycles
+
+    # Per-position LEAP-lifecycle derived fields that need only stored data +
+    # today's date. The price-dependent health (extrinsic remaining, weekly
+    # burn, net maintenance, delta velocity) is layered on at view time in
+    # leap_policy, where the live stock price and option mark are available.
+    weeks_rows = state["theta_ledger"]["weeks"]
+    today = now.date()
+    for p in state.get("positions", []):
+        ticker = p.get("ticker", "")
+        if p.get("status") == "closed" or not (p.get("leap") or {}):
+            p["leap_dte"] = None
+            p["trailing_avg_weekly_juice"] = None
+            continue
+        leap = p["leap"]
+        # leap_dte: calendar days to expiry from the stored expiration; fall
+        # back to the static entry-time snapshot when no expiration is stored.
+        dte = None
+        exp = leap.get("expiration")
+        if exp:
+            try:
+                dte = (datetime.strptime(str(exp)[:10], "%Y-%m-%d").date() - today).days
+            except ValueError:
+                dte = None
+        p["leap_dte"] = dte if dte is not None else leap.get("dte")
+        # trailing_avg_weekly_juice: mean net juice over the last N COMPLETED
+        # weeks for this ticker (weeks_rows is sorted ascending by week).
+        juice_weeks = [r["net_juice"] for r in weeks_rows
+                       if r["ticker"] == ticker and r["week"] < cur_week]
+        juice_weeks = juice_weeks[-config.JUICE_TRAILING_WEEKS:]
+        p["trailing_avg_weekly_juice"] = (round(sum(juice_weeks) / len(juice_weeks), 2)
+                                          if juice_weeks else None)
     return state

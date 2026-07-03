@@ -162,13 +162,13 @@ def test_pre_migration_snapshot_written_before_migrated_save(store):
     assert state["schema_version"] == migrations.CURRENT_VERSION
 
     snaps = glob.glob(os.path.join(backups.backups_dir(),
-                                   "pre-migration-v4-to-v5-*.json"))
+                                   f"pre-migration-v4-to-v{migrations.CURRENT_VERSION}-*.json"))
     assert len(snaps) == 1
     # The snapshot captured the PRE-migration bytes (v4), proving it was taken
     # before the migrated state was written back.
     assert json.load(open(snaps[0], encoding="utf-8"))["schema_version"] == 4
     # And the live file is now migrated.
-    assert json.load(open(config.STATE_PATH, encoding="utf-8"))["schema_version"] == 5
+    assert json.load(open(config.STATE_PATH, encoding="utf-8"))["schema_version"] == migrations.CURRENT_VERSION
 
 
 def test_migration_aborts_when_snapshot_fails(store, monkeypatch):

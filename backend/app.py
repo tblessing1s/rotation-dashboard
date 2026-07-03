@@ -209,6 +209,22 @@ def api_defend():
         return _err(e)
 
 
+@app.route("/api/leap-roll-estimate")
+def api_leap_roll_estimate():
+    """Roll-cost estimate for a position's LONG leg: suggested ~target-delta /
+    ~180-DTE replacement LEAP, estimated net debit, and whether that debit still
+    fits the 2xATR cash reserve (reserve_ok). Prices from the live chain when
+    available, else a Black-Scholes estimate at trailing realized vol."""
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        import leap_policy
+        return jsonify(leap_policy.roll_cost_estimate(ticker))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/strike-posture", methods=["GET", "POST"])
 def api_strike_posture():
     """Read or set the operator's risk posture (aggressive/conservative) for

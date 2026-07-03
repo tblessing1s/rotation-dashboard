@@ -18,7 +18,8 @@ import logging_handler as log
 import schwab_api
 import sector_data
 
-VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_short"}
+VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_short",
+                 "roll_leap", "close_position_atomic"}
 
 # Why a roll happened — the whipsaw ledger key. Unrecognized values fall back to
 # "scheduled" so the ledger enum stays clean for later calibration.
@@ -65,6 +66,7 @@ def _ensure_position(state: dict, ticker: str) -> dict:
         "short_calls": [],
         "kill_switch": {},
         "thesis": {"fundamentals": "", "intact": True},
+        "delta_history": [],  # nightly {date, leap_delta} snapshots (delta velocity)
     }
     state["positions"].append(p)
     return p
@@ -89,12 +91,28 @@ def execute(payload: dict) -> dict:
 
     state = log.load_state()
     position = _ensure_position(state, ticker)
+
+    # Ordering invariant: never close the LONG leg while a short is still open —
+    # that leaves a naked short call. A single-leg close_leap is REJECTED (no
+    # override) when an open short remains; the operator must exit both legs
+    # atomically (close_position_atomic) or close/roll the short first. Legit
+    # single-leg closes (short already expired/closed, shares-only) still pass.
+    if action == "close_leap" and (position.get("short_calls") or []):
+        raise ValueError(
+            "Refusing single-leg close_leap while an open short remains — it would "
+            "leave a naked short call. Use close_position_atomic to exit both legs "
+            "on one ticket, or close/roll the short first.")
+
     log.save_state(state)  # persist the shell position before recording the fill
 
     mode = "live" if live_enabled() else "logged"
 
     if action == "roll_short":
         return _roll_short(payload, ticker, contracts, stock_price, mode, price_source)
+    if action == "roll_leap":
+        return _roll_leap(payload, ticker, stock_price, mode, price_source)
+    if action == "close_position_atomic":
+        return _close_position_atomic(payload, ticker, stock_price, mode, price_source)
 
     # Live single-leg orders go to the broker and resolve asynchronously (place ->
     # poll -> fill/cancel); they're committed to state only once they actually
@@ -271,8 +289,13 @@ def order_status(order_id: str) -> dict:
     order = data_handler.client().get_order(rec["account_hash"], order_id)
     raw = (order.get("status") or "").upper()
     if raw == "FILLED":
-        if rec.get("kind") == "roll_short":
+        kind = rec.get("kind")
+        if kind == "roll_short":
             result = _commit_roll_from_pending(rec, order)
+        elif kind == "exit":
+            result = _commit_exit_from_pending(rec, order)
+        elif kind == "roll_leap":
+            result = _commit_leap_roll_from_pending(rec, order)
         else:
             result = _commit_from_pending(rec, _fill_price(order))
         log.pop_pending_order(order_id)
@@ -620,6 +643,358 @@ def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source):
         "net_credit": round(new_total - close_total, 2),
         "executions": [stored_close, stored_sell],
     }
+
+
+# ---------------------------------------------------------------------------
+# Atomic exit (close LEAP + short on one ticket) and atomic LEAP roll
+# ---------------------------------------------------------------------------
+def _next_exit_id(state) -> str:
+    n = len({e.get("exit_id") for e in state.get("executions", []) if e.get("exit_id")})
+    return f"exit_{n + 1:03d}"
+
+
+def _next_leap_roll_id(state) -> str:
+    n = len({e.get("leap_roll_id") for e in state.get("executions", []) if e.get("leap_roll_id")})
+    return f"leaproll_{n + 1:03d}"
+
+
+def _leg_fills(order: dict, symbols: list[str]) -> dict:
+    """symbol -> average per-share fill price from a filled multi-leg order,
+    matched by legId -> orderLegCollection symbol. Missing legs are absent."""
+    leg_symbol = {}
+    for i, leg in enumerate(order.get("orderLegCollection") or [], start=1):
+        sym = ((leg.get("instrument") or {}).get("symbol") or "").strip()
+        leg_symbol[leg.get("legId") or i] = sym
+    wanted = {s.strip() for s in symbols if s}
+    fills: dict[str, float] = {}
+    try:
+        for act in order.get("orderActivityCollection", []) or []:
+            for leg in act.get("executionLegs", []) or []:
+                price = leg.get("price")
+                if price is None:
+                    continue
+                sym = leg_symbol.get(leg.get("legId"))
+                if sym in wanted:
+                    fills[sym] = float(price)
+    except (TypeError, ValueError):
+        pass
+    return fills
+
+
+def _leap_close_per_contract(leap: dict, payload: dict) -> float:
+    """Per-contract sell-to-close price for the LEAP: supplied leap_close_price,
+    else the stored per-position mark (current_bid) split back per contract."""
+    supplied = payload.get("leap_close_price")
+    if supplied is not None:
+        return float(supplied)
+    contracts = int(leap.get("contracts") or 0)
+    cur = leap.get("current_bid")
+    return float(cur) / contracts if (cur is not None and contracts) else 0.0
+
+
+def _build_exit_legs(position, payload, stock_price):
+    """(leap_close_exec, leap_apply, [(short_exec, short_apply)...], net_per_share,
+    symbols) for an atomic exit. Prices come from supplied values / stored marks;
+    the live path overlays real per-leg fills before committing."""
+    leap = position.get("leap") or {}
+    n_leap = int(leap.get("contracts") or 0)
+    leap_strike = leap.get("strike")
+    leap_pc = _leap_close_per_contract(leap, payload)
+    leap_payload = {
+        "ticker": position["ticker"], "strike": leap_strike, "contracts": n_leap,
+        "close_price": leap_pc, "stock_price": stock_price,
+        "cost_basis": payload.get("cost_basis", leap.get("cost_basis")),
+        "exit_reason": payload.get("exit_reason"),
+    }
+    leap_exec, leap_apply = _close_leap(leap_payload, position["ticker"], leap_strike, n_leap, stock_price)
+
+    shorts = []
+    short_buyback_total = 0.0
+    for sc in position.get("short_calls") or []:
+        n_sc = int(sc.get("contracts") or 0)
+        buyback_ps = sc.get("current_bid")
+        sp = {
+            "ticker": position["ticker"], "strike": sc.get("strike"), "contracts": n_sc,
+            "close_price_per_share": buyback_ps, "stock_price": stock_price,
+            "extrinsic_sold": sc.get("entry_extrinsic_per_share"),
+        }
+        e, ap = _close_short(sp, position["ticker"], sc.get("strike"), n_sc, stock_price)
+        shorts.append((e, ap))
+        short_buyback_total += float(e.get("close_total") or 0)
+
+    leap_close_total = float(leap_exec.get("close_total") or 0)
+    # Net = LEAP sale proceeds (credit) minus short buyback (debit), per LEAP share.
+    net_total = leap_close_total - short_buyback_total
+    net_ps = round(net_total / (n_leap * 100), 2) if n_leap else 0.0
+    return leap_exec, leap_apply, shorts, net_ps
+
+
+def _commit_exit(payload, ticker, stock_price, mode, price_source):
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if not position or not (position.get("leap") or {}):
+        raise ValueError(f"{ticker} has no open LEAP to close")
+    leap_exec, leap_apply, shorts, _net = _build_exit_legs(position, payload, stock_price)
+
+    exit_id = _next_exit_id(state)
+    for e in [leap_exec] + [se for se, _ in shorts]:
+        e["mode"] = mode
+        e["price_source"] = price_source
+        e["exit_id"] = exit_id
+    leap_exec["exit_leg"] = "leap"
+    for se, _ in shorts:
+        se["exit_leg"] = "short"
+
+    # Append shorts (buy-to-close) then the LEAP (sell-to-close); on the immutable
+    # log order is cosmetic, but this mirrors "cover the short, then release the
+    # long". Apply all mutations on the freshly written state, once.
+    stored = [log.append_execution(se) for se, _ in shorts]
+    stored_leap = log.append_execution(leap_exec)
+
+    state = log.load_state()
+    position = _ensure_position(state, ticker)
+    for _, ap in shorts:
+        ap(position)
+    leap_apply(position)
+    log.recompute_derived(state)
+    log.save_state(state)
+
+    return {
+        "success": True,
+        "status": "filled",
+        "exit_id": exit_id,
+        "execution_id": stored_leap["id"],
+        "short_execution_ids": [s["id"] for s in stored],
+        "timestamp": stored_leap["date"],
+        "mode": mode,
+        "captured_price": stock_price,
+        "realized_pnl": stored_leap.get("realized_pnl"),
+        "executions": stored + [stored_leap],
+    }
+
+
+def _place_live_exit(payload, ticker, stock_price, price_source):
+    """Transmit the exit as ONE multi-leg NET order (sell-to-close the LEAP +
+    buy-to-close every open short) and park it pending; commit on fill."""
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if not position or not (position.get("leap") or {}):
+        raise ValueError(f"{ticker} has no open LEAP to close")
+    leap = position["leap"]
+    _le, _la, _shorts, net_ps = _build_exit_legs(position, payload, stock_price)
+
+    client = data_handler.client()
+    account_hash = client.primary_account_hash()
+
+    def _sym(prefix, strike, default_exp_key):
+        sym = payload.get(f"{prefix}_option_symbol")
+        if sym:
+            return sym
+        expiration = payload.get(default_exp_key)
+        if not expiration:
+            raise ValueError(f"live exit needs {prefix}_option_symbol or {default_exp_key}")
+        return schwab_api.occ_option_symbol(ticker, expiration, strike, call=True)
+
+    leap_symbol = _sym("leap", leap.get("strike"), "leap_expiration")
+    legs = [("SELL_TO_CLOSE", leap_symbol, int(leap.get("contracts") or 0))]
+    short_symbols = []
+    overrides = payload.get("short_option_symbols") or {}
+    for sc in position.get("short_calls") or []:
+        s = overrides.get(str(sc.get("strike")))
+        if not s and sc.get("expiration"):
+            s = schwab_api.occ_option_symbol(ticker, sc.get("expiration"), sc.get("strike"), call=True)
+        if not s:
+            raise ValueError(f"live exit needs an option symbol/expiration for short {sc.get('strike')}")
+        legs.append(("BUY_TO_CLOSE", s, int(sc.get("contracts") or 0)))
+        short_symbols.append(s)
+
+    order = schwab_api.build_net_order(legs, net_ps)
+    placed = client.place_order(account_hash, order)
+    order_id = placed.get("orderId")
+    if not order_id:
+        raise schwab_api.SchwabError("Schwab accepted the exit but returned no order id")
+    log.save_pending_order(order_id, {
+        "kind": "exit", "payload": payload, "ticker": ticker, "action": "close_position_atomic",
+        "stock_price": stock_price, "price_source": price_source, "account_hash": account_hash,
+        "leap_symbol": leap_symbol, "short_symbols": short_symbols,
+        "net_limit": net_ps, "placed_at": log.utcnow(),
+    })
+    return {"success": True, "status": "working", "order_id": str(order_id), "mode": "live",
+            "option_symbols": [leap_symbol] + short_symbols, "net_limit": net_ps}
+
+
+def _commit_exit_from_pending(rec: dict, order: dict) -> dict:
+    """Commit a filled atomic exit, overlaying real per-leg fills onto the
+    payload marks (leap_close_price + per-short buyback)."""
+    payload = dict(rec.get("payload") or {})
+    fills = _leg_fills(order, [rec.get("leap_symbol", "")] + list(rec.get("short_symbols") or []))
+    leap_fill = fills.get((rec.get("leap_symbol") or "").strip())
+    if leap_fill is not None:
+        payload["leap_close_price"] = leap_fill * 100  # per-contract dollars
+    # Overlay each short's real buyback fill onto its stored mark so _commit_exit
+    # books the short at the actual fill. short_symbols align with short_calls.
+    state = log.load_state()
+    position = log.find_position(state, rec["ticker"])
+    if position:
+        for sc, sym in zip(position.get("short_calls") or [], rec.get("short_symbols") or []):
+            f = fills.get(sym.strip())
+            if f is not None:
+                sc["current_bid"] = f
+        log.save_state(state)
+    return _close_position_atomic(payload, rec["ticker"], rec.get("stock_price"),
+                                  "live", rec.get("price_source", "schwab"), _committed=True)
+
+
+def _close_position_atomic(payload, ticker, stock_price, mode, price_source, _committed=False):
+    """Exit a full position on ONE ticket: sell-to-close the LEAP + buy-to-close
+    the open short(s), single net price, pending -> poll -> commit/auto-cancel —
+    reusing the same two-leg machinery as an atomic short roll. This is the
+    default action for a kill-switch / circuit-breaker exit: legging out is most
+    expensive exactly when those fire. Paper mode books both legs immediately."""
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if not position or not (position.get("leap") or {}):
+        raise ValueError(f"{ticker} has no open LEAP to close")
+    if mode == "live" and schwab_api.configured() and not _committed:
+        return _place_live_exit(payload, ticker, stock_price, price_source)
+    return _commit_exit(payload, ticker, stock_price, mode, price_source)
+
+
+def _roll_leap(payload, ticker, stock_price, mode, price_source):
+    """Roll the LONG leg: sell-to-close the old LEAP + buy-to-open a fresh one,
+    recorded as close_leap + buy_leap executions linked by a shared leap_roll_id
+    so the derived layer carries the position's payback continuity across the
+    roll (juice carries, the new extrinsic is ADDED to the target) rather than
+    treating it as an exit + re-entry. Reserve is checked like an entry: a roll
+    debit that breaches the 2xATR reserve needs an override_reason.
+
+    Paper mode books both legs immediately at supplied/estimated prices. Live
+    mode transmits ONE two-leg NET order (no legging risk)."""
+    import leap_policy
+
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if not position or not (position.get("leap") or {}):
+        raise ValueError(f"{ticker} has no open LEAP to roll")
+
+    # Reserve check (blocking unless overridden), mirroring the entry gate.
+    est = leap_policy.roll_cost_estimate(ticker, position=position, state=state)
+    if est.get("reserve_ok") is False and not (payload.get("override_reason") or "").strip():
+        raise ValueError(
+            f"LEAP roll would breach the 2xATR cash reserve "
+            f"(debit ${est.get('net_debit')}, free after ${est.get('free_cash_after')} "
+            f"< reserve ${est.get('reserve_required')}). Pass override_reason to roll anyway.")
+
+    if mode == "live" and schwab_api.configured():
+        return _place_live_leap_roll(payload, ticker, position, stock_price, price_source, est)
+    return _commit_leap_roll(payload, ticker, position, stock_price, mode, price_source, est)
+
+
+def _commit_leap_roll(payload, ticker, position, stock_price, mode, price_source, est):
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    old_leap = position["leap"]
+    n = int(old_leap.get("contracts") or 0)
+    leap_roll_id = _next_leap_roll_id(state)
+
+    # Close the old LEAP.
+    close_pc = _leap_close_per_contract(old_leap, payload)
+    close_payload = {"ticker": ticker, "strike": old_leap.get("strike"), "contracts": n,
+                     "close_price": close_pc, "stock_price": stock_price,
+                     "cost_basis": old_leap.get("cost_basis"), "exit_reason": "discretionary"}
+    close_exec, close_apply = _close_leap(close_payload, ticker, old_leap.get("strike"), n, stock_price)
+
+    # Open the replacement LEAP.
+    new_strike = payload.get("to_strike", (est.get("new_leap") or {}).get("strike"))
+    new_pc = payload.get("execution_price")
+    if new_pc is None:
+        new_pc = ((est.get("new_leap") or {}).get("est_cost") or 0) / n * 100 if n else 0
+    buy_payload = {"ticker": ticker, "strike": new_strike, "contracts": n,
+                   "execution_price": new_pc, "stock_price": stock_price,
+                   "dte": payload.get("to_dte", config.LEAP_TARGET_DTE),
+                   "expiration": payload.get("to_expiration"),
+                   "circuit_breaker_price": (position.get("circuit_breaker") or {}).get("price")}
+    buy_exec, buy_apply = _buy_leap(buy_payload, ticker, new_strike, n, stock_price)
+
+    for e, leg in ((close_exec, "close"), (buy_exec, "open")):
+        e["mode"] = mode
+        e["price_source"] = price_source
+        e["leap_roll_id"] = leap_roll_id
+        e["leap_roll_leg"] = leg
+    if payload.get("override_reason"):
+        buy_exec["override"] = {"reason": str(payload["override_reason"]).strip(),
+                                "failed_checks": ["cash_reserve"] if est.get("reserve_ok") is False else []}
+
+    stored_close = log.append_execution(close_exec)
+    stored_buy = log.append_execution(buy_exec)
+
+    state = log.load_state()
+    position = _ensure_position(state, ticker)
+    close_apply(position)
+    buy_apply(position)
+    log.recompute_derived(state)
+    log.save_state(state)
+
+    return {
+        "success": True,
+        "status": "filled",
+        "leap_roll_id": leap_roll_id,
+        "close_execution_id": stored_close["id"],
+        "execution_id": stored_buy["id"],
+        "timestamp": stored_buy["date"],
+        "mode": mode,
+        "net_debit": round(float(stored_buy.get("execution_total") or 0)
+                           - float(stored_close.get("close_total") or 0), 2),
+        "executions": [stored_close, stored_buy],
+    }
+
+
+def _place_live_leap_roll(payload, ticker, position, stock_price, price_source, est):
+    """Transmit a LEAP roll as ONE two-leg NET order: sell-to-close the old LEAP
+    + buy-to-open the new one. Committed on fill via the same lifecycle."""
+    leap = position["leap"]
+    n = int(leap.get("contracts") or 0)
+    new_strike = payload.get("to_strike", (est.get("new_leap") or {}).get("strike"))
+    client = data_handler.client()
+    account_hash = client.primary_account_hash()
+
+    close_symbol = payload.get("from_option_symbol") or (
+        schwab_api.occ_option_symbol(ticker, payload.get("from_expiration"), leap.get("strike"), call=True)
+        if payload.get("from_expiration") else None)
+    open_symbol = payload.get("to_option_symbol") or (
+        schwab_api.occ_option_symbol(ticker, payload.get("to_expiration"), new_strike, call=True)
+        if payload.get("to_expiration") else None)
+    if not close_symbol or not open_symbol:
+        raise ValueError("live LEAP roll needs from/to option_symbol or expiration to build the contracts")
+
+    net_ps = round(-float(est.get("net_debit") or 0) / (n * 100), 2) if n else 0.0
+    legs = [("SELL_TO_CLOSE", close_symbol, n), ("BUY_TO_OPEN", open_symbol, n)]
+    order = schwab_api.build_net_order(legs, net_ps)
+    placed = client.place_order(account_hash, order)
+    order_id = placed.get("orderId")
+    if not order_id:
+        raise schwab_api.SchwabError("Schwab accepted the LEAP roll but returned no order id")
+    log.save_pending_order(order_id, {
+        "kind": "roll_leap", "payload": payload, "ticker": ticker, "action": "roll_leap",
+        "stock_price": stock_price, "price_source": price_source, "account_hash": account_hash,
+        "close_option_symbol": close_symbol, "open_option_symbol": open_symbol,
+        "net_limit": net_ps, "placed_at": log.utcnow(),
+    })
+    return {"success": True, "status": "working", "order_id": str(order_id), "mode": "live",
+            "option_symbols": [close_symbol, open_symbol], "net_limit": net_ps}
+
+
+def _commit_leap_roll_from_pending(rec: dict, order: dict) -> dict:
+    payload = dict(rec.get("payload") or {})
+    fills = _leg_fills(order, [rec.get("close_option_symbol", ""), rec.get("open_option_symbol", "")])
+    close_fill = fills.get((rec.get("close_option_symbol") or "").strip())
+    open_fill = fills.get((rec.get("open_option_symbol") or "").strip())
+    if close_fill is not None:
+        payload["leap_close_price"] = close_fill * 100
+    if open_fill is not None:
+        payload["execution_price"] = open_fill * 100
+    return _roll_leap(payload, rec["ticker"], rec.get("stock_price"), "logged",
+                      rec.get("price_source", "schwab"))
 
 
 def defend_recommendation(ticker: str) -> dict:
