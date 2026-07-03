@@ -17,6 +17,10 @@ REPO_DIR = os.path.dirname(BACKEND_DIR)
 DATA_DIR = os.environ.get("DATA_DIR") or BACKEND_DIR
 STATE_PATH = os.path.join(DATA_DIR, "state.json")
 CACHE_DIR = os.path.join(DATA_DIR, "cache")
+# The ticker universe lives here as an editable JSON store on the volume, seeded
+# once from the read-only repo file (TICKERS_BY_SECTOR_PATH) so it can be managed
+# at runtime (add/remove/fix tickers) and survives deploys.
+UNIVERSE_PATH = os.path.join(DATA_DIR, "universe.json")
 
 # ---- Demo mode -------------------------------------------------------------
 # A self-contained "fake data" view, kept entirely separate from the live store

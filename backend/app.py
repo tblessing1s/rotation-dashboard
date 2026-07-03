@@ -585,6 +585,46 @@ def api_universe_health():
         return _err(e)
 
 
+@app.route("/api/universe", methods=["GET"])
+def api_universe():
+    """The ticker universe (editable JSON store on the volume): sectors with
+    their constituents. Managed via /api/universe/add and /remove."""
+    try:
+        secs = sector_data.sectors()
+        return jsonify({
+            "sectors": [{"etf": s.etf, "name": s.name, "group": s.group,
+                         "tickers": list(s.tickers), "count": len(s.tickers)}
+                        for s in secs.values()],
+            "total": sum(len(s.tickers) for s in secs.values()),
+        })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/universe/add", methods=["POST"])
+def api_universe_add():
+    """Add a constituent to a sector: {ticker, sector}."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(sector_data.add_ticker(payload.get("ticker", ""), payload.get("sector", "")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/universe/remove", methods=["POST"])
+def api_universe_remove():
+    """Remove a constituent from the universe: {ticker}."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(sector_data.remove_ticker(payload.get("ticker", "")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/maintenance/refresh", methods=["POST"])
 def api_maintenance_refresh():
     """Force the nightly earnings/dividends refresh now (also runs on the

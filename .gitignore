@@ -14,6 +14,8 @@ data/cache/
 backend/state.demo.json
 backend/cache_demo/
 backend/mode.json
+# Editable universe store (DATA_DIR/universe.json; seeded from tickers_by_sector.txt)
+backend/universe.json
 # Durability backups, pre-migration snapshots, restore-aside + write-temp files
 # (DATA_DIR/backups; on Fly the /data volume — never commit real state)
 backend/backups/
