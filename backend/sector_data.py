@@ -80,20 +80,63 @@ def _seed_from_file() -> list[dict]:
 # ---------------------------------------------------------------------------
 # Volume store (JSON) — read / write / seed
 # ---------------------------------------------------------------------------
-def _read_store() -> list[dict] | None:
+def _read_store() -> dict | None:
+    """The raw store: {"sectors": [...], "removed": [...]} or None if absent."""
     try:
         with open(config.UNIVERSE_PATH, encoding="utf-8") as fh:
             data = json.load(fh)
         sectors = data.get("sectors")
-        return sectors if isinstance(sectors, list) and sectors else None
+        if not (isinstance(sectors, list) and sectors):
+            return None
+        removed = [str(t).strip().upper() for t in (data.get("removed") or [])]
+        return {"sectors": sectors, "removed": removed}
     except (OSError, ValueError):
         return None
 
 
-def _write_store(sectors: list[dict]) -> None:
+def _write_store(sectors: list[dict], removed) -> None:
     import logging_handler as log  # reuse the atomic-write machinery (fsync + rename)
-    payload = json.dumps({"schema": UNIVERSE_SCHEMA, "sectors": sectors}, indent=2)
+    payload = json.dumps({"schema": UNIVERSE_SCHEMA, "sectors": sectors,
+                          "removed": sorted(set(removed))}, indent=2)
     log._atomic_write(config.UNIVERSE_PATH, payload)
+
+
+def _current_removed() -> set:
+    store = _read_store()
+    return set(store["removed"]) if store else set()
+
+
+def _merge_seed(sectors: list[dict], removed: set) -> bool:
+    """Additively fold new entries from the repo seed file into an existing store:
+    add any seed SECTOR the store lacks, and any seed TICKER not already present
+    anywhere AND not tombstoned (so a name the operator removed stays gone, but a
+    name newly added to the seed — e.g. the ETFs, or a future S&P addition —
+    shows up automatically). Never removes or moves anything. Returns True if the
+    store changed."""
+    present = set()
+    for s in sectors:
+        present.add(str(s.get("etf", "")).upper())
+        present.update(str(t).upper() for t in s.get("tickers", []))
+    by_etf = {str(s.get("etf", "")).upper(): s for s in sectors}
+    changed = False
+    for seed_sec in _seed_from_file():
+        etf = seed_sec["etf"].upper()
+        store_sec = by_etf.get(etf)
+        if store_sec is None and etf not in removed:
+            store_sec = {"etf": etf, "name": seed_sec["name"], "tickers": []}
+            sectors.append(store_sec)
+            by_etf[etf] = store_sec
+            present.add(etf)
+            changed = True
+        if store_sec is None:
+            continue
+        for t in seed_sec["tickers"]:
+            t = t.upper()
+            if t not in present and t not in removed:
+                store_sec["tickers"].append(t)
+                present.add(t)
+                changed = True
+    return changed
 
 
 def _clear_caches() -> None:
@@ -103,11 +146,15 @@ def _clear_caches() -> None:
 
 @lru_cache(maxsize=1)
 def _load() -> dict[str, Sector]:
-    raw = _read_store()
-    if raw is None:  # first run (or store lost) — seed from the repo file
-        raw = _seed_from_file()
+    store = _read_store()
+    if store is None:  # first run (or store lost) — seed from the repo file
+        raw, removed, dirty = _seed_from_file(), set(), True
+    else:
+        raw, removed = store["sectors"], set(store["removed"])
+        dirty = _merge_seed(raw, removed)  # pull in anything new from the seed
+    if dirty:
         try:
-            _write_store(raw)
+            _write_store(raw, removed)
         except OSError:  # read-only fs: still serve from memory this run
             pass
     sectors: dict[str, Sector] = {}
@@ -145,13 +192,16 @@ def add_ticker(ticker: str, sector: str) -> dict:
     for s in lst:
         if s["etf"] == sector:
             s["tickers"].append(ticker)
-    _write_store(lst)
+    removed = _current_removed()
+    removed.discard(ticker)   # re-adding clears any tombstone
+    _write_store(lst, removed)
     _clear_caches()
     return {"added": ticker, "sector": sector}
 
 
 def remove_ticker(ticker: str) -> dict:
-    """Remove a constituent. Sector ETFs (the headers) can't be removed."""
+    """Remove a constituent. Sector ETFs (the headers) can't be removed. The name
+    is tombstoned so a seed-merge won't re-add it on the next load."""
     ticker = (ticker or "").strip().upper()
     sectors = _load()
     if ticker in sectors:
@@ -164,14 +214,16 @@ def remove_ticker(ticker: str) -> dict:
             removed_from = s["etf"]
     if removed_from is None:
         raise ValueError(f"{ticker} is not in the universe")
-    _write_store(lst)
+    removed = _current_removed()
+    removed.add(ticker)
+    _write_store(lst, removed)
     _clear_caches()
     return {"removed": ticker, "sector": removed_from}
 
 
 def remove_tickers(tickers: list[str]) -> dict:
     """Remove many constituents in one write (used by 'remove all dead'). Skips
-    sector ETFs and names not in the universe; returns what was removed/skipped."""
+    sector ETFs and names not in the universe; tombstones what it removes."""
     wanted = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
     sectors = _load()
     etfs = set(sectors)
@@ -191,16 +243,35 @@ def remove_tickers(tickers: list[str]) -> dict:
     found = set(removed)
     skipped += [{"ticker": t, "reason": "not in universe"} for t in to_remove if t not in found]
     if removed:
-        _write_store(lst)
+        tomb = _current_removed()
+        tomb.update(removed)
+        _write_store(lst, tomb)
         _clear_caches()
     return {"removed": removed, "skipped": skipped}
 
 
+def sync_from_seed() -> dict:
+    """Additively pull in any names in the repo seed file that aren't in the store
+    and aren't tombstoned (e.g. after new tickers/ETFs are added to the seed).
+    The merge also runs automatically on load; this just forces it now and
+    reports what it added. Never removes or moves anything."""
+    store = _read_store()
+    before = set()
+    if store:
+        for s in store["sectors"]:
+            before.add(str(s.get("etf", "")).upper())
+            before.update(str(t).upper() for t in s.get("tickers", []))
+    _clear_caches()
+    after = set(all_tickers())   # triggers _load -> seed merge -> write
+    added = sorted(after - before)
+    return {"synced": True, "added": added, "count": len(added)}
+
+
 def reseed_from_file() -> dict:
     """Reset the volume store back to the baked-in repo file (discards runtime
-    edits). Useful after fixing the seed file in a deploy."""
+    edits AND tombstones). Useful after fixing the seed file in a deploy."""
     raw = _seed_from_file()
-    _write_store(raw)
+    _write_store(raw, [])
     _clear_caches()
     return {"reseeded": True, "sectors": len(raw)}
 
@@ -246,3 +317,10 @@ def stock_to_sector() -> dict[str, str]:
 
 def sector_for(ticker: str) -> str | None:
     return stock_to_sector().get(ticker.upper())
+
+
+def is_etf(ticker: str) -> bool:
+    """True for a sector-ETF header (XLK…SPY) or a known tradeable ETF — used to
+    put the name on the lower-juice ETF income sleeve at the entry gate."""
+    t = (ticker or "").strip().upper()
+    return t in _load() or t in config.KNOWN_ETFS

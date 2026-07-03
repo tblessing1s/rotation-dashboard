@@ -628,6 +628,17 @@ def api_universe_remove():
         return _err(e)
 
 
+@app.route("/api/universe/sync", methods=["POST"])
+def api_universe_sync():
+    """Additively pull any new names from the baked-in seed file into the store
+    (e.g. after ETFs / S&P additions were added to the seed). Respects the
+    operator's removals (tombstoned); never removes or moves anything."""
+    try:
+        return jsonify(sector_data.sync_from_seed())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/universe/vet", methods=["POST"])
 def api_universe_vet():
     """Vet candidate symbols against the CFM criteria (data + weeklies + Scorecard

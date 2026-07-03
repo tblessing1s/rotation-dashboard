@@ -66,6 +66,31 @@ def test_validation(universe):
         sector_data.remove_ticker("NOPE")
 
 
+def test_seed_merge_adds_new_names_to_existing_store(universe):
+    # An OLD store (as if seeded before new tickers were added to the seed file).
+    old = {"schema": 1, "removed": [], "sectors": [
+        {"etf": "XLK", "name": "Technology", "tickers": ["NVDA", "AAPL"]},
+        {"etf": "XLE", "name": "Energy", "tickers": ["XOM"]},
+    ]}
+    json.dump(old, open(config.UNIVERSE_PATH, "w", encoding="utf-8"))
+    sector_data._clear_caches()
+    # On load, everything new in the seed is additively merged in...
+    assert sector_data.sector_for("SMH") == "XLK"      # new ETF
+    assert sector_data.sector_for("QQQ") == "SPY"      # whole new sector
+    assert sector_data.sector_for("NVDA") == "XLK"     # existing kept
+
+
+def test_removed_ticker_stays_gone_across_seed_merge(universe):
+    sector_data.all_tickers()
+    sector_data.remove_ticker("SMH")        # tombstoned
+    sector_data._clear_caches()             # force a fresh load + seed merge
+    assert sector_data.sector_for("SMH") is None   # NOT re-added by the merge
+    # Re-adding clears the tombstone.
+    sector_data.add_ticker("SMH", "XLK")
+    sector_data._clear_caches()
+    assert sector_data.sector_for("SMH") == "XLK"
+
+
 def test_self_heals_when_store_deleted(universe):
     sector_data.all_tickers()
     os.remove(config.UNIVERSE_PATH)      # lose the volume copy
@@ -85,6 +110,19 @@ def test_bulk_remove_skips_etfs_and_absent(universe):
     sector_data._clear_caches()
     assert sector_data.sector_for("DEAD1") is None
     assert sector_data.sector_for("XLK") == "XLK"   # ETF preserved
+
+
+def test_etf_classification_and_lower_juice_bar(universe):
+    import account_gate
+    sector_data.all_tickers()
+    # Stocks are not ETFs; sector headers + curated ETFs are.
+    assert not sector_data.is_etf("NVDA")
+    for t in ("XLK", "SPY", "SMH", "GDX", "QQQ", "XBI", "KRE"):
+        assert sector_data.is_etf(t), t
+    # ETFs clear a lower juice bar than growth stocks.
+    stock_bar = account_gate.weekly_yield_target_pct("NVDA")
+    etf_bar = account_gate.weekly_yield_target_pct("SMH")
+    assert etf_bar == config.ETF_WEEKLY_JUICE_TARGET_PCT < stock_bar
 
 
 def test_reseed_discards_runtime_edits(universe):
