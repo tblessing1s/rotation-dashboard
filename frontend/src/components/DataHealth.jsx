@@ -12,6 +12,80 @@ const SOURCE_LABELS = {
   alpha_vantage_quote: "Alpha Vantage quotes (fallback)",
 };
 
+// On-demand universe sweep: which tickers return no provider data (dead /
+// renamed / typo'd) and, optionally, which lack weekly options (can't run CFM).
+// Not fetched on mount — it hits every ticker, so it only runs on the button.
+function UniverseCheck() {
+  const [res, setRes] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+
+  const run = async (weeklies) => {
+    setBusy(true);
+    setRes(null);
+    try {
+      setRes(await api.universeHealth(weeklies));
+    } catch (e) {
+      setRes({ error: String(e.message || e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const group = (rows) => {
+    const by = {};
+    (rows || []).forEach((r) => { (by[r.sector || "?"] ||= []).push(r.ticker); });
+    return Object.entries(by).sort();
+  };
+
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Universe check</span>
+        <div className="flex gap-2">
+          <button onClick={() => run(false)} disabled={busy}
+                  className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+            {busy ? "Checking…" : "Check universe"}
+          </button>
+          <button onClick={() => run(true)} disabled={busy}
+                  title="Also probe weekly options for every ticker (slower)"
+                  className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-400 hover:bg-slate-800 disabled:opacity-50">
+            + weeklies
+          </button>
+        </div>
+      </div>
+      {res?.error && <p className="mt-2 text-sm text-rose-400">{res.error}</p>}
+      {res && !res.error && res.skipped && <p className="mt-2 text-sm text-slate-500">{res.skipped}</p>}
+      {res && !res.error && !res.skipped && (
+        <div className="mt-2 text-sm">
+          <p className="text-slate-400">
+            {res.total} tickers · <span className="text-emerald-300">{res.with_data} returned data</span>
+            {res.no_data.length > 0
+              ? <> · <span className="text-rose-300">{res.no_data.length} dead</span></>
+              : <> · <span className="text-emerald-300">none dead</span></>}
+            {res.checked_weeklies && <> · <span className="text-slate-300">{res.cfm_ready} CFM-ready</span></>}
+          </p>
+          {res.no_data.length > 0 && (
+            <div className="mt-1">
+              <div className="text-xs uppercase tracking-wide text-rose-400/80">No data — fix in tickers_by_sector.txt</div>
+              {group(res.no_data).map(([sector, ts]) => (
+                <div key={sector} className="text-xs text-slate-400"><span className="text-slate-500">{sector}</span> {ts.join(", ")}</div>
+              ))}
+            </div>
+          )}
+          {res.checked_weeklies && res.no_weeklies?.length > 0 && (
+            <div className="mt-2">
+              <div className="text-xs uppercase tracking-wide text-amber-400/80">No weeklies — can't run CFM</div>
+              {group(res.no_weeklies).map(([sector, ts]) => (
+                <div key={sector} className="text-xs text-slate-400"><span className="text-slate-500">{sector}</span> {ts.join(", ")}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DataHealth() {
   const { data, error, loading, reload } = useApi(api.dataHealth, [], 120000);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -94,6 +168,7 @@ export default function DataHealth() {
           </div>
         </div>
       )}
+      {!data?.demo && <UniverseCheck />}
     </Card>
   );
 }
