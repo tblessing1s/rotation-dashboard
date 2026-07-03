@@ -572,6 +572,19 @@ def api_data_health():
         return _err(e)
 
 
+@app.route("/api/universe-health")
+def api_universe_health():
+    """Sweep the whole ticker universe and report dead names (no provider data —
+    renamed/delisted/typo'd) and, with ?weeklies=1, names that lack weekly
+    options (can't run CFM). On-demand only — fetches OHLCV for every ticker."""
+    try:
+        import universe_health
+        weeklies = request.args.get("weeklies", "").strip() in ("1", "true", "yes")
+        return jsonify(universe_health.check(check_weeklies=weeklies))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/maintenance/refresh", methods=["POST"])
 def api_maintenance_refresh():
     """Force the nightly earnings/dividends refresh now (also runs on the
