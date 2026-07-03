@@ -66,6 +66,31 @@ def test_validation(universe):
         sector_data.remove_ticker("NOPE")
 
 
+def test_seed_merge_adds_new_names_to_existing_store(universe):
+    # An OLD store (as if seeded before new tickers were added to the seed file).
+    old = {"schema": 1, "removed": [], "sectors": [
+        {"etf": "XLK", "name": "Technology", "tickers": ["NVDA", "AAPL"]},
+        {"etf": "XLE", "name": "Energy", "tickers": ["XOM"]},
+    ]}
+    json.dump(old, open(config.UNIVERSE_PATH, "w", encoding="utf-8"))
+    sector_data._clear_caches()
+    # On load, everything new in the seed is additively merged in...
+    assert sector_data.sector_for("SMH") == "XLK"      # new ETF
+    assert sector_data.sector_for("QQQ") == "SPY"      # whole new sector
+    assert sector_data.sector_for("NVDA") == "XLK"     # existing kept
+
+
+def test_removed_ticker_stays_gone_across_seed_merge(universe):
+    sector_data.all_tickers()
+    sector_data.remove_ticker("SMH")        # tombstoned
+    sector_data._clear_caches()             # force a fresh load + seed merge
+    assert sector_data.sector_for("SMH") is None   # NOT re-added by the merge
+    # Re-adding clears the tombstone.
+    sector_data.add_ticker("SMH", "XLK")
+    sector_data._clear_caches()
+    assert sector_data.sector_for("SMH") == "XLK"
+
+
 def test_self_heals_when_store_deleted(universe):
     sector_data.all_tickers()
     os.remove(config.UNIVERSE_PATH)      # lose the volume copy

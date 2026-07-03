@@ -66,6 +66,15 @@ function UniverseCheck() {
     } catch (e) { setMsg({ err: String(e.message || e) }); }
   };
 
+  const syncFromSeed = async () => {
+    setMsg(null);
+    try {
+      const r = await api.universeSync();
+      setMsg({ ok: r.count ? `Synced ${r.count} new: ${r.added.join(", ")}` : "Already up to date with the seed" });
+      setSectors(null);  // force the add-form sector list to refresh
+    } catch (e) { setMsg({ err: String(e.message || e) }); }
+  };
+
   const removeAllDead = async () => {
     const dead = (res?.no_data || []).map((d) => d.ticker);
     if (!dead.length || !window.confirm(`Remove ${dead.length} dead ticker(s) from the universe?`)) return;
@@ -125,6 +134,11 @@ function UniverseCheck() {
             <button onClick={addTicker} disabled={!form.ticker || !form.sector}
                     className="rounded border border-emerald-700 bg-emerald-500/10 px-2.5 py-1 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50">
               Add
+            </button>
+            <button onClick={syncFromSeed}
+                    title="Pull in any new names from the built-in seed list (e.g. newly added ETFs) — respects your removals"
+                    className="rounded border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-sm font-semibold text-slate-300 hover:bg-slate-800">
+              Sync from seed
             </button>
             <span className="text-xs text-slate-600">to fix a ticker, remove the old and add the new</span>
           </div>
