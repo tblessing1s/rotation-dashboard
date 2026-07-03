@@ -13,7 +13,16 @@ theta_ledger / extrinsic_payback / pending_orders).
 """
 from __future__ import annotations
 
+import logging
+
+logger = logging.getLogger("cfm.alerts")
+
 CURRENT_VERSION = 5
+
+
+class MigrationAbortedError(RuntimeError):
+    """Raised when a pre-migration snapshot can't be written. We refuse to run a
+    schema migration on live data without a rollback point (see docs/recovery.md)."""
 
 
 def default_alert_state() -> dict:
@@ -71,14 +80,33 @@ MIGRATIONS = {
 }
 
 
-def migrate(state: dict) -> tuple[dict, bool]:
+def migrate(state: dict, state_path: str | None = None) -> tuple[dict, bool]:
     """Upgrade a loaded state dict to CURRENT_VERSION.
 
     Returns (state, changed) — ``changed`` tells the caller to persist the
     upgraded file so the migration runs once, not on every load.
+
+    When ``state_path`` is given and at least one migration will run, a snapshot
+    of the pre-migration file is written to backups/ FIRST. If that snapshot
+    can't be written the migration is ABORTED (MigrationAbortedError) and the
+    on-disk file is left untouched at its original version — a migration bug on
+    live data must always have a rollback point.
     """
     version = int(state.get("schema_version") or 1)
     changed = False
+    if version < CURRENT_VERSION and MIGRATIONS.get(version) is not None and state_path is not None:
+        import backups
+        try:
+            snapshot = backups.snapshot_before_migration(state_path, version,
+                                                         CURRENT_VERSION, state=state)
+        except Exception as e:  # noqa: BLE001 — no rollback point => do not migrate
+            logger.critical("aborting migration v%s->v%s: pre-migration snapshot "
+                            "failed: %s", version, CURRENT_VERSION, e)
+            raise MigrationAbortedError(
+                f"pre-migration snapshot failed ({e}); refusing to migrate "
+                f"v{version}->v{CURRENT_VERSION} without a rollback point") from e
+        logger.info("migrating state v%s->v%s (pre-migration snapshot: %s)",
+                    version, CURRENT_VERSION, snapshot)
     while version < CURRENT_VERSION:
         migration = MIGRATIONS.get(version)
         if migration is None:  # unknown gap — stamp and stop rather than loop

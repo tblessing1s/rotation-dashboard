@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 
+import backups
 import config
 import dividends
 import earnings
@@ -71,6 +72,18 @@ def nightly_refresh() -> dict:
         report["operating_cash"] = cash_info
     except Exception as e:  # noqa: BLE001 — a cash-sync failure must not sink the sweep
         report["errors"].append(f"operating_cash: {e}")
+
+    # Nightly rotating backup + off-machine copy of state.json. Runs last so a
+    # backup failure (which self-alerts through the Notifier) never blocks the
+    # data refresh above.
+    try:
+        report["backup"] = backups.nightly_backup()
+        off = (report["backup"].get("offmachine") or {})
+        logger.info("nightly backup: local=%s off-machine=%s(%s)",
+                    report["backup"].get("local"), off.get("method"),
+                    "ok" if off.get("ok") else "FAILED")
+    except Exception as e:  # noqa: BLE001 — belt-and-braces; nightly_backup never raises
+        report["errors"].append(f"backup: {e}")
 
     logger.info("nightly maintenance refreshed %d ticker(s), %d error(s)",
                 len(report["tickers"]), len(report["errors"]))

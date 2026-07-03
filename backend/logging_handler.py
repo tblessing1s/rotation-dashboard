@@ -2,20 +2,34 @@
 
 Every execution is appended here with a timestamp and captured prices; the theta
 ledger and extrinsic-payback meters are *derived* from the executions/positions
-so nothing is ever hand-maintained. Writes are atomic (temp file + rename) and
-guarded by a process lock — this is a single-writer store (run one machine).
+so nothing is ever hand-maintained. Writes are atomic (temp file + fsync +
+rename + dir fsync) and guarded by a process lock — this is a single-writer
+store (run one machine). See ``_atomic_write`` for the durability contract and
+``docs/recovery.md`` for the corrupt-state runbook.
 """
 from __future__ import annotations
 
+import glob
 import json
+import logging
 import os
+import shutil
+import tempfile
 import threading
 from datetime import datetime, timedelta, timezone
 
 import config
 import migrations
 
+logger = logging.getLogger("cfm.alerts")
+
 _lock = threading.RLock()
+
+
+class StateCorruptError(RuntimeError):
+    """Raised on load when an existing state file can't be parsed. We refuse to
+    silently re-initialize empty state over a live trading record — the operator
+    must restore from a backup (see docs/recovery.md)."""
 
 
 def utcnow() -> str:
@@ -47,18 +61,34 @@ def _default_state() -> dict:
 
 def load_state() -> dict:
     with _lock:
-        if not os.path.exists(config.active_state_path()):
+        path = config.active_state_path()
+        if not os.path.exists(path):
             state = _default_state()
             _write(state)
             return state
         try:
-            with open(config.active_state_path(), encoding="utf-8") as fh:
+            with open(path, encoding="utf-8") as fh:
                 state = json.load(fh)
-        except (ValueError, OSError):
-            state = _default_state()
+        except (ValueError, OSError) as e:
+            # DO NOT silently re-initialize: empty state over a live trading
+            # record is unrecoverable. Log CRITICAL, point at the newest backup,
+            # and refuse to continue (crashes the worker == the app won't serve
+            # bad state). Recovery: scripts/restore_state.py — see docs/recovery.md.
+            import backups
+            latest = backups.latest_backup()
+            hint = (f"most recent backup: {latest}" if latest
+                    else "NO backups found in " + backups.backups_dir())
+            logger.critical("state file %s is corrupt/unreadable (%s); refusing to "
+                            "start with empty state — %s", path, e, hint)
+            raise StateCorruptError(
+                f"{path} is corrupt or unreadable ({e}). Refusing to overwrite a "
+                f"live trading record with empty state. {hint}. "
+                f"Restore with scripts/restore_state.py (see docs/recovery.md).") from e
         # Versioned migrations first (they add structure old files lack), then
         # forward-fill any still-missing top-level keys so older state files load.
-        state, migrated = migrations.migrate(state)
+        # migrate() snapshots the pre-migration file to backups/ before touching
+        # it and aborts (raises) if that snapshot can't be written.
+        state, migrated = migrations.migrate(state, state_path=path)
         for k, v in _default_state().items():
             state.setdefault(k, v)
         if migrated:
@@ -69,13 +99,81 @@ def load_state() -> dict:
         return state
 
 
+def _serialize(state: dict) -> str:
+    """Serialize to a string FIRST, so a serialization error (unencodable value)
+    raises before any file is touched and can never truncate the real file."""
+    return json.dumps(state, indent=2)
+
+
+def _atomic_write(path: str, payload: str) -> None:
+    """Durable, crash-safe replace of ``path`` with ``payload``.
+
+    Contract (POSIX / ext4): write to a uniquely-named temp file *in the same
+    directory* (same filesystem — cross-fs os.replace is not atomic), flush +
+    fsync the temp file so its bytes hit disk, os.replace() it over the target
+    (atomic rename), then fsync the *directory* so the rename itself is durable.
+    On any error the temp file is removed and the original is left untouched.
+    """
+    directory = os.path.dirname(path) or "."
+    os.makedirs(directory, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory,
+                               prefix=os.path.basename(path) + ".tmp.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    # fsync the directory so the rename (a directory-metadata change) is durable
+    # across a crash — without this, ext4 can lose the rename after a power cut.
+    try:
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except OSError:  # some filesystems disallow directory fsync — best effort
+        pass
+
+
 def _write(state: dict) -> None:
-    path = config.active_state_path()
-    os.makedirs(config.DATA_DIR, exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(state, fh, indent=2)
-    os.replace(tmp, path)
+    # Serialize BEFORE opening any file so an unserializable value aborts cleanly.
+    _atomic_write(config.active_state_path(), _serialize(state))
+
+
+def cleanup_orphan_temp_files() -> list[str]:
+    """Remove ``*.tmp.*`` temp files left by a write that crashed between
+    mkstemp and os.replace. Safe: a live temp file only exists for microseconds
+    inside a held lock, so anything on disk at startup is orphaned. Returns the
+    paths removed (logged by the caller)."""
+    removed: list[str] = []
+    for base in (config.STATE_PATH, config.DEMO_STATE_PATH):
+        directory = os.path.dirname(base) or "."
+        pattern = os.path.join(directory, os.path.basename(base) + ".tmp.*")
+        for orphan in glob.glob(pattern):
+            try:
+                os.remove(orphan)
+                removed.append(orphan)
+            except OSError:
+                pass
+    if removed:
+        logger.warning("startup: removed %d orphaned state temp file(s): %s",
+                       len(removed), ", ".join(removed))
+    return removed
+
+
+def startup_check() -> None:
+    """Run once at app startup: clear orphaned temp files, then eagerly load the
+    active store so a corrupt file fails fast (StateCorruptError) instead of on
+    the first request. Only touches the ACTIVE store."""
+    cleanup_orphan_temp_files()
+    load_state()  # raises StateCorruptError on a corrupt live file → refuse to start
 
 
 def save_state(state: dict) -> dict:
@@ -83,6 +181,25 @@ def save_state(state: dict) -> dict:
         state.setdefault("metadata", {})["last_updated"] = utcnow()
         _write(state)
         return state
+
+
+def restore_from_backup(backup_path: str) -> dict:
+    """Restore ``backup_path`` onto the active state file via the atomic save
+    path (never a raw copy), writing the current (possibly corrupt) file aside
+    first. Used by scripts/restore_state.py. Returns a small report."""
+    with _lock:
+        target = config.active_state_path()
+        with open(backup_path, encoding="utf-8") as fh:
+            payload = fh.read()
+        json.loads(payload)  # validate the backup parses before we touch anything
+        pre_restore = None
+        if os.path.exists(target):
+            pre_restore = f"{target}.pre-restore.{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            shutil.copy2(target, pre_restore)
+        _atomic_write(target, payload)
+        logger.warning("restored state from %s -> %s (previous saved aside as %s)",
+                       backup_path, target, pre_restore)
+        return {"restored": target, "from": backup_path, "pre_restore": pre_restore}
 
 
 def _next_exec_id(state: dict) -> str:

@@ -14,6 +14,14 @@ data/cache/
 backend/state.demo.json
 backend/cache_demo/
 backend/mode.json
+# Durability backups, pre-migration snapshots, restore-aside + write-temp files
+# (DATA_DIR/backups; on Fly the /data volume — never commit real state)
+backend/backups/
+data/backups/
+backend/state.json.pre-restore.*
+backend/state.demo.json.pre-restore.*
+backend/state.json.tmp.*
+backend/state.demo.json.tmp.*
 # Auto-generated cookie-signing key (persisted so sessions survive restarts)
 backend/.session_secret
 .session_secret

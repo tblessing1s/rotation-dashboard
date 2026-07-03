@@ -196,6 +196,26 @@ ALERT_LOG_MAX = 500            # PROPOSED_DEFAULT — alert history cap in state
 # the earnings/dividend caches for held names and sync position snapshots.
 MAINTENANCE_ET = "17:30"
 
+# ---- Durability / backups --------------------------------------------------
+# state.json is the single source of truth on a single Fly volume, so the
+# nightly job keeps rotating local copies AND ships one copy off the machine.
+
+# PROPOSED_DEFAULT — how many rotating nightly backups to retain under
+# DATA_DIR/backups; older ones are pruned. Pre-migration snapshots are exempt
+# from this rotation (kept forever — rare and small).
+BACKUP_RETENTION = 30
+
+# PROPOSED_DEFAULT — max state-file size (bytes) to attach to the nightly backup
+# email. Above this the job emails a warning instead of the attachment and
+# relies on the S3 off-machine path. ~5 MB.
+BACKUP_EMAIL_MAX_BYTES = 5 * 1024 * 1024
+
+# PROPOSED_DEFAULT — optional S3-compatible off-machine upload (Tigris/S3/B2),
+# OFF by default. When on, boto3 is imported lazily and the target comes from
+# env: BACKUP_S3_BUCKET, BACKUP_S3_ENDPOINT, BACKUP_S3_KEY_PREFIX, plus AWS_*
+# credentials. Lets an operator point backups off-machine without a code change.
+BACKUP_S3_ENABLED = os.environ.get("CFM_BACKUP_S3", "").strip() in ("1", "true", "yes")
+
 
 def alerts_dry_run_default() -> bool:
     """Dry-run (log instead of send) via env; per-store override lives in the
