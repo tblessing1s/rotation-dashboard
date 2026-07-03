@@ -169,6 +169,33 @@ def remove_ticker(ticker: str) -> dict:
     return {"removed": ticker, "sector": removed_from}
 
 
+def remove_tickers(tickers: list[str]) -> dict:
+    """Remove many constituents in one write (used by 'remove all dead'). Skips
+    sector ETFs and names not in the universe; returns what was removed/skipped."""
+    wanted = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
+    sectors = _load()
+    etfs = set(sectors)
+    lst = _sectors_as_list()
+    removed, skipped = [], []
+    to_remove = set()
+    for t in wanted:
+        if t in etfs:
+            skipped.append({"ticker": t, "reason": "sector ETF"})
+        else:
+            to_remove.add(t)
+    for s in lst:
+        present = [t for t in s["tickers"] if t in to_remove]
+        for t in present:
+            s["tickers"].remove(t)
+            removed.append(t)
+    found = set(removed)
+    skipped += [{"ticker": t, "reason": "not in universe"} for t in to_remove if t not in found]
+    if removed:
+        _write_store(lst)
+        _clear_caches()
+    return {"removed": removed, "skipped": skipped}
+
+
 def reseed_from_file() -> dict:
     """Reset the volume store back to the baked-in repo file (discards runtime
     edits). Useful after fixing the seed file in a deploy."""

@@ -615,12 +615,33 @@ def api_universe_add():
 
 @app.route("/api/universe/remove", methods=["POST"])
 def api_universe_remove():
-    """Remove a constituent from the universe: {ticker}."""
+    """Remove from the universe. {ticker} for one, or {tickers:[...]} to bulk
+    remove (e.g. 'remove all dead' after a universe health check)."""
     payload = request.get_json(silent=True) or {}
     try:
+        if isinstance(payload.get("tickers"), list):
+            return jsonify(sector_data.remove_tickers(payload["tickers"]))
         return jsonify(sector_data.remove_ticker(payload.get("ticker", "")))
     except ValueError as e:
         return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/universe/vet", methods=["POST"])
+def api_universe_vet():
+    """Vet candidate symbols against the CFM criteria (data + weeklies + Scorecard
+    verdict): {symbols: [...] or "AAPL, MSFT"}. Returns which are add-ready."""
+    payload = request.get_json(silent=True) or {}
+    syms = payload.get("symbols")
+    if isinstance(syms, str):
+        import re
+        syms = [s for s in re.split(r"[,\s]+", syms) if s]
+    if not isinstance(syms, list):
+        return jsonify({"error": "symbols must be a list or a comma/space-separated string"}), 400
+    try:
+        import universe_health
+        return jsonify(universe_health.vet_candidates(syms))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

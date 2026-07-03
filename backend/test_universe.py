@@ -27,8 +27,11 @@ def test_seeds_from_repo_file_on_first_load(universe):
     tickers = sector_data.all_tickers()
     # Seed written to the volume, and it contains the fixed universe.
     assert os.path.exists(config.UNIVERSE_PATH)
-    assert len(sector_data.sector_etfs()) == 11
+    assert len(sector_data.sector_etfs()) == 12   # 11 SPDR sectors + SPY (Broad Market)
     assert "NVDA" in tickers and "XLK" in tickers
+    # Curated CFM-fit ETFs are seeded with sensible sector homes.
+    assert sector_data.sector_for("SMH") == "XLK" and sector_data.sector_for("GDX") == "XLB"
+    assert sector_data.sector_for("QQQ") == "SPY" and "IWM" in tickers
     # The stale tickers we removed are gone; the renames are present.
     for dead in ("Q", "FISV", "MRSH", "FDXF", "ECHO"):
         assert dead not in tickers
@@ -69,6 +72,19 @@ def test_self_heals_when_store_deleted(universe):
     sector_data._clear_caches()
     assert len(sector_data.all_tickers()) > 100   # re-seeds from the repo file
     assert os.path.exists(config.UNIVERSE_PATH)
+
+
+def test_bulk_remove_skips_etfs_and_absent(universe):
+    sector_data.all_tickers()
+    sector_data.add_ticker("DEAD1", "XLK")
+    sector_data.add_ticker("DEAD2", "XLE")
+    r = sector_data.remove_tickers(["DEAD1", "DEAD2", "XLK", "NOPE"])
+    assert set(r["removed"]) == {"DEAD1", "DEAD2"}
+    reasons = {s["ticker"]: s["reason"] for s in r["skipped"]}
+    assert reasons["XLK"] == "sector ETF" and reasons["NOPE"] == "not in universe"
+    sector_data._clear_caches()
+    assert sector_data.sector_for("DEAD1") is None
+    assert sector_data.sector_for("XLK") == "XLK"   # ETF preserved
 
 
 def test_reseed_discards_runtime_edits(universe):
