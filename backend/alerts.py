@@ -42,6 +42,9 @@ ALERT_TYPES = {
     "EARNINGS_WINDOW": ("MEDIUM", "HARD_CFM_RULE: roll deep-ITM or exit before the report"),
     "EXPIRY_FRIDAY": ("MEDIUM", "HARD_CFM_RULE: weekly shorts are rolled, never left to expire unmanaged"),
     "DATA_STALE": ("MEDIUM", "PROPOSED_DEFAULT: cached OHLCV older than expected on a market day"),
+    "LEAP_ROLL_DUE": ("HIGH", "PROPOSED_DEFAULT: LEAP DTE below the floor or extrinsic runway too short -> roll the long leg"),
+    "CAPITAL_BURN": ("HIGH", "PROPOSED_DEFAULT: weekly juice not covering LEAP decay -> the flywheel is running backwards"),
+    "DELTA_VELOCITY": ("MEDIUM", "PROPOSED_DEFAULT: LEAP delta bleeding fast while still above the 0.50 floor"),
 }
 
 
@@ -320,6 +323,122 @@ def check_data_stale(state: dict) -> list[dict]:
         key=now.strftime("%Y-%m-%d"))]
 
 
+def _cur_iso_week() -> str:
+    now = datetime.now(ET)
+    y, w, _ = now.isocalendar()
+    return f"{y}-W{w:02d}"
+
+
+def _completed_week_juice(state: dict, ticker: str) -> list[float]:
+    """Net juice per COMPLETED week for a ticker (oldest→newest) from the derived
+    theta ledger — the weekly series behind the juice-vs-burn maintenance check."""
+    cur = _cur_iso_week()
+    rows = [r for r in (state.get("theta_ledger") or {}).get("weeks", [])
+            if r.get("ticker") == ticker and r.get("week", "") < cur]
+    rows.sort(key=lambda r: r["week"])
+    return [float(r.get("net_juice") or 0) for r in rows]
+
+
+def check_leap_roll_due(state: dict) -> list[dict]:
+    """The long leg needs rolling: DTE below the floor OR extrinsic runway worth
+    less than a few weeks of juice (leap_policy.roll_policy)."""
+    import leap_policy
+    out = []
+    for p in _open_positions(state):
+        if not (p.get("leap") or {}):
+            continue
+        t = p.get("ticker", "")
+        health = leap_policy.leap_health(p)
+        if not health.get("roll_due"):
+            continue
+        est = leap_policy.roll_cost_estimate(t, position=p, state=state)
+        debit = est.get("net_debit")
+        reserve_ok = est.get("reserve_ok")
+        note = "" if reserve_ok is not False else " (⚠ breaches the 2×ATR cash reserve)"
+        out.append(_alert(
+            "LEAP_ROLL_DUE", t,
+            (f"{t} LEAP roll due — " + "; ".join(health["roll_reasons"]) + "."),
+            (f"Roll the LEAP into a fresh ~{config.LEAP_TARGET_DTE}-DTE / "
+             f"~{config.LEAP_TARGET_DELTA:.2f}-delta long"
+             + (f"; est. net debit ${debit:,.0f}{note}." if debit is not None else ".")),
+            {"leap_dte": health.get("leap_dte"),
+             "extrinsic_weeks_remaining": health.get("leap_extrinsic_weeks_remaining"),
+             "reasons": health["roll_reasons"], "roll_cost": est},
+            key="roll"))
+    return out
+
+
+def check_capital_burn(state: dict) -> list[dict]:
+    """Weekly juice has not covered the LEAP's own decay for
+    MAINTENANCE_NEGATIVE_WEEKS consecutive completed weeks — the diagonal is
+    losing time value faster than the shorts collect it. Uses the current BS
+    weekly burn as the decay proxy across those recent weeks (burn moves slowly
+    week to week)."""
+    import leap_policy
+    out = []
+    for p in _open_positions(state):
+        if not (p.get("leap") or {}):
+            continue
+        t = p.get("ticker", "")
+        health = leap_policy.leap_health(p)
+        burn = health.get("leap_weekly_burn")
+        if burn is None:
+            continue
+        weekly = _completed_week_juice(state, t)
+        n = config.MAINTENANCE_NEGATIVE_WEEKS
+        if len(weekly) < n:
+            continue
+        recent = weekly[-n:]
+        if all(j - burn < 0 for j in recent):
+            shortfall = round(burn - (sum(recent) / len(recent)), 2)
+            out.append(_alert(
+                "CAPITAL_BURN", t,
+                (f"{t} juice has not covered LEAP decay for {n} weeks "
+                 f"(avg ${sum(recent) / len(recent):,.0f}/wk vs ${burn:,.0f}/wk burn)."),
+                "The flywheel is running backwards — roll the LEAP deeper/longer "
+                "or reassess the position; check juice adequacy.",
+                {"trailing_avg_weekly_juice": health.get("trailing_avg_weekly_juice"),
+                 "leap_weekly_burn": burn, "shortfall_per_week": shortfall,
+                 "weeks": n, "recent_weekly_juice": recent},
+                key="burn"))
+    return out
+
+
+def check_delta_velocity(state: dict) -> list[dict]:
+    """LEAP delta has dropped more than DELTA_VELOCITY_DROP over the last
+    DELTA_VELOCITY_WINDOW sessions while still ABOVE the 0.50 floor (below the
+    floor, DELTA_UNCOVERED owns it — don't double-fire). A warning tier, not a
+    directive: points at the kill-switch / circuit-breaker panels."""
+    import leap_policy
+    out = []
+    for p in _open_positions(state):
+        if not (p.get("leap") or {}):
+            continue
+        t = p.get("ticker", "")
+        health = leap_policy.leap_health(p)
+        vel = health.get("delta_velocity") or {}
+        drop, end = vel.get("drop"), vel.get("end")
+        leap_delta = health.get("leap_delta")
+        if drop is None or end is None or leap_delta is None:
+            continue
+        if leap_delta <= config.LEAP_DELTA_FLOOR:  # floor alert owns this regime
+            continue
+        if drop > config.DELTA_VELOCITY_DROP:
+            to_floor = round(leap_delta - config.LEAP_DELTA_FLOOR, 4)
+            out.append(_alert(
+                "DELTA_VELOCITY", t,
+                (f"{t} LEAP delta fell {drop:.2f} over {vel['window']} sessions "
+                 f"({vel['start']:.2f}→{vel['end']:.2f}), {to_floor:.2f} above the "
+                 f"{config.LEAP_DELTA_FLOOR:.2f} floor."),
+                "Delta is bleeding fast — review the kill-switch and circuit-breaker "
+                "panels; a LEAP roll-down may be needed before the floor is hit.",
+                {"start_delta": vel["start"], "end_delta": vel["end"],
+                 "window": vel["window"], "drop": drop,
+                 "distance_to_floor": to_floor},
+                key="velocity"))
+    return out
+
+
 EVALUATORS = [
     check_kill_switch,
     check_circuit_breaker,
@@ -331,6 +450,9 @@ EVALUATORS = [
     check_expiry_friday,
     check_token_expiry,
     check_data_stale,
+    check_leap_roll_due,
+    check_capital_burn,
+    check_delta_velocity,
 ]
 
 

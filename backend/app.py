@@ -209,6 +209,22 @@ def api_defend():
         return _err(e)
 
 
+@app.route("/api/leap-roll-estimate")
+def api_leap_roll_estimate():
+    """Roll-cost estimate for a position's LONG leg: suggested ~target-delta /
+    ~180-DTE replacement LEAP, estimated net debit, and whether that debit still
+    fits the 2xATR cash reserve (reserve_ok). Prices from the live chain when
+    available, else a Black-Scholes estimate at trailing realized vol."""
+    ticker = request.args.get("ticker", "")
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        import leap_policy
+        return jsonify(leap_policy.roll_cost_estimate(ticker))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/strike-posture", methods=["GET", "POST"])
 def api_strike_posture():
     """Read or set the operator's risk posture (aggressive/conservative) for
@@ -552,6 +568,59 @@ def api_data_health():
             "schwab_token": schwab_api.token_status(),
             "demo": config.demo_enabled(),
         })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/universe-health")
+def api_universe_health():
+    """Sweep the whole ticker universe and report dead names (no provider data —
+    renamed/delisted/typo'd) and, with ?weeklies=1, names that lack weekly
+    options (can't run CFM). On-demand only — fetches OHLCV for every ticker."""
+    try:
+        import universe_health
+        weeklies = request.args.get("weeklies", "").strip() in ("1", "true", "yes")
+        return jsonify(universe_health.check(check_weeklies=weeklies))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/universe", methods=["GET"])
+def api_universe():
+    """The ticker universe (editable JSON store on the volume): sectors with
+    their constituents. Managed via /api/universe/add and /remove."""
+    try:
+        secs = sector_data.sectors()
+        return jsonify({
+            "sectors": [{"etf": s.etf, "name": s.name, "group": s.group,
+                         "tickers": list(s.tickers), "count": len(s.tickers)}
+                        for s in secs.values()],
+            "total": sum(len(s.tickers) for s in secs.values()),
+        })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/universe/add", methods=["POST"])
+def api_universe_add():
+    """Add a constituent to a sector: {ticker, sector}."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(sector_data.add_ticker(payload.get("ticker", ""), payload.get("sector", "")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/universe/remove", methods=["POST"])
+def api_universe_remove():
+    """Remove a constituent from the universe: {ticker}."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(sector_data.remove_ticker(payload.get("ticker", "")))
+    except ValueError as e:
+        return _err(e, 400)
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

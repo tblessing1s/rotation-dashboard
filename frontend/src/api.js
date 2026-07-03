@@ -41,6 +41,13 @@ export const api = {
   },
   rollSuggestion: (ticker) => request(`/api/roll-suggestion?ticker=${ticker}`),
   defend: (ticker) => request(`/api/defend?ticker=${ticker}`),
+  leapRollEstimate: (ticker) => request(`/api/leap-roll-estimate?ticker=${ticker}`),
+  universeHealth: (weeklies = false) => request(`/api/universe-health${weeklies ? "?weeklies=1" : ""}`),
+  universe: () => request("/api/universe"),
+  universeAdd: (ticker, sector) =>
+    request("/api/universe/add", { method: "POST", body: JSON.stringify({ ticker, sector }) }),
+  universeRemove: (ticker) =>
+    request("/api/universe/remove", { method: "POST", body: JSON.stringify({ ticker }) }),
   strikePosture: () => request("/api/strike-posture"),
   setStrikePosture: (posture) =>
     request("/api/strike-posture", { method: "POST", body: JSON.stringify({ posture }) }),

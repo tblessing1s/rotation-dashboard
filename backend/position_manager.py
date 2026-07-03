@@ -89,6 +89,14 @@ def enrich_position(position: dict, roll_summary: dict | None = None) -> dict:
     out["stock_price"] = price
     if position.get("leap"):
         out["leap"] = enrich_leap(position["leap"], price)
+        # LEAP long-leg health: DTE, extrinsic runway, juice-vs-burn, delta
+        # velocity, and the roll recommendation (Task 1-3). Best-effort — a
+        # pricing gap degrades to Nones, never blanks the position.
+        try:
+            import leap_policy
+            out["leap_health"] = leap_policy.leap_health(position, stock_price=price)
+        except Exception:  # noqa: BLE001 — health is informational, never block positions
+            out["leap_health"] = None
     dividend = position.get("dividend")
     out["short_calls"] = [enrich_short(sc, price, dividend)
                           for sc in position.get("short_calls", [])]

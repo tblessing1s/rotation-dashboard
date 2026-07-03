@@ -33,6 +33,37 @@ def open_tickers(state: dict | None = None) -> list[str]:
             if p.get("status") != "closed" and p.get("ticker")]
 
 
+def snapshot_leap_deltas(today: str | None = None) -> list[dict]:
+    """Append one {date, leap_delta} point per open LEAP to each position's
+    delta_history, retaining the most recent DELTA_HISTORY_DAYS. Idempotent per
+    day: a second run on the same date overwrites that day's point rather than
+    duplicating it (a mid-day restart re-runs the nightly slot). Returns a small
+    per-ticker report."""
+    import indicators
+    import leap_policy
+
+    day = today or log.utcnow()[:10]
+    state = log.load_state()
+    report = []
+    changed = False
+    for p in state.get("positions", []):
+        if p.get("status") == "closed" or not (p.get("leap") or {}):
+            continue
+        health = leap_policy.leap_health(p)
+        delta = health.get("leap_delta")
+        hist = p.setdefault("delta_history", [])
+        if hist and hist[-1].get("date") == day:
+            hist[-1]["leap_delta"] = delta       # same-day re-run: overwrite
+        else:
+            hist.append({"date": day, "leap_delta": delta})
+        del hist[:-config.DELTA_HISTORY_DAYS]      # retain the newest N
+        changed = True
+        report.append({"ticker": p.get("ticker"), "leap_delta": delta})
+    if changed:
+        log.save_state(state)
+    return report
+
+
 def nightly_refresh() -> dict:
     """Refresh earnings + dividend caches for every held name and sync each
     position's dividend snapshot. Returns a per-ticker report."""
@@ -65,6 +96,13 @@ def nightly_refresh() -> dict:
                 changed = True
         if changed:
             log.save_state(state)
+
+    # Append today's per-position LEAP delta to the rolling delta_history that
+    # powers the delta-velocity early warning (retained DELTA_HISTORY_DAYS).
+    try:
+        report["delta_snapshots"] = snapshot_leap_deltas()
+    except Exception as e:  # noqa: BLE001 — a snapshot failure must not sink the sweep
+        report["errors"].append(f"delta_snapshot: {e}")
 
     try:
         import account_gate

@@ -451,6 +451,28 @@ def build_single_leg_order(instruction: str, quantity: int, option_symbol: str,
     }
 
 
+def build_net_order(legs: list[tuple], net_price: float) -> dict:
+    """A single multi-leg NET_CREDIT/NET_DEBIT DAY order so several option legs
+    fill together or not at all — no legging risk. ``legs`` is a list of
+    (instruction, option_symbol, quantity). ``net_price`` is per share: positive
+    = net credit received, negative = net debit paid. Used for atomic exits
+    (sell-to-close the LEAP + buy-to-close the short) and atomic LEAP rolls."""
+    credit = float(net_price) >= 0
+    return {
+        "orderType": "NET_CREDIT" if credit else "NET_DEBIT",
+        "session": "NORMAL",
+        "price": f"{abs(float(net_price)):.2f}",
+        "duration": "DAY",
+        "orderStrategyType": "SINGLE",
+        "complexOrderStrategyType": "CUSTOM",
+        "orderLegCollection": [
+            {"instruction": instr, "quantity": int(qty),
+             "instrument": {"symbol": sym, "assetType": "OPTION"}}
+            for instr, sym, qty in legs
+        ],
+    }
+
+
 def build_roll_order(quantity: int, buy_to_close_symbol: str, sell_to_open_symbol: str,
                      net_price: float) -> dict:
     """A single two-leg NET_CREDIT/NET_DEBIT DAY order for a short-call roll:

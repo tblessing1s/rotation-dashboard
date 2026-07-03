@@ -30,6 +30,9 @@ export default function App() {
   // null = still checking, true = signed in (or auth disabled), false = show login.
   const [authed, setAuthed] = React.useState(null);
   const [alertCount, setAlertCount] = React.useState(0);
+  // Scan details (full-universe Scorecard + Stock Filter) stay UNMOUNTED until
+  // opened, so their ~500-ticker sweeps aren't fetched on every Scan-tab visit.
+  const [scanDetails, setScanDetails] = React.useState(false);
 
   // Navbar bell badge: poll the active-alert count once a minute.
   React.useEffect(() => {
@@ -118,8 +121,25 @@ export default function App() {
           <div className="grid gap-4">
             <RegimeScanner onStatus={setRegimeStatus} />
             <ReadyToEnter onSelectStock={selectStock} />
-            <Scorecard regimeStatus={regimeStatus} />
-            <StockFilter onSelectStock={selectStock} />
+            <div>
+              <button
+                onClick={() => setScanDetails((v) => !v)}
+                className="flex w-full items-center justify-between rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-2 text-sm text-slate-400 hover:bg-slate-900/70"
+              >
+                <span>
+                  {scanDetails ? "Hide" : "Show"} full universe — Scorecard &amp; Stock Filter
+                </span>
+                <span className="text-xs text-slate-600">
+                  {scanDetails ? "▲ collapse" : "▼ loads the full sweep on open"}
+                </span>
+              </button>
+            </div>
+            {scanDetails && (
+              <>
+                <Scorecard regimeStatus={regimeStatus} />
+                <StockFilter onSelectStock={selectStock} />
+              </>
+            )}
           </div>
         )}
         {tab === "Execute" && (

@@ -1,18 +1,24 @@
-"""Load and serve the sector universe parsed from tickers_by_sector.txt.
+"""Load and serve the sector universe.
 
-File format (blocks separated by blank lines):
+The universe lives as an editable JSON store on the volume
+(``config.UNIVERSE_PATH``), seeded once from the read-only repo file
+(``tickers_by_sector.txt``) on first load. That makes it manageable at runtime —
+add / remove / fix a ticker via the API without editing the repo and
+redeploying — while surviving deploys (it's on the /data volume). If the store
+is ever missing it self-heals by re-seeding from the repo file, so the baked-in
+list is always the safety net.
+
+Seed file format (blocks separated by blank lines):
 
     XLK — Technology
     NVDA, AAPL, MSFT, ...
 
-The first line of each block is the sector header (ETF symbol, a dash, then the
-sector name); the following line(s) are the comma-separated constituents.
-Parsed once at import and cached in memory. Provides the sector ETF list, each
-sector's constituent tickers, and a stock -> sector-ETF reverse map used to
-compute RS3M-vs-Sector for any candidate.
+Provides the sector ETF list, each sector's constituents, and a stock ->
+sector-ETF reverse map used to compute RS3M-vs-Sector for any candidate.
 """
 from __future__ import annotations
 
+import json
 import re
 from functools import lru_cache
 
@@ -20,6 +26,7 @@ import config
 
 # A header line is "<ETF> <dash> <name>"; dash may be em/en/hyphen.
 _HEADER_RE = re.compile(r"^([A-Za-z][A-Za-z0-9.]{0,6})\s*[—–-]\s*(.+)$")
+UNIVERSE_SCHEMA = 1
 
 
 class Sector:
@@ -33,41 +40,142 @@ class Sector:
         return {"etf": self.etf, "name": self.name, "group": self.group, "tickers": self.tickers}
 
 
-def _flush(sectors: dict, header: tuple[str, str] | None, ticker_lines: list[str]) -> None:
+# ---------------------------------------------------------------------------
+# Seed (repo file) -> ordered [{etf, name, tickers}]
+# ---------------------------------------------------------------------------
+def _flush(out: list, header: tuple[str, str] | None, ticker_lines: list[str]) -> None:
     if not header:
         return
     etf, name = header
-    csv = ", ".join(ticker_lines)
-    tickers = [t.strip().upper() for t in csv.split(",") if t.strip()]
+    tickers = [t.strip().upper() for t in ", ".join(ticker_lines).split(",") if t.strip()]
     if tickers:
-        group = config.SECTOR_GROUPS.get(etf, "")
-        sectors[etf] = Sector(etf, name, group, tickers)
+        out.append({"etf": etf, "name": name, "tickers": tickers})
 
 
-@lru_cache(maxsize=1)
-def _load() -> dict[str, Sector]:
-    sectors: dict[str, Sector] = {}
+def _seed_from_file() -> list[dict]:
+    out: list[dict] = []
     header: tuple[str, str] | None = None
     ticker_lines: list[str] = []
     with open(config.TICKERS_BY_SECTOR_PATH, encoding="utf-8") as fh:
         for raw in fh:
             line = raw.strip()
             if not line or line.startswith("#"):
-                _flush(sectors, header, ticker_lines)
+                _flush(out, header, ticker_lines)
                 header, ticker_lines = None, []
                 continue
             m = _HEADER_RE.match(line)
             # A line is a header only if it has no comma (ticker lines are CSV).
             if m and "," not in line:
-                _flush(sectors, header, ticker_lines)
+                _flush(out, header, ticker_lines)
                 header = (m.group(1).upper(), m.group(2).strip())
                 ticker_lines = []
             else:
                 ticker_lines.append(line)
-    _flush(sectors, header, ticker_lines)
-    if not sectors:
+    _flush(out, header, ticker_lines)
+    if not out:
         raise RuntimeError(f"no sectors parsed from {config.TICKERS_BY_SECTOR_PATH}")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Volume store (JSON) — read / write / seed
+# ---------------------------------------------------------------------------
+def _read_store() -> list[dict] | None:
+    try:
+        with open(config.UNIVERSE_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+        sectors = data.get("sectors")
+        return sectors if isinstance(sectors, list) and sectors else None
+    except (OSError, ValueError):
+        return None
+
+
+def _write_store(sectors: list[dict]) -> None:
+    import logging_handler as log  # reuse the atomic-write machinery (fsync + rename)
+    payload = json.dumps({"schema": UNIVERSE_SCHEMA, "sectors": sectors}, indent=2)
+    log._atomic_write(config.UNIVERSE_PATH, payload)
+
+
+def _clear_caches() -> None:
+    _load.cache_clear()
+    stock_to_sector.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def _load() -> dict[str, Sector]:
+    raw = _read_store()
+    if raw is None:  # first run (or store lost) — seed from the repo file
+        raw = _seed_from_file()
+        try:
+            _write_store(raw)
+        except OSError:  # read-only fs: still serve from memory this run
+            pass
+    sectors: dict[str, Sector] = {}
+    for s in raw:
+        etf = str(s.get("etf", "")).upper()
+        if not etf:
+            continue
+        tickers = [t.strip().upper() for t in s.get("tickers", []) if str(t).strip()]
+        sectors[etf] = Sector(etf, s.get("name", ""), config.SECTOR_GROUPS.get(etf, ""), tickers)
+    if not sectors:
+        raise RuntimeError("no sectors in the universe store")
     return sectors
+
+
+# ---------------------------------------------------------------------------
+# Mutations (runtime universe management) — persist + invalidate caches
+# ---------------------------------------------------------------------------
+def _sectors_as_list() -> list[dict]:
+    return [{"etf": s.etf, "name": s.name, "tickers": list(s.tickers)} for s in _load().values()]
+
+
+def add_ticker(ticker: str, sector: str) -> dict:
+    """Add a constituent to a sector. Rejects unknown sectors and duplicates."""
+    ticker = (ticker or "").strip().upper()
+    sector = (sector or "").strip().upper()
+    if not ticker:
+        raise ValueError("ticker is required")
+    sectors = _load()
+    if sector not in sectors:
+        raise ValueError(f"unknown sector '{sector}' (expected one of {sorted(sectors)})")
+    existing = sector_for(ticker)
+    if existing:
+        raise ValueError(f"{ticker} is already in the universe ({existing})")
+    lst = _sectors_as_list()
+    for s in lst:
+        if s["etf"] == sector:
+            s["tickers"].append(ticker)
+    _write_store(lst)
+    _clear_caches()
+    return {"added": ticker, "sector": sector}
+
+
+def remove_ticker(ticker: str) -> dict:
+    """Remove a constituent. Sector ETFs (the headers) can't be removed."""
+    ticker = (ticker or "").strip().upper()
+    sectors = _load()
+    if ticker in sectors:
+        raise ValueError(f"{ticker} is a sector ETF — can't remove a sector header")
+    lst = _sectors_as_list()
+    removed_from = None
+    for s in lst:
+        if ticker in s["tickers"]:
+            s["tickers"].remove(ticker)
+            removed_from = s["etf"]
+    if removed_from is None:
+        raise ValueError(f"{ticker} is not in the universe")
+    _write_store(lst)
+    _clear_caches()
+    return {"removed": ticker, "sector": removed_from}
+
+
+def reseed_from_file() -> dict:
+    """Reset the volume store back to the baked-in repo file (discards runtime
+    edits). Useful after fixing the seed file in a deploy."""
+    raw = _seed_from_file()
+    _write_store(raw)
+    _clear_caches()
+    return {"reseeded": True, "sectors": len(raw)}
 
 
 def sectors() -> dict[str, Sector]:

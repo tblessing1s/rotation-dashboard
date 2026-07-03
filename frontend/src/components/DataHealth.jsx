@@ -12,6 +12,161 @@ const SOURCE_LABELS = {
   alpha_vantage_quote: "Alpha Vantage quotes (fallback)",
 };
 
+// On-demand universe sweep: which tickers return no provider data (dead /
+// renamed / typo'd) and, optionally, which lack weekly options (can't run CFM).
+// Not fetched on mount — it hits every ticker, so it only runs on the button.
+function UniverseCheck() {
+  const [res, setRes] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [manage, setManage] = React.useState(false);
+  const [sectors, setSectors] = React.useState(null);
+  const [form, setForm] = React.useState({ ticker: "", sector: "" });
+  const [msg, setMsg] = React.useState(null);
+
+  const run = async (weeklies) => {
+    setBusy(true);
+    setRes(null);
+    try {
+      setRes(await api.universeHealth(weeklies));
+    } catch (e) {
+      setRes({ error: String(e.message || e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const openManage = async () => {
+    const next = !manage;
+    setManage(next);
+    if (next && !sectors) {
+      try {
+        const u = await api.universe();
+        setSectors(u.sectors || []);
+        setForm((f) => ({ ...f, sector: u.sectors?.[0]?.etf || "" }));
+      } catch (e) { setMsg({ err: String(e.message || e) }); }
+    }
+  };
+
+  const addTicker = async () => {
+    setMsg(null);
+    try {
+      const r = await api.universeAdd(form.ticker, form.sector);
+      setMsg({ ok: `Added ${r.added} to ${r.sector}` });
+      setForm((f) => ({ ...f, ticker: "" }));
+    } catch (e) { setMsg({ err: String(e.message || e) }); }
+  };
+
+  const removeTicker = async (ticker) => {
+    setMsg(null);
+    try {
+      await api.universeRemove(ticker);
+      setMsg({ ok: `Removed ${ticker}` });
+      // Drop it from the currently displayed dead-list without a full re-check.
+      setRes((r) => r && !r.error ? { ...r, no_data: r.no_data.filter((d) => d.ticker !== ticker) } : r);
+    } catch (e) { setMsg({ err: String(e.message || e) }); }
+  };
+
+  const group = (rows) => {
+    const by = {};
+    (rows || []).forEach((r) => { (by[r.sector || "?"] ||= []).push(r.ticker); });
+    return Object.entries(by).sort();
+  };
+
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Universe check</span>
+        <div className="flex gap-2">
+          <button onClick={() => run(false)} disabled={busy}
+                  className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+            {busy ? "Checking…" : "Check universe"}
+          </button>
+          <button onClick={() => run(true)} disabled={busy}
+                  title="Also probe weekly options for every ticker (slower)"
+                  className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-400 hover:bg-slate-800 disabled:opacity-50">
+            + weeklies
+          </button>
+          <button onClick={openManage}
+                  className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-400 hover:bg-slate-800">
+            {manage ? "Done" : "Manage"}
+          </button>
+        </div>
+      </div>
+
+      {manage && (
+        <div className="mt-2 rounded-lg border border-slate-800 bg-slate-950/50 p-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              value={form.ticker}
+              onChange={(e) => setForm((f) => ({ ...f, ticker: e.target.value.toUpperCase() }))}
+              placeholder="TICKER"
+              className="w-28 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-100 placeholder:text-slate-600"
+            />
+            <select
+              value={form.sector}
+              onChange={(e) => setForm((f) => ({ ...f, sector: e.target.value }))}
+              className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-200"
+            >
+              {(sectors || []).map((s) => (
+                <option key={s.etf} value={s.etf}>{s.etf} — {s.name} ({s.count})</option>
+              ))}
+            </select>
+            <button onClick={addTicker} disabled={!form.ticker || !form.sector}
+                    className="rounded border border-emerald-700 bg-emerald-500/10 px-2.5 py-1 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50">
+              Add
+            </button>
+            <span className="text-xs text-slate-600">to fix a ticker, remove the old and add the new</span>
+          </div>
+          {msg && (
+            <p className={`mt-1 text-xs ${msg.err ? "text-rose-400" : "text-emerald-300"}`}>{msg.err || msg.ok}</p>
+          )}
+        </div>
+      )}
+      {res?.error && <p className="mt-2 text-sm text-rose-400">{res.error}</p>}
+      {res && !res.error && res.skipped && <p className="mt-2 text-sm text-slate-500">{res.skipped}</p>}
+      {res && !res.error && !res.skipped && (
+        <div className="mt-2 text-sm">
+          <p className="text-slate-400">
+            {res.total} tickers · <span className="text-emerald-300">{res.with_data} returned data</span>
+            {res.no_data.length > 0
+              ? <> · <span className="text-rose-300">{res.no_data.length} dead</span></>
+              : <> · <span className="text-emerald-300">none dead</span></>}
+            {res.checked_weeklies && <> · <span className="text-slate-300">{res.cfm_ready} CFM-ready</span></>}
+          </p>
+          {res.no_data.length > 0 && (
+            <div className="mt-1">
+              <div className="text-xs uppercase tracking-wide text-rose-400/80">
+                No data — {manage ? "click ✕ to remove a dead ticker" : "Manage to remove, or fix in the seed file"}
+              </div>
+              {group(res.no_data).map(([sector, ts]) => (
+                <div key={sector} className="flex flex-wrap items-center gap-1.5 text-xs text-slate-400">
+                  <span className="text-slate-500">{sector}</span>
+                  {ts.map((t) => (
+                    manage ? (
+                      <button key={t} onClick={() => removeTicker(t)}
+                              className="rounded border border-rose-800 bg-rose-500/10 px-1.5 py-0.5 text-rose-300 hover:bg-rose-500/20">
+                        {t} ✕
+                      </button>
+                    ) : <span key={t}>{t}</span>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
+          {res.checked_weeklies && res.no_weeklies?.length > 0 && (
+            <div className="mt-2">
+              <div className="text-xs uppercase tracking-wide text-amber-400/80">No weeklies — can't run CFM</div>
+              {group(res.no_weeklies).map(([sector, ts]) => (
+                <div key={sector} className="text-xs text-slate-400"><span className="text-slate-500">{sector}</span> {ts.join(", ")}</div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DataHealth() {
   const { data, error, loading, reload } = useApi(api.dataHealth, [], 120000);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -94,6 +249,7 @@ export default function DataHealth() {
           </div>
         </div>
       )}
+      {!data?.demo && <UniverseCheck />}
     </Card>
   );
 }

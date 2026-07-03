@@ -16,29 +16,15 @@ in demo mode), then aggregated:
 """
 from __future__ import annotations
 
-import math
-
 import config
 import data_handler
 import indicators
 
 
-def _norm_pdf(x: float) -> float:
-    return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
-
-
-def _call_greeks_full(S, K, T, r, sigma, q=0.0):
-    """(delta, theta_per_day, vega_per_volpt) for one call, per share."""
-    if not (S and S > 0 and K and K > 0 and T and T > 0 and sigma and sigma > 0):
-        return None, None, None
-    d1 = indicators._d1(S, K, T, r, sigma, q)
-    d2 = d1 - sigma * math.sqrt(T)
-    delta = math.exp(-q * T) * indicators._norm_cdf(d1)
-    theta_year = (-S * math.exp(-q * T) * _norm_pdf(d1) * sigma / (2 * math.sqrt(T))
-                  - r * K * math.exp(-r * T) * indicators._norm_cdf(d2)
-                  + q * S * math.exp(-q * T) * indicators._norm_cdf(d1))
-    vega = S * math.exp(-q * T) * _norm_pdf(d1) * math.sqrt(T) / 100.0  # per vol point
-    return delta, theta_year / 365.0, vega
+# (delta, theta_per_day, vega_per_volpt) per share — the one BSM implementation
+# lives in indicators.call_greeks_full; this delegates so the theta formula has
+# a single source of truth (also used by the LEAP juice-vs-burn math).
+_call_greeks_full = indicators.call_greeks_full
 
 
 def _leg_greeks(S, strike, dte, mark_per_share):
