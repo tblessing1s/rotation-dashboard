@@ -317,3 +317,10 @@ def stock_to_sector() -> dict[str, str]:
 
 def sector_for(ticker: str) -> str | None:
     return stock_to_sector().get(ticker.upper())
+
+
+def is_etf(ticker: str) -> bool:
+    """True for a sector-ETF header (XLK…SPY) or a known tradeable ETF — used to
+    put the name on the lower-juice ETF income sleeve at the entry gate."""
+    t = (ticker or "").strip().upper()
+    return t in _load() or t in config.KNOWN_ETFS

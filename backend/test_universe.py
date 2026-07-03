@@ -112,6 +112,19 @@ def test_bulk_remove_skips_etfs_and_absent(universe):
     assert sector_data.sector_for("XLK") == "XLK"   # ETF preserved
 
 
+def test_etf_classification_and_lower_juice_bar(universe):
+    import account_gate
+    sector_data.all_tickers()
+    # Stocks are not ETFs; sector headers + curated ETFs are.
+    assert not sector_data.is_etf("NVDA")
+    for t in ("XLK", "SPY", "SMH", "GDX", "QQQ", "XBI", "KRE"):
+        assert sector_data.is_etf(t), t
+    # ETFs clear a lower juice bar than growth stocks.
+    stock_bar = account_gate.weekly_yield_target_pct("NVDA")
+    etf_bar = account_gate.weekly_yield_target_pct("SMH")
+    assert etf_bar == config.ETF_WEEKLY_JUICE_TARGET_PCT < stock_bar
+
+
 def test_reseed_discards_runtime_edits(universe):
     sector_data.all_tickers()
     sector_data.add_ticker("TSM", "XLK")

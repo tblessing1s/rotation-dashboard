@@ -96,9 +96,13 @@ def juice_estimate(ticker: str, df=None) -> dict:
     }
 
 
-def weekly_yield_target_pct() -> float:
-    """Minimum weekly juice as % of LEAP cost implied by the CFM cycle target:
-    the low end of 15-25% spread over the slow end of 4-8 weeks."""
+def weekly_yield_target_pct(ticker: str | None = None) -> float:
+    """Minimum weekly juice as % of LEAP cost. Growth stocks use the CFM cycle
+    target (low end of 15-25% over the slow end of 4-8 weeks, ~1.9%/wk); ETFs
+    (lower IV, steadier-income sleeve) clear the lower ETF bar instead."""
+    import sector_data
+    if ticker and sector_data.is_etf(ticker):
+        return config.ETF_WEEKLY_JUICE_TARGET_PCT
     return round(config.CYCLE_RETURN_MIN / config.CYCLE_WEEKS_MAX * 100, 2)
 
 
@@ -248,18 +252,22 @@ def evaluate(ticker: str, contracts: int | None = None,
         {"sector": sector, "already_held": same_sector,
          "max": config.MAX_POSITIONS_PER_SECTOR}))
 
-    # 4) Juice adequacy: weekly extrinsic / LEAP cost vs the CFM cycle target.
-    target = weekly_yield_target_pct()
+    # 4) Juice adequacy vs the underlying's profile bar: growth stocks use the
+    #    CFM cycle target (~1.9%/wk); ETFs run a lower steady-income bar.
+    is_etf_underlying = sector_data.is_etf(ticker)
+    target = weekly_yield_target_pct(ticker)
     weekly_yield = (round(weekly_extr / leap_cost * 100, 2)
                     if (weekly_extr is not None and leap_cost) else None)
+    profile_note = ("ETF income sleeve" if is_etf_underlying
+                    else f"{config.CYCLE_RETURN_MIN * 100:g}% over {config.CYCLE_WEEKS_MAX} wks")
     checks.append(_check(
         "juice_adequacy",
-        f"Weekly juice ≥ {target:g}% of LEAP cost ({config.CYCLE_RETURN_MIN * 100:g}% over "
-        f"{config.CYCLE_WEEKS_MAX} wks)",
+        f"Weekly juice ≥ {target:g}% of LEAP cost ({profile_note})",
         weekly_yield is not None and weekly_yield >= target, True,
         {"weekly_yield_pct": weekly_yield, "target_pct": target,
          "weekly_extrinsic_per_share": weekly_extr, "leap_cost_per_share": leap_cost,
-         "source": juice_source, "estimate": est}))
+         "source": juice_source, "estimate": est, "is_etf": is_etf_underlying,
+         "profile": "etf" if is_etf_underlying else "stock"}))
 
     # 4b) Juice too rich (warning): actual premium far above what the ticker's
     #     own realized vol implies = the market is pricing an event/risk.
@@ -307,7 +315,8 @@ def evaluate(ticker: str, contracts: int | None = None,
         "suggested_circuit_breaker": cb,
         "dividend": div,
         "juice": {"weekly_yield_pct": weekly_yield, "target_pct": target,
-                  "source": juice_source},
+                  "source": juice_source, "is_etf": is_etf_underlying,
+                  "profile": "etf" if is_etf_underlying else "stock"},
     }
 
 

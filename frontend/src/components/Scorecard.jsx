@@ -101,9 +101,11 @@ function ScoreRow({ row, expanded, onToggle }) {
               <span className="flex items-center gap-1.5">
                 <span className="text-slate-500">{expanded ? "▾" : "▸"}</span>
                 {row.ticker}
-                {row.is_sector_etf && (
+                {(row.is_etf || row.is_sector_etf) && (
                   <span
-                    title="Sector ETF — a valid CFM candidate in its own right. RS vs Sector is N/A (it IS the sector)."
+                    title={row.is_sector_etf
+                      ? "Sector ETF — a valid CFM candidate in its own right. RS vs Sector is N/A (it IS the sector). Runs on the lower ETF juice bar."
+                      : "ETF — steadier, lower-IV income sleeve. Clears a lower weekly-juice bar than growth stocks."}
                     className="rounded border border-sky-600/50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-400"
                   >
                     ETF

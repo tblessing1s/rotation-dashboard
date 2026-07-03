@@ -303,6 +303,20 @@ CYCLE_WEEKS_MAX = 8
 # income ("juice too rich"). Warn, don't block.
 JUICE_RICH_FACTOR = 1.75
 
+# ---- ETF income sleeve ------------------------------------------------------
+# ETFs carry lower IV than single growth stocks, so their weekly juice is
+# thinner — but steadier, with no earnings-gap risk. They run as a lower-income,
+# grow-the-position sleeve: same one book, but a LOWER juice-adequacy bar at
+# entry than the growth-stock bar (which is the CFM 15-25%/4-8wk rule, ~1.9%/wk).
+# PROPOSED_DEFAULT — a deliberate variant of the stated rule for the lower-vol
+# ETF sleeve, not a change to the rule itself.
+ETF_WEEKLY_JUICE_TARGET_PCT = 1.0
+
+# Tickers treated as ETFs for the income profile above, in addition to the 11
+# sector-ETF headers + SPY (which are always ETFs). Extend this as you add ETFs
+# to the universe so they get the ETF juice bar.
+KNOWN_ETFS = {"QQQ", "IWM", "DIA", "SMH", "ARKK", "XBI", "GDX", "XOP", "KRE", "XHB"}
+
 # PROPOSED_DEFAULT — circuit-breaker (line-in-the-sand) default suggestion:
 # max(MA50, entry - CIRCUIT_BREAKER_ATR_MULT * ATR). Operator-editable at entry;
 # storing SOME line is required (HARD_CFM_RULE), only the formula is tunable.

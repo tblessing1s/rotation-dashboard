@@ -368,7 +368,9 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     import account_gate
     import earnings as earnings_mod
     est = account_gate.juice_estimate(ticker, df)
-    target = account_gate.weekly_yield_target_pct()
+    # ETFs are judged against the lower ETF income-sleeve bar, not the growth bar.
+    row["is_etf"] = sector_data.is_etf(ticker)
+    target = account_gate.weekly_yield_target_pct(ticker)
     row["juice_weekly_pct"] = est["weekly_yield_pct"]
     row["juice_target_pct"] = target
     row["juice_ok"] = (None if est["weekly_yield_pct"] is None
