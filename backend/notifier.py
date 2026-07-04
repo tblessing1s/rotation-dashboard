@@ -102,6 +102,22 @@ class NtfyNotifier(Notifier):
                       timeout=20)
 
 
+class WebPushNotifier(Notifier):
+    """Native Web Push to the installed PWA (VAPID). Subscriptions are stored in
+    state.json by /api/push/subscribe; keys come from VAPID_PUBLIC_KEY /
+    VAPID_PRIVATE_KEY. See ``webpush.py``. Self-contained — no external app."""
+
+    name = "webpush"
+
+    def configured(self) -> bool:
+        import webpush
+        return webpush.configured()
+
+    def send(self, subject: str, body: str, alerts: list[dict]) -> None:
+        import webpush
+        webpush.send(subject, body, alerts)
+
+
 class LogNotifier(Notifier):
     """Dry-run / fallback channel: writes to the process log, always available."""
 
@@ -114,7 +130,7 @@ class LogNotifier(Notifier):
         logger.warning("ALERTS (not sent): %s\n%s", subject, body)
 
 
-CHANNELS: list[Notifier] = [EmailNotifier(), NtfyNotifier()]
+CHANNELS: list[Notifier] = [EmailNotifier(), NtfyNotifier(), WebPushNotifier()]
 
 
 def dispatch(alerts: list[dict], settings: dict | None = None,

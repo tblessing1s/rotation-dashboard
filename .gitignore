@@ -27,6 +27,10 @@ backend/state.demo.json.tmp.*
 # Auto-generated cookie-signing key (persisted so sessions survive restarts)
 backend/.session_secret
 .session_secret
+# Auto-generated Web Push VAPID keypair (persisted on the /data volume, stable
+# across deploys; never commit — regenerating invalidates device subscriptions)
+backend/.vapid_keys.json
+.vapid_keys.json
 
 # Node/Vite
 frontend/node_modules/

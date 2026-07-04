@@ -90,6 +90,12 @@ export const api = {
     request("/api/reconcile/acknowledge", { method: "POST", body: JSON.stringify({ diff_id: diffId, ack_reason: ackReason }) }),
   alertSettings: (patch) =>
     request("/api/alerts/settings", { method: "POST", body: JSON.stringify(patch) }),
+  pushVapidKey: () => request("/api/push/vapid-key"),
+  pushSubscribe: (subscription) =>
+    request("/api/push/subscribe", { method: "POST", body: JSON.stringify({ subscription }) }),
+  pushUnsubscribe: (endpoint) =>
+    request("/api/push/unsubscribe", { method: "POST", body: JSON.stringify({ endpoint }) }),
+  pushTest: () => request("/api/push/test", { method: "POST" }),
   config: () => request("/api/config"),
   mode: () => request("/api/mode"),
   setMode: (demo) => request("/api/mode", { method: "POST", body: JSON.stringify({ demo }) }),

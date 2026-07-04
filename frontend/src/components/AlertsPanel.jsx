@@ -1,6 +1,9 @@
 import React from "react";
 import { api } from "../api.js";
+import PushSetup from "./PushSetup.jsx";
 import { Card, Loading, Pill, useApi } from "./ui.jsx";
+
+const CHANNEL_LABELS = { email: "Email", ntfy: "Push (ntfy)", webpush: "Push (this app)" };
 
 const SEVERITY_TONE = {
   CRITICAL: "border-rose-500/40 bg-rose-500/10",
@@ -61,15 +64,16 @@ function Settings({ settings, types, onSaved }) {
                  className="h-3.5 w-3.5 accent-emerald-500" />
           Dry run (log instead of send)
         </label>
-        {["email", "ntfy"].map((ch) => (
+        {["email", "ntfy", "webpush"].map((ch) => (
           <label key={ch} className="flex items-center gap-2">
             <input type="checkbox" disabled={busy} checked={channels[ch] !== false}
                    onChange={(e) => patch({ channels: { [ch]: e.target.checked } })}
                    className="h-3.5 w-3.5 accent-emerald-500" />
-            {ch === "email" ? "Email" : "Push (ntfy)"}
+            {CHANNEL_LABELS[ch]}
           </label>
         ))}
       </div>
+      <PushSetup />
       <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
         {Object.entries(types || {}).map(([type, info]) => (
           <label key={type} className="flex items-center gap-2 text-xs text-slate-300" title={info.rule}>
@@ -83,7 +87,8 @@ function Settings({ settings, types, onSaved }) {
       </div>
       <p className="mt-2 text-xs text-slate-600">
         Channels are configured via environment variables (SMTP_HOST / ALERT_EMAIL_TO for email,
-        ALERT_NTFY_TOPIC for push). Unconfigured channels fall back to the server log.
+        ALERT_NTFY_TOPIC for ntfy, VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY for this app’s push).
+        Unconfigured channels fall back to the server log.
       </p>
     </div>
   );
