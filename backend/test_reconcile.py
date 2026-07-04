@@ -534,8 +534,8 @@ def test_v6_to_v7_migration_additive_with_snapshot(store):
     with open(config.STATE_PATH, "w", encoding="utf-8") as fh:
         json.dump(_v6_state(), fh, indent=2)
 
-    state = log.load_state()  # triggers v6 -> v7
-    assert state["schema_version"] == migrations.CURRENT_VERSION == 7
+    state = log.load_state()  # triggers v6 -> v7 (and onward to current)
+    assert state["schema_version"] == migrations.CURRENT_VERSION
 
     # Additive structures present.
     assert state["reconciliation"] == {"last": None, "history": [], "last_success": None} \

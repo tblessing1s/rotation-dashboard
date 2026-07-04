@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 7
+CURRENT_VERSION = 8
 
 
 class MigrationAbortedError(RuntimeError):
@@ -35,6 +35,9 @@ def default_alert_state() -> dict:
         # operator-editable: per-type enable/disable, channel toggles, dry-run.
         "settings": {},
         "last_run": None,
+        # browser/PWA Web Push subscriptions (one per registered device); the
+        # "webpush" notifier channel delivers alert batches to these.
+        "push_subscriptions": [],
     }
 
 
@@ -109,6 +112,15 @@ def _v6_to_v7(state: dict) -> dict:
     return state
 
 
+def _v7_to_v8(state: dict) -> dict:
+    """v8 (native Web Push): a list of browser/PWA push subscriptions under
+    ``alerts.push_subscriptions``, delivered to by the new ``webpush`` channel.
+    Additive — seed the empty list so readers never key-error (it fills in as
+    devices register via /api/push/subscribe)."""
+    state.setdefault("alerts", default_alert_state()).setdefault("push_subscriptions", [])
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -116,6 +128,7 @@ MIGRATIONS = {
     4: _v4_to_v5,
     5: _v5_to_v6,
     6: _v6_to_v7,
+    7: _v7_to_v8,
 }
 
 

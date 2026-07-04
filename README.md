@@ -220,6 +220,54 @@ via `.github/workflows/fly.yml`.
 
 ---
 
+## Mobile app & push notifications
+
+The dashboard is a **PWA**: install it to your Android home screen and it runs
+full-screen with its own icon, and the alert engine can push notifications to
+the phone's lock screen even when the app is closed. It stays private — the
+whole app is behind your password gate, on your own Fly machine.
+
+### Install on Android (home-screen app)
+
+Open the dashboard in **Chrome** on Android, then menu (⋮) → **Install app** /
+**Add to Home screen**. It launches standalone from then on. (A manifest,
+service worker, and icons ship in `frontend/public/`; nothing to configure.)
+
+### Native Web Push (this app sends the notifications)
+
+Delivery is a self-contained alert **channel** (`webpush`, alongside `email`
+and `ntfy`), keyed by a VAPID pair. Generate one pair, set it once, keep it
+stable (rotating it invalidates every device subscription):
+
+```bash
+python scripts/gen_vapid_keys.py     # prints the three secrets below
+fly secrets set VAPID_PUBLIC_KEY='…' VAPID_PRIVATE_KEY='…' VAPID_SUBJECT='mailto:you@example.com'
+fly deploy
+```
+
+Then in the app: **Alerts → Settings → Push notifications (this device) →
+Enable on this device**, allow the browser prompt, and hit **Send test**. Each
+phone/browser registers once; subscriptions live in `state.json`
+(`alerts.push_subscriptions`) and dead ones are pruned automatically. Do the
+enable step **after installing to the home screen** — Android push is far more
+reliable from the installed PWA.
+
+### ntfy (alternative / additional push, no VAPID)
+
+The [ntfy](https://ntfy.sh) app is a zero-code path: install it, subscribe to a
+**secret random topic**, and point the app at it. Privacy comes from the topic
+name being unguessable.
+
+```bash
+fly secrets set ALERT_NTFY_TOPIC='cfm-<long-random-string>'   # optional: ALERT_NTFY_SERVER for self-hosted
+```
+
+Both channels can run at once; toggle either under **Alerts → Settings**.
+Unconfigured channels fall back to the server log, so alerts are never silently
+dropped.
+
+---
+
 ## Tests
 
 ```bash
