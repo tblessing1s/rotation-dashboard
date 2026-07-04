@@ -273,6 +273,22 @@ Both channels can run at once; toggle either under **Alerts → Settings**.
 Unconfigured channels fall back to the server log, so alerts are never silently
 dropped.
 
+### Dead-man's switch (page me if the scheduler goes quiet)
+
+The alert scheduler is an in-process thread — if it wedges or the machine stops,
+no alert fires and nothing says so. Point it at an external dead-man service so
+its *silence* pages you:
+
+```bash
+fly secrets set HEALTHCHECK_URL='https://hc-ping.com/<your-uuid>'   # healthchecks.io (or any ping URL)
+```
+
+The scheduler pings that URL every tick while it's alive (a `/fail` ping on a
+broken alert run); miss enough pings and the service alerts you. Optional:
+`HEALTHCHECK_MIN_INTERVAL` (seconds between liveness pings, default 300).
+Configure the check's period+grace to taste — e.g. period 1h / grace 1h catches
+a wedge or stop within ~2h, any day. Inert when unset.
+
 ---
 
 ## Tests

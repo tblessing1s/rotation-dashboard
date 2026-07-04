@@ -72,8 +72,14 @@ def maintenance_due(now: datetime, last: date | None) -> bool:
 
 def _tick() -> None:
     import alerts  # local import: keep module import side-effect free
+    import heartbeat
     global _last_maintenance
     now = datetime.now(ET)
+
+    # Dead-man's switch: prove the scheduler thread is alive on EVERY tick,
+    # including weekends/holidays when no alert slot fires — a missed run of
+    # pings (thread wedged or machine stopped) is what pages the operator.
+    heartbeat.ping()
 
     if maintenance_due(now, _last_maintenance):
         _last_maintenance = now.date()
@@ -99,6 +105,10 @@ def _tick() -> None:
                     "+".join(due), len(result["fired"]), len(result["resolved"]),
                     result["active_count"])
     except Exception as e:  # noqa: BLE001 — a failed run must not kill the thread
+        # The thread is alive but the evaluation itself broke — page immediately
+        # (a persistently failing run is as dangerous as a dead thread).
+        import heartbeat
+        heartbeat.ping("/fail", force=True)
         logger.error("scheduled alert run (%s ET) failed: %s", "+".join(due), e)
 
 
