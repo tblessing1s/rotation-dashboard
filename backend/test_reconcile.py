@@ -592,3 +592,17 @@ def test_api_reconcile_get_and_post(store, monkeypatch):
     assert got["last"]["status"] == reconcile.DIRTY
     # The NVDA LEAP is now frozen (missing at broker).
     assert log.find_position(log.load_state(), "NVDA")["needs_review"] is True
+
+
+def test_portfolio_risk_exposes_frozen_count(store):
+    import portfolio_risk
+    state = log.load_state()
+    state["positions"] = [
+        _frozen_position(),
+        {"ticker": "AMD", "status": "active", "needs_review": False,
+         "leap": {"strike": 120, "contracts": 5}, "shares": {"count": 0}, "short_calls": []},
+    ]
+    log.save_state(state)
+    view = portfolio_risk.portfolio_view(state)
+    assert view["frozen"]["count"] == 1
+    assert view["frozen"]["tickers"] == ["NVDA"]

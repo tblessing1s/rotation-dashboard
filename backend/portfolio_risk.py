@@ -140,8 +140,15 @@ def portfolio_view(state: dict) -> dict:
         sectors[r["sector"] or "?"] = round(sectors.get(r["sector"] or "?", 0.0) + r["capital"], 2)
     total_cap = sum(sectors.values()) or 1.0
 
+    # Frozen (needs_review) positions still count toward the aggregates above;
+    # the risk card surfaces the count so the operator knows some inputs are
+    # computed off state that hasn't been verified against the broker.
+    frozen = [p.get("ticker") for p in state.get("positions", [])
+              if p.get("status") != "closed" and p.get("needs_review")]
+
     return {
         "positions": rows,
+        "frozen": {"count": len(frozen), "tickers": frozen},
         "totals": {
             "delta_dollars": _sum("delta_dollars"),
             "delta_dollars_spy_adj": _sum("delta_dollars_spy_adj"),

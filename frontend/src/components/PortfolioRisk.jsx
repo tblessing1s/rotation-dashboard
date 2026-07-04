@@ -12,10 +12,21 @@ export default function PortfolioRisk() {
   const t = data?.totals || {};
   const cap = data?.capital || {};
   const sectors = data?.sector_exposure || [];
+  const frozen = data?.frozen || {};
   if (!data?.positions?.length) return null;
 
   return (
-    <Card title="Portfolio risk">
+    <Card
+      title="Portfolio risk"
+      right={frozen.count > 0 && (
+        <span
+          title={`Aggregates include ${frozen.count} frozen position(s) whose state is unverified against the broker: ${(frozen.tickers || []).join(", ")}`}
+          className="cursor-help rounded-full border border-rose-500/50 bg-rose-500/20 px-2 py-0.5 text-xs font-semibold uppercase text-rose-200"
+        >
+          ⚠ {frozen.count} frozen
+        </span>
+      )}
+    >
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Stat label="Δ dollars" value={money(t.delta_dollars)}
               sub={t.delta_dollars_spy_adj != null ? `${money(t.delta_dollars_spy_adj)} SPY-β adj` : "β unavailable"} />
