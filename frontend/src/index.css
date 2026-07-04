@@ -11,4 +11,20 @@ body,
 body {
   margin: 0;
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  /* Never let the page itself scroll sideways on a phone — wide content
+     (tables, chip rows) scrolls inside its own overflow-x-auto container. */
+  overflow-x: hidden;
+  /* Avoid the iOS/Android "rubber-band" reveal past the app background. */
+  overscroll-behavior-y: none;
+}
+
+@layer utilities {
+  /* Horizontal scroll strips (mobile tab bar) without a visible scrollbar. */
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
 }

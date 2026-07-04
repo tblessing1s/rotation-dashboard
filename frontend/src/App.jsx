@@ -115,7 +115,7 @@ export default function App() {
               demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo} onLogout={logout}
               alertCount={alertCount} onAlertsClick={() => setTab("Checklist")}
               posture={posture} postureBusy={postureBusy} onTogglePosture={togglePosture} />
-      <main className="mx-auto max-w-7xl px-4 py-6">
+      <main className="mx-auto max-w-7xl px-3 py-4 sm:px-4 sm:py-6">
         <SchwabStatus demo={demo} />
         {tab === "Scan" && (
           <div className="grid gap-4">
@@ -160,7 +160,10 @@ export default function App() {
           </div>
         )}
       </main>
-      <footer className="mx-auto max-w-7xl px-4 pb-8 pt-4 text-center text-xs text-slate-600">
+      <footer
+        className="mx-auto max-w-7xl px-4 pb-8 pt-4 text-center text-xs text-slate-600"
+        style={{ paddingBottom: "calc(2rem + env(safe-area-inset-bottom))" }}
+      >
         CFM dashboard · scan → gate → execute → track · state.json is the source of truth
       </footer>
     </div>
