@@ -32,7 +32,10 @@ self.addEventListener("push", (event) => {
   const options = {
     body: payload.body || "",
     icon: "/icon-192.png",
-    badge: "/icon-192.png",
+    // Android renders the small/status icon from `badge` as a monochrome
+    // silhouette (color ignored) — a dedicated transparent CFM-mark PNG, so it
+    // shows the trend-arrow instead of a solid white square.
+    badge: "/badge-96.png",
     tag: payload.tag || "cfm-alerts",
     renotify: true,
     // CRITICAL alerts require an explicit dismiss so they can't be missed.
