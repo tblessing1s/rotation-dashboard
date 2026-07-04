@@ -236,21 +236,28 @@ service worker, and icons ship in `frontend/public/`; nothing to configure.)
 ### Native Web Push (this app sends the notifications)
 
 Delivery is a self-contained alert **channel** (`webpush`, alongside `email`
-and `ntfy`), keyed by a VAPID pair. Generate one pair, set it once, keep it
-stable (rotating it invalidates every device subscription):
+and `ntfy`), keyed by a VAPID pair. **No setup required:** on first use the app
+generates a keypair and persists it to `DATA_DIR/.vapid_keys.json` on the volume
+(the same self-configuring pattern as the session-signing key), stable across
+deploys. So push works out of the box — nothing to run from a phone.
+
+Just deploy, then in the app: **Alerts → Settings → Push notifications (this
+device) → Enable on this device**, allow the browser prompt, and hit **Send
+test**. Each phone/browser registers once; subscriptions live in `state.json`
+(`alerts.push_subscriptions`) and dead ones are pruned automatically. Do the
+enable step **after installing to the home screen** — Android push is far more
+reliable from the installed PWA.
+
+**Optional — manage the keys yourself** (only if you'd rather set them
+centrally, e.g. to share one keypair across environments). Generating them
+regenerates the pair, which invalidates existing device subscriptions, so keep
+them stable once set:
 
 ```bash
 python scripts/gen_vapid_keys.py     # prints the three secrets below
 fly secrets set VAPID_PUBLIC_KEY='…' VAPID_PRIVATE_KEY='…' VAPID_SUBJECT='mailto:you@example.com'
 fly deploy
 ```
-
-Then in the app: **Alerts → Settings → Push notifications (this device) →
-Enable on this device**, allow the browser prompt, and hit **Send test**. Each
-phone/browser registers once; subscriptions live in `state.json`
-(`alerts.push_subscriptions`) and dead ones are pruned automatically. Do the
-enable step **after installing to the home screen** — Android push is far more
-reliable from the installed PWA.
 
 ### ntfy (alternative / additional push, no VAPID)
 

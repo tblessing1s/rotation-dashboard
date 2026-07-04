@@ -24,12 +24,18 @@ def _b64url(b: bytes) -> str:
 
 @pytest.fixture(autouse=True)
 def _clean_state():
-    """Start every test from an empty current-schema state and clear VAPID env."""
+    """Start every test from an empty current-schema state, clear VAPID env, and
+    reset the auto-generated key cache/file so tests don't leak keys."""
     log.save_state({"schema_version": migrations.CURRENT_VERSION,
                     "metadata": {}, "positions": [], "executions": [],
                     "alerts": migrations.default_alert_state()})
     for k in ("VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"):
         os.environ.pop(k, None)
+    webpush._cache = None
+    try:
+        os.remove(webpush._VAPID_FILE)
+    except OSError:
+        pass
     yield
 
 
@@ -56,11 +62,30 @@ def test_migration_seeds_push_subscriptions():
     assert migrated["alerts"]["push_subscriptions"] == []
 
 
-def test_keys_configured_reflects_env():
-    assert webpush.keys_configured() is False
+def test_explicit_env_keys_take_precedence():
     _set_keys()
     assert webpush.keys_configured() is True
     assert webpush.public_key() == os.environ["VAPID_PUBLIC_KEY"]
+
+
+def test_keys_autogenerate_and_persist_when_no_env():
+    # No env vars set -> a keypair is generated, persisted, and stays stable.
+    assert webpush.keys_configured() is True
+    pub = webpush.public_key()
+    assert pub and os.path.exists(webpush._VAPID_FILE)
+    # A fresh in-memory cache reloads the SAME persisted key (stability matters:
+    # rotating it would invalidate every device subscription).
+    webpush._cache = None
+    assert webpush.public_key() == pub
+
+
+def test_env_only_public_falls_back_to_persisted_pair():
+    # A half-set env (public only) must NOT mix with a persisted private key.
+    os.environ["VAPID_PUBLIC_KEY"] = _b64url(b"\x04" + b"Q" * 64)
+    pub, priv = webpush.public_key(), webpush._private_key()
+    # Both come from the persisted pair, so they are a matched set.
+    assert pub != os.environ["VAPID_PUBLIC_KEY"]
+    assert pub and priv
 
 
 def test_add_reject_invalid_subscription():
@@ -94,7 +119,10 @@ def test_configured_requires_keys_and_a_device():
     assert webpush.configured() is False  # device gone
 
 
-def test_send_raises_without_keys():
+def test_send_raises_when_all_deliveries_fail():
+    # Keys auto-configure; a subscription with a bogus p256dh key fails to
+    # encrypt, so 0/1 devices are reached and send() surfaces that as an error
+    # (offline: pywebpush rejects the key before any network call).
     webpush.add_subscription(_sub())
     with pytest.raises(RuntimeError):
         webpush.send("s", "b", [])

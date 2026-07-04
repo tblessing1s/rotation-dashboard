@@ -11,23 +11,30 @@ so alerts reach the phone's lock screen even when the app is closed.
 Why this AND ntfy: ntfy needs a separate app; Web Push is self-contained in the
 installed PWA. Both are wired as channels so either (or both) can be enabled.
 
-Keys are operator secrets, never committed. Generate a pair with
-``python scripts/gen_vapid_keys.py`` and set them as env/secrets:
+Keys are NOT required config. If you set them explicitly (both env vars) they
+are used verbatim; otherwise the app generates a keypair ONCE and persists it to
+``DATA_DIR/.vapid_keys.json`` (0600, on the Fly volume), reused across deploys
+and restarts — the same self-configuring pattern as the session-signing key in
+auth.py. So push works out of the box with zero setup; explicit keys are only
+for operators who want to manage them centrally.
 
     VAPID_PUBLIC_KEY   base64url raw public key — also handed to the browser as
                        the applicationServerKey at subscribe time.
     VAPID_PRIVATE_KEY  base64url raw private key — signs the push JWT.
     VAPID_SUBJECT      contact URI for the push service (mailto:you@… or a URL).
 
-Unconfigured (no keys) → the channel reports not-configured and is skipped, so
-the app runs fine without push set up.
+Keys stay STABLE once generated (rotating them invalidates every device's
+subscription), which is exactly why they're persisted rather than regenerated
+per boot.
 """
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
 
+import config
 import logging_handler as log
 
 logger = logging.getLogger("cfm.alerts")
@@ -35,14 +42,75 @@ logger = logging.getLogger("cfm.alerts")
 # Subscriptions the push service has permanently rejected get pruned on send.
 _GONE_STATUS = {404, 410}
 
+# Auto-generated keypair persisted here when the env vars are not set.
+_VAPID_FILE = os.path.join(config.DATA_DIR, ".vapid_keys.json")
+_cache: dict | None = None  # in-memory {"public":…, "private":…}
+
+
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _generate_keypair() -> dict:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    key = ec.generate_private_key(ec.SECP256R1())
+    priv = _b64url(key.private_numbers().private_value.to_bytes(32, "big"))
+    pub = _b64url(key.public_key().public_bytes(
+        serialization.Encoding.X962,
+        serialization.PublicFormat.UncompressedPoint))
+    return {"public": pub, "private": priv}
+
+
+def _persisted_keys() -> dict:
+    """Load the persisted VAPID pair, generating+saving it once on first use.
+
+    Never raises: if the keypair can't be persisted (read-only FS) it is kept in
+    memory for this process — push still works until restart. Returns {} only if
+    key generation itself fails (cryptography missing), disabling the channel.
+    """
+    global _cache
+    if _cache:
+        return _cache
+    try:
+        with open(_VAPID_FILE, encoding="utf-8") as fh:
+            data = json.load(fh)
+        if data.get("public") and data.get("private"):
+            _cache = {"public": data["public"], "private": data["private"]}
+            return _cache
+    except (OSError, ValueError):
+        pass
+    try:
+        _cache = _generate_keypair()
+    except Exception as e:  # noqa: BLE001 — no crypto -> channel simply stays off
+        logger.error("VAPID key generation failed: %s", e)
+        return {}
+    try:
+        os.makedirs(config.DATA_DIR, exist_ok=True)
+        fd = os.open(_VAPID_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(_cache, fh)
+    except OSError:
+        pass  # in-memory only (resets on restart) — still usable this run
+    return _cache
+
+
+def _keys() -> dict:
+    """Explicit env pair (only when BOTH are set) else the persisted pair."""
+    epub = (os.environ.get("VAPID_PUBLIC_KEY") or "").strip()
+    epriv = (os.environ.get("VAPID_PRIVATE_KEY") or "").strip()
+    if epub and epriv:
+        return {"public": epub, "private": epriv}
+    return _persisted_keys()
+
 
 def public_key() -> str:
     """The VAPID application server key the browser needs to subscribe."""
-    return (os.environ.get("VAPID_PUBLIC_KEY") or "").strip()
+    return _keys().get("public", "")
 
 
 def _private_key() -> str:
-    return (os.environ.get("VAPID_PRIVATE_KEY") or "").strip()
+    return _keys().get("private", "")
 
 
 def _subject() -> str:
@@ -52,8 +120,9 @@ def _subject() -> str:
 
 
 def keys_configured() -> bool:
-    """True when both VAPID keys are set (push CAN be offered to devices)."""
-    return bool(public_key() and _private_key())
+    """True when a VAPID keypair is available (explicit or auto-generated)."""
+    k = _keys()
+    return bool(k.get("public") and k.get("private"))
 
 
 # ---------------------------------------------------------------------------
