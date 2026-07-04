@@ -32,7 +32,10 @@ export function Light({ status, size = "h-3 w-3" }) {
 
 export function Card({ title, right, children, className = "" }) {
   return (
-    <div className={`rounded-xl border border-slate-800 bg-slate-900/60 p-4 ${className}`}>
+    // min-w-0: when a Card is a flex/grid item, let it shrink to its track so a
+    // wide inner table scrolls inside its own overflow-x-auto wrapper instead of
+    // stretching the card past the viewport (mobile horizontal-overflow guard).
+    <div className={`min-w-0 rounded-xl border border-slate-800 bg-slate-900/60 p-4 ${className}`}>
       {(title || right) && (
         <div className="mb-3 flex items-center justify-between">
           {title && <h3 className="text-sm font-semibold text-slate-200">{title}</h3>}
@@ -46,9 +49,9 @@ export function Card({ title, right, children, className = "" }) {
 
 export function Stat({ label, value, sub, tone = "text-slate-100" }) {
   return (
-    <div>
+    <div className="min-w-0">
       <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
-      <div className={`text-2xl font-semibold ${tone}`}>{value}</div>
+      <div className={`text-xl font-semibold leading-tight sm:text-2xl ${tone}`}>{value}</div>
       {sub && <div className="text-xs text-slate-500">{sub}</div>}
     </div>
   );
