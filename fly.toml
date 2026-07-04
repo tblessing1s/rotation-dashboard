@@ -26,6 +26,10 @@ primary_region = "iad"
   # deliver kill-switch/exit alerts. If you'd rather let the machine sleep,
   # set this back to 0 and have an external cron POST /api/alerts/run
   # (auto_start wakes the machine; alert dedup makes repeat runs no-ops).
+  #
+  # Dead-man's switch: set HEALTHCHECK_URL (fly secrets set HEALTHCHECK_URL=…)
+  # to a healthchecks.io ping URL and the scheduler heartbeats it every tick;
+  # if this machine stops or the alert thread wedges, that service pages you.
   min_machines_running = 1
   processes = ["app"]
 
