@@ -72,26 +72,37 @@ def _pr_from_git() -> str | None:
     return None
 
 
+def _compose_display(version: str, pr: str | None) -> str:
+    """The "what version am I on" string: the PR number takes the patch slot, so
+    a base VERSION of "2.1.0" merged via PR #148 shows as "2.1.148". With no PR
+    (a direct push to master) the base version is shown unchanged."""
+    if not pr:
+        return version
+    parts = version.split(".")
+    if len(parts) >= 2:
+        return f"{parts[0]}.{parts[1]}.{pr}"
+    return f"{version}.{pr}"
+
+
 @lru_cache(maxsize=1)
 def info() -> dict:
     """{"version", "pr", "display", "commit", "built_at"} for the running build.
 
-    ``version`` is the semantic version from the VERSION file; ``pr`` is the pull
-    request number the build was merged from; ``display`` composes them
-    ("2.1.0+pr148") — that's the "what version am I on" string. ``commit`` is the
-    short git SHA and ``built_at`` an ISO-8601 timestamp. Each signal comes from
-    its build-time env var first (the deployed container), then falls back to live
-    git (a local checkout), then None.
+    ``version`` is the base semantic version from the VERSION file; ``pr`` is the
+    pull request number the build was merged from; ``display`` composes them with
+    the PR as the patch segment ("2.1.148") — that's the "what version am I on"
+    string. ``commit`` is the short git SHA and ``built_at`` an ISO-8601
+    timestamp. Each signal comes from its build-time env var first (the deployed
+    container), then falls back to live git (a local checkout), then None.
     """
     version = _read_version_file()
     pr = (os.environ.get("APP_PR_NUMBER") or "").strip() or _pr_from_git()
     commit = (os.environ.get("APP_GIT_SHA") or "").strip() or _git("rev-parse", "--short", "HEAD")
     built_at = (os.environ.get("APP_BUILD_TIME") or "").strip() or _git("show", "-s", "--format=%cI", "HEAD")
-    display = f"{version}+pr{pr}" if pr else version
     return {
         "version": version,
         "pr": pr,
-        "display": display,
+        "display": _compose_display(version, pr),
         "commit": commit,
         "built_at": built_at,
     }
