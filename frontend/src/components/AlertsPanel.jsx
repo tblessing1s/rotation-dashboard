@@ -12,8 +12,22 @@ const SEVERITY_TONE = {
 };
 const SEVERITY_PILL = { CRITICAL: "red", HIGH: "yellow", MEDIUM: "unknown" };
 
+function actFromUrl(url) {
+  // "/?action=roll&ticker=NVDA&reason=75%-rule" -> dispatch the in-app intent.
+  try {
+    const q = new URLSearchParams((url.split("?")[1] || ""));
+    const action = q.get("action");
+    const ticker = q.get("ticker");
+    if (action && ticker) {
+      window.dispatchEvent(new CustomEvent("cfm-action",
+        { detail: { action, ticker, reason: q.get("reason") || undefined } }));
+    }
+  } catch { /* malformed link — ignore */ }
+}
+
 function AlertRow({ alert, onAck }) {
   const tone = SEVERITY_TONE[alert.severity] || "border-slate-800";
+  const actLabel = alert.action_url?.includes("action=roll") ? "Roll →" : "Open →";
   return (
     <li className={`rounded-lg border px-3 py-2 ${tone} ${alert.acknowledged ? "opacity-60" : ""}`}>
       <div className="flex flex-wrap items-center gap-2">
@@ -23,6 +37,14 @@ function AlertRow({ alert, onAck }) {
         </span>
         {alert.ticker && <span className="text-sm font-bold text-slate-100">{alert.ticker}</span>}
         <span className="ml-auto text-xs text-slate-500">{(alert.first_seen || "").slice(0, 16).replace("T", " ")}</span>
+        {alert.action_url && (
+          <button
+            onClick={() => actFromUrl(alert.action_url)}
+            className="rounded-full border border-emerald-600/50 bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20"
+          >
+            {actLabel}
+          </button>
+        )}
         {onAck && !alert.acknowledged && (
           <button
             onClick={() => onAck(alert.id)}

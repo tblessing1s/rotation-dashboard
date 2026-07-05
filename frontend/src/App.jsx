@@ -30,6 +30,10 @@ export default function App() {
   // null = still checking, true = signed in (or auth disabled), false = show login.
   const [authed, setAuthed] = React.useState(null);
   const [alertCount, setAlertCount] = React.useState(0);
+  // Deep-link intent for the Positions tab: {action:"roll"|"focus", ticker, reason, id}.
+  // Set from the ?action=…&ticker=… URL (a tapped push notification) or an
+  // in-app "Act" click, so an alert lands you on the prefilled ticket, not a tab.
+  const [positionIntent, setPositionIntent] = React.useState(null);
   // Scan details (full-universe Scorecard + Stock Filter) stay UNMOUNTED until
   // opened, so their ~500-ticker sweeps aren't fetched on every Scan-tab visit.
   const [scanDetails, setScanDetails] = React.useState(false);
@@ -53,6 +57,34 @@ export default function App() {
     window.addEventListener("auth-required", onAuthRequired);
     return () => window.removeEventListener("auth-required", onAuthRequired);
   }, []);
+
+  // Route an alert action (from a tapped push or an in-app "Act" click) to the
+  // Positions tab with a prefilled intent. Each call gets a fresh id so the same
+  // ticker/action re-triggers the modal.
+  const goToAction = React.useCallback((action, ticker, reason) => {
+    if (!action || !ticker) return;
+    setPositionIntent({ action, ticker, reason, id: Date.now() });
+    setTab("Positions");
+  }, []);
+
+  // On load: a ?action=…&ticker=… deep link (the push's target URL). Consume it
+  // and strip the query so a refresh doesn't replay the action.
+  React.useEffect(() => {
+    if (authed !== true) return;
+    const params = new URLSearchParams(window.location.search);
+    const action = params.get("action");
+    const ticker = params.get("ticker");
+    if (action && ticker) {
+      goToAction(action, ticker, params.get("reason") || undefined);
+      params.delete("action"); params.delete("ticker"); params.delete("reason");
+      const qs = params.toString();
+      window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+    }
+    // In-app "Act" clicks from the Alerts panel dispatch this event.
+    const onAction = (e) => goToAction(e.detail?.action, e.detail?.ticker, e.detail?.reason);
+    window.addEventListener("cfm-action", onAction);
+    return () => window.removeEventListener("cfm-action", onAction);
+  }, [authed, goToAction]);
 
   React.useEffect(() => {
     if (authed !== true) return;
@@ -150,7 +182,10 @@ export default function App() {
         )}
         {tab === "Theta" && <ThetaLedger key={execNonce} />}
         {tab === "Kill Switch" && <KillSwitchMonitor />}
-        {tab === "Positions" && <PositionTracker key={execNonce} />}
+        {tab === "Positions" && (
+          <PositionTracker key={execNonce} intent={positionIntent}
+                           onIntentHandled={() => setPositionIntent(null)} />
+        )}
         {tab === "History" && <HistoryTab key={execNonce} />}
         {tab === "Checklist" && (
           <div className="grid gap-4">

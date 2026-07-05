@@ -330,11 +330,32 @@ function DefendPanel({ ticker, onStage }) {
   );
 }
 
-export default function PositionTracker() {
+export default function PositionTracker({ intent, onIntentHandled } = {}) {
   const toast = useToast();
   const { data, error, loading, reload } = useApi(api.positions, [], null);
   const { data: recon, reload: reloadRecon } = useApi(api.reconcile, [], null);
   const [rolling, setRolling] = React.useState(null); // {ticker, reason}
+  const [focusedTicker, setFocusedTicker] = React.useState(null);
+  const handledIntentId = React.useRef(null);
+
+  // Deep-link intent from a tapped alert: open the prefilled roll ticket for the
+  // ticker, or (for exit/kill-switch alerts) scroll to and highlight its card.
+  React.useEffect(() => {
+    if (!intent || !data || handledIntentId.current === intent.id) return;
+    handledIntentId.current = intent.id;
+    const posList = (data.positions || []).filter((p) => p.status !== "closed");
+    const pos = posList.find((p) => p.ticker === intent.ticker);
+    if (pos && intent.action === "roll" && (pos.short_calls || []).length > 0) {
+      setRolling({ ticker: intent.ticker, reason: intent.reason || "scheduled" });
+    } else if (pos) {
+      setFocusedTicker(intent.ticker);
+      requestAnimationFrame(() =>
+        document.getElementById(`pos-${intent.ticker}`)
+          ?.scrollIntoView({ behavior: "smooth", block: "center" }));
+      setTimeout(() => setFocusedTicker((t) => (t === intent.ticker ? null : t)), 2500);
+    }
+    onIntentHandled?.();
+  }, [intent, data, onIntentHandled]);
 
   // Open (unresolved) reconciliation diffs indexed by ticker — drives the review
   // panel + the state-unverified marker on frozen positions.
@@ -407,8 +428,9 @@ export default function PositionTracker() {
         const sh = p.shares || {};
         const shorts = p.short_calls || [];
         return (
+          <div key={p.ticker} id={`pos-${p.ticker}`} className="scroll-mt-20">
           <Card
-            key={p.ticker}
+            className={focusedTicker === p.ticker ? "ring-2 ring-emerald-400/70 transition" : "transition"}
             title={`${p.ticker} · ${p.sector || ""}`}
             right={
               <div className="flex items-center gap-2">
@@ -549,6 +571,7 @@ export default function PositionTracker() {
 
             <DeltaCoverage ticker={p.ticker} />
           </Card>
+          </div>
         );
       })}
 
