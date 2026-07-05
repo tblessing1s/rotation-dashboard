@@ -14,6 +14,7 @@ of a running process doesn't change, so we resolve it once.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from functools import lru_cache
 
@@ -51,18 +52,46 @@ def _git(*args: str) -> str | None:
         return None
 
 
+def _pr_from_git() -> str | None:
+    """Best-effort PR number from git history. A PR number only comes into being
+    when the code is merged, and the merge records it in the commit subject:
+    a merge commit ("Merge pull request #N from …") or a squash commit ("Title
+    (#N)"). We read the most recent such subject reachable from HEAD, so a
+    deployed master build reports the PR it was merged from. None when there is no
+    merge in history yet (e.g. a fresh branch)."""
+    subject = _git("log", "-1", "--merges", "--pretty=%s")
+    if subject:
+        m = re.search(r"#(\d+)", subject)
+        if m:
+            return m.group(1)
+    subject = _git("log", "-1", "--pretty=%s")  # squash-merge: "Title (#N)"
+    if subject:
+        m = re.search(r"\(#(\d+)\)\s*$", subject)
+        if m:
+            return m.group(1)
+    return None
+
+
 @lru_cache(maxsize=1)
 def info() -> dict:
-    """{"version", "commit", "built_at"} for the running build.
+    """{"version", "pr", "display", "commit", "built_at"} for the running build.
 
-    ``commit`` is the short git SHA, ``built_at`` an ISO-8601 timestamp. Both come
-    from the build-time env vars first (the deployed container), then fall back to
-    live git (a local checkout), then None.
+    ``version`` is the semantic version from the VERSION file; ``pr`` is the pull
+    request number the build was merged from; ``display`` composes them
+    ("2.1.0+pr148") — that's the "what version am I on" string. ``commit`` is the
+    short git SHA and ``built_at`` an ISO-8601 timestamp. Each signal comes from
+    its build-time env var first (the deployed container), then falls back to live
+    git (a local checkout), then None.
     """
+    version = _read_version_file()
+    pr = (os.environ.get("APP_PR_NUMBER") or "").strip() or _pr_from_git()
     commit = (os.environ.get("APP_GIT_SHA") or "").strip() or _git("rev-parse", "--short", "HEAD")
     built_at = (os.environ.get("APP_BUILD_TIME") or "").strip() or _git("show", "-s", "--format=%cI", "HEAD")
+    display = f"{version}+pr{pr}" if pr else version
     return {
-        "version": _read_version_file(),
+        "version": version,
+        "pr": pr,
+        "display": display,
         "commit": commit,
         "built_at": built_at,
     }

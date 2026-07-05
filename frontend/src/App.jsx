@@ -209,7 +209,7 @@ export default function App() {
         <div>CFM dashboard · scan → gate → execute → track · state.json is the source of truth</div>
         {version?.version && (
           <div className="mt-1 text-slate-700" title={version.built_at ? `Built ${version.built_at}` : undefined}>
-            v{version.version}
+            v{version.display || version.version}
             {version.commit ? ` · ${version.commit}` : ""}
           </div>
         )}

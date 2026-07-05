@@ -25,14 +25,16 @@ COPY tickers_by_sector.txt ./tickers_by_sector.txt
 COPY VERSION ./VERSION
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
-# Build identity, surfaced at /api/version. Pass on deploy to pin the exact
-# build, e.g. `fly deploy --build-arg GIT_SHA=$(git rev-parse --short HEAD)
-# --build-arg BUILD_TIME=$(date -u +%FT%TZ)`. Absent → version.py degrades to
+# Build identity, surfaced at /api/version. The CI deploy (.github/workflows/
+# fly.yml) passes these from the merge commit; absent → version.py degrades to
 # the VERSION file alone (the runtime image has no .git to fall back to).
+# PR_NUMBER is the pull request the build was merged from — part of the version.
 ARG GIT_SHA=""
 ARG BUILD_TIME=""
+ARG PR_NUMBER=""
 ENV APP_GIT_SHA=$GIT_SHA \
-    APP_BUILD_TIME=$BUILD_TIME
+    APP_BUILD_TIME=$BUILD_TIME \
+    APP_PR_NUMBER=$PR_NUMBER
 
 EXPOSE 8080
 
