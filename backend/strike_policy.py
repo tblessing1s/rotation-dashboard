@@ -50,3 +50,16 @@ def suggest_strike(price: float, atr_value: float, regime_status: str | None,
     entry = table_entry(regime_status, posture)
     strike = indicators.short_strike_from_table(price, atr_value, entry["atr_mult"], entry["itm_pct"])
     return {**entry, "strike": strike}
+
+
+def suggest_earnings_strike(price: float, atr_value: float, regime_status: str | None,
+                            posture: str | None = None) -> dict:
+    """Deep-ITM protective strike for rolling a short THROUGH an earnings report.
+    Takes the deeper of the regime/posture cell and the earnings floors
+    (config.EARNINGS_ROLL_*), so it never rolls shallower than the regime would."""
+    entry = table_entry(regime_status, posture)
+    atr_mult = max(entry["atr_mult"], config.EARNINGS_ROLL_ATR_MULT)
+    itm_pct = max(entry["itm_pct"], config.EARNINGS_ROLL_ITM_PCT)
+    strike = indicators.short_strike_from_table(price, atr_value, atr_mult, itm_pct)
+    return {**entry, "atr_mult": atr_mult, "itm_pct": itm_pct,
+            "strike": strike, "earnings_protected": True}

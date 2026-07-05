@@ -5,3 +5,4 @@ numpy>=1.24
 pyarrow>=14.0
 requests>=2.31
 pywebpush>=1.14
+boto3>=1.34

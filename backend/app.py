@@ -474,6 +474,20 @@ def api_alerts_settings():
 # ---------------------------------------------------------------------------
 # Web Push (PWA native push): VAPID key handshake + subscription registry.
 # ---------------------------------------------------------------------------
+@app.route("/api/iv-rank")
+def api_iv_rank():
+    """IV rank (current IV vs the ticker's own trailing-year range) — where this
+    week's premium sits in its own history, the signal juice-adequacy can't see."""
+    ticker = (request.args.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        import iv_history
+        return jsonify(iv_history.iv_rank(ticker))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/verify-fills", methods=["POST"])
 def api_verify_fills():
     """Re-fetch recent live orders from Schwab and diff their fills against what

@@ -112,3 +112,24 @@ def test_roll_options_supports_red_regime(isolated_state, monkeypatch):
     assert out["regime"] == "red"
     assert out["atr_mult"] == 1.5 and out["itm_pct"] == 0.05 and out["posture"] == "conservative"
     assert out["suggested_strike"] == 142.5
+
+
+def test_earnings_strike_is_deeper_than_the_regime_cell(isolated_state):
+    # A green/aggressive cell is the shallowest (0×ATR, 0% ITM). The earnings
+    # protective strike must sit further below spot than the regular suggestion.
+    price, atr = 100.0, 2.0
+    normal = strike_policy.suggest_strike(price, atr, "green", "aggressive")["strike"]
+    earn = strike_policy.suggest_earnings_strike(price, atr, "green", "aggressive")
+    assert earn["earnings_protected"] is True
+    assert earn["strike"] < normal
+    # Applies the deep floors (config.EARNINGS_ROLL_*), never shallower.
+    assert earn["atr_mult"] >= config.EARNINGS_ROLL_ATR_MULT
+    assert earn["itm_pct"] >= config.EARNINGS_ROLL_ITM_PCT
+
+
+def test_earnings_strike_never_rolls_shallower_than_a_deep_regime(isolated_state):
+    # red/conservative is (1.5×ATR, 5% ITM) — still shallower than the earnings
+    # floors here, so the earnings strike takes the deeper earnings values.
+    e = strike_policy.suggest_earnings_strike(100.0, 2.0, "red", "conservative")
+    assert e["atr_mult"] == max(1.5, config.EARNINGS_ROLL_ATR_MULT)
+    assert e["itm_pct"] == max(0.05, config.EARNINGS_ROLL_ITM_PCT)

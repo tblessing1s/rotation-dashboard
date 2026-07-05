@@ -21,6 +21,7 @@ import config
 import data_handler
 import dividends
 import indicators
+import iv_history
 import logging_handler as log
 import schwab_api
 import screening
@@ -73,10 +74,19 @@ def _median(vals: list) -> float | None:
     return nums[mid] if len(nums) % 2 else (nums[mid - 1] + nums[mid]) / 2
 
 
-def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None) -> dict:
-    """Compare the weekly short's IV to the stock's 20-day realized volatility.
-    IV well above realized = rich premium (favorable to sell); below = cheap."""
-    out = {"weekly_iv": weekly_iv, "leap_iv": leap_iv, "hist_vol": hv}
+def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None,
+             ticker: str | None = None) -> dict:
+    """Compare the weekly short's IV to the stock's 20-day realized volatility AND
+    to its own trailing-year range (IV rank). IV above realized = rich vs the
+    stock's typical move; a high IV rank = rich vs its OWN history — the
+    constructive twin of the juice-rich warning ("a good week to sell")."""
+    out = {"weekly_iv": weekly_iv, "leap_iv": leap_iv, "hist_vol": hv,
+           "iv_rank": None, "iv_percentile": None}
+    if ticker and weekly_iv is not None:
+        rank = iv_history.iv_rank(ticker, weekly_iv)
+        out["iv_rank"] = rank["iv_rank"]
+        out["iv_percentile"] = rank["iv_percentile"]
+        out["iv_rank_days"] = rank["days"]
     if weekly_iv is None or hv is None or hv == 0:
         out["premium"] = "unknown"
         out["label"] = "IV vs realized unavailable"
@@ -84,15 +94,20 @@ def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None) -
         return out
     ratio = weekly_iv / hv
     out["iv_vs_hv"] = round(ratio, 2)
+    ivr = out["iv_rank"]
+    rank_note = (f" · IV rank {ivr:g}"
+                 + (" — rich vs its own year, a good week to sell" if ivr is not None and ivr >= 50
+                    else " — cheap vs its own year" if ivr is not None and ivr <= 25 else "")
+                 if ivr is not None else "")
     if ratio >= 1.1:
         out["premium"] = "rich"
-        out["label"] = f"IV {weekly_iv:g}% is HIGHER than 20-day realized {hv:g}% — premium rich (favorable to sell)"
+        out["label"] = f"IV {weekly_iv:g}% is HIGHER than 20-day realized {hv:g}% — premium rich (favorable to sell){rank_note}"
     elif ratio <= 0.9:
         out["premium"] = "cheap"
-        out["label"] = f"IV {weekly_iv:g}% is LOWER than 20-day realized {hv:g}% — premium cheap (thin to sell)"
+        out["label"] = f"IV {weekly_iv:g}% is LOWER than 20-day realized {hv:g}% — premium cheap (thin to sell){rank_note}"
     else:
         out["premium"] = "fair"
-        out["label"] = f"IV {weekly_iv:g}% is in line with 20-day realized {hv:g}%"
+        out["label"] = f"IV {weekly_iv:g}% is in line with 20-day realized {hv:g}%{rank_note}"
     return out
 
 
@@ -178,6 +193,20 @@ def roll_options(ticker: str) -> dict:
         "entry_extrinsic_per_share": current.get("entry_extrinsic_per_share"),
     }
 
+    # Next earnings date — a roll week that SPANS the report gets a deep-ITM
+    # suggested strike so the short keeps intrinsic cover across the gap.
+    earn_date = None
+    try:
+        import earnings
+        raw = (earnings.next_earnings(ticker) or {}).get("date")
+        if raw:
+            earn_date = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
+    except Exception:  # noqa: BLE001 — earnings lookup must not sink the roll picker
+        earn_date = None
+    today = datetime.utcnow().date()
+    earn_strike = (strike_policy.suggest_earnings_strike(price, atr_val, reg.get("status"))["strike"]
+                   if earn_date is not None and atr_val is not None and price is not None else None)
+
     # Candidate expirations out to ROLL_MAX_DTE, each with nearby strikes.
     by_exp: dict[str, dict] = {}
     for c in contracts:
@@ -186,10 +215,19 @@ def roll_options(ticker: str) -> dict:
             continue
         by_exp.setdefault(exp, {"expiration": exp, "dte": dte, "contracts": []})["contracts"].append(c)
 
-    target = suggested_strike if suggested_strike is not None else cur_strike
+    default_target = suggested_strike if suggested_strike is not None else cur_strike
     expirations = []
     for exp in sorted(by_exp, key=lambda e: by_exp[e]["dte"]):
         grp = by_exp[exp]
+        # Earnings falls inside this new short's week if the report is on/before
+        # the expiration (and not already past).
+        exp_date = None
+        try:
+            exp_date = datetime.strptime(str(exp)[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            exp_date = None
+        earnings_in_week = bool(earn_date and exp_date and today <= earn_date <= exp_date)
+        target = earn_strike if (earnings_in_week and earn_strike is not None) else default_target
         strikes = indicators.get_nearby_strikes(grp["contracts"], target, underlying, count=7)
         # Guarantee the current strike is offered so "same strike" always works.
         if cur_strike is not None and not any(s["strike"] == cur_strike for s in strikes):
@@ -201,6 +239,8 @@ def roll_options(ticker: str) -> dict:
             "expiration": exp,
             "dte": grp["dte"],
             "is_current_week": exp == cur_exp,
+            "earnings_in_week": earnings_in_week,
+            "deep_itm_suggested": bool(earnings_in_week and earn_strike is not None),
             "strikes": strikes,
         })
 
@@ -213,6 +253,8 @@ def roll_options(ticker: str) -> dict:
         "itm_pct": itm_pct,
         "posture": posture,
         "suggested_strike": suggested_strike,
+        "earnings_date": earn_date.isoformat() if earn_date else None,
+        "iv_rank": iv_history.iv_rank(ticker),
         "current_short": current_view,
         "expirations": expirations,
     }
@@ -437,6 +479,9 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
         strikes = indicators.get_nearby_strikes(exp_contracts, suggested_strike, underlying)
         sug = next((s for s in strikes if s.get("suggested")), strikes[0] if strikes else None)
         weekly_iv = (sug or {}).get("volatility") or _median([s.get("volatility") for s in strikes])
+        # Accrue one IV-history point per day from the IV we already computed —
+        # this is what IV rank is measured against (zero extra chain fetches).
+        iv_history.record(ticker, weekly_iv)
         weekly = {
             "expiration": weekly_exp,
             "dte": exp_contracts[0]["dte"] if exp_contracts else None,
@@ -537,7 +582,7 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
             "open_short": open_short_view,
             "existing_leap": existing_leap_view,
         },
-        "iv": _iv_view(weekly_iv, (leap or {}).get("volatility"), hv),
+        "iv": _iv_view(weekly_iv, (leap or {}).get("volatility"), hv, ticker),
         "leap": leap,
         "weekly": weekly,
         "payoff": payoff,

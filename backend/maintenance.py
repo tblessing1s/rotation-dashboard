@@ -64,6 +64,22 @@ def snapshot_leap_deltas(today: str | None = None) -> list[dict]:
     return report
 
 
+def snapshot_iv(tickers: list[str]) -> list[dict]:
+    """Compute + record today's weekly IV for each ticker via the option-chain
+    view (its capture hook writes the point). Best-effort per ticker — a blocked
+    view (RED tape) or a provider hiccup skips that name, never the sweep."""
+    import iv_history
+    import option_chain
+    out = []
+    for t in tickers:
+        try:
+            option_chain.option_chain(t)  # records weekly IV as a side effect
+            out.append({"ticker": t, "iv_rank": iv_history.iv_rank(t).get("iv_rank")})
+        except Exception as e:  # noqa: BLE001 — one ticker must not sink the sweep
+            logger.info("iv snapshot skipped for %s: %s", t, e)
+    return out
+
+
 def nightly_refresh() -> dict:
     """Refresh earnings + dividend caches for every held name and sync each
     position's dividend snapshot. Returns a per-ticker report."""
@@ -103,6 +119,14 @@ def nightly_refresh() -> dict:
         report["delta_snapshots"] = snapshot_leap_deltas()
     except Exception as e:  # noqa: BLE001 — a snapshot failure must not sink the sweep
         report["errors"].append(f"delta_snapshot: {e}")
+
+    # Record today's weekly IV for each held name so IV rank has a daily point
+    # even on days the operator never opens a chain (the option-chain view
+    # records it opportunistically the rest of the time).
+    try:
+        report["iv_snapshots"] = snapshot_iv(tickers)
+    except Exception as e:  # noqa: BLE001 — an IV snapshot failure must not sink the sweep
+        report["errors"].append(f"iv_snapshot: {e}")
 
     try:
         import account_gate
