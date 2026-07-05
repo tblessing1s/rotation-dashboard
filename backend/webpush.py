@@ -192,6 +192,9 @@ def configured() -> bool:
 def _payload(subject: str, body: str, alerts: list[dict]) -> str:
     worst = alerts[0].get("severity") if alerts else "ALERT"
     tickers = sorted({a["ticker"] for a in alerts if a.get("ticker")})
+    # A single actionable alert deep-links straight to its prefilled ticket;
+    # a mixed batch opens the dashboard (no single right action to jump to).
+    url = alerts[0].get("action_url") if len(alerts) == 1 else None
     return json.dumps({
         "title": subject,
         "body": body,
@@ -199,7 +202,7 @@ def _payload(subject: str, body: str, alerts: list[dict]) -> str:
         "count": len(alerts),
         "tickers": tickers,
         "tag": "cfm-alerts",
-        "url": "/",
+        "url": url or "/",
     })
 
 

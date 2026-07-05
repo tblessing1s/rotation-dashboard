@@ -51,6 +51,35 @@ ALERT_TYPES = {
 }
 
 
+# Alert -> deep link into the app. Roll-type alerts open the roll ticket for the
+# ticker (RollModal already pre-selects the policy strike); the rest focus the
+# affected position card so the operator lands on it, not the tab. The value:
+# the decision engine already decided — the tap shouldn't make you rebuild it.
+_ROLL_ACTIONS = {
+    "BUYBACK_75": "75%-rule",
+    "EXPIRY_FRIDAY": "scheduled",
+    "DEFEND_POSITION": "defend",
+    "ASSIGNMENT_RISK": "defend",
+    "EARNINGS_WINDOW": "earnings",
+}
+_FOCUS_ACTIONS = {
+    "KILL_SWITCH_SECTOR", "KILL_SWITCH_SPY", "CIRCUIT_BREAKER", "SHORT_STOCK_DETECTED",
+    "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
+}
+
+
+def _action_url(type_: str, ticker: str | None) -> str | None:
+    if not ticker:
+        return None
+    from urllib.parse import quote
+    t = quote(ticker)
+    if type_ in _ROLL_ACTIONS:
+        return f"/?action=roll&ticker={t}&reason={quote(_ROLL_ACTIONS[type_])}"
+    if type_ in _FOCUS_ACTIONS:
+        return f"/?action=focus&ticker={t}"
+    return None
+
+
 def _alert(type_: str, ticker: str | None, message: str, action: str,
            data: dict | None = None, key: str = "") -> dict:
     severity, rule = ALERT_TYPES[type_]
@@ -59,6 +88,7 @@ def _alert(type_: str, ticker: str | None, message: str, action: str,
         "type": type_, "severity": severity, "rule": rule,
         "ticker": ticker, "message": message, "action": action,
         "data": data or {}, "fingerprint": fingerprint,
+        "action_url": _action_url(type_, ticker),
     }
 
 
