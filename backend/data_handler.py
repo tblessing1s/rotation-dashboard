@@ -101,6 +101,28 @@ def _read_cache(symbol: str) -> pd.DataFrame | None:
         return None
 
 
+def _cached_frame(symbol: str) -> pd.DataFrame | None:
+    """Warm-cache read that memoizes the parsed frame in ``_mem_cache``.
+
+    The parquet on disk is the source of truth, but parsing it is not free: a
+    full-universe sweep calls ``get_daily`` ~4-5x per ticker (score row, then the
+    entry gate re-reading SPY + the sector ETF + the ticker again), so a ~530-name
+    universe would otherwise re-read and re-parse thousands of parquet files from
+    disk on every scan even when nothing has changed. Serving the already-parsed
+    frame from memory turns those repeat reads into a dict lookup. Correctness is
+    unchanged: ``_mem_cache`` is only ever populated from the same parquet (here or
+    on a live fetch that also wrote it), and callers only reach this helper while
+    the parquet is still fresh — once it ages out, ``get_daily`` bypasses the cache
+    and refetches, refreshing memory in lockstep with disk."""
+    df = _mem_cache.get(symbol)
+    if df is not None and not df.empty:
+        return df
+    df = _read_cache(symbol)
+    if df is not None and not df.empty:
+        _mem_cache[symbol] = df
+    return df
+
+
 def _write_cache(symbol: str, df: pd.DataFrame) -> None:
     os.makedirs(config.active_cache_dir(), exist_ok=True)
     try:
@@ -148,18 +170,17 @@ def get_daily(symbol: str, force: bool = False) -> pd.DataFrame | None:
     symbol = symbol.upper()
     # Demo mode is purely cache-backed (synthetic data, no providers).
     if config.demo_enabled():
-        cached = _read_cache(symbol)
-        return cached if (cached is not None and not cached.empty) else None
+        return _cached_frame(symbol)
     path = _cache_path(symbol)
     if not force and _is_fresh(path):
-        cached = _read_cache(symbol)
+        cached = _cached_frame(symbol)
         if cached is not None and not cached.empty:
             return cached
     # Serialize fetches per symbol so concurrent requests don't all hit the
     # provider for the same name; the loser re-reads the freshly written cache.
     with _symbol_lock(symbol):
         if not force and _is_fresh(path):
-            cached = _read_cache(symbol)
+            cached = _cached_frame(symbol)
             if cached is not None and not cached.empty:
                 return cached
         try:
