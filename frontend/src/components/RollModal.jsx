@@ -193,6 +193,16 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
               )}
             </div>
 
+            {selectedExp?.earnings_in_week && (
+              <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">
+                <span className="font-semibold">Earnings before this expiration</span>
+                {data.earnings_date ? ` (${data.earnings_date})` : ""} — the short would span the report.
+                {selectedExp.deep_itm_suggested
+                  ? " Suggested strike is rolled deep-ITM for protection; pick a different week to avoid the report entirely."
+                  : " Roll deep-ITM for protection or pick a week that clears the report."}
+              </div>
+            )}
+
             {/* Strike choice */}
             <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
               <div className="mb-2 flex items-center justify-between">
@@ -220,7 +230,7 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
                       <span className="text-sm font-semibold tabular-nums text-slate-100">
                         {fmt(s.strike, 2)}
                         {cur && s.strike === cur.strike && <span className="ml-1 text-[10px] font-normal text-sky-300">SAME</span>}
-                        {s.suggested && <span className="ml-1 text-[10px] font-normal text-emerald-400">ATR</span>}
+                        {s.suggested && <span className="ml-1 text-[10px] font-normal text-emerald-400">{selectedExp?.deep_itm_suggested ? "DEEP-ITM" : "ATR"}</span>}
                       </span>
                       <span className="text-sm tabular-nums text-slate-300">{dollars(s.bid)} / {dollars(s.ask)}</span>
                       <span className="text-sm tabular-nums text-slate-400">{dollars(s.mark)}</span>

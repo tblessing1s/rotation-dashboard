@@ -282,7 +282,11 @@ def evaluate(ticker: str, contracts: int | None = None,
          "history_implied_per_share": est_extr,
          "factor": config.JUICE_RICH_FACTOR}))
 
-    # 5) Earnings inside the planned 4-8 week cycle (warn at entry).
+    # 5) Earnings inside the planned 4-8 week cycle. BLOCKING: the CFM rule is
+    # "be out or really deep" before a report, so opening a fresh cycle over one
+    # is a hard stop — overridable with a typed reason (e.g. deliberately
+    # planning to roll deep-ITM into it), logged onto the execution like any
+    # Level 5 override.
     try:
         earn = earnings.next_earnings(ticker)
     except Exception:  # noqa: BLE001
@@ -291,7 +295,7 @@ def evaluate(ticker: str, contracts: int | None = None,
     inside = earn.get("days_until") is not None and 0 <= earn["days_until"] <= cycle_days
     checks.append(_check(
         "earnings_in_cycle", f"No earnings inside the {config.CYCLE_WEEKS_MAX}-week cycle",
-        not inside, False, {"earnings": earn, "cycle_days": cycle_days}))
+        not inside, True, {"earnings": earn, "cycle_days": cycle_days}))
 
     # 6) Circuit breaker suggestion (storing one is enforced by the executor).
     cb = suggested_circuit_breaker(ticker, df)
