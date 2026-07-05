@@ -21,7 +21,23 @@ RUN pip install --no-cache-dir -r backend/requirements.txt gunicorn
 COPY backend/ ./backend/
 # Root-level sector universe (read at startup by sector_data.py via REPO_DIR).
 COPY tickers_by_sector.txt ./tickers_by_sector.txt
+# Human-facing version string, read at runtime by version.py via REPO_DIR.
+COPY VERSION ./VERSION
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
+
+# Build identity, surfaced at /api/version. The CI deploy (.github/workflows/
+# fly.yml) passes these on merge; absent → version.py degrades to the VERSION
+# file / no git (the runtime image has no .git to fall back to).
+# APP_VERSION is the author-set version parsed from the PR title; PR_NUMBER,
+# GIT_SHA and BUILD_TIME are provenance for the exact build.
+ARG APP_VERSION=""
+ARG GIT_SHA=""
+ARG BUILD_TIME=""
+ARG PR_NUMBER=""
+ENV APP_VERSION=$APP_VERSION \
+    APP_GIT_SHA=$GIT_SHA \
+    APP_BUILD_TIME=$BUILD_TIME \
+    APP_PR_NUMBER=$PR_NUMBER
 
 EXPOSE 8080
 

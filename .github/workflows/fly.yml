@@ -10,6 +10,12 @@ jobs:
   deploy:
     name: Deploy app
     runs-on: ubuntu-latest
+    # Read-only GITHUB_TOKEN: the deploy step reads the merged PR's title (for the
+    # version) via the GitHub API. flyctl authenticates with FLY_API_TOKEN, not
+    # this token, so read scope is all that's needed.
+    permissions:
+      contents: read
+      pull-requests: read
     concurrency:
       group: fly-deploy
       cancel-in-progress: true
@@ -51,6 +57,30 @@ jobs:
         # Single-writer state.json store: deploy exactly ONE machine. --ha=false
         # prevents Fly from provisioning a second machine, which would demand a
         # second volume (iad=2) and diverge the data.
-        run: flyctl deploy --remote-only --ha=false --app rotation-dashboard
+        #
+        # Bake the build identity in as build args so /api/version reports it (the
+        # runtime image has no .git). The version is author-set: it's read from the
+        # merged PR's title (e.g. "v2.1.5 — …", "[2.1.5] …", or a bare "2.1.5").
+        # PR_NUMBER comes from the merge commit subject ("Merge pull request #N",
+        # or a squash's "Title (#N)"). All are empty for a direct push to master —
+        # version.py then falls back to the VERSION file, which is fine.
+        run: |
+          PR=$(git log -1 --pretty=%s | grep -oE '#[0-9]+' | head -n1 | tr -d '#')
+          TITLE=""
+          if [ -n "$PR" ]; then
+            TITLE=$(gh pr view "$PR" --repo "$GITHUB_REPOSITORY" --json title -q .title 2>/dev/null || true)
+          fi
+          # First vX.Y.Z / X.Y.Z / X.Y token in the title, with any leading "v" stripped.
+          APP_VERSION=$(printf '%s' "$TITLE" | grep -oiE 'v?[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | sed 's/^[vV]//')
+          SHA=$(git rev-parse --short HEAD)
+          BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "Deploying build: version=${APP_VERSION:-<VERSION file>} pr=${PR:-none} sha=$SHA at $BUILD_TIME"
+          flyctl deploy --remote-only --ha=false --app rotation-dashboard \
+            --build-arg APP_VERSION="$APP_VERSION" \
+            --build-arg PR_NUMBER="$PR" \
+            --build-arg GIT_SHA="$SHA" \
+            --build-arg BUILD_TIME="$BUILD_TIME"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}

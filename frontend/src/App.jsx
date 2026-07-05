@@ -37,6 +37,9 @@ export default function App() {
   // Scan details (full-universe Scorecard + Stock Filter) stay UNMOUNTED until
   // opened, so their ~500-ticker sweeps aren't fetched on every Scan-tab visit.
   const [scanDetails, setScanDetails] = React.useState(false);
+  // Build identity shown in the footer (version · commit). Fetched once; the
+  // /api/version endpoint is open, so this works before/without a session too.
+  const [version, setVersion] = React.useState(null);
 
   // Navbar bell badge: poll the active-alert count once a minute.
   React.useEffect(() => {
@@ -48,6 +51,10 @@ export default function App() {
     const id = setInterval(poll, 60000);
     return () => { stop = true; clearInterval(id); };
   }, [authed, execNonce]);
+
+  React.useEffect(() => {
+    api.version().then(setVersion).catch(() => {});
+  }, []);
 
   React.useEffect(() => {
     api.authStatus()
@@ -199,7 +206,13 @@ export default function App() {
         className="mx-auto max-w-7xl px-4 pb-8 pt-4 text-center text-xs text-slate-600"
         style={{ paddingBottom: "calc(2rem + env(safe-area-inset-bottom))" }}
       >
-        CFM dashboard · scan → gate → execute → track · state.json is the source of truth
+        <div>CFM dashboard · scan → gate → execute → track · state.json is the source of truth</div>
+        {version?.version && (
+          <div className="mt-1 text-slate-700" title={version.built_at ? `Built ${version.built_at}` : undefined}>
+            v{version.display || version.version}
+            {version.commit ? ` · ${version.commit}` : ""}
+          </div>
+        )}
       </footer>
     </div>
   );

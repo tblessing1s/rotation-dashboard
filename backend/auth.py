@@ -42,7 +42,8 @@ _PW_PLAIN = (os.environ.get("DASHBOARD_PASSWORD") or "").strip()
 # only exchanges a Schwab-issued code). Everything else under /api or
 # /auth/schwab is protected; the static frontend is served openly so the login
 # page can load.
-_OPEN_PATHS = {"/api/login", "/api/logout", "/api/auth/status", "/auth/schwab/callback"}
+_OPEN_PATHS = {"/api/login", "/api/logout", "/api/auth/status", "/api/version",
+               "/auth/schwab/callback"}
 
 
 def enabled() -> bool:

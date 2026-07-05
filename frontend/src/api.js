@@ -99,6 +99,7 @@ export const api = {
   pushUnsubscribe: (endpoint) =>
     request("/api/push/unsubscribe", { method: "POST", body: JSON.stringify({ endpoint }) }),
   pushTest: () => request("/api/push/test", { method: "POST" }),
+  version: () => request("/api/version"),
   config: () => request("/api/config"),
   mode: () => request("/api/mode"),
   setMode: (demo) => request("/api/mode", { method: "POST", body: JSON.stringify({ demo }) }),

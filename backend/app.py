@@ -676,6 +676,14 @@ def api_config():
     })
 
 
+@app.route("/api/version")
+def api_version():
+    """Build identity: {version, commit, built_at}. Open (no auth) so the login
+    screen and external health checks can read it without a session."""
+    import version
+    return jsonify(version.info())
+
+
 @app.route("/api/data-status")
 def api_data_status():
     syms = [config.BENCHMARK, config.VIX_SYMBOL] + sector_data.sector_etfs()
