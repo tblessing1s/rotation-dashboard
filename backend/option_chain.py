@@ -178,6 +178,20 @@ def roll_options(ticker: str) -> dict:
         "entry_extrinsic_per_share": current.get("entry_extrinsic_per_share"),
     }
 
+    # Next earnings date — a roll week that SPANS the report gets a deep-ITM
+    # suggested strike so the short keeps intrinsic cover across the gap.
+    earn_date = None
+    try:
+        import earnings
+        raw = (earnings.next_earnings(ticker) or {}).get("date")
+        if raw:
+            earn_date = datetime.strptime(str(raw)[:10], "%Y-%m-%d").date()
+    except Exception:  # noqa: BLE001 — earnings lookup must not sink the roll picker
+        earn_date = None
+    today = datetime.utcnow().date()
+    earn_strike = (strike_policy.suggest_earnings_strike(price, atr_val, reg.get("status"))["strike"]
+                   if earn_date is not None and atr_val is not None and price is not None else None)
+
     # Candidate expirations out to ROLL_MAX_DTE, each with nearby strikes.
     by_exp: dict[str, dict] = {}
     for c in contracts:
@@ -186,10 +200,19 @@ def roll_options(ticker: str) -> dict:
             continue
         by_exp.setdefault(exp, {"expiration": exp, "dte": dte, "contracts": []})["contracts"].append(c)
 
-    target = suggested_strike if suggested_strike is not None else cur_strike
+    default_target = suggested_strike if suggested_strike is not None else cur_strike
     expirations = []
     for exp in sorted(by_exp, key=lambda e: by_exp[e]["dte"]):
         grp = by_exp[exp]
+        # Earnings falls inside this new short's week if the report is on/before
+        # the expiration (and not already past).
+        exp_date = None
+        try:
+            exp_date = datetime.strptime(str(exp)[:10], "%Y-%m-%d").date()
+        except (TypeError, ValueError):
+            exp_date = None
+        earnings_in_week = bool(earn_date and exp_date and today <= earn_date <= exp_date)
+        target = earn_strike if (earnings_in_week and earn_strike is not None) else default_target
         strikes = indicators.get_nearby_strikes(grp["contracts"], target, underlying, count=7)
         # Guarantee the current strike is offered so "same strike" always works.
         if cur_strike is not None and not any(s["strike"] == cur_strike for s in strikes):
@@ -201,6 +224,8 @@ def roll_options(ticker: str) -> dict:
             "expiration": exp,
             "dte": grp["dte"],
             "is_current_week": exp == cur_exp,
+            "earnings_in_week": earnings_in_week,
+            "deep_itm_suggested": bool(earnings_in_week and earn_strike is not None),
             "strikes": strikes,
         })
 
@@ -213,6 +238,7 @@ def roll_options(ticker: str) -> dict:
         "itm_pct": itm_pct,
         "posture": posture,
         "suggested_strike": suggested_strike,
+        "earnings_date": earn_date.isoformat() if earn_date else None,
         "current_short": current_view,
         "expirations": expirations,
     }

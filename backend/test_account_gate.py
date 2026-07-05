@@ -138,7 +138,7 @@ def test_gate_blocks_capital_cap_and_low_juice(isolated_state, monkeypatch):
     assert juice["detail"]["weekly_yield_pct"] == 0.5
 
 
-def test_gate_warns_juice_too_rich_and_earnings(isolated_state, monkeypatch):
+def test_gate_warns_juice_rich_but_blocks_on_earnings_in_cycle(isolated_state, monkeypatch):
     import data_handler
     import earnings
     df = _rich_df()
@@ -152,9 +152,10 @@ def test_gate_warns_juice_too_rich_and_earnings(isolated_state, monkeypatch):
     g = account_gate.evaluate("NVDA", contracts=5,
                               leap_cost_per_share=est["leap_cost_per_share"],
                               weekly_extrinsic_per_share=rich)
-    # Rich juice and in-cycle earnings warn but do NOT block.
-    assert "juice_rich" in g["warnings"] and "earnings_in_cycle" in g["warnings"]
-    assert "juice_rich" not in g["blocking_failures"]
+    # Rich juice stays a warning; earnings inside the cycle now BLOCKS.
+    assert "juice_rich" in g["warnings"] and "juice_rich" not in g["blocking_failures"]
+    assert "earnings_in_cycle" in g["blocking_failures"]
+    assert g["pass"] is False
 
 
 # ---- executor enforcement -----------------------------------------------------
@@ -471,3 +472,17 @@ def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state
     client = app_module.app.test_client()
     body = client.get("/api/scan/ready").get_json()
     assert [r["ticker"] for r in body["ready"]] == ["HIGH", "LOW"]
+
+
+def test_earnings_beyond_the_cycle_does_not_block(isolated_state, monkeypatch):
+    import data_handler
+    import earnings
+    df = _rich_df()
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(earnings, "next_earnings",
+                        lambda t, refresh=False: {"date": "2026-12-01", "days_until": 150,
+                                                  "warning": False})
+    _seed_state(operating_cash=100000)
+    g = account_gate.evaluate("NVDA", contracts=5,
+                              leap_cost_per_share=40.0, weekly_extrinsic_per_share=1.20)
+    assert "earnings_in_cycle" not in g["blocking_failures"] and g["pass"] is True

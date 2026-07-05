@@ -165,6 +165,12 @@ WEEKLIES_CACHE_TTL = 7 * 24 * 3600
 # Around earnings we either roll the short deep-ITM for protection or exit the
 # position entirely, so the next report date is surfaced on every open position.
 EARNINGS_WARN_DAYS = 7       # flag a position when earnings is within this many days
+# PROPOSED_DEFAULT — deep-ITM protective roll THROUGH an earnings report: when a
+# candidate roll week spans the next report, the picker suggests a strike this
+# deep (the further-below-spot of the ATR-distance and ITM%-floor), beyond any
+# regime/posture cell, so the short keeps intrinsic cover across the gap.
+EARNINGS_ROLL_ATR_MULT = 2.5
+EARNINGS_ROLL_ITM_PCT = 0.08
 
 # ---- Alerting --------------------------------------------------------------
 # The operator works a day job — "exit immediately" rules are only followable
