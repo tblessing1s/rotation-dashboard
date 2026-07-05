@@ -1,15 +1,17 @@
 """Application version metadata — the single place the app reports "what am I?".
 
-The human-facing version is the repo-root ``VERSION`` file (committed, edited by
-hand on a release). The exact build is further pinned by the git commit and a
-build timestamp, which are baked into the container at build time via the
-``APP_GIT_SHA`` / ``APP_BUILD_TIME`` env vars (see the Dockerfile). In a local
-checkout — where ``.git`` is present but those env vars are not — they fall back
-to reading git directly, so `flask run` also shows a real commit.
+The human-facing version is chosen per release and written into the PR title
+(e.g. "v2.1.5 — …"); the deploy workflow extracts it and bakes it into the
+container as ``APP_VERSION`` (see .github/workflows/fly.yml + the Dockerfile), so
+the running app reports exactly the number the author set. When ``APP_VERSION``
+isn't set — a local checkout, or a build that skipped CI — it falls back to the
+repo-root ``VERSION`` file. The build is further pinned by the git commit, build
+timestamp, and the merged PR number, each baked in the same way with a live-git
+fallback for local checkouts.
 
-Every signal is best-effort: a missing one degrades to ``None`` rather than
-raising, so ``/api/version`` can never fail. Resolution is memoized — the version
-of a running process doesn't change, so we resolve it once.
+Every signal is best-effort: a missing one degrades to ``None`` (or the VERSION
+file) rather than raising, so ``/api/version`` can never fail. Resolution is
+memoized — the version of a running process doesn't change, so we resolve once.
 """
 from __future__ import annotations
 
@@ -72,37 +74,26 @@ def _pr_from_git() -> str | None:
     return None
 
 
-def _compose_display(version: str, pr: str | None) -> str:
-    """The "what version am I on" string: the PR number takes the patch slot, so
-    a base VERSION of "2.1.0" merged via PR #148 shows as "2.1.148". With no PR
-    (a direct push to master) the base version is shown unchanged."""
-    if not pr:
-        return version
-    parts = version.split(".")
-    if len(parts) >= 2:
-        return f"{parts[0]}.{parts[1]}.{pr}"
-    return f"{version}.{pr}"
-
-
 @lru_cache(maxsize=1)
 def info() -> dict:
     """{"version", "pr", "display", "commit", "built_at"} for the running build.
 
-    ``version`` is the base semantic version from the VERSION file; ``pr`` is the
-    pull request number the build was merged from; ``display`` composes them with
-    the PR as the patch segment ("2.1.148") — that's the "what version am I on"
-    string. ``commit`` is the short git SHA and ``built_at`` an ISO-8601
+    ``version`` is the author-set version carried in from the PR title (the
+    ``APP_VERSION`` build arg), falling back to the VERSION file. ``pr`` is the
+    pull request the build was merged from and ``commit`` the short git SHA —
+    shown alongside as provenance. ``display`` is the version (kept as its own
+    field so the UI has one string to render). ``built_at`` is an ISO-8601
     timestamp. Each signal comes from its build-time env var first (the deployed
-    container), then falls back to live git (a local checkout), then None.
+    container), then falls back to live git / the VERSION file (a local checkout).
     """
-    version = _read_version_file()
+    version = (os.environ.get("APP_VERSION") or "").strip() or _read_version_file()
     pr = (os.environ.get("APP_PR_NUMBER") or "").strip() or _pr_from_git()
     commit = (os.environ.get("APP_GIT_SHA") or "").strip() or _git("rev-parse", "--short", "HEAD")
     built_at = (os.environ.get("APP_BUILD_TIME") or "").strip() or _git("show", "-s", "--format=%cI", "HEAD")
     return {
         "version": version,
         "pr": pr,
-        "display": _compose_display(version, pr),
+        "display": version,
         "commit": commit,
         "built_at": built_at,
     }

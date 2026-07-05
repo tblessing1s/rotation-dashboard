@@ -26,13 +26,16 @@ COPY VERSION ./VERSION
 COPY --from=frontend-build /app/frontend/dist ./frontend/dist
 
 # Build identity, surfaced at /api/version. The CI deploy (.github/workflows/
-# fly.yml) passes these from the merge commit; absent → version.py degrades to
-# the VERSION file alone (the runtime image has no .git to fall back to).
-# PR_NUMBER is the pull request the build was merged from — part of the version.
+# fly.yml) passes these on merge; absent → version.py degrades to the VERSION
+# file / no git (the runtime image has no .git to fall back to).
+# APP_VERSION is the author-set version parsed from the PR title; PR_NUMBER,
+# GIT_SHA and BUILD_TIME are provenance for the exact build.
+ARG APP_VERSION=""
 ARG GIT_SHA=""
 ARG BUILD_TIME=""
 ARG PR_NUMBER=""
-ENV APP_GIT_SHA=$GIT_SHA \
+ENV APP_VERSION=$APP_VERSION \
+    APP_GIT_SHA=$GIT_SHA \
     APP_BUILD_TIME=$BUILD_TIME \
     APP_PR_NUMBER=$PR_NUMBER
 
