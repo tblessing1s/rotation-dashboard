@@ -84,6 +84,8 @@ export const api = {
   ackAlert: (id) => request("/api/alerts/ack", { method: "POST", body: JSON.stringify({ id }) }),
   reconcile: () => request("/api/reconcile"),
   runReconcile: () => request("/api/reconcile", { method: "POST" }),
+  verifyFills: (limit) =>
+    request("/api/verify-fills", { method: "POST", body: JSON.stringify(limit ? { limit } : {}) }),
   resolveExpiry: (diffId) =>
     request("/api/reconcile/resolve-expiry", { method: "POST", body: JSON.stringify({ diff_id: diffId }) }),
   acknowledgeDiff: (diffId, ackReason) =>

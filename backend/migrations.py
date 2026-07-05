@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 8
+CURRENT_VERSION = 9
 
 
 class MigrationAbortedError(RuntimeError):
@@ -121,6 +121,15 @@ def _v7_to_v8(state: dict) -> dict:
     return state
 
 
+def _v8_to_v9(state: dict) -> dict:
+    """v9 (live-fill verification): a capped ``order_receipts`` list — one entry
+    per filled live order linking its Schwab order id to the committed execution
+    ids, written at fill time so fill_verify can diff our record against the
+    broker's. Additive; seed the empty list so readers never key-error."""
+    state.setdefault("order_receipts", [])
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -129,6 +138,7 @@ MIGRATIONS = {
     5: _v5_to_v6,
     6: _v6_to_v7,
     7: _v7_to_v8,
+    8: _v8_to_v9,
 }
 
 

@@ -474,6 +474,18 @@ def api_alerts_settings():
 # ---------------------------------------------------------------------------
 # Web Push (PWA native push): VAPID key handshake + subscription registry.
 # ---------------------------------------------------------------------------
+@app.route("/api/verify-fills", methods=["POST"])
+def api_verify_fills():
+    """Re-fetch recent live orders from Schwab and diff their fills against what
+    we recorded, plus a reconcile pass. The live-order verification harness."""
+    import fill_verify
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(fill_verify.verify_live_fills(limit=int(payload.get("limit", 20))))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/push/vapid-key")
 def api_push_vapid_key():
     """The applicationServerKey the browser needs to subscribe, plus whether the

@@ -342,6 +342,70 @@ function ReconcileStatus() {
   );
 }
 
+// Live-fill verification: re-fetch recent live orders from Schwab and diff the
+// broker's fills against what we logged, plus a reconcile pass. On-demand — this
+// is the "prove the live-order path is correct" check for after a real order.
+function LiveFillVerify() {
+  const [res, setRes] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+
+  const run = async () => {
+    setBusy(true); setRes(null);
+    try { setRes(await api.verifyFills()); }
+    catch (e) { setRes({ error: String(e.message || e) }); }
+    finally { setBusy(false); }
+  };
+
+  const green = res && !res.error && res.all_ok === true;
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Live-fill verification (vs Schwab)</span>
+        <button onClick={run} disabled={busy}
+                title="Re-fetch recent live orders from Schwab and diff their fills against what we logged"
+                className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          {busy ? "Verifying…" : "Verify live fills"}
+        </button>
+      </div>
+      {res?.error && <p className="mt-2 text-sm text-rose-400">{res.error}</p>}
+      {res && !res.error && (
+        <div className="mt-2 text-sm">
+          {res.checked === 0 ? (
+            <p className="text-slate-500">No live fills recorded yet — this lights up after a real (non-paper) order fills.</p>
+          ) : (
+            <>
+              <div className="flex items-center gap-2">
+                <Light status={green ? "green" : res.all_ok === null ? "yellow" : "red"} size="h-2.5 w-2.5" />
+                <span className="font-semibold text-slate-200">
+                  {green ? `All ${res.checked} fill(s) match Schwab` :
+                   res.all_ok === null ? "Broker check skipped" : "Discrepancies found"}
+                </span>
+                {res.reconcile?.status && (
+                  <span className="text-xs text-slate-500">· reconcile: {res.reconcile.status}
+                    {res.reconcile.open_diffs ? ` (${res.reconcile.open_diffs} open)` : ""}</span>
+                )}
+              </div>
+              {!green && (
+                <ul className="mt-1 space-y-1">
+                  {res.orders.filter((o) => o.ok !== true).map((o) => (
+                    <li key={o.order_id} className="rounded bg-slate-900/60 px-2 py-1 text-xs">
+                      <span className="font-semibold text-slate-200">{o.ticker} · {o.kind}</span>
+                      <span className="text-slate-500"> · order {o.order_id}</span>
+                      {(o.issues || []).map((i, k) => (
+                        <div key={k} className="text-rose-300">— {i}</div>
+                      ))}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function DataHealth() {
   const { data, error, loading, reload } = useApi(api.dataHealth, [], 120000);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -425,6 +489,7 @@ export default function DataHealth() {
         </div>
       )}
       <ReconcileStatus />
+      {!data?.demo && <LiveFillVerify />}
       {!data?.demo && <UniverseCheck />}
     </Card>
   );

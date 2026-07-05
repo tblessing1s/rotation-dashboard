@@ -486,12 +486,34 @@ def order_status(order_id: str) -> dict:
         else:
             result = _commit_from_pending(rec, _fill_price(order))
         log.pop_pending_order(order_id)
+        _capture_order_receipt(order_id, raw, rec, order, result)
         return {"order_id": order_id, "status": "filled", "raw_status": raw, **result}
     if raw in ("CANCELED", "REJECTED", "EXPIRED"):
         log.pop_pending_order(order_id)
         return {"order_id": order_id, "status": "rejected" if raw == "REJECTED" else "canceled",
                 "raw_status": raw}
     return {"order_id": order_id, "status": "working", "raw_status": raw}
+
+
+def _capture_order_receipt(order_id, raw_status, rec, order, result) -> None:
+    """Record a broker fill receipt: the Schwab order id + the committed
+    execution ids, so the live-order path can later be diffed against Schwab's
+    own record (fill_verify.py). Belt-and-braces: a receipt failure must NEVER
+    unwind a fill that has already been committed and cleared."""
+    try:
+        execs = result.get("executions") or (
+            [result["execution"]] if result.get("execution") else [])
+        log.save_order_receipt({
+            "order_id": str(order_id),
+            "kind": rec.get("kind") or rec.get("action"),
+            "ticker": rec.get("ticker"),
+            "account_hash": rec.get("account_hash"),
+            "broker_status": raw_status,
+            "execution_ids": [e.get("id") for e in execs if e.get("id")],
+            "captured_at": log.utcnow(),
+        })
+    except Exception as e:  # noqa: BLE001 — never let bookkeeping unwind a fill
+        log.logger.error("order receipt capture failed for %s: %s", order_id, e)
 
 
 def cancel_order(order_id: str) -> dict:
