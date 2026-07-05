@@ -21,6 +21,7 @@ import config
 import data_handler
 import dividends
 import indicators
+import iv_history
 import logging_handler as log
 import schwab_api
 import screening
@@ -73,10 +74,19 @@ def _median(vals: list) -> float | None:
     return nums[mid] if len(nums) % 2 else (nums[mid - 1] + nums[mid]) / 2
 
 
-def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None) -> dict:
-    """Compare the weekly short's IV to the stock's 20-day realized volatility.
-    IV well above realized = rich premium (favorable to sell); below = cheap."""
-    out = {"weekly_iv": weekly_iv, "leap_iv": leap_iv, "hist_vol": hv}
+def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None,
+             ticker: str | None = None) -> dict:
+    """Compare the weekly short's IV to the stock's 20-day realized volatility AND
+    to its own trailing-year range (IV rank). IV above realized = rich vs the
+    stock's typical move; a high IV rank = rich vs its OWN history — the
+    constructive twin of the juice-rich warning ("a good week to sell")."""
+    out = {"weekly_iv": weekly_iv, "leap_iv": leap_iv, "hist_vol": hv,
+           "iv_rank": None, "iv_percentile": None}
+    if ticker and weekly_iv is not None:
+        rank = iv_history.iv_rank(ticker, weekly_iv)
+        out["iv_rank"] = rank["iv_rank"]
+        out["iv_percentile"] = rank["iv_percentile"]
+        out["iv_rank_days"] = rank["days"]
     if weekly_iv is None or hv is None or hv == 0:
         out["premium"] = "unknown"
         out["label"] = "IV vs realized unavailable"
@@ -84,15 +94,20 @@ def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None) -
         return out
     ratio = weekly_iv / hv
     out["iv_vs_hv"] = round(ratio, 2)
+    ivr = out["iv_rank"]
+    rank_note = (f" · IV rank {ivr:g}"
+                 + (" — rich vs its own year, a good week to sell" if ivr is not None and ivr >= 50
+                    else " — cheap vs its own year" if ivr is not None and ivr <= 25 else "")
+                 if ivr is not None else "")
     if ratio >= 1.1:
         out["premium"] = "rich"
-        out["label"] = f"IV {weekly_iv:g}% is HIGHER than 20-day realized {hv:g}% — premium rich (favorable to sell)"
+        out["label"] = f"IV {weekly_iv:g}% is HIGHER than 20-day realized {hv:g}% — premium rich (favorable to sell){rank_note}"
     elif ratio <= 0.9:
         out["premium"] = "cheap"
-        out["label"] = f"IV {weekly_iv:g}% is LOWER than 20-day realized {hv:g}% — premium cheap (thin to sell)"
+        out["label"] = f"IV {weekly_iv:g}% is LOWER than 20-day realized {hv:g}% — premium cheap (thin to sell){rank_note}"
     else:
         out["premium"] = "fair"
-        out["label"] = f"IV {weekly_iv:g}% is in line with 20-day realized {hv:g}%"
+        out["label"] = f"IV {weekly_iv:g}% is in line with 20-day realized {hv:g}%{rank_note}"
     return out
 
 
@@ -239,6 +254,7 @@ def roll_options(ticker: str) -> dict:
         "posture": posture,
         "suggested_strike": suggested_strike,
         "earnings_date": earn_date.isoformat() if earn_date else None,
+        "iv_rank": iv_history.iv_rank(ticker),
         "current_short": current_view,
         "expirations": expirations,
     }
@@ -463,6 +479,9 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
         strikes = indicators.get_nearby_strikes(exp_contracts, suggested_strike, underlying)
         sug = next((s for s in strikes if s.get("suggested")), strikes[0] if strikes else None)
         weekly_iv = (sug or {}).get("volatility") or _median([s.get("volatility") for s in strikes])
+        # Accrue one IV-history point per day from the IV we already computed —
+        # this is what IV rank is measured against (zero extra chain fetches).
+        iv_history.record(ticker, weekly_iv)
         weekly = {
             "expiration": weekly_exp,
             "dte": exp_contracts[0]["dte"] if exp_contracts else None,
@@ -563,7 +582,7 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
             "open_short": open_short_view,
             "existing_leap": existing_leap_view,
         },
-        "iv": _iv_view(weekly_iv, (leap or {}).get("volatility"), hv),
+        "iv": _iv_view(weekly_iv, (leap or {}).get("volatility"), hv, ticker),
         "leap": leap,
         "weekly": weekly,
         "payoff": payoff,

@@ -154,6 +154,17 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
                   {data.posture ? `, ${data.posture}` : ""})
                 </div>
               )}
+              {data.iv_rank?.iv_rank != null && (
+                <div className="mt-1 text-xs">
+                  <span className={`font-semibold ${data.iv_rank.iv_rank >= 50 ? "text-emerald-300" : data.iv_rank.iv_rank <= 25 ? "text-slate-400" : "text-slate-300"}`}>
+                    IV rank {fmt(data.iv_rank.iv_rank, 0)}
+                  </span>
+                  <span className="text-slate-500">
+                    {" "}(IV {fmt(data.iv_rank.iv_now, 1)}% vs {fmt(data.iv_rank.iv_min, 1)}–{fmt(data.iv_rank.iv_max, 1)}%, {data.iv_rank.days}d)
+                    {data.iv_rank.iv_rank >= 50 ? " — rich vs its own year, good week to sell" : data.iv_rank.iv_rank <= 25 ? " — cheap vs its own year" : ""}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Week choice */}
