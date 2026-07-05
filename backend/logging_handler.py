@@ -246,6 +246,18 @@ def save_pending_order(order_id: str, record: dict) -> None:
         save_state(state)
 
 
+def save_order_receipt(receipt: dict, cap: int = 200) -> None:
+    """Append one broker fill receipt (order_id + committed execution ids) to a
+    capped list. Written at fill time so the live-order path can later be
+    verified against Schwab's own record (see fill_verify.py)."""
+    with _lock:
+        state = load_state()
+        receipts = state.setdefault("order_receipts", [])
+        receipts.append(receipt)
+        del receipts[:-cap]  # keep newest
+        save_state(state)
+
+
 def get_pending_order(order_id: str) -> dict | None:
     return load_state().get("pending_orders", {}).get(str(order_id))
 
