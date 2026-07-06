@@ -327,6 +327,37 @@ def test_adjustment_requires_typed_reason(store):
                           "instrument_type": "EQUITY", "quantity_delta": 500, "reason": ""})
 
 
+def test_resolving_a_missing_leap_by_closing_lifts_the_freeze(store):
+    # A phantom LEAP marked in state but not held at the broker (MISSING_AT_BROKER)
+    # freezes the position. Resolving it by adjusting the LEAP to zero closes the
+    # position — the freeze must lift, not get stuck on the now-closed position.
+    pos = {
+        "ticker": "XLK", "status": "active", "needs_review": True,
+        "review": {"summary": "LEAP missing", "diff_ids": ["diff_001"]},
+        "leap": {"strike": 137.5, "contracts": 4, "expiration": "2027-01-15"},
+        "shares": {"count": 0, "cap": 500}, "short_calls": [],
+    }
+    state = log.load_state()
+    state["positions"] = [pos]
+    state["reconciliation"] = {"last": _report_with({
+        "id": "diff_001", "classification": reconcile.MISSING_AT_BROKER, "ticker": "XLK",
+        "instrument_type": "OPTION", "strike": 137.5, "expiry": "2027-01-15",
+        "expected_qty": 4, "broker_qty": 0, "summary": "LEAP missing at broker"}),
+        "history": [], "last_success": "2026-07-06T16:49:16Z"}
+    log.save_state(state)
+
+    out = executor.execute({
+        "action": "adjustment", "ticker": "XLK", "instrument_type": "OPTION",
+        "strike": 137.5, "quantity_delta": -4,
+        "reason": "phantom LEAP not held at broker", "linked_diff_id": "diff_001"})
+    assert out["status"] == "adjusted"
+
+    p = log.find_position(log.load_state(), "XLK")
+    assert p["leap"] is None and p["status"] == "closed"  # position closed out
+    assert not p.get("needs_review")                      # freeze lifted, not stuck
+    assert p.get("review") is None
+
+
 def test_acknowledge_requires_typed_reason_then_lifts_freeze(store):
     state = log.load_state()
     state["positions"] = [_frozen_position()]

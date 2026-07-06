@@ -621,7 +621,14 @@ def reevaluate_freezes(state: dict) -> None:
         if _diff_open(d):
             open_by_ticker.setdefault(d["ticker"], []).append(d)
     for p in state.get("positions", []):
+        # A closed position can never be under review — clear any stale freeze
+        # left over from when it was open. Without this, resolving a MISSING diff
+        # by adjusting the position closed leaves needs_review stuck True forever
+        # (the diff is gone, but the flag that blocks new entries never lifts).
         if p.get("status") == "closed":
+            if p.get("needs_review"):
+                p["needs_review"] = False
+                p["review"] = None
             continue
         ticker = (p.get("ticker") or "").upper()
         remaining = open_by_ticker.get(ticker)
