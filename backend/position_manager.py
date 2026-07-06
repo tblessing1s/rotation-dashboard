@@ -13,6 +13,39 @@ def _stock_price(ticker: str) -> float | None:
     return q["price"] if q else None
 
 
+def _live_short_marks(ticker: str, shorts: list[dict]) -> dict[tuple, float]:
+    """Live per-share marks for a position's open shorts, keyed by (strike,
+    expiration). One batched Schwab quote for all legs; best-effort — off-hours,
+    in demo, without Schwab, or on any error it returns {} and callers fall back
+    to the stored entry mark. Only legs carrying an expiration can be quoted."""
+    import schwab_api
+    if config.demo_enabled() or not schwab_api.configured():
+        return {}
+    syms: dict[str, tuple] = {}
+    for sc in shorts:
+        exp, strike = sc.get("expiration"), sc.get("strike")
+        if exp and strike is not None:
+            try:
+                syms[schwab_api.occ_option_symbol(ticker, exp, float(strike), call=True)] = (strike, exp)
+            except (TypeError, ValueError):
+                continue
+    if not syms:
+        return {}
+    try:
+        quotes = data_handler.client().get_quotes(list(syms))
+    except Exception:  # noqa: BLE001 — a marks fetch never blocks the positions view
+        return {}
+    out: dict[tuple, float] = {}
+    for sym, key in syms.items():
+        node = quotes.get(sym) or {}
+        mark = node.get("mark")
+        if mark is None:
+            mark = node.get("bid")  # mid preferred; bid is the conservative fallback
+        if mark is not None:
+            out[key] = float(mark)
+    return out
+
+
 def enrich_leap(leap: dict, stock_price: float | None) -> dict:
     """Re-split a LEAP's current value into intrinsic/extrinsic.
 
@@ -33,28 +66,61 @@ def enrich_leap(leap: dict, stock_price: float | None) -> dict:
     return out
 
 
-def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None) -> dict:
+def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
+                 live_mark: float | None = None) -> dict:
     """Per-short management signals, all derived from stored execution data:
 
     - decay_pct + roll_now: the 75% buyback rule (HARD_CFM_RULE — when the short
       has surrendered >=75% of its sale premium with >2 DTE, roll early).
+    - extrinsic capture: what extrinsic we sold at entry (the target to capture),
+      what's left in the short now, and the % captured so far. An ITM weekly's
+      premium is intrinsic (tracks the stock) + extrinsic (the theta we're here
+      to collect); isolating the extrinsic is the honest "how much juice left."
     - below_strike: the DEFEND trigger (stock closed under the short strike).
     - assignment_risk: extrinsic below the coming dividend before ex-div. The
       short is covered by a LEAP, NOT stock — assignment creates SHORT STOCK
       that owes the dividend, so the standard play is to roll before ex-div.
+
+    ``live_mark`` (per share), when supplied by the caller from a fresh quote,
+    overrides the stored entry mark so decay + extrinsic capture read live.
     """
     out = dict(sc)
     contracts = int(sc.get("contracts") or 0)
     sold = (float(sc["entry_premium_total"]) / (contracts * 100)
             if sc.get("entry_premium_total") and contracts else None)
-    current = sc.get("current_bid")
+    current = live_mark if live_mark is not None else sc.get("current_bid")
+    out["current_bid"] = current
     out["sold_per_share"] = round(sold, 2) if sold else None
     decay = (1 - float(current) / sold) if (sold and current is not None) else None
     out["decay_pct"] = round(decay * 100, 1) if decay is not None else None
+    strike = sc.get("strike")
+
+    # Extrinsic capture: the extrinsic sold at entry is the target; what's left in
+    # the short now is its current mark minus its current intrinsic; captured is
+    # the difference. All best-effort — a missing mark leaves the live fields None
+    # but always keeps the entry target visible.
+    entry_extrinsic = sc.get("entry_extrinsic_per_share")
+    entry_extrinsic = float(entry_extrinsic) if entry_extrinsic is not None else None
+    intrinsic_now = (max(float(stock_price) - float(strike), 0.0)
+                     if stock_price is not None and strike is not None else None)
+    current_extrinsic = (max(float(current) - intrinsic_now, 0.0)
+                         if current is not None and intrinsic_now is not None else None)
+    captured = (max(entry_extrinsic - current_extrinsic, 0.0)
+                if entry_extrinsic is not None and current_extrinsic is not None else None)
+    captured_pct = (min(max(captured / entry_extrinsic * 100, 0.0), 100.0)
+                    if captured is not None and entry_extrinsic else None)
+    out["entry_extrinsic_per_share"] = round(entry_extrinsic, 2) if entry_extrinsic is not None else None
+    out["current_extrinsic_per_share"] = round(current_extrinsic, 2) if current_extrinsic is not None else None
+    out["extrinsic_captured_per_share"] = round(captured, 2) if captured is not None else None
+    out["extrinsic_captured_pct"] = round(captured_pct, 1) if captured_pct is not None else None
+    mult = contracts * 100
+    out["entry_extrinsic_total"] = round(entry_extrinsic * mult, 2) if entry_extrinsic is not None and mult else None
+    out["extrinsic_captured_total"] = round(captured * mult, 2) if captured is not None and mult else None
+    out["extrinsic_remaining_total"] = round(current_extrinsic * mult, 2) if current_extrinsic is not None and mult else None
+
     dte = sc.get("dte")
     out["roll_now"] = bool(decay is not None and decay >= config.BUYBACK_DECAY_PCT
                            and dte is not None and dte > config.BUYBACK_MIN_DTE)
-    strike = sc.get("strike")
     out["below_strike"] = bool(stock_price is not None and strike is not None
                                and stock_price < float(strike))
 
@@ -98,8 +164,12 @@ def enrich_position(position: dict, roll_summary: dict | None = None) -> dict:
         except Exception:  # noqa: BLE001 — health is informational, never block positions
             out["leap_health"] = None
     dividend = position.get("dividend")
-    out["short_calls"] = [enrich_short(sc, price, dividend)
-                          for sc in position.get("short_calls", [])]
+    shorts = position.get("short_calls", [])
+    marks = _live_short_marks(ticker, shorts)
+    out["short_calls"] = [
+        enrich_short(sc, price, dividend,
+                     live_mark=marks.get((sc.get("strike"), sc.get("expiration"))))
+        for sc in shorts]
     out["defend"] = any(sc["below_strike"] for sc in out["short_calls"])
     out["roll_summary"] = roll_summary or {"count": 0, "net_total": 0.0, "drag_total": 0.0}
     shares = dict(position.get("shares") or {})

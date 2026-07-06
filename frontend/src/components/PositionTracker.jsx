@@ -513,9 +513,10 @@ export default function PositionTracker({ intent, onIntentHandled } = {}) {
               {shorts.length === 0 ? (
                 <p className="text-xs text-slate-500">No open short — sell this week's call from the Execute tab.</p>
               ) : (
-                <div className="space-y-1">
+                <div className="space-y-1.5">
                   {shorts.map((sc, i) => (
-                    <div key={i} className="flex items-center justify-between rounded-lg bg-slate-950/60 px-3 py-1.5 text-sm">
+                    <div key={i} className="rounded-lg bg-slate-950/60 px-3 py-1.5 text-sm">
+                     <div className="flex items-center justify-between">
                       <span className="text-slate-200">
                         {fmt(sc.strike, 2)}C · {sc.contracts}c
                         {sc.expiration ? ` · exp ${sc.expiration}` : ""}
@@ -556,6 +557,37 @@ export default function PositionTracker({ intent, onIntentHandled } = {}) {
                           <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300">expiring</span>
                         )}
                       </span>
+                     </div>
+                     {/* Extrinsic capture: what you sold (the target), how much
+                         theta you've collected back so far, and what's left. An
+                         ITM short's premium is intrinsic (tracks the stock) +
+                         extrinsic (the juice) — this isolates the juice. */}
+                     {sc.entry_extrinsic_total != null && (
+                       <div className="mt-1.5">
+                         <div className="flex items-center justify-between text-[11px]">
+                           <span
+                             className="text-slate-500"
+                             title="Extrinsic (time value) sold at entry is the target; capturing all of it is max profit on the short."
+                           >
+                             extrinsic captured {money(sc.extrinsic_captured_total)} / {money(sc.entry_extrinsic_total)}
+                             {sc.extrinsic_remaining_total != null && (
+                               <span className="text-slate-600"> · {money(sc.extrinsic_remaining_total)} left</span>
+                             )}
+                           </span>
+                           {sc.extrinsic_captured_pct != null && (
+                             <span className={sc.extrinsic_captured_pct >= 75 ? "text-emerald-300" : "text-slate-400"}>
+                               {fmt(sc.extrinsic_captured_pct, 0)}% captured
+                             </span>
+                           )}
+                         </div>
+                         <div className="mt-1">
+                           <Meter
+                             pct={sc.extrinsic_captured_pct}
+                             tone={sc.extrinsic_captured_pct >= 75 ? "bg-emerald-400" : "bg-sky-500"}
+                           />
+                         </div>
+                       </div>
+                     )}
                     </div>
                   ))}
                 </div>
