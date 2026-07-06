@@ -1433,6 +1433,12 @@ def defend_recommendation(ticker: str) -> dict:
         new_extrinsic = round(max(bs - max(price - new_strike, 0.0), 0.0), 2)
     net = (round((new_premium - float(buyback)) * contracts * 100, 2)
            if (new_premium is not None and buyback is not None) else None)
+    # Whipsaw circuit breaker: if this position has already rolled down too many
+    # times / bled too much drag, the correct move is to EXIT, not defend again —
+    # surface that on the very recommendation the operator opens to roll.
+    import position_manager
+    whipsaw = position_manager.whipsaw_status(
+        pos, (state.get("roll_ledger") or {}).get("rolls", []))
     return {
         "ticker": ticker,
         "breached": True,
@@ -1443,6 +1449,7 @@ def defend_recommendation(ticker: str) -> dict:
         "atr_mult": atr_mult,
         "itm_pct": itm_pct,
         "posture": posture,
+        "whipsaw": whipsaw,
         "current_short": {"strike": sc.get("strike"), "contracts": contracts,
                           "dte": dte, "expiration": sc.get("expiration"),
                           "buyback_per_share": buyback},

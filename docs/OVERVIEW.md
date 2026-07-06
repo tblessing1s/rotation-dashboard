@@ -50,7 +50,8 @@ only *new* alerts to the notifier.
 | `CIRCUIT_BREAKER` | CRITICAL | HARD_CFM_RULE (line in the sand) | last close at/below the position's stored circuit-breaker price |
 | `DELTA_UNCOVERED` | HIGH | HARD_CFM_RULE (coverage) | LEAP delta < 0.50 floor, or long delta < a short leg's delta |
 | `DEFEND_POSITION` | HIGH | HARD_CFM_RULE (defense) | underlying closed below the short strike; includes suggested roll-down strike (price − 1.5×ATR) |
-| `ASSIGNMENT_RISK` | HIGH | HARD_CFM_RULE (dividend/assignment) | short extrinsic < upcoming dividend before ex-div. Note: the short is covered by a LEAP, not stock — assignment creates *short stock* that owes the dividend |
+| `WHIPSAW_EXIT` | CRITICAL | HARD_CFM_RULE (whipsaw) | cumulative defend guard: ≥`WHIPSAW_DEFEND_ROLLS` defensive rolls in `WHIPSAW_WINDOW_WEEKS`, OR cumulative roll drag > `WHIPSAW_DRAG_PCT` of position capital → exit, not another defend (the slow-grind bleed no single check owns) |
+| `ASSIGNMENT_RISK` | HIGH | HARD_CFM_RULE (assignment mechanics) | base: an ITM short whose extrinsic has collapsed below `ASSIGNMENT_EXTRINSIC_FLOOR` (a few cents) — assignable any time, deep-ITM early assignment is an extrinsic problem; escalation: extrinsic < upcoming dividend before ex-div. Note: the short is covered by a LEAP, not stock — assignment creates *short stock* that owes any dividend |
 | `TOKEN_EXPIRY` | HIGH | PROPOSED_DEFAULT (`TOKEN_WARN_AGE_DAYS`=5) | Schwab refresh token older than 5 days (dies at ~7) |
 | `BUYBACK_75` | MEDIUM | HARD_CFM_RULE (75% buyback) | short lost ≥75% of sale premium with >2 DTE → roll early to capture juice |
 | `EARNINGS_WINDOW` | MEDIUM | HARD_CFM_RULE (earnings) | earnings within `EARNINGS_WARN_DAYS` for an open position |
@@ -218,11 +219,28 @@ list.
   Positions tab shows cumulative roll drag per position; Theta tab nets rolls
   against juice. This is the dataset that later validates 1.5× vs 2×ATR strike
   placement.
-- **Assignment-risk monitor**: each short is checked against the position's
-  stored dividend (extrinsic < dividend before ex-div → flag + alert). The
-  flag's tooltip explains the PMCC nuance: the short is covered by a LEAP, not
-  stock, so assignment creates SHORT STOCK that owes the dividend — roll
-  before ex-div.
+- **Whipsaw circuit breaker** (`position_manager.whipsaw_status`, the
+  `WHIPSAW_EXIT` alert): the individual defend roll-downs are each correct, but
+  the whipsaw — roll-down after roll-down in a slow grind, each locking a lower
+  strike — is the strategy's real killer, and no single check owns it (the RS
+  kill switch and the price circuit breaker can both stay untripped while defend
+  bleeds the position weekly). This cumulative guard reads the roll ledger above:
+  it trips when ≥`WHIPSAW_DEFEND_ROLLS` (3) defensive rolls landed in the trailing
+  `WHIPSAW_WINDOW_WEEKS` (4), OR cumulative roll drag passed `WHIPSAW_DRAG_PCT`
+  (5%) of the position's capital — recommending EXIT, not another defend. Scoped
+  to the current cycle (rolls on/after the position's entry). Surfaced on the
+  Positions tab, on the defend recommendation itself (`GET /api/defend` — so the
+  ticket you open to roll tells you to exit instead), and as the alert. The
+  counts/percent are PROPOSED_DEFAULT pending the roll-ledger data that tunes them.
+- **Assignment-risk monitor**: assignment is modelled as an *extrinsic* problem,
+  not a dividend one. The base trigger is an ITM short whose remaining time value
+  has collapsed below `ASSIGNMENT_EXTRINSIC_FLOOR` (a few cents) — assignable any
+  time, no ex-date required, because the counterparty forfeits no time value by
+  exercising. The stored dividend is an *escalation*: extrinsic below the coming
+  dividend before ex-div makes early exercise rational on a specific date. Either
+  way the flag's tooltip explains the PMCC nuance: the short is covered by a LEAP,
+  not stock, so assignment creates SHORT STOCK (that owes any dividend) — roll to
+  re-establish time value, never exercise the LEAP to cover.
 - **Accumulation vs kill-switch** (`BLOCK_ACCUMULATION_ON_RS_DETERIORATION`,
   HARD_CFM_RULE candidate, OFF by default pending confirmation): when on,
   `can_add_shares` refuses accumulation on any name whose kill switch reads

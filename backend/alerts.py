@@ -36,6 +36,7 @@ ALERT_TYPES = {
     "CIRCUIT_BREAKER": ("CRITICAL", "HARD_CFM_RULE: line-in-the-sand exit price stored at entry"),
     "DELTA_UNCOVERED": ("HIGH", "HARD_CFM_RULE: LEAP below 0.50 delta (or below the short's delta) no longer covers the short"),
     "DEFEND_POSITION": ("HIGH", "HARD_CFM_RULE: underlying closed below the short strike -> defensive roll-down"),
+    "WHIPSAW_EXIT": ("CRITICAL", "HARD_CFM_RULE: defend whipsaw (too many roll-downs / too much cumulative drag) -> exit, not another defend"),
     "ASSIGNMENT_RISK": ("HIGH", "HARD_CFM_RULE: short extrinsic below the coming dividend invites early assignment"),
     "TOKEN_EXPIRY": ("HIGH", "PROPOSED_DEFAULT: Schwab refresh token dies at ~7 days; re-auth by day 5"),
     "BUYBACK_75": ("MEDIUM", "HARD_CFM_RULE: 75% of the sale premium captured with >2 DTE -> roll early"),
@@ -65,6 +66,7 @@ _ROLL_ACTIONS = {
 _FOCUS_ACTIONS = {
     "KILL_SWITCH_SECTOR", "KILL_SWITCH_SPY", "CIRCUIT_BREAKER", "SHORT_STOCK_DETECTED",
     "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
+    "WHIPSAW_EXIT",
 }
 
 
@@ -250,6 +252,30 @@ def check_defend_position(state: dict) -> list[dict]:
     return out
 
 
+def check_whipsaw_exit(state: dict) -> list[dict]:
+    """Cumulative defend-whipsaw guard: a position taking roll-down after
+    roll-down in a slow grind bleeds via drag while neither the RS kill switch
+    nor the price circuit breaker trips. Fires when too many defensive rolls
+    landed in the trailing window OR cumulative roll drag has passed a fraction
+    of the position's capital — recommend EXIT, not another defend."""
+    import position_manager
+    out = []
+    rolls = (state.get("roll_ledger") or {}).get("rolls", [])
+    for p in _open_positions(state):
+        t = p.get("ticker", "")
+        ws = position_manager.whipsaw_status(p, rolls)
+        if not ws["tripped"]:
+            continue
+        out.append(_alert(
+            "WHIPSAW_EXIT", t,
+            f"{t} is in a defend whipsaw — " + "; ".join(ws["reasons"]) + ".",
+            "Stop defending — the roll-down spiral is bleeding the position while the "
+            "kill switch and circuit breaker stay quiet. EXIT and redeploy the capital; "
+            "another roll-down just locks a lower strike.",
+            ws, key="whipsaw"))
+    return out
+
+
 def check_circuit_breaker(state: dict) -> list[dict]:
     out = []
     for p in _open_positions(state):
@@ -286,30 +312,41 @@ def check_earnings_window(state: dict) -> list[dict]:
 
 
 def check_assignment_risk(state: dict) -> list[dict]:
+    """Early-assignment risk. The base trigger is an EXTRINSIC one: an ITM short
+    whose remaining time value has collapsed below ASSIGNMENT_EXTRINSIC_FLOOR is
+    assignable any time (the counterparty forfeits nothing by exercising), no
+    ex-date required. The coming dividend is an ESCALATION: extrinsic below the
+    dividend before ex-div makes early exercise rational on a specific date. At
+    most one alert per short — the dividend escalation preempts the bare floor."""
     out = []
     today = datetime.now(ET).date()
     for p in _open_positions(state):
         t = p.get("ticker", "")
+        price = _last_close(t)
+        if price is None:
+            continue
         div = p.get("dividend") or {}
         ex_date, amount = div.get("ex_date"), div.get("amount")
-        if not ex_date or not amount:
-            continue
-        try:
-            ex = datetime.strptime(str(ex_date)[:10], "%Y-%m-%d").date()
-        except ValueError:
-            continue
-        if ex < today:
-            continue
-        price = _last_close(t)
+        ex = None
+        if ex_date and amount:
+            try:
+                ex = datetime.strptime(str(ex_date)[:10], "%Y-%m-%d").date()
+            except ValueError:
+                ex = None
+            if ex is not None and ex < today:
+                ex = None  # already gone ex — no longer a dividend-capture trigger
         for sc in p.get("short_calls", []):
+            strike, current, dte = sc.get("strike"), sc.get("current_bid"), sc.get("dte")
+            if strike is None or current is None:
+                continue
+            intrinsic = max(price - float(strike), 0.0)
+            extrinsic = max(float(current) - intrinsic, 0.0)
+            itm = price > float(strike)
             expiry = _short_expiry(sc, today)
-            if expiry is None or ex > expiry:
-                continue
-            strike, current = sc.get("strike"), sc.get("current_bid")
-            if strike is None or current is None or price is None:
-                continue
-            extrinsic = max(float(current) - max(price - float(strike), 0.0), 0.0)
-            if extrinsic < float(amount):
+
+            # Escalation: the short spans a dividend its extrinsic no longer covers.
+            if (ex is not None and amount is not None and expiry is not None
+                    and ex <= expiry and extrinsic < float(amount)):
                 out.append(_alert(
                     "ASSIGNMENT_RISK", t,
                     (f"{t} short {strike} extrinsic {extrinsic:.2f}/sh is below the "
@@ -317,9 +354,25 @@ def check_assignment_risk(state: dict) -> list[dict]:
                     ("Roll the short before the ex-div date (or accept assignment: the short "
                      "is covered by a LEAP, not stock, so assignment creates SHORT STOCK that "
                      "owes the dividend — usually roll)."),
-                    {"strike": strike, "extrinsic": round(extrinsic, 2),
+                    {"strike": strike, "extrinsic": round(extrinsic, 2), "trigger": "dividend",
                      "dividend": float(amount), "ex_date": ex_date},
                     key=f"{strike}:{ex_date}"))
+                continue
+
+            # Base: an ITM short with near-zero extrinsic is assignable any time.
+            if (itm and dte is not None and dte > 0
+                    and extrinsic < config.ASSIGNMENT_EXTRINSIC_FLOOR):
+                out.append(_alert(
+                    "ASSIGNMENT_RISK", t,
+                    (f"{t} short {strike} extrinsic {extrinsic:.2f}/sh has collapsed below "
+                     f"the {config.ASSIGNMENT_EXTRINSIC_FLOOR:.2f} floor (deep ITM, {dte} DTE) "
+                     f"— assignable any time, no ex-div required."),
+                    ("Roll the short up/out to re-establish time value (or accept assignment "
+                     "deliberately: the short is covered by a LEAP, not stock, so assignment "
+                     "creates SHORT STOCK — never exercise the LEAP to cover)."),
+                    {"strike": strike, "extrinsic": round(extrinsic, 2), "trigger": "extrinsic",
+                     "floor": config.ASSIGNMENT_EXTRINSIC_FLOOR, "dte": dte},
+                    key=f"{strike}:extrinsic"))
     return out
 
 
@@ -579,6 +632,7 @@ def check_reconcile_stale(state: dict) -> list[dict]:
 EVALUATORS = [
     check_kill_switch,
     check_circuit_breaker,
+    check_whipsaw_exit,
     check_delta_uncovered,
     check_defend_position,
     check_buyback_75,

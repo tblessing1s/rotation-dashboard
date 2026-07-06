@@ -265,6 +265,16 @@ BUYBACK_MIN_DTE = 2            # HARD_CFM_RULE — ">2 days to expiration" leg o
 # stock, so the short call is effectively uncovered risk.
 LEAP_DELTA_FLOOR = 0.50
 
+# Assignment risk is fundamentally an EXTRINSIC problem, not a dividend problem: a
+# deep-ITM short is assignable whenever its extrinsic collapses to ~0 (the
+# counterparty forfeits no time value by exercising), no ex-date required — a
+# dividend just makes early exercise rational on a specific date. So the trigger
+# is "an ITM short's extrinsic below this floor", with the coming dividend as an
+# ESCALATION of it (extrinsic below the dividend before ex-div; see the ASSIGNMENT
+# section of the assignment/dividend rule). PROPOSED_DEFAULT floor — a few cents
+# of remaining time value per share.
+ASSIGNMENT_EXTRINSIC_FLOOR = 0.10
+
 # PROPOSED_DEFAULT — Schwab refresh tokens die at 7 days (no programmatic
 # renewal); alert at day 5 so re-auth happens before data goes dark.
 TOKEN_WARN_AGE_DAYS = 5
@@ -387,6 +397,21 @@ DELTA_HISTORY_DAYS = 30
 # rate-based earlier tier.
 DELTA_VELOCITY_DROP = 0.08
 DELTA_VELOCITY_WINDOW = 5
+
+
+# ---- Whipsaw circuit breaker (cumulative defend guard) ---------------------
+# The defend engine's individual roll-downs are each correct, but the WHIPSAW —
+# roll-down after roll-down in a slow grind, each locking a lower strike — is the
+# strategy's real killer, and no single check owns it: the RS kill switch and the
+# price circuit breaker can both stay untripped while defend bleeds the position
+# weekly. This is the cumulative guard, computed from the roll ledger the app
+# already derives: too many defensive rolls in a short window, OR cumulative roll
+# drag past a fraction of the position's capital -> recommend EXIT, not another
+# defend. HARD_CFM_RULE concept (whipsaw is the killer); the specific counts /
+# percent are PROPOSED_DEFAULT pending the roll-ledger data that validates them.
+WHIPSAW_DEFEND_ROLLS = 3       # defensive (reason="defend") rolls...
+WHIPSAW_WINDOW_WEEKS = 4       # ...within this trailing window, OR
+WHIPSAW_DRAG_PCT = 0.05        # cumulative roll drag > this fraction of position capital
 
 
 def alerts_dry_run_default() -> bool:
