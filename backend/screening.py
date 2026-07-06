@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime
 
 import config
 import data_handler
@@ -60,6 +61,71 @@ def warm_scan_cache() -> dict:
         return {"ok": True}
     except Exception as e:  # noqa: BLE001 — a warm-up must never break its caller
         return {"ok": False, "error": str(e)}
+
+
+# ---------------------------------------------------------------------------
+# Background scan runner — decouple the full-universe sweep from the request
+# ---------------------------------------------------------------------------
+# The heavy scan normally runs inside whichever Scan-tab request triggers it. On
+# a phone / installed PWA, backgrounding the app throttles JS and can kill the
+# in-flight fetch, abandoning a cold scan half-done. Running the sweep in a
+# detached daemon thread — kicked by a request that returns in milliseconds —
+# means the work survives the browser tab being backgrounded, navigated away, or
+# closed. The client polls scan_status(); results land in the same memo the
+# synchronous endpoints read, so a returning client is served warm.
+_scan_thread: threading.Thread | None = None
+_scan_guard = threading.Lock()
+_scan_state: dict = {"status": "idle", "started_at": None, "finished_at": None,
+                     "error": None}
+
+
+def _now_iso() -> str:
+    return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _run_background_scan() -> None:
+    result = warm_scan_cache()
+    with _scan_guard:
+        _scan_state.update(
+            status="done" if result.get("ok") else "error",
+            finished_at=_now_iso(),
+            error=None if result.get("ok") else result.get("error"),
+        )
+
+
+def start_background_scan() -> dict:
+    """Kick a full-universe scan in a detached daemon thread if one isn't already
+    running, and return the status immediately. Idempotent: a concurrent call
+    while a scan is in flight just returns the current status (one scan at a
+    time, deduped). The work is not tied to the triggering request, so it keeps
+    running even if the browser tab is backgrounded, switched, or closed."""
+    global _scan_thread
+    with _scan_guard:
+        if _scan_thread is not None and _scan_thread.is_alive():
+            return dict(_scan_state, running=True, fresh=_scan_fresh())
+        _scan_state.update(status="running", started_at=_now_iso(),
+                           finished_at=None, error=None)
+        _scan_thread = threading.Thread(target=_run_background_scan,
+                                        name="scan-runner", daemon=True)
+        _scan_thread.start()
+        return dict(_scan_state, running=True, fresh=_scan_fresh())
+
+
+def _scan_fresh() -> bool:
+    """True when the memoized full-universe sweeps are warm (results available
+    without a recompute) — i.e. a returning client can render immediately."""
+    return peek_cached("scorecard:full", max_age=_RESULT_TTL) is not None
+
+
+def scan_status() -> dict:
+    """Current background-scan state for the client to poll: idle / running /
+    done / error, the start/finish stamps, and whether results are warm."""
+    with _scan_guard:
+        running = _scan_thread is not None and _scan_thread.is_alive()
+        st = dict(_scan_state)
+    st["running"] = running
+    st["fresh"] = _scan_fresh()
+    return st
 
 
 def peek_cached(key: str, max_age: float | None = None):
