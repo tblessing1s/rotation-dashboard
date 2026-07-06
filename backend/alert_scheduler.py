@@ -73,6 +73,32 @@ def _warm_scan() -> None:
         logger.warning("scan cache warm-up failed: %s", e)
 
 
+def _market_hours(now: datetime) -> bool:
+    """True during regular US equity trading hours (Mon-Fri, 09:30-16:00 ET).
+    Holidays aren't modelled — a holiday just force-refreshes an unchanged
+    hot set, which the freshness cache makes near-free."""
+    if now.weekday() >= 5:
+        return False
+    return "09:30" <= now.strftime("%H:%M") <= "16:00"
+
+
+def _maybe_hot_refresh(now: datetime) -> None:
+    """During market hours, keep the live-risk names (open positions, entry
+    candidates, earnings-imminent) current by force-refreshing the small "hot"
+    set on the HOT_REFRESH_MINUTES cadence — while the long tail rides the daily
+    pre-open warm-up. Best-effort: logged, never fatal to the tick."""
+    import refresh_policy
+    if not refresh_policy.enabled() or not _market_hours(now):
+        return
+    try:
+        result = refresh_policy.maybe_refresh_hot(now)
+        if result and result["count"]:
+            logger.info("hot refresh: %d tickers (%s)", result["count"],
+                        ", ".join(result["tickers"][:8]))
+    except Exception as e:  # noqa: BLE001 — a refresh must never break the tick
+        logger.warning("hot refresh failed: %s", e)
+
+
 def due_slots(now: datetime, last_run: dict[str, date] | None = None) -> list[str]:
     """Schedule slots that should run at `now` (ET): time reached, market day,
     not yet run today. Pure so it's unit-testable without threads."""
@@ -109,6 +135,11 @@ def _tick() -> None:
             maintenance.nightly_refresh()
         except Exception as e:  # noqa: BLE001 — a failed refresh must not kill the thread
             logger.error("nightly maintenance failed: %s", e)
+
+    # Keep the live-risk names fresh intraday. Runs every tick (its own cadence
+    # gate rate-limits the actual refresh), so it must sit BEFORE the slot-based
+    # early return below.
+    _maybe_hot_refresh(now)
 
     due = due_slots(now)
     if not due:

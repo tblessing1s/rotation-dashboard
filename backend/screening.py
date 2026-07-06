@@ -62,6 +62,20 @@ def warm_scan_cache() -> dict:
         return {"ok": False, "error": str(e)}
 
 
+def peek_cached(key: str, max_age: float | None = None):
+    """Return a memoized scan result without ever computing one — a read-only peek
+    (unlike ``_cached``, which computes on a miss). ``max_age`` (seconds) bounds
+    how stale a hit may be; None returns any present value. Used by the refresh
+    policy to read the last GO/earnings candidate pool cheaply on its tight
+    cadence, so picking the hot set never triggers a fresh full-universe sweep."""
+    hit = _results.get(key)
+    if not hit:
+        return None
+    if max_age is not None and time.time() - hit[0] > max_age:
+        return None
+    return hit[1]
+
+
 def _cached(key: str, fn, ttl: int = _RESULT_TTL, store_if=None):
     hit = _results.get(key)
     if hit and time.time() - hit[0] < ttl:

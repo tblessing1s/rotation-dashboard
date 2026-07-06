@@ -98,6 +98,7 @@ export const api = {
   portfolioRisk: () => request("/api/portfolio-risk"),
   dataHealth: () => request("/api/data-health"),
   maintenanceRefresh: () => request("/api/maintenance/refresh", { method: "POST" }),
+  refreshHot: () => request("/api/refresh/hot", { method: "POST" }),
   alerts: () => request("/api/alerts"),
   runAlerts: (dryRun) =>
     request("/api/alerts/run", {

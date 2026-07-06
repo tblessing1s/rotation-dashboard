@@ -707,13 +707,17 @@ def api_data_health():
     failures are visible instead of quietly serving stale frames."""
     try:
         import dividends
-        key_syms = [config.BENCHMARK, config.VIX_SYMBOL]
+        import refresh_policy
         state = log.load_state()
-        key_syms += [p.get("ticker", "") for p in state.get("positions", [])
-                     if p.get("status") != "closed"]
+        # Report cache age for the hot set (positions + live candidates) — those
+        # are the names whose staleness actually matters intraday.
+        hot = refresh_policy.hot_tickers(state)
+        key_syms = [config.BENCHMARK, config.VIX_SYMBOL] + hot
         return jsonify({
             "providers": data_handler.health(),
-            "ohlcv_cache_age_hours": {s: data_handler.cache_age_hours(s) for s in key_syms if s},
+            "ohlcv_cache_age_hours": {s: data_handler.cache_age_hours(s)
+                                      for s in dict.fromkeys(s for s in key_syms if s)},
+            "hot_refresh": refresh_policy.status(),
             "earnings_cache": earnings.cache_health(),
             "dividends_cache": dividends.cache_health(),
             "schwab_token": schwab_api.token_status(),
@@ -815,6 +819,19 @@ def api_maintenance_refresh():
     try:
         import maintenance
         return jsonify(maintenance.nightly_refresh())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/refresh/hot", methods=["POST"])
+def api_refresh_hot():
+    """Force-refresh the hot set (open positions + live entry/earnings candidates)
+    daily bars now, bypassing the freshness window. The scheduler does this
+    automatically on the HOT_REFRESH_MINUTES cadence during market hours; this is
+    the on-demand path for 'refresh these stocks now'."""
+    try:
+        import refresh_policy
+        return jsonify(refresh_policy.maybe_refresh_hot(force=True))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
