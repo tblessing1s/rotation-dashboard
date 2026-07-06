@@ -99,6 +99,7 @@ maxes out.
 | `GET /api/regime` | Market regime: status (green/yellow/red), breadth, VIX, SPY trend. |
 | `GET /api/sectors` | Per-sector RS3M, breadth, ATR-expanding, status. |
 | `GET /api/stock-filter?sector=XLK` | Candidates with RS3M vs SPY/Sector, ATR%, consolidating, status. |
+| `POST /api/scan/refresh` · `GET /api/scan/status` | Run the full-universe scan as a **detached server-side job** and poll it. The sweep keeps running even if the browser tab is backgrounded, switched, or closed; a returning client reads the memoized result warm. |
 | `GET /api/entry-gate?ticker=ON` | The 4-level gate, pass/fail per level, verdict. |
 | `GET /api/roll-suggestion?ticker=ON` | Suggested weekly short strike (stock − 1.5×ATR). |
 | `GET /api/roll-options?ticker=ON` | Roll picker data: current short + live buyback, plus every expiration to ROLL_MAX_DTE with nearby strikes (choose week + strike). |

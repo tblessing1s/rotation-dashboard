@@ -56,6 +56,10 @@ export const api = {
   stockFilter: (sector) => request(`/api/stock-filter${sector ? `?sector=${sector}` : ""}`),
   scorecard: (tickers) => request(`/api/scan/scorecard${tickers ? `?tickers=${tickers}` : ""}`),
   scanReady: (tickers) => request(`/api/scan/ready${tickers ? `?tickers=${tickers}` : ""}`),
+  // Kick a detached server-side scan (keeps running if the tab is backgrounded)
+  // and poll its status. The refresh POST returns immediately.
+  scanRefresh: () => request("/api/scan/refresh", { method: "POST" }),
+  scanStatus: () => request("/api/scan/status"),
   entryGate: (ticker) => request(`/api/entry-gate?ticker=${ticker}`),
   accountGate: (ticker, params = {}) => {
     const q = Object.entries(params)

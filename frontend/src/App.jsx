@@ -15,6 +15,7 @@ import AlertsPanel from "./components/AlertsPanel.jsx";
 import HistoryTab from "./components/HistoryTab.jsx";
 import DataHealth from "./components/DataHealth.jsx";
 import ReadyToEnter from "./components/ReadyToEnter.jsx";
+import ScanProgress from "./components/ScanProgress.jsx";
 
 const TABS = ["Scan", "Execute", "Theta", "Kill Switch", "Positions", "History", "Checklist"];
 
@@ -37,6 +38,9 @@ export default function App() {
   // Scan details (full-universe Scorecard + Stock Filter) stay UNMOUNTED until
   // opened, so their ~500-ticker sweeps aren't fetched on every Scan-tab visit.
   const [scanDetails, setScanDetails] = React.useState(false);
+  // Bumped when the detached background scan finishes, so the Scan panels reload
+  // with the freshly-warmed data (see ScanProgress).
+  const [scanNonce, setScanNonce] = React.useState(0);
   // Build identity shown in the footer (version · commit). Fetched once; the
   // /api/version endpoint is open, so this works before/without a session too.
   const [version, setVersion] = React.useState(null);
@@ -158,8 +162,9 @@ export default function App() {
         <SchwabStatus demo={demo} />
         {tab === "Scan" && (
           <div className="grid gap-4">
+            <ScanProgress onComplete={() => setScanNonce((n) => n + 1)} />
             <RegimeScanner onStatus={setRegimeStatus} />
-            <ReadyToEnter onSelectStock={selectStock} />
+            <ReadyToEnter onSelectStock={selectStock} refreshKey={scanNonce} />
             <div>
               <button
                 onClick={() => setScanDetails((v) => !v)}
@@ -175,8 +180,8 @@ export default function App() {
             </div>
             {scanDetails && (
               <>
-                <Scorecard regimeStatus={regimeStatus} />
-                <StockFilter onSelectStock={selectStock} />
+                <Scorecard regimeStatus={regimeStatus} refreshKey={scanNonce} />
+                <StockFilter onSelectStock={selectStock} refreshKey={scanNonce} />
               </>
             )}
           </div>

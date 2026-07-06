@@ -33,10 +33,10 @@ function SectorBar({ sectors, selected, onSelect }) {
   );
 }
 
-export default function StockFilter({ onSelectStock }) {
+export default function StockFilter({ onSelectStock, refreshKey }) {
   const [sector, setSector] = React.useState("");
-  const sectorsQ = useApi(api.sectors, []);
-  const stocksQ = useApi(() => api.stockFilter(sector), [sector]);
+  const sectorsQ = useApi(api.sectors, [refreshKey]);
+  const stocksQ = useApi(() => api.stockFilter(sector), [sector, refreshKey]);
 
   return (
     <Card title="Stock Filter (Levels 2–4)" right={stocksQ.loading ? <span className="flex items-center gap-1.5 text-xs text-slate-500"><Spinner size="h-3 w-3" />scanning…</span> : null}>

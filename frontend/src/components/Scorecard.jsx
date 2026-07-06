@@ -147,8 +147,8 @@ function ScoreRow({ row, expanded, onToggle }) {
   );
 }
 
-export default function Scorecard({ regimeStatus }) {
-  const { data, error, loading, reload } = useApi(api.scorecard, []);
+export default function Scorecard({ regimeStatus, refreshKey }) {
+  const { data, error, loading, reload } = useApi(api.scorecard, [refreshKey]);
   const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);

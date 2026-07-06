@@ -96,6 +96,28 @@ def api_stock_filter():
         return _err(e)
 
 
+@app.route("/api/scan/refresh", methods=["POST"])
+def api_scan_refresh():
+    """Start a full-universe scan in a detached server-side job (deduped — one at
+    a time) and return its status immediately. Because the sweep runs off-request,
+    it keeps going even if the client tab is backgrounded, switched, or closed;
+    the client polls /api/scan/status and reads results warm when it returns."""
+    try:
+        return jsonify(screening.start_background_scan())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/scan/status")
+def api_scan_status():
+    """Poll the background scan: running / done / error, timestamps, and whether
+    the memoized results are warm (ready to render)."""
+    try:
+        return jsonify(screening.scan_status())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/scan/scorecard")
 def api_scorecard():
     """Numeric CFM scorecard, one row per ticker (default: all holdings). Optional
