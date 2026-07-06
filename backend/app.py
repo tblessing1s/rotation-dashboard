@@ -692,7 +692,13 @@ def api_config():
             "strike_table": config.STRIKE_TABLE,
             "strike_posture": strike_policy.get_posture(),
         },
-        "live_trading": executor.live_enabled(),
+        # Effective transmit capability, NOT the raw flag: in demo mode a trade
+        # never reaches the broker (see executor.live_transmit), so the Paper/Live
+        # badge must read paper even when CFM_LIVE_TRADING is on. live_trading_flag
+        # exposes the raw env flag for diagnostics.
+        "live_trading": executor.live_transmit(),
+        "live_trading_flag": executor.live_enabled(),
+        "demo": config.demo_enabled(),
         "schwab": schwab_api.token_status(),
         "alpha_vantage_configured": __import__("alpha_vantage").configured(),
     })

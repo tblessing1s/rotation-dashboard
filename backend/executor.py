@@ -66,6 +66,30 @@ def live_enabled() -> bool:
     return os.environ.get("CFM_LIVE_TRADING", "").strip() in ("1", "true", "yes")
 
 
+def live_transmit() -> bool:
+    """Whether an executed order may actually be transmitted to the broker.
+
+    Two independent switches must BOTH allow it: CFM_LIVE_TRADING must be on, AND
+    the session must NOT be in demo/paper mode. Demo mode swaps in a synthetic
+    price feed and a separate paper book (config.active_state_path), so placing a
+    real order from a demo session would trade the LIVE account against fake
+    prices — a hard safety no. This is the single choke point the entire
+    live-order path is gated on; ``mode`` is derived from it, so a demo session
+    always records the honest logged/paper path and never reaches the broker."""
+    return live_enabled() and not config.demo_enabled()
+
+
+def _assert_transmit_allowed(action: str) -> None:
+    """Defense-in-depth broker-boundary guard: refuse to place a real order from a
+    demo/paper session even if a caller reached here without the mode check.
+    execute() already downgrades a demo session to the logged path, so this is a
+    backstop that guarantees the invariant can't be bypassed by a future path."""
+    if config.demo_enabled():
+        raise schwab_api.SchwabError(
+            f"Refusing to place a live {action} order in demo/paper mode — "
+            "switch to Live data to trade the real account.")
+
+
 def _capture_price(ticker: str, supplied: float | None) -> tuple[float | None, str]:
     if supplied is not None:
         return float(supplied), "supplied"
@@ -140,7 +164,7 @@ def execute(payload: dict) -> dict:
 
     log.save_state(state)  # persist the shell position before recording the fill
 
-    mode = "live" if live_enabled() else "logged"
+    mode = "live" if live_transmit() else "logged"
 
     if action == "roll_short":
         return _roll_short(payload, ticker, contracts, stock_price, mode, price_source)
@@ -230,7 +254,7 @@ def _adjustment(payload: dict, ticker: str) -> dict:
     strike = payload.get("strike")
     price = payload.get("price")
     linked = payload.get("linked_diff_id")
-    mode = "live" if live_enabled() else "logged"
+    mode = "live" if live_transmit() else "logged"
     execution = {
         "ticker": ticker, "action": "adjustment",
         "instrument": payload.get("instrument"), "instrument_type": itype,
@@ -279,7 +303,7 @@ def resolve_expiry(diff_id: str) -> dict:
     close_payload = {"ticker": ticker, "strike": strike, "contracts": contracts,
                      "close_price_per_share": 0.0, "stock_price": stock_price}
     execution, apply = _close_short(close_payload, ticker, strike, contracts, stock_price)
-    execution["mode"] = "live" if live_enabled() else "logged"
+    execution["mode"] = "live" if live_transmit() else "logged"
     execution["reason"] = "expired_worthless"
     execution["linked_diff_id"] = diff_id
     if expiry:
@@ -388,6 +412,7 @@ def _limit_price(action, payload):
 def _place_live(payload, ticker, action, contracts, strike, stock_price, price_source):
     """Transmit a real single-leg LIMIT order and park it as pending. The fill is
     confirmed (and committed) later via order_status; cancel_order drops it."""
+    _assert_transmit_allowed(action)
     client = data_handler.client()
     account_hash = client.primary_account_hash()
 
@@ -727,6 +752,7 @@ def _roll_short(payload, ticker, contracts, stock_price, mode, price_source):
 
 def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
     """Transmit the roll as a single two-leg NET order and park it as pending."""
+    _assert_transmit_allowed("roll_short")
     client = data_handler.client()
     account_hash = client.primary_account_hash()
 
@@ -985,6 +1011,7 @@ def _commit_exit(payload, ticker, stock_price, mode, price_source):
 def _place_live_exit(payload, ticker, stock_price, price_source):
     """Transmit the exit as ONE multi-leg NET order (sell-to-close the LEAP +
     buy-to-close every open short) and park it pending; commit on fill."""
+    _assert_transmit_allowed("close_position_atomic")
     state = log.load_state()
     position = log.find_position(state, ticker)
     if not position or not (position.get("leap") or {}):
@@ -1161,6 +1188,7 @@ def _commit_leap_roll(payload, ticker, position, stock_price, mode, price_source
 def _place_live_leap_roll(payload, ticker, position, stock_price, price_source, est):
     """Transmit a LEAP roll as ONE two-leg NET order: sell-to-close the old LEAP
     + buy-to-open the new one. Committed on fill via the same lifecycle."""
+    _assert_transmit_allowed("roll_leap")
     leap = position["leap"]
     n = int(leap.get("contracts") or 0)
     new_strike = payload.get("to_strike", (est.get("new_leap") or {}).get("strike"))
