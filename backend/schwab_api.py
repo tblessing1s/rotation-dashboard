@@ -33,6 +33,16 @@ ACCOUNTS_BASE = "https://api.schwabapi.com/trader/v1"
 REFRESH_TOKEN_TTL_DAYS = 7
 SYMBOL_MAP = {"^VIX": "$VIX", "^NYA": "$NYA", "^GSPC": "$SPX"}
 
+# Schwab's market-data + trader hosts sit behind Akamai bot management, which
+# returns an HTML "Access Denied" 403 for requests that don't look like they came
+# from a browser — notably the default ``python-requests/x.y`` User-Agent from a
+# cloud host IP. The OAuth token host is separate infra and isn't gated the same
+# way, so a token can refresh cleanly while every data/chain call 403s. Sending a
+# real browser User-Agent on every request clears the block. (The option-chain
+# endpoint is the most sensitive because it has no local cache to fall back on.)
+USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
+
 _TOKEN_FILE = os.path.join(config.DATA_DIR, "schwab_token.json")
 _token_lock = threading.Lock()
 
@@ -138,7 +148,8 @@ def exchange_code(code: str, redirect_uri: str) -> dict:
     resp = requests.post(
         TOKEN_URL,
         headers={"Authorization": f"Basic {basic}",
-                 "Content-Type": "application/x-www-form-urlencoded"},
+                 "Content-Type": "application/x-www-form-urlencoded",
+                 "User-Agent": USER_AGENT},
         data={"grant_type": "authorization_code", "code": code, "redirect_uri": redirect_uri},
         timeout=20,
     )
@@ -194,7 +205,8 @@ class SchwabClient:
         resp = requests.post(
             TOKEN_URL,
             headers={"Authorization": f"Basic {basic}",
-                     "Content-Type": "application/x-www-form-urlencoded"},
+                     "Content-Type": "application/x-www-form-urlencoded",
+                     "User-Agent": USER_AGENT},
             data={"grant_type": "refresh_token", "refresh_token": refresh},
             timeout=20,
         )
@@ -213,7 +225,11 @@ class SchwabClient:
         return self._access_token
 
     def _auth_headers(self, extra: dict | None = None) -> dict:
-        h = {"Authorization": f"Bearer {self._token()}", "Accept": "application/json"}
+        # User-Agent is required: Schwab's Akamai edge 403s a default requests UA
+        # from a cloud host. Covers every market-data + trader call (quotes, price
+        # history, chains, instruments, accounts, orders).
+        h = {"Authorization": f"Bearer {self._token()}", "Accept": "application/json",
+             "User-Agent": USER_AGENT}
         if extra:
             h.update(extra)
         return h
@@ -294,6 +310,14 @@ class SchwabClient:
         if to_date:
             params["toDate"] = to_date
         resp = requests.get(OPTION_CHAIN_URL, headers=self._auth_headers(), params=params, timeout=20)
+        if resp.status_code == 403 and "Access Denied" in (resp.text or ""):
+            # Akamai edge block (HTML body), distinct from an app-level 403. If it
+            # persists with a browser User-Agent set, it points at the Schwab app's
+            # market-data entitlement rather than the request itself.
+            raise SchwabError(
+                "schwab option chain: HTTP 403 blocked at the Schwab/Akamai edge — "
+                "the request was denied before reaching the API. Confirm the Schwab "
+                "app is approved for market data; a token refresh will not fix this.")
         if resp.status_code != 200:
             raise SchwabError(f"schwab option chain: HTTP {resp.status_code} {resp.text[:200]}")
         return resp.json()
