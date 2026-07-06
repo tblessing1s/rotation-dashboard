@@ -122,7 +122,8 @@ def portfolio_view(state: dict) -> dict:
         vals = [r[key] for r in rows if r.get(key) is not None]
         return round(sum(vals), 2) if vals else None
 
-    deployed = float(state.get("metadata", {}).get("capital_deployed") or 0)
+    import position_manager
+    deployed = position_manager.deployed_capital(state)
 
     # Live Schwab balance when connected, else the stored manual fallback
     # (same resolver the Level 5 gate and the Capital card use).

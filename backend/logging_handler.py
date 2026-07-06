@@ -316,7 +316,8 @@ def recompute_derived(state: dict) -> dict:
         if d[:4] == cur_year:
             totals["ytd"] += net
 
-    deployed = float(state.get("metadata", {}).get("capital_deployed") or 0)
+    import position_manager  # deferred: derive deployed from open positions
+    deployed = position_manager.deployed_capital(state)
     totals["pct_deployed"] = round(totals["ytd"] / deployed, 4) if deployed else 0
     for k in ("this_week", "this_month", "ytd"):
         totals[k] = round(totals[k], 2)

@@ -45,6 +45,18 @@ def test_enrich_short_decay_and_roll_now():
     assert pm.enrich_short(dict(sc, current_bid=0.90), 134.0, None)["roll_now"] is False
 
 
+def test_deployed_capital_derives_from_open_positions():
+    state = {"positions": [
+        {"ticker": "A", "status": "active", "leap": {"cost_basis": 12000},
+         "shares": {"count": 100, "cost_basis_per_share": 50.0}},   # 12000 + 5000
+        {"ticker": "B", "status": "active", "leap": {"cost_basis": 8000},
+         "shares": {"count": 0}},                                    # 8000
+        {"ticker": "C", "status": "closed", "leap": {"cost_basis": 99999}},  # excluded
+    ]}
+    assert pm.position_capital(state["positions"][0]) == 17000.0
+    assert pm.deployed_capital(state) == 25000.0
+
+
 def test_enrich_short_extrinsic_capture():
     sc = {"strike": 132, "contracts": 5, "entry_premium_total": 600.0,
           "entry_extrinsic_per_share": 0.80, "current_bid": 1.20, "dte": 4}
