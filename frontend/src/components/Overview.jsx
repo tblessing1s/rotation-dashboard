@@ -1,0 +1,364 @@
+import React from "react";
+import { api } from "../api.js";
+import { Card, Stat, Light, Pill, Meter, Loading, ErrorState, money, fmt, pct, useApi } from "./ui.jsx";
+
+// The dashboard landing tab: one screen that answers "where does everything
+// stand and what needs me today." It leans entirely on existing endpoints
+// (regime · positions · theta-ledger · kill-switch · alerts) — the same
+// position-derived signals the detail tabs render, gathered into a single
+// glance with one-click routing into whichever tab owns the fix.
+
+const REGIME_COPY = {
+  green: "Market good — clear to hunt entries.",
+  yellow: "Caution — tighten criteria, no fresh risk.",
+  red: "Wait — regime risk-off, stand down.",
+};
+
+const SEV_RANK = { critical: 0, high: 1, medium: 2, low: 3 };
+const SEV_TONE = {
+  critical: "border-rose-500/50 bg-rose-500/10 text-rose-200",
+  high: "border-amber-500/50 bg-amber-500/10 text-amber-200",
+  medium: "border-sky-500/40 bg-sky-500/5 text-sky-200",
+  low: "border-slate-700 bg-slate-800/40 text-slate-300",
+};
+const SEV_PILL = { critical: "red", high: "yellow", medium: "unknown", low: "unknown" };
+
+// Fold the position/kill-switch/capital signals into one severity-ranked list of
+// things to act on. Each item carries a go() that routes into the owning tab.
+function buildActionItems({ positions, capital, killSwitch }, nav) {
+  const items = [];
+  const push = (severity, ticker, label, go) => items.push({ severity, ticker, label, go });
+
+  if (capital && capital.reserve_ok === false) {
+    push("high", null,
+      `Reserve underfunded — ${money(capital.operating_cash)} cash vs ${money(capital.reserve_required)} required`,
+      () => nav.tab("Positions"));
+  }
+
+  for (const p of positions) {
+    const t = p.ticker;
+    if (p.needs_review) {
+      push("critical", t, `${t} — state diverged from the broker; resolve before trading`,
+        () => nav.focus(t));
+    }
+    if (p.defend) {
+      push("high", t, `${t} — stock below the short strike; stage a defensive roll`,
+        () => nav.roll(t, "defend"));
+    }
+    if (p.earnings?.warning) {
+      const d = p.earnings.days_until;
+      push("high", t,
+        `${t} — earnings ${p.earnings.date}${d != null ? ` (${d}d)` : ""}; roll deep-ITM or exit`,
+        () => nav.focus(t));
+    }
+    for (const sc of p.short_calls || []) {
+      if (sc.dte != null && sc.dte <= 2) {
+        push("high", t, `${t} — short ${fmt(sc.strike, 0)}C expiring (${sc.dte} DTE); roll it`,
+          () => nav.roll(t, "expiring"));
+      } else if (sc.roll_now) {
+        push("medium", t, `${t} — short ${fmt(sc.strike, 0)}C ≥75% decayed; roll to capture juice`,
+          () => nav.roll(t, "75%-rule"));
+      }
+    }
+    if (p.leap_health?.roll_due) {
+      push("medium", t, `${t} — LEAP roll due${p.leap?.dte != null ? ` (${p.leap.dte} DTE)` : ""}`,
+        () => nav.focus(t));
+    }
+  }
+
+  for (const k of killSwitch || []) {
+    if (!k.alert) continue;
+    push(k.status === "red" ? "critical" : "high", k.ticker,
+      `${k.ticker} — kill switch: ${k.suggested_action}`,
+      () => nav.tab("Kill Switch"));
+  }
+
+  items.sort((a, b) => (SEV_RANK[a.severity] ?? 9) - (SEV_RANK[b.severity] ?? 9));
+  return items;
+}
+
+function ActionItems({ items }) {
+  if (items.length === 0) {
+    return (
+      <Card title="Needs attention">
+        <p className="text-sm text-emerald-300">All clear — nothing needs action right now.</p>
+      </Card>
+    );
+  }
+  return (
+    <Card title={`Needs attention — ${items.length}`}>
+      <ul className="space-y-2">
+        {items.map((it, i) => (
+          <li key={i}>
+            <button
+              onClick={it.go}
+              className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm transition hover:brightness-125 ${
+                SEV_TONE[it.severity] || SEV_TONE.low
+              }`}
+            >
+              <Pill status={SEV_PILL[it.severity]}>{it.severity}</Pill>
+              <span className="min-w-0 flex-1 text-slate-100">{it.label}</span>
+              <span className="shrink-0 text-xs opacity-70">→</span>
+            </button>
+          </li>
+        ))}
+      </ul>
+    </Card>
+  );
+}
+
+function RegimeHero({ regime }) {
+  const r = regime || {};
+  return (
+    <Card title="Market Regime" right={<Pill status={r.status}>{r.status || "—"}</Pill>}>
+      <div className="flex items-center gap-4">
+        <Light status={r.status} size="h-9 w-9" />
+        <div className="min-w-0">
+          <div className="text-base font-semibold text-slate-100">{(r.status || "—").toUpperCase()}</div>
+          <div className="text-xs text-slate-400">{REGIME_COPY[r.status] || ""}</div>
+        </div>
+      </div>
+      <div className="mt-4 grid grid-cols-3 gap-3">
+        <Stat label="Breadth" value={r.breadth != null ? `${fmt(r.breadth, 0)}%` : "—"} />
+        <Stat label="VIX" value={fmt(r.vix, 1)} tone={r.vix == null ? "text-slate-500" : "text-slate-100"} />
+        <Stat label="SPY" value={(r.spy_trend || "—").toUpperCase()} sub={`MA21 ${fmt(r.spy_dist_ma21, 1)}%`} />
+      </div>
+    </Card>
+  );
+}
+
+function BookSummary({ capital, juice }) {
+  const cap = capital || {};
+  const ms = cap.milestones || {};
+  const totals = juice || {};
+  return (
+    <Card title="The book">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <Stat label="Deployed" value={money(cap.capital_deployed)} />
+        <Stat label="Operating cash" value={money(cap.operating_cash)}
+              sub={cap.operating_cash_source === "schwab" ? "live from Schwab" : undefined} />
+        <Stat label="Reserve req." value={money(cap.reserve_required)}
+              tone={cap.reserve_ok ? "text-slate-100" : "text-rose-300"}
+              sub={cap.reserve_ok ? "funded" : "underfunded"} />
+        <Stat label="Juice YTD" value={money(cap.juice_ytd ?? totals.ytd)} tone="text-emerald-300" />
+      </div>
+      {(ms.half_nut || ms.quit_safe) && (
+        <div className="mt-5 grid gap-4 sm:grid-cols-2">
+          {["half_nut", "quit_safe"].map((k) => (
+            ms[k] && (
+              <div key={k}>
+                <div className="mb-1 flex justify-between text-xs">
+                  <span className="text-slate-300">{k === "half_nut" ? "Half-nut ($/mo)" : "Quit-safe ($/mo)"}</span>
+                  <span className="text-slate-400">{money(ms[k].current)} / {money(ms[k].target)}</span>
+                </div>
+                <Meter pct={ms[k].pct} tone="bg-emerald-500" />
+              </div>
+            )
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function JuiceCard({ juice, payback }) {
+  const t = juice || {};
+  const rows = Object.entries(payback || {});
+  return (
+    <Card title="Net juice">
+      <div className="grid grid-cols-3 gap-3">
+        <Stat label="This week" value={money(t.this_week)} tone="text-emerald-300" />
+        <Stat label="This month" value={money(t.this_month)} />
+        <Stat label="YTD" value={money(t.ytd)} />
+      </div>
+      {rows.length > 0 && (
+        <div className="mt-4 space-y-3 border-t border-slate-800 pt-4">
+          <div className="text-xs uppercase tracking-wide text-slate-500">Extrinsic payback</div>
+          {rows.map(([ticker, p]) => (
+            <div key={ticker}>
+              <div className="mb-1 flex justify-between text-xs">
+                <span className="font-semibold text-slate-200">{ticker}</span>
+                <span className="text-slate-400">{fmt(p.pct_complete, 0)}%</span>
+              </div>
+              <Meter pct={p.pct_complete} tone={p.pct_complete >= 100 ? "bg-emerald-400" : "bg-sky-500"} />
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
+// Compact per-position row — the same badges the Positions tab shows, condensed.
+function PositionsGlance({ positions, killByTicker, nav }) {
+  if (positions.length === 0) {
+    return (
+      <Card title="Positions">
+        <p className="text-sm text-slate-500">No open positions. Scan for an entry to get started.</p>
+      </Card>
+    );
+  }
+  return (
+    <Card title={`Positions — ${positions.length}`}>
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
+              <th className="py-1 pr-3">Ticker</th>
+              <th className="py-1 pr-3">Stock</th>
+              <th className="py-1 pr-3">LEAP</th>
+              <th className="py-1 pr-3">Shorts</th>
+              <th className="py-1 pr-3">Flags</th>
+            </tr>
+          </thead>
+          <tbody>
+            {positions.map((p) => {
+              const leap = p.leap || {};
+              const shorts = p.short_calls || [];
+              const ks = killByTicker[p.ticker];
+              return (
+                <tr key={p.ticker} className="border-t border-slate-800/60">
+                  <td className="py-1.5 pr-3">
+                    <button onClick={() => nav.focus(p.ticker)}
+                            className="font-semibold text-slate-100 hover:text-emerald-300">
+                      {p.ticker}
+                    </button>
+                    <span className="ml-2 text-xs text-slate-500">{p.sector || ""}</span>
+                  </td>
+                  <td className="py-1.5 pr-3 text-slate-300">{fmt(p.stock_price, 2)}</td>
+                  <td className="py-1.5 pr-3 text-slate-300">
+                    {leap.contracts || 0}×{fmt(leap.strike, 0)}C
+                    <span className="text-slate-500"> · {leap.dte ?? "—"}d</span>
+                  </td>
+                  <td className="py-1.5 pr-3 text-slate-300">{shorts.length}</td>
+                  <td className="py-1.5 pr-3">
+                    <div className="flex flex-wrap gap-1">
+                      {p.needs_review && <Flag tone="rose">review</Flag>}
+                      {p.defend && <Flag tone="rose">defend</Flag>}
+                      {ks?.alert && <Flag tone={ks.status === "red" ? "rose" : "amber"}>kill switch</Flag>}
+                      {p.earnings?.warning && <Flag tone="amber">earnings</Flag>}
+                      {shorts.some((s) => s.dte != null && s.dte <= 2) && <Flag tone="amber">expiring</Flag>}
+                      {shorts.some((s) => s.roll_now) && <Flag tone="emerald">roll now</Flag>}
+                      {p.leap_health?.roll_due && <Flag tone="amber">leap roll</Flag>}
+                      {p.wash_sale_flag && <Flag tone="amber">wash-sale</Flag>}
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+const FLAG_TONE = {
+  rose: "border-rose-500/40 bg-rose-500/15 text-rose-300",
+  amber: "border-amber-500/40 bg-amber-500/15 text-amber-300",
+  emerald: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
+};
+function Flag({ tone, children }) {
+  return (
+    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${FLAG_TONE[tone] || FLAG_TONE.amber}`}>
+      {children}
+    </span>
+  );
+}
+
+export default function Overview({ onNavigate, onSelectStock, onAction, onRegimeStatus }) {
+  const regime = useApi(api.regime, [], 5 * 60 * 1000);
+  const positions = useApi(api.positions, [], null);
+  const theta = useApi(api.thetaLedger, [], null);
+  const kill = useApi(api.killSwitch, [], 5 * 60 * 1000);
+
+  // Routing helpers passed down to every clickable signal.
+  const nav = React.useMemo(() => ({
+    tab: (t) => onNavigate?.(t),
+    focus: (ticker) => onAction?.("focus", ticker),
+    roll: (ticker, reason) => onAction?.("roll", ticker, reason),
+    enter: (ticker) => onSelectStock?.(ticker),
+  }), [onNavigate, onAction, onSelectStock]);
+
+  // Feed the navbar's regime light so it stays lit on the Overview landing,
+  // not only when the Scan tab's RegimeScanner is mounted.
+  React.useEffect(() => {
+    if (regime.data?.status) onRegimeStatus?.(regime.data.status);
+  }, [regime.data, onRegimeStatus]);
+
+  const openPositions = React.useMemo(
+    () => (positions.data?.positions || []).filter((p) => p.status !== "closed"),
+    [positions.data],
+  );
+  const killPositions = kill.data?.positions || [];
+  const killByTicker = React.useMemo(() => {
+    const out = {};
+    for (const k of killPositions) out[k.ticker] = k;
+    return out;
+  }, [killPositions]);
+
+  const actionItems = React.useMemo(
+    () => buildActionItems({
+      positions: openPositions,
+      capital: positions.data?.capital,
+      killSwitch: killPositions,
+    }, nav),
+    [openPositions, positions.data, killPositions, nav],
+  );
+
+  const loading = regime.loading && !regime.data && positions.loading && !positions.data;
+  if (loading) return <Card title="Overview"><Loading label="Gathering your dashboard…" /></Card>;
+
+  const cap = positions.data?.capital || {};
+  const juice = theta.data?.totals || {};
+  const payback = theta.data?.extrinsic_payback || {};
+
+  return (
+    <div className="grid gap-4">
+      {/* Top KPI band */}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Card>
+          <div className="flex items-center justify-between">
+            <div className="text-xs uppercase tracking-wide text-slate-500">Regime</div>
+            <Light status={regime.data?.status} />
+          </div>
+          <div className="mt-1 text-2xl font-semibold text-slate-100">
+            {(regime.data?.status || "—").toUpperCase()}
+          </div>
+        </Card>
+        <Card>
+          <div className="text-xs uppercase tracking-wide text-slate-500">Open positions</div>
+          <div className="mt-1 text-2xl font-semibold text-slate-100">{openPositions.length}</div>
+        </Card>
+        <Card>
+          <div className="text-xs uppercase tracking-wide text-slate-500">Net juice · week</div>
+          <div className="mt-1 text-2xl font-semibold text-emerald-300">{money(juice.this_week)}</div>
+        </Card>
+        <Card>
+          <div className="text-xs uppercase tracking-wide text-slate-500">Juice · YTD</div>
+          <div className="mt-1 text-2xl font-semibold text-slate-100">
+            {money(cap.juice_ytd ?? juice.ytd)}
+          </div>
+        </Card>
+      </div>
+
+      {positions.error ? (
+        <Card title="Needs attention"><ErrorState error={positions.error} onRetry={positions.reload} /></Card>
+      ) : (
+        <ActionItems items={actionItems} />
+      )}
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="lg:col-span-2"><BookSummary capital={cap} juice={juice} /></div>
+        <RegimeHero regime={regime.data} />
+      </div>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="lg:col-span-2">
+          <PositionsGlance positions={openPositions} killByTicker={killByTicker} nav={nav} />
+        </div>
+        <JuiceCard juice={juice} payback={payback} />
+      </div>
+    </div>
+  );
+}
