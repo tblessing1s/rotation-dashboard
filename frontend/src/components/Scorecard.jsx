@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Spinner, fmt, pct, useApi } from "./ui.jsx";
+import { Card, Pill, Spinner, ErrorState, fmt, pct, useApi } from "./ui.jsx";
 
 // The numeric CFM scorecard: one row per holding, a single composite verdict,
 // no chart-reading required. Grouped by sector, filterable by verdict, sortable
@@ -148,7 +148,7 @@ function ScoreRow({ row, expanded, onToggle }) {
 }
 
 export default function Scorecard({ regimeStatus }) {
-  const { data, error, loading } = useApi(api.scorecard, []);
+  const { data, error, loading, reload } = useApi(api.scorecard, []);
   const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);
@@ -228,7 +228,7 @@ export default function Scorecard({ regimeStatus }) {
           Weeklies only{noWeeklies > 0 ? ` (${noWeeklies} hidden)` : ""}
         </label>
       </div>
-      {error && <p className="text-sm text-rose-400">{error}</p>}
+      {error && <ErrorState error={error} onRetry={reload} />}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>

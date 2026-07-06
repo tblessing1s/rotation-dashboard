@@ -101,19 +101,39 @@ export function pct(n) {
   return `${n > 0 ? "+" : ""}${fmt(n, 1)}%`;
 }
 
-export function useApi(fn, deps = [], interval = null) {
+// Retrying a 401 (auth-required) or a 4xx client error is pointless — the app
+// swaps in the login screen on 401, and a bad request won't fix itself. Only a
+// timeout, a network drop, or a 5xx server error is worth retrying.
+function isTransient(e) {
+  if (e.timeout) return true;
+  if (e.status && e.status >= 400 && e.status < 500) return false;
+  return true;
+}
+
+export function useApi(fn, deps = [], interval = null, retries = 2) {
   const [data, setData] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const load = React.useCallback(async () => {
-    try {
-      setError(null);
-      const d = await fn();
-      setData(d);
-    } catch (e) {
-      setError(e.message);
-    } finally {
-      setLoading(false);
+    setError(null);
+    setLoading(true);
+    // A cold full-universe scan can be slow or blip on a transient provider
+    // hiccup; retry a few times with backoff before surfacing the error, so the
+    // panel self-heals instead of stranding the operator on a dead message.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const d = await fn();
+        setData(d);
+        setLoading(false);
+        return;
+      } catch (e) {
+        if (attempt >= retries || !isTransient(e)) {
+          setError(e.message);
+          setLoading(false);
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+      }
     }
   }, deps); // eslint-disable-line react-hooks/exhaustive-deps
   React.useEffect(() => {
@@ -124,4 +144,22 @@ export function useApi(fn, deps = [], interval = null) {
     }
   }, [load, interval]);
   return { data, error, loading, reload: load };
+}
+
+// Inline error with a Retry button — for a panel whose fetch failed, so the
+// operator can re-try in place instead of reloading the whole dashboard.
+export function ErrorState({ error, onRetry, className = "" }) {
+  return (
+    <div className={`flex flex-col items-start gap-2 py-4 text-sm ${className}`}>
+      <p className="text-rose-400">{error || "Something went wrong."}</p>
+      {onRetry && (
+        <button
+          onClick={onRetry}
+          className="rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800"
+        >
+          Retry
+        </button>
+      )}
+    </div>
+  );
 }

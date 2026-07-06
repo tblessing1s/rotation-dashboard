@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Loading, fmt, useApi } from "./ui.jsx";
+import { Card, Pill, Loading, ErrorState, fmt, useApi } from "./ui.jsx";
 
 // Ready-to-enter shortlist: tickers that clear the Scorecard's GO verdict
 // (Level 3 beats peers + Level 4 consolidating + the scorecard's own
@@ -22,11 +22,11 @@ function reasonList(l5) {
 }
 
 export default function ReadyToEnter({ onSelectStock }) {
-  const { data, error, loading } = useApi(api.scanReady, [], null);
+  const { data, error, loading, reload } = useApi(api.scanReady, [], null);
   const [showMisses, setShowMisses] = React.useState(false);
 
-  if (loading && !data) return <Card title="Ready to Enter"><Loading /></Card>;
-  if (error) return <Card title="Ready to Enter"><p className="text-sm text-rose-400">{error}</p></Card>;
+  if (loading && !data) return <Card title="Ready to Enter"><Loading label="Scanning the universe…" /></Card>;
+  if (error) return <Card title="Ready to Enter"><ErrorState error={error} onRetry={reload} /></Card>;
 
   const ready = data?.ready || [];
   const misses = data?.near_misses || [];

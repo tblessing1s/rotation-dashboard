@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Spinner, pct, fmt, useApi } from "./ui.jsx";
+import { Card, Pill, Spinner, ErrorState, pct, fmt, useApi } from "./ui.jsx";
 
 function SectorBar({ sectors, selected, onSelect }) {
   const entries = Object.entries(sectors || {}).sort(
@@ -41,7 +41,7 @@ export default function StockFilter({ onSelectStock }) {
   return (
     <Card title="Stock Filter (Levels 2–4)" right={stocksQ.loading ? <span className="flex items-center gap-1.5 text-xs text-slate-500"><Spinner size="h-3 w-3" />scanning…</span> : null}>
       <SectorBar sectors={sectorsQ.data} selected={sector} onSelect={setSector} />
-      {stocksQ.error && <p className="text-sm text-rose-400">{stocksQ.error}</p>}
+      {stocksQ.error && <ErrorState error={stocksQ.error} onRetry={stocksQ.reload} />}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>

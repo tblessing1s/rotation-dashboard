@@ -1,12 +1,34 @@
 // Thin fetch wrapper for the CFM API. Returns parsed JSON or throws.
 const BASE = "";
 
+// A full-universe scan (cold cache) can legitimately take a while, but a request
+// that never returns must not spin the UI forever — abort it and surface a clear
+// timeout the caller (useApi) can retry, instead of an indefinite spinner.
+const TIMEOUT_MS = 60000;
+
 async function request(path, opts = {}) {
-  const res = await fetch(BASE + path, {
-    credentials: "same-origin", // send/receive the session cookie
-    headers: { "Content-Type": "application/json" },
-    ...opts,
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs || TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(BASE + path, {
+      credentials: "same-origin", // send/receive the session cookie
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      ...opts,
+    });
+  } catch (e) {
+    // AbortError (our timeout) or a network failure — both are transient and
+    // worth retrying; give them a message the UI can show and useApi can catch.
+    if (e.name === "AbortError") {
+      const err = new Error("Request timed out — the server is taking too long.");
+      err.timeout = true;
+      throw err;
+    }
+    throw new Error("Network error — couldn't reach the server.");
+  } finally {
+    clearTimeout(timer);
+  }
   const text = await res.text();
   let data;
   try {
