@@ -213,9 +213,32 @@ def positions_view(state: dict) -> list[dict]:
     return out
 
 
+def position_capital(p: dict) -> float:
+    """Capital deployed in one position: the LEAP's cost basis plus any
+    accumulated shares (count x cost basis per share). The buy executions set
+    these on the position, so this is the source of truth."""
+    leap = p.get("leap") or {}
+    total = float(leap.get("cost_basis") or 0)
+    shares = p.get("shares") or {}
+    count = int(shares.get("count") or 0)
+    cps = shares.get("cost_basis_per_share")
+    if count and cps is not None:
+        total += float(cps) * count
+    return round(total, 2)
+
+
+def deployed_capital(state: dict) -> float:
+    """Total capital deployed across all OPEN positions, derived from their LEAP
+    cost bases + shares. Derived (never a hand-maintained metadata figure) so it
+    reflects the book the moment a LEAP is bought — the same principle as the
+    theta ledger and payback meters."""
+    return round(sum(position_capital(p) for p in state.get("positions", [])
+                     if p.get("status") != "closed"), 2)
+
+
 def capital_summary(state: dict) -> dict:
     meta = state.get("metadata", {})
-    deployed = float(meta.get("capital_deployed") or 0)
+    deployed = deployed_capital(state)
     reserve = float(meta.get("reserve_required") or config.RESERVE_REQUIRED)
     # Live Schwab balance when connected (also persists back to state.metadata
     # so this stays the single source other readers agree on); manual entry

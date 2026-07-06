@@ -41,7 +41,8 @@ def weekly_juice_chart(state: dict) -> dict:
     weeks: dict[str, float] = {}
     for w in state.get("theta_ledger", {}).get("weeks", []):
         weeks[w["week"]] = round(weeks.get(w["week"], 0.0) + float(w.get("net_juice") or 0), 2)
-    deployed = float(state.get("metadata", {}).get("capital_deployed") or 0)
+    import position_manager
+    deployed = position_manager.deployed_capital(state)
     return {
         "weeks": [{"week": k, "net_juice": v} for k, v in sorted(weeks.items())],
         "target_low": round(deployed * config.WEEKLY_JUICE_TARGET_PCT_MIN / 100, 2),

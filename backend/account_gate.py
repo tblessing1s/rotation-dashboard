@@ -246,7 +246,8 @@ def evaluate(ticker: str, contracts: int | None = None,
         n_open + 1 <= config.MAX_CFM_POSITIONS, True,
         {"open_positions": n_open, "max": config.MAX_CFM_POSITIONS}))
 
-    deployed = float(meta.get("capital_deployed") or 0)
+    import position_manager
+    deployed = round(sum(position_manager.position_capital(p) for p in open_pos), 2)
     after = deployed + (proposed_cost or 0)
     checks.append(_check(
         "capital_limit", f"Deployed capital ≤ ${config.MAX_DEPLOYED_CAPITAL:,}",

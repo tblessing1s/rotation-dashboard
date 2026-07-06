@@ -140,7 +140,14 @@ def test_gate_blocks_third_position_and_sector_concentration(isolated_state, mon
 def test_gate_blocks_capital_cap_and_low_juice(isolated_state, monkeypatch):
     import data_handler
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _rich_df())
-    _seed_state(operating_cash=100000, capital_deployed=30000)
+    _seed_state(operating_cash=100000)
+    # Deployed capital is derived from open positions: an existing LEAP with a
+    # $30k cost basis + $20k proposed -> $50k > the $38k cap.
+    state = log.load_state()
+    state["positions"] = [{"ticker": "XOM", "sector": "XLE", "status": "active",
+                           "leap": {"strike": 80, "contracts": 5, "cost_basis": 30000},
+                           "short_calls": [], "shares": {"count": 0}}]
+    log.save_state(state)
     g = account_gate.evaluate("NVDA", contracts=5,
                               leap_cost_per_share=40.0,  # +20k -> 50k > 38k cap
                               weekly_extrinsic_per_share=0.20)  # 0.5%/wk < 1.88%

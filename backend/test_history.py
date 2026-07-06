@@ -137,9 +137,16 @@ def test_history_aggregates_and_export(isolated_state):
     md_text = history.juice_journal_markdown(state)
     assert "# CFM Juice Journal" in md_text and "| NVDA |" in md_text
 
-    chart = view["weekly_juice"]
-    assert chart["target_low"] == round(
-        float(state["metadata"].get("capital_deployed") or 0) * 0.01, 2)
+    # The weekly-juice target band is 1-2%/wk of deployed capital, derived from
+    # the open book (not a hand-set metadata figure). Add an open LEAP and the
+    # band tracks its cost basis.
+    state["positions"] = [{"ticker": "TSLA", "sector": "XLY", "status": "active",
+                           "leap": {"strike": 100, "contracts": 5, "cost_basis": 20000},
+                           "short_calls": [], "shares": {"count": 0}}]
+    log.save_state(state)
+    chart = history.view(log.load_state())["weekly_juice"]
+    assert chart["capital_deployed"] == 20000
+    assert chart["target_low"] == round(20000 * config.WEEKLY_JUICE_TARGET_PCT_MIN / 100, 2)
 
 
 # ---- calibration harness --------------------------------------------------------
