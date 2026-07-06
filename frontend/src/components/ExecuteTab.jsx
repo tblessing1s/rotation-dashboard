@@ -4,6 +4,7 @@ import { Card, Pill, Light, Loading, fmt } from "./ui.jsx";
 import OptionChainModal from "./OptionChainModal.jsx";
 import { useToast } from "./Toast.jsx";
 import { submitOrder } from "../orderFlow.js";
+import { useTradeMode, TradeModeBadge } from "../tradeMode.jsx";
 
 function checkValue(v) {
   if (v === null || v === undefined) return "—";
@@ -92,6 +93,7 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
   const [error, setError] = React.useState(null);
   const [chainOpen, setChainOpen] = React.useState(false);
   const [gateLoading, setGateLoading] = React.useState(false);
+  const tradeMode = useTradeMode(); // "paper" | "live" | null — where do executed orders go?
 
   React.useEffect(() => { if (initialTicker) setTicker(initialTicker); }, [initialTicker]);
 
@@ -160,12 +162,19 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
         )}
       </Card>
 
-      <Card title="Execute">
+      <Card title="Execute" right={<TradeModeBadge mode={tradeMode} />}>
         <p className="mb-3 text-sm text-slate-400">
           Send trades from the live option chain — it auto-detects the next action
           (buy LEAP · sell / close / roll the short · sell the LEAP to exit) from
           your current position and prices the order ticket for you.
         </p>
+        {tradeMode === "paper" && (
+          <p className="mb-3 rounded-lg border border-amber-700 bg-amber-500/5 px-3 py-2 text-xs text-amber-300">
+            <span className="font-semibold">Paper mode.</span> Trades are captured to your
+            ledger at live prices but <span className="font-semibold">no order is sent to Schwab</span>.
+            Enable <code className="text-amber-200">CFM_LIVE_TRADING</code> and connect Schwab to trade live.
+          </p>
+        )}
         {canViewChain ? (
           <button
             onClick={() => setChainOpen(true)}
