@@ -62,9 +62,24 @@ real providers, not the demo store).
 
 **Scheduler** (`backend/alert_scheduler.py`): an in-process daemon thread —
 the volume attaches to one machine and state.json is single-writer, so a
-separate scheduled machine can't share `/data`. Fires at ET slots
-(`ALERT_SCHEDULE_ET`: 08:30, 10:00, 12:30, 15:30) on weekdays, once per slot
-per day; fly.toml pins `min_machines_running = 1` so the machine is awake.
+separate scheduled machine can't share `/data`. Fires at ET slots on weekdays,
+once per slot per day; fly.toml pins `min_machines_running = 1` so the machine
+is awake. The schedule (`config.ALERT_SCHEDULE_ET`) is the fixed anchors
+(`ALERT_SCHEDULE_ANCHORS_ET`: 08:30, 10:00, 12:30, 15:30, **16:15**) merged with
+the **post-open gap-cadence** slots (09:40, 09:50):
+
+- **16:15 post-close slot** (`POST_CLOSE_SLOT_ET`) — the kill switch's
+  confirmed-close condition and an end-of-day circuit-breaker breach can only be
+  evaluated after the 16:00 close, so the 15:30 slot can't see them; without a
+  post-close slot their earliest fire is the next morning's 08:30 ("exit
+  immediately" → "exit at tomorrow's open"). The scheduler force-refreshes the
+  hot set at this slot first so the official close is cached before evaluation.
+- **Post-open gap cadence** (`MARKET_OPEN_ET` + `OPEN_GAP_WINDOW_MIN`=30 /
+  `OPEN_GAP_CADENCE_MIN`=10) — the open (09:30) to the first fixed slot (10:00)
+  was a 30-min blind window: a gap straight through a position's circuit breaker
+  at 09:31 wasn't seen until 10:00. CFM deliberately uses alerts, not resting
+  stops, so the cadence *is* the only tripwire — it's tightened across the
+  high-volatility post-open window.
 Alternative/backup: an external cron can `POST /api/alerts/run` (auto-start
 wakes the machine; dedup makes repeat runs no-ops). Disable the thread with
 `CFM_ALERTS_SCHEDULER=0`.

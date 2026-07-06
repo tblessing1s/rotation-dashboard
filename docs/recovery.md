@@ -103,3 +103,11 @@ If neither is configured the nightly job logs that no off-machine method
 succeeded. Restoring one of these off-machine copies is a manual step: download
 it into `/data/backups/` (or anywhere) and point `restore_state.py --restore` at
 it.
+
+## Related runbooks
+
+- [`emergency-exit.md`](emergency-exit.md) — "Schwab is down / the token lapsed
+  and the kill switch just fired": exit at the broker directly and reconcile the
+  trade back in afterward.
+- [`reconciliation.md`](reconciliation.md) — the state-vs-broker check and the
+  compensating-adjustment mechanics.

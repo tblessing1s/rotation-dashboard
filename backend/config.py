@@ -276,9 +276,52 @@ DATA_STALE_HOURS = 30.0
 # PROPOSED_DEFAULT — shorts expiring within this many days and not yet rolled.
 EXPIRY_WARN_DTE = 1
 
-# PROPOSED_DEFAULT — evaluator schedule, ET, market days only: pre-market,
-# ~30 min after open, mid-day, ~30 min before close.
-ALERT_SCHEDULE_ET = ["08:30", "10:00", "12:30", "15:30"]
+# PROPOSED_DEFAULT — evaluator schedule, ET, market days only. Fixed anchor
+# slots: pre-market, ~30 min after open, mid-day, ~30 min before close, and a
+# post-close sweep. The full ALERT_SCHEDULE_ET below merges these with the
+# post-open gap-cadence slots.
+ALERT_SCHEDULE_ANCHORS_ET = ["08:30", "10:00", "12:30", "15:30", "16:15"]
+
+# PROPOSED_DEFAULT — post-close sweep (the 16:15 anchor above). The kill switch's
+# "confirmed close" condition and an end-of-day circuit-breaker breach can only
+# be evaluated AFTER the 16:00 close, so the 15:30 slot is too early to see them;
+# without a post-close slot their earliest fire is the next morning's 08:30 —
+# i.e. "exit immediately" degrades to "exit at tomorrow's open". A ~16:15 slot
+# pages the same evening instead. The scheduler force-refreshes the hot set at
+# this slot first so the official close is in the cache before evaluation.
+POST_CLOSE_SLOT_ET = "16:15"
+
+# PROPOSED_DEFAULT — gap-risk cadence. The open (09:30) to the first fixed slot
+# (10:00) is a 30-min blind window: a gap straight through a position's circuit
+# breaker at 09:31 isn't seen until 10:00, and the post-open window is
+# statistically high-volatility. CFM deliberately uses alerts, not resting stop
+# orders, so the evaluation cadence IS the only tripwire — tighten it over the
+# first OPEN_GAP_WINDOW_MIN minutes after the open, every OPEN_GAP_CADENCE_MIN.
+MARKET_OPEN_ET = "09:30"
+OPEN_GAP_WINDOW_MIN = 30
+OPEN_GAP_CADENCE_MIN = 10
+
+
+def _open_gap_slots() -> list[str]:
+    """Extra ET evaluation slots across the post-open gap window — open+cadence,
+    open+2·cadence, … up to and including open+window. With the defaults
+    (cadence 10, window 30) that's 09:40, 09:50, 10:00 (10:00 is already an
+    anchor, so the merge dedups it). Empty when the cadence/window are disabled."""
+    from datetime import datetime as _dt, timedelta as _td
+    if OPEN_GAP_CADENCE_MIN <= 0 or OPEN_GAP_WINDOW_MIN <= 0:
+        return []
+    open_t = _dt.strptime(MARKET_OPEN_ET, "%H:%M")
+    out, step = [], OPEN_GAP_CADENCE_MIN
+    while step <= OPEN_GAP_WINDOW_MIN:
+        out.append((open_t + _td(minutes=step)).strftime("%H:%M"))
+        step += OPEN_GAP_CADENCE_MIN
+    return out
+
+
+# The evaluator slots the scheduler actually runs: the fixed anchors plus the
+# post-open gap-cadence slots, sorted and deduped. The first slot (08:30) stays
+# the pre-market anchor everything else keys off (e.g. morning reconciliation).
+ALERT_SCHEDULE_ET = sorted(set(ALERT_SCHEDULE_ANCHORS_ET) | set(_open_gap_slots()))
 ALERT_LOG_MAX = 500            # PROPOSED_DEFAULT — alert history cap in state.json
 
 # PROPOSED_DEFAULT — nightly maintenance slot (ET, every calendar day): refresh

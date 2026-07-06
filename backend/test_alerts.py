@@ -393,12 +393,36 @@ def test_v1_state_file_migrates_on_load(isolated_state):
 def test_due_slots_market_days_and_once_per_day():
     et = alert_scheduler.ET
     wed_1003 = datetime(2026, 7, 1, 10, 3, tzinfo=et)
-    assert alert_scheduler.due_slots(wed_1003, {}) == ["08:30", "10:00"]
-    already = {"08:30": date(2026, 7, 1), "10:00": date(2026, 7, 1)}
+    # Fixed anchors + the post-open gap-cadence slots (09:40, 09:50) all past by 10:03.
+    assert alert_scheduler.due_slots(wed_1003, {}) == ["08:30", "09:40", "09:50", "10:00"]
+    already = {s: date(2026, 7, 1) for s in ("08:30", "09:40", "09:50", "10:00")}
     assert alert_scheduler.due_slots(wed_1003, already) == []
     yesterday = {"08:30": date(2026, 6, 30)}
-    assert alert_scheduler.due_slots(wed_1003, yesterday) == ["08:30", "10:00"]
+    assert alert_scheduler.due_slots(wed_1003, yesterday) == ["08:30", "09:40", "09:50", "10:00"]
     sat = datetime(2026, 7, 4, 12, 0, tzinfo=et)
     assert alert_scheduler.due_slots(sat, {}) == []
     early = datetime(2026, 7, 1, 7, 0, tzinfo=et)
     assert alert_scheduler.due_slots(early, {}) == []
+
+
+def test_open_gap_cadence_slots_close_the_blind_window():
+    """The post-open window (09:30→10:00) is covered by tighter gap slots so a
+    9:31 gap through a circuit breaker is seen well before the 10:00 anchor."""
+    et = alert_scheduler.ET
+    # Just after 09:40: the first gap slot is due, the pre-market anchor too.
+    at_0941 = datetime(2026, 7, 1, 9, 41, tzinfo=et)
+    assert alert_scheduler.due_slots(at_0941, {"08:30": date(2026, 7, 1)}) == ["09:40"]
+    # 09:35 (inside the window, before the first gap slot) — nothing new yet.
+    at_0935 = datetime(2026, 7, 1, 9, 35, tzinfo=et)
+    assert alert_scheduler.due_slots(at_0935, {"08:30": date(2026, 7, 1)}) == []
+    assert config._open_gap_slots() == ["09:40", "09:50", "10:00"]
+
+
+def test_post_close_slot_fires_the_evening():
+    """A post-close slot (16:15) is on the schedule so confirmed-close signals
+    and end-of-day breaches page the same evening, not next morning."""
+    assert config.POST_CLOSE_SLOT_ET in config.ALERT_SCHEDULE_ET
+    et = alert_scheduler.ET
+    ran = {s: date(2026, 7, 1) for s in config.ALERT_SCHEDULE_ET if s < "16:15"}
+    at_1620 = datetime(2026, 7, 1, 16, 20, tzinfo=et)
+    assert alert_scheduler.due_slots(at_1620, ran) == ["16:15"]

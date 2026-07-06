@@ -292,6 +292,14 @@ broken alert run); miss enough pings and the service alerts you. Optional:
 Configure the check's period+grace to taste — e.g. period 1h / grace 1h catches
 a wedge or stop within ~2h, any day. Inert when unset.
 
+### Emergency exit — "Schwab is down and the kill switch just fired"
+
+All trading goes through the app by design, but the app trades through one broker
+API on a 7-day token. If that token lapsed or Schwab's API is down during an
+exit-now event, exit at Schwab directly and let reconciliation adopt the trade
+via a compensating adjustment. The written procedure is
+[`docs/emergency-exit.md`](docs/emergency-exit.md) — read it before you need it.
+
 ---
 
 ## Tests
