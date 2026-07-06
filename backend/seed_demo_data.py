@@ -177,7 +177,9 @@ BOOK = [
          weeks=2, sold=0.88, paid=0.36, leap_tv=1650, short=(160, 2, 5.10),
          shares=0, share_cost=None, leap_dte=28),
 ]
-CONTRACTS = config.LEAP_CONTRACTS  # 5
+# Demo positions are pinned to 5 contracts so the showcase looks the same
+# regardless of the live LEAP_CONTRACTS default (which the operator may set to 1).
+CONTRACTS = 5
 
 # Two completed cycles (a target-hit winner and a kill-switch loser) so the
 # History tab, aggregates and juice-journal export have demo data. Derived

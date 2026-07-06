@@ -146,7 +146,11 @@ HOT_TICKERS_MAX = 40         # cap on the hot set (open positions are never drop
 HOT_CANDIDATE_MAX_AGE = 2 * 3600
 
 # ---- CFM mechanics ---------------------------------------------------------
-LEAP_CONTRACTS = 5            # 5 deep-ITM LEAP calls per stock
+# Default LEAP position size (deep-ITM calls per stock). Pre-fills the entry
+# ticket's quantity and sizes the capital/reserve gate when no quantity is
+# passed; it's editable per trade. Override the default via the LEAP_CONTRACTS
+# env var (e.g. on Fly) without touching code.
+LEAP_CONTRACTS = int(os.environ.get("LEAP_CONTRACTS") or 1)
 LEAP_TARGET_DELTA = 0.90
 LEAP_DELTA_MIN = 0.88        # preferred LEAP delta band (offer strikes to choose)
 LEAP_DELTA_MAX = 0.91
