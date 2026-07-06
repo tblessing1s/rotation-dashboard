@@ -42,7 +42,7 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
         setExpiration(cur?.expiration || null);
         const sug = cur?.strikes?.find((s) => s.suggested) || cur?.strikes?.[0];
         setStrike(sug ? sug.strike : null);
-        setQty(String(d.current_short?.contracts ?? 5));
+        setQty(String(d.current_short?.contracts ?? 1));
       })
       .catch((e) => { if (live) setError(e.message); })
       .finally(() => { if (live) setLoading(false); });

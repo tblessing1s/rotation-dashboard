@@ -62,7 +62,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
         const defQty =
           sa === "close_short" && c.position?.open_short?.contracts ? c.position.open_short.contracts
           : sa === "close_leap" && c.position?.existing_leap?.contracts ? c.position.existing_leap.contracts
-          : c.quantity_default ?? 5;
+          : c.quantity_default ?? 1;
         setQty(String(defQty));
       })
       .catch((e) => { if (live) setError(e.message); })
