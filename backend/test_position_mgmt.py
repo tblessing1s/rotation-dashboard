@@ -45,6 +45,33 @@ def test_enrich_short_decay_and_roll_now():
     assert pm.enrich_short(dict(sc, current_bid=0.90), 134.0, None)["roll_now"] is False
 
 
+def test_enrich_short_extrinsic_capture():
+    sc = {"strike": 132, "contracts": 5, "entry_premium_total": 600.0,
+          "entry_extrinsic_per_share": 0.80, "current_bid": 1.20, "dte": 4}
+    # Stock 134 -> 2.00 intrinsic. A live 2.30 mark is only 0.30 extrinsic, so
+    # 0.50 of the 0.80 extrinsic sold has been captured (62.5%).
+    out = pm.enrich_short(sc, stock_price=134.0, dividend=None, live_mark=2.30)
+    assert out["current_bid"] == 2.30  # live mark overrides the stored entry mark
+    assert out["entry_extrinsic_per_share"] == 0.80
+    assert out["current_extrinsic_per_share"] == 0.30
+    assert out["extrinsic_captured_per_share"] == 0.50
+    assert out["extrinsic_captured_pct"] == 62.5
+    assert out["entry_extrinsic_total"] == 400.0
+    assert out["extrinsic_captured_total"] == 250.0
+    assert out["extrinsic_remaining_total"] == 150.0
+
+    # A mark at/under intrinsic -> extrinsic fully captured, clamped at 100%.
+    out2 = pm.enrich_short(sc, stock_price=134.0, dividend=None, live_mark=1.90)
+    assert out2["current_extrinsic_per_share"] == 0.0
+    assert out2["extrinsic_captured_pct"] == 100.0
+
+    # No entry extrinsic recorded -> capture fields stay None, target included.
+    bare = {"strike": 132, "contracts": 5, "current_bid": 1.0}
+    out3 = pm.enrich_short(bare, stock_price=134.0, dividend=None)
+    assert out3["entry_extrinsic_per_share"] is None
+    assert out3["extrinsic_captured_pct"] is None
+
+
 def test_enrich_short_assignment_risk_flag():
     today = date.today()
     sc = {"strike": 132, "contracts": 5, "dte": 4, "current_bid": 0.25,
