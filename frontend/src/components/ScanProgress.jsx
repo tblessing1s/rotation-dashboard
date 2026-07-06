@@ -20,6 +20,10 @@ export default function ScanProgress({ onComplete }) {
     try { setSt(await api.scanRefresh()); } catch { /* surfaced by the next poll */ }
   }, []);
 
+  // Mount: check status ONCE (kick a scan if the cache is cold), and re-check
+  // only when the tab returns to the foreground. No steady polling here — that's
+  // driven by the running state below, so an idle Scan tab doesn't hammer
+  // /scan/status forever.
   React.useEffect(() => {
     let alive = true;
     (async () => {
@@ -30,17 +34,23 @@ export default function ScanProgress({ onComplete }) {
       // Cold cache and nothing running yet → start the detached scan.
       if (s && !s.fresh && !s.running) rescan();
     })();
-    const id = setInterval(poll, 2500);
-    // A backgrounded mobile tab throttles the interval; re-poll the moment it
-    // returns to the foreground so the state is current immediately.
     const onVis = () => { if (!document.hidden) poll(); };
     document.addEventListener("visibilitychange", onVis);
     return () => {
       alive = false;
-      clearInterval(id);
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [poll, rescan]);
+
+  // Poll ONLY while a scan is actually running — every 2.5s until it finishes,
+  // then stop. Starting a scan (Rescan, or one discovered on focus / at mount)
+  // flips `running` true and restarts this; when it goes false the interval is
+  // torn down. Idle → zero polling.
+  React.useEffect(() => {
+    if (!st?.running) return undefined;
+    const id = setInterval(poll, 2500);
+    return () => clearInterval(id);
+  }, [st?.running, poll]);
 
   // Fire onComplete on the running → finished transition, so the panels reload
   // once (with warm data) rather than on every poll.
