@@ -21,8 +21,8 @@ function reasonList(l5) {
   return (l5?.blocking_failures || []).map((id) => REASON_LABELS[id] || id).join(", ");
 }
 
-export default function ReadyToEnter({ onSelectStock }) {
-  const { data, error, loading, reload } = useApi(api.scanReady, [], null);
+export default function ReadyToEnter({ onSelectStock, refreshKey }) {
+  const { data, error, loading, reload } = useApi(api.scanReady, [refreshKey], null);
   const [showMisses, setShowMisses] = React.useState(false);
 
   if (loading && !data) return <Card title="Ready to Enter"><Loading label="Scanning the universe…" /></Card>;
