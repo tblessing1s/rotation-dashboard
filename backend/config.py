@@ -121,6 +121,18 @@ MA_WINDOW = 21
 VOL_AVG_WINDOW = 20
 HISTORY_DAYS = 320           # daily bars pulled / cached per symbol
 
+# ---- Smart intraday refresh (hot tiering) ----------------------------------
+# The whole universe is fetched once pre-open (the warm-up) and then frozen in
+# the parquet cache for the day. That's right for the long tail, but the handful
+# of names carrying live risk — open positions, entry candidates, earnings-
+# imminent — should stay current intraday. refresh_policy picks that small "hot"
+# set and the scheduler force-refreshes it on this cadence during market hours.
+HOT_REFRESH_MINUTES = 15     # market-hours cadence for refreshing the hot set
+HOT_TICKERS_MAX = 40         # cap on the hot set (open positions are never dropped)
+# Ignore a scorecard memo older than this (seconds) when reading the GO/earnings
+# candidate pool — so an overnight-stale sweep never drives the intraday picks.
+HOT_CANDIDATE_MAX_AGE = 2 * 3600
+
 # ---- CFM mechanics ---------------------------------------------------------
 LEAP_CONTRACTS = 5            # 5 deep-ITM LEAP calls per stock
 LEAP_TARGET_DELTA = 0.90

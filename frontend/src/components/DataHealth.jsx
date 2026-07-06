@@ -409,6 +409,7 @@ function LiveFillVerify() {
 export default function DataHealth() {
   const { data, error, loading, reload } = useApi(api.dataHealth, [], 120000);
   const [refreshing, setRefreshing] = React.useState(false);
+  const [hotBusy, setHotBusy] = React.useState(false);
 
   async function refresh() {
     setRefreshing(true);
@@ -417,6 +418,16 @@ export default function DataHealth() {
       await reload();
     } finally {
       setRefreshing(false);
+    }
+  }
+
+  async function refreshHot() {
+    setHotBusy(true);
+    try {
+      await api.refreshHot();
+      await reload();
+    } finally {
+      setHotBusy(false);
     }
   }
 
@@ -468,7 +479,23 @@ export default function DataHealth() {
             </p>
           </div>
           <div>
-            <div className="mb-1 text-xs uppercase tracking-wide text-slate-500">OHLCV cache age (key symbols)</div>
+            <div className="mb-1 flex items-center justify-between gap-2">
+              <span className="text-xs uppercase tracking-wide text-slate-500">OHLCV cache age (hot set)</span>
+              <button onClick={refreshHot} disabled={hotBusy}
+                      title="Force-refresh the hot set now (open positions + live entry/earnings candidates)"
+                      className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+                {hotBusy ? "Refreshing…" : "Refresh hot now"}
+              </button>
+            </div>
+            {data?.hot_refresh && (
+              <p className="mb-1 text-xs text-slate-500">
+                {data.hot_refresh.count} hot ticker(s) · every {data.hot_refresh.cadence_minutes}m in market hours
+                {data.hot_refresh.last_refresh
+                  ? ` · last ${data.hot_refresh.last_refresh.slice(11, 16)}`
+                  : " · not run yet"}
+                {!data.hot_refresh.enabled && " · disabled"}
+              </p>
+            )}
             <ul className="space-y-1 text-sm">
               {Object.entries(ages).map(([sym, age]) => (
                 <li key={sym} className="flex items-center gap-2">

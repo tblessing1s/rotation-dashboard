@@ -74,6 +74,7 @@ maxes out.
 | `sector_data.py` | Parses the root-level `tickers_by_sector.txt` into the sector universe. |
 | `indicators.py` | RS3M, ATR, MA, RSI, breadth, consolidation, strike spacing. |
 | `data_handler.py` | Daily OHLCV (Schwab → Alpha Vantage) with a parquet cache. |
+| `refresh_policy.py` | Tiers the universe: force-refreshes the "hot" set (open positions + live entry/earnings candidates) intraday while the long tail rides the daily pre-open warm-up. |
 | `schwab_api.py` | **Kept** — market data, quotes, option chains, order execution. |
 | `alpha_vantage.py` | **Kept** — daily OHLCV + quotes fallback. |
 | `screening.py` | Regime, sector strength, stock filter, the 4-level entry gate, checklist. |
@@ -111,6 +112,7 @@ maxes out.
 | `GET /api/kill-switch` | Per-position RS3M vs SPY/Sector + exit signals. |
 | `GET /api/daily-checklist` | Today's routine: regime, reserve, expiring shorts, LEAP DTE. |
 | `GET/POST /api/state` | Read the full state; POST updates metadata. |
+| `POST /api/refresh/hot` | Force-refresh the hot set (open positions + live entry/earnings candidates) now; the scheduler also runs it every `HOT_REFRESH_MINUTES` in market hours. `/api/data-health` reports the set + last run. |
 | `GET /api/config` | Thresholds, sector universe, Schwab/AV status, live-trading flag. |
 
 ---
