@@ -100,6 +100,35 @@ def test_defend_recommendation_regime_atr_strike(isolated_state, monkeypatch):
     assert executor.defend_recommendation("PG")["breached"] is False
 
 
+def test_defend_recommendation_clears_on_intraday_recovery(isolated_state, monkeypatch):
+    """Closed below the short strike but recovered above it intraday -> the live
+    price clears the breach, matching the alert engine's close+live gate."""
+    import data_handler
+    import screening
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([130.0] * 60))
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "yellow"})
+    state = log.load_state()
+    state["positions"] = [{
+        "ticker": "PG", "sector": "XLP", "status": "active",
+        "leap": {"strike": 140, "contracts": 5},
+        "short_calls": [{"strike": 132, "contracts": 5, "dte": 4, "current_bid": 0.25,
+                         "entry_premium_total": 600.0}],
+    }]
+    log.save_state(state)
+
+    # Live 133 > 132 strike -> not breached, even though the close (130) is below.
+    monkeypatch.setattr(data_handler, "live_price", lambda s: 133.0)
+    rec = executor.defend_recommendation("PG")
+    assert rec["breached"] is False
+    assert rec["stock_price"] == 133.0 and rec["last_close"] == 130.0
+
+    # Live 131 < 132 strike (and close below) -> breached; the roll-down is sized
+    # off the live price.
+    monkeypatch.setattr(data_handler, "live_price", lambda s: 131.0)
+    rec = executor.defend_recommendation("PG")
+    assert rec["breached"] is True and rec["stock_price"] == 131.0 and rec["last_close"] == 130.0
+
+
 # ---- roll ledger (derived) ------------------------------------------------------
 def test_roll_writes_ledger_with_reason_and_net(isolated_state):
     executor.execute({"action": "sell_short", "ticker": "NVDA", "strike": 130,

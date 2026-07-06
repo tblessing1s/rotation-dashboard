@@ -245,6 +245,16 @@ def latest_quote(symbol: str) -> dict | None:
     return None
 
 
+def live_price(symbol: str) -> float | None:
+    """The current tradeable price as a float, or None. Thin wrapper over
+    latest_quote (Schwab last/mark -> Alpha Vantage -> cached close), so callers
+    that only need the number don't unpack the quote dict. Off-hours / no
+    provider it degrades to the last cached close, same as latest_quote."""
+    q = latest_quote(symbol)
+    price = (q or {}).get("price")
+    return float(price) if price is not None else None
+
+
 def cache_age_hours(symbol: str) -> float | None:
     path = _cache_path(symbol.upper())
     if not os.path.exists(path):
