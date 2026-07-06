@@ -1,7 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { Pill, Loading, fmt } from "./ui.jsx";
-import { useTradeMode, TradeModeBadge } from "../tradeMode.jsx";
+import { useTradeMode, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
 
 function dollars(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -31,6 +31,7 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
   const [busy, setBusy] = React.useState(false);
   const [execErr, setExecErr] = React.useState(null);
   const tradeMode = useTradeMode(); // "paper" | "live" | null — is this roll routed to Schwab?
+  const [pendingLive, setPendingLive] = React.useState(null); // live roll awaiting explicit confirm
 
   React.useEffect(() => {
     let live = true;
@@ -89,29 +90,42 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
   const canExecute = qtyNum > 0 && cur && chosen && selectedExp
     && !(sameStrike && sameWeek); // rolling to the exact same leg is a no-op
 
-  async function execute() {
+  function buildPayload() {
+    return {
+      action: "roll_short",
+      ticker: data.ticker,
+      contracts: qtyNum,
+      from_strike: cur.strike,
+      from_expiration: cur.expiration,
+      close_price_per_share: cur.current_mark,
+      to_strike: chosen.strike,
+      to_expiration: selectedExp.expiration,
+      to_dte: selectedExp.dte,
+      premium_per_share: chosen.mark,
+      stock_price: data.underlying_price,
+      roll_reason: reason, // whipsaw-ledger key: scheduled | 75%-rule | defend | earnings | kill-switch-exit
+    };
+  }
+
+  function execute() {
+    const payload = buildPayload();
+    // Confirm unless we KNOW this is paper (null/unresolved errs toward confirm).
+    if (tradeMode !== "paper") { setPendingLive(payload); return; }
+    doExecute(payload);
+  }
+
+  async function doExecute(payload) {
     setBusy(true); setExecErr(null);
     try {
-      await onExecute?.({
-        action: "roll_short",
-        ticker: data.ticker,
-        contracts: qtyNum,
-        from_strike: cur.strike,
-        from_expiration: cur.expiration,
-        close_price_per_share: cur.current_mark,
-        to_strike: chosen.strike,
-        to_expiration: selectedExp.expiration,
-        to_dte: selectedExp.dte,
-        premium_per_share: chosen.mark,
-        stock_price: data.underlying_price,
-        roll_reason: reason, // whipsaw-ledger key: scheduled | 75%-rule | defend | earnings | kill-switch-exit
-      });
+      await onExecute?.(payload);
+      setPendingLive(null);
       onClose?.();
-    } catch (e) { setExecErr(e.message); }
+    } catch (e) { setExecErr(e.message); setPendingLive(null); }
     finally { setBusy(false); }
   }
 
   return (
+    <>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       role="dialog" aria-modal="true" onClick={onClose}
@@ -301,5 +315,14 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
         )}
       </div>
     </div>
+    {pendingLive && (
+      <LiveOrderConfirm
+        payload={pendingLive}
+        busy={busy}
+        onConfirm={() => doExecute(pendingLive)}
+        onCancel={() => setPendingLive(null)}
+      />
+    )}
+    </>
   );
 }

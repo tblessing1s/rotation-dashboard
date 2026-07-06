@@ -670,6 +670,37 @@ def api_mode():
     return jsonify({"demo": config.demo_enabled()})
 
 
+def _live_trading_status() -> dict:
+    """Current live-trading state for the UI switch. `enabled` is the toggle
+    (env or persisted); `transmit` is the EFFECTIVE gate — orders only reach the
+    broker when live is on AND not in demo. Preconditions are surfaced so the UI
+    can explain why a switched-on session might still be paper."""
+    return {
+        "enabled": config.live_trading_enabled(),
+        "env_locked": config.live_trading_env(),
+        "transmit": executor.live_transmit(),
+        "demo": config.demo_enabled(),
+        "schwab_configured": schwab_api.configured(),
+        "schwab": schwab_api.token_status(),
+    }
+
+
+@app.route("/api/live-trading", methods=["GET", "POST"])
+def api_live_trading():
+    """Read or set the live-trading toggle. Enabling it means executed orders are
+    transmitted to the real Schwab account (unless in demo mode). Locked when
+    CFM_LIVE_TRADING is set in the environment."""
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        try:
+            config.set_live_trading_enabled(bool(payload.get("enabled")))
+        except RuntimeError as e:
+            return _err(e, 400)  # env-locked
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+    return jsonify(_live_trading_status())
+
+
 @app.route("/api/config")
 def api_config():
     return jsonify({

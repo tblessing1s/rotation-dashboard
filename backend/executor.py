@@ -9,8 +9,6 @@ honest paper path. Position state updates identically either way.
 """
 from __future__ import annotations
 
-import os
-
 import config
 import data_handler
 import indicators
@@ -63,7 +61,10 @@ INSTRUCTION = {
 
 
 def live_enabled() -> bool:
-    return os.environ.get("CFM_LIVE_TRADING", "").strip() in ("1", "true", "yes")
+    """Whether live trading is switched on — via the CFM_LIVE_TRADING env override
+    or the persisted UI toggle (config.live_trading_enabled). This alone does NOT
+    mean an order will transmit; see live_transmit() for the demo-safe gate."""
+    return config.live_trading_enabled()
 
 
 def live_transmit() -> bool:

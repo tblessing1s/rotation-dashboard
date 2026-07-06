@@ -58,6 +58,56 @@ def set_demo_enabled(on: bool) -> None:
     os.replace(tmp, MODE_PATH)
 
 
+# ---- Live trading toggle ---------------------------------------------------
+# Whether executed orders may be transmitted to the broker. Controlled either by
+# the CFM_LIVE_TRADING env var (an ops override that force-enables it and locks
+# the UI) or a persisted UI toggle stored on the volume so it survives restarts.
+# Off by default — the honest paper path. Live transmission ALSO requires not
+# being in demo mode; that combined gate lives in executor.live_transmit().
+LIVE_TRADING_PATH = os.path.join(DATA_DIR, "live_trading.json")
+
+_live_trading: bool | None = None
+
+
+def live_trading_env() -> bool:
+    """The CFM_LIVE_TRADING env override. When truthy it force-enables live
+    trading and the UI toggle can't turn it off — a deliberate ops lock."""
+    return os.environ.get("CFM_LIVE_TRADING", "").strip().lower() in ("1", "true", "yes")
+
+
+def live_trading_enabled() -> bool:
+    """Live trading is on when the env override is set OR the persisted UI toggle
+    is on. Single source of truth for executor.live_enabled()."""
+    if live_trading_env():
+        return True
+    global _live_trading
+    if _live_trading is None:
+        try:
+            import json
+            with open(LIVE_TRADING_PATH, encoding="utf-8") as fh:
+                _live_trading = bool(json.load(fh).get("live", False))
+        except (OSError, ValueError):
+            _live_trading = False
+    return _live_trading
+
+
+def set_live_trading_enabled(on: bool) -> None:
+    """Persist the UI toggle to the volume. Raises if the env override is forcing
+    it on — that lock is deliberate and must be cleared at the deploy level."""
+    if live_trading_env():
+        raise RuntimeError(
+            "CFM_LIVE_TRADING is set in the environment — live trading is locked on "
+            "at the deploy level and can't be changed from the UI.")
+    global _live_trading
+    import json
+    _live_trading = bool(on)
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = LIVE_TRADING_PATH + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump({"live": _live_trading}, fh)
+    os.replace(tmp, LIVE_TRADING_PATH)
+
+
 def active_state_path() -> str:
     """state.json path for the current mode (demo store stays separate)."""
     return DEMO_STATE_PATH if demo_enabled() else STATE_PATH

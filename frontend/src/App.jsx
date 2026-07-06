@@ -14,6 +14,7 @@ import DailyChecklist from "./components/DailyChecklist.jsx";
 import AlertsPanel from "./components/AlertsPanel.jsx";
 import HistoryTab from "./components/HistoryTab.jsx";
 import DataHealth from "./components/DataHealth.jsx";
+import LiveTradingSwitch from "./components/LiveTradingSwitch.jsx";
 import ReadyToEnter from "./components/ReadyToEnter.jsx";
 import ScanProgress from "./components/ScanProgress.jsx";
 
@@ -201,6 +202,7 @@ export default function App() {
         {tab === "History" && <HistoryTab key={execNonce} />}
         {tab === "Checklist" && (
           <div className="grid gap-4">
+            <LiveTradingSwitch />
             <AlertsPanel />
             <DailyChecklist />
             <DataHealth />
