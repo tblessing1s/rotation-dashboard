@@ -12,6 +12,15 @@ function bigDollars(n) {
   return "$" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
+// Normalize the weekly payload into a list of choosable expirations. Newer
+// backends send `weekly.expirations` (current + next week); older ones send a
+// single flat week, which we wrap so the rest of the UI is uniform.
+function weeklyExpirations(weekly) {
+  if (!weekly) return [];
+  if (weekly.expirations?.length) return weekly.expirations;
+  return [{ expiration: weekly.expiration, dte: weekly.dte, strikes: weekly.strikes || [] }];
+}
+
 const ACTION_LABELS = {
   buy_leap: "Buy LEAP (deep ITM)",
   sell_short: "Sell weekly short call",
@@ -30,6 +39,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   const [chain, setChain] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
+  const [weeklyExp, setWeeklyExp] = React.useState(null);
   const [weeklyStrike, setWeeklyStrike] = React.useState(null);
   const [leapStrike, setLeapStrike] = React.useState(null);
   const [action, setAction] = React.useState(null);
@@ -53,7 +63,12 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       .then((c) => {
         if (!live) return;
         setChain(c);
-        const sug = c.weekly?.strikes?.find((s) => s.suggested) || c.weekly?.strikes?.[0];
+        // Default to the current (first) week and its suggested strike.
+        const exps = weeklyExpirations(c.weekly);
+        const firstExp = exps[0] || null;
+        setWeeklyExp(firstExp?.expiration ?? null);
+        const firstStrikes = firstExp?.strikes || [];
+        const sug = firstStrikes.find((s) => s.suggested) || firstStrikes[0];
         setWeeklyStrike(sug ? sug.strike : null);
         const sugLeap = c.leap?.strikes?.find((s) => s.suggested) || c.leap?.strikes?.[0];
         setLeapStrike(sugLeap ? sugLeap.strike : null);
@@ -86,7 +101,18 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       }
     : ACTION_LABELS;
   const showPayoff = !mgmt && action !== "close_leap";
-  const chosenWeekly = weekly?.strikes?.find((s) => s.strike === weeklyStrike) || null;
+  const weeklyExps = weeklyExpirations(weekly);
+  const activeWeekly = weeklyExps.find((e) => e.expiration === weeklyExp) || weeklyExps[0] || null;
+  const activeStrikes = activeWeekly?.strikes || [];
+  const chosenWeekly = activeStrikes.find((s) => s.strike === weeklyStrike) || null;
+  // Switching week keeps the same strike if it exists there, else that week's
+  // suggested strike.
+  const selectWeeklyExp = (e) => {
+    setWeeklyExp(e.expiration);
+    const keep = e.strikes.find((s) => s.strike === weeklyStrike);
+    const pick = keep || e.strikes.find((s) => s.suggested) || e.strikes[0];
+    setWeeklyStrike(pick ? pick.strike : null);
+  };
   const chosenLeap = leap?.strikes?.find((s) => s.strike === leapStrike)
     || leap?.strikes?.find((s) => s.suggested) || null;
   const qtyNum = Number(qty) || 0;
@@ -425,18 +451,39 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                 <h3 className="text-sm font-semibold text-slate-200">Weekly short call ({weekly?.posture || "…"}-suggested)</h3>
                 {weekly && (
                   <span className="text-xs text-slate-500">
-                    {weekly.expiration ? `exp ${weekly.expiration} · ` : ""}{weekly.dte} DTE ·{" "}
+                    {activeWeekly?.dte != null ? `${activeWeekly.dte} DTE · ` : ""}
                     {weekly.atr_mult}×ATR {fmt(weekly.atr, 2)}
                     {weekly.itm_pct != null ? ` / ${(weekly.itm_pct * 100).toFixed(0)}% ITM floor` : ""}
                   </span>
                 )}
               </div>
-              {weekly?.strikes?.length ? (
+              {weeklyExps.length > 1 && (
+                <div className="mb-2 flex flex-wrap gap-2">
+                  {weeklyExps.map((e, i) => (
+                    <button
+                      key={e.expiration || i}
+                      type="button"
+                      onClick={() => selectWeeklyExp(e)}
+                      className={`rounded-lg border px-2.5 py-1 text-xs tabular-nums ${
+                        e.expiration === weeklyExp
+                          ? "border-emerald-600 bg-emerald-500/10 text-emerald-200"
+                          : "border-slate-700 text-slate-400 hover:bg-slate-800/50"
+                      }`}
+                    >
+                      {i === 0 ? "This week" : i === 1 ? "Next week" : `Week ${i + 1}`}
+                      <span className="ml-1 text-slate-500">
+                        {e.expiration || "—"}{e.dte != null ? ` · ${e.dte}d` : ""}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {activeStrikes.length ? (
                 <>
                   <div className="grid grid-cols-[auto_repeat(5,1fr)] gap-2 text-xs uppercase tracking-wide text-slate-500">
                     <span className="w-6" /><span>Strike</span><span>Delta</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
                   </div>
-                  {weekly.strikes.map((s) => (
+                  {activeStrikes.map((s) => (
                     <label
                       key={s.strike}
                       className={`grid grid-cols-[auto_repeat(5,1fr)] items-center gap-2 rounded-lg px-1 py-1 ${

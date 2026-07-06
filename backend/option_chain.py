@@ -467,30 +467,47 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     if atr_val is not None and price is not None:
         sp = strike_policy.suggest_strike(price, atr_val, regime_status)
         suggested_strike = sp["strike"]
-        # Nearest expiration with at least one day left = this week's short.
-        # dte > 0 (not >= 0): a 0-DTE contract expires today, so it has almost no
-        # time value left and its delta collapses to ~1.0/~0.0 near expiration —
-        # useless for a fresh entry, which wants a full week of premium to sell.
+        # The nearest expirations with time left = this week, next week, ... The
+        # operator picks which to sell. dte > 0 (not >= 0): a 0-DTE contract
+        # expires today with almost no time value and a delta that collapses to
+        # ~1.0/~0.0, useless for a fresh entry that wants a full week of premium.
         dated = [c for c in contracts if c.get("dte") is not None and c["dte"] > 0]
-        weekly_exp = None
-        if dated:
-            weekly_exp = min(dated, key=lambda c: c["dte"])["expiration"]
-        exp_contracts = [c for c in contracts if c["expiration"] == weekly_exp] if weekly_exp else []
-        strikes = indicators.get_nearby_strikes(exp_contracts, suggested_strike, underlying)
-        sug = next((s for s in strikes if s.get("suggested")), strikes[0] if strikes else None)
-        weekly_iv = (sug or {}).get("volatility") or _median([s.get("volatility") for s in strikes])
-        # Accrue one IV-history point per day from the IV we already computed —
-        # this is what IV rank is measured against (zero extra chain fetches).
+        near_exps: list[str] = []
+        for c in sorted(dated, key=lambda c: c["dte"]):
+            if c["expiration"] not in near_exps:
+                near_exps.append(c["expiration"])
+            if len(near_exps) >= config.WEEKLY_EXPIRATIONS_SHOWN:
+                break
+        # One strike ladder per offered expiration (same regime-suggested strike).
+        exp_views = []
+        for exp in near_exps:
+            exp_contracts = [c for c in contracts if c["expiration"] == exp]
+            strikes = indicators.get_nearby_strikes(exp_contracts, suggested_strike, underlying)
+            exp_views.append({
+                "expiration": exp,
+                "dte": exp_contracts[0]["dte"] if exp_contracts else None,
+                "strikes": strikes,
+            })
+        # Accrue one IV-history point per day from the current week's IV — this is
+        # what IV rank is measured against (zero extra chain fetches).
+        current = exp_views[0] if exp_views else None
+        cur_strikes = current["strikes"] if current else []
+        sug = next((s for s in cur_strikes if s.get("suggested")),
+                   cur_strikes[0] if cur_strikes else None)
+        weekly_iv = (sug or {}).get("volatility") or _median([s.get("volatility") for s in cur_strikes])
         iv_history.record(ticker, weekly_iv)
         weekly = {
-            "expiration": weekly_exp,
-            "dte": exp_contracts[0]["dte"] if exp_contracts else None,
+            # Top-level fields mirror the current (first) week for back-compat;
+            # `expirations` carries the full set the UI lets the user choose from.
+            "expiration": current["expiration"] if current else None,
+            "dte": current["dte"] if current else None,
             "suggested_strike": suggested_strike,
             "atr": round(atr_val, 2),
             "atr_mult": sp["atr_mult"],
             "itm_pct": sp["itm_pct"],
             "posture": sp["posture"],
-            "strikes": strikes,
+            "strikes": cur_strikes,
+            "expirations": exp_views,
         }
 
     # --- If a short is already open, surface its live buy-to-close cost ------

@@ -159,6 +159,9 @@ RISK_FREE_RATE = 0.04        # for Black–Scholes greeks (delta recomputed to m
 SHORT_ATR_MULT = 1.5         # short strike = stock - 1.5 * ATR (legacy flat default;
                               # superseded by STRIKE_TABLE below for regime/posture-aware picks)
 SHARE_CAP = 500              # accumulate to 500 shares per stock, then rotate
+# How many near-term expirations to offer for a fresh weekly short. 2 = the
+# current week plus the next, so the operator can pick which to sell.
+WEEKLY_EXPIRATIONS_SHOWN = 2
 
 # ---- Weekly short strike selection: regime x posture table -----------------
 # HARD_CFM_RULE ("Genius System" market-timing table). The weekly short strike

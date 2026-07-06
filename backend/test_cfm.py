@@ -353,6 +353,46 @@ def test_weekly_short_skips_0dte_expiration(monkeypatch):
     assert out["weekly"]["dte"] == 5
 
 
+def test_weekly_offers_current_and_next_week(monkeypatch):
+    # A fresh entry offers the current week AND the next week (capped at
+    # WEEKLY_EXPIRATIONS_SHOWN) so the operator can choose which to sell; the
+    # top-level weekly fields still mirror the current (first) week.
+    import option_chain as oc
+    import data_handler
+    import logging_handler as log
+    import screening
+
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "green"})
+    df = _frame([112.5] * 60)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 112.5, "source": "t"})
+    monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {}})
+    monkeypatch.setattr(log, "find_position", lambda s, t: None)
+
+    def _leg(sym, dte, bid, ask, mark):
+        return {"symbol": sym, "strikePrice": 105.0, "daysToExpiration": dte,
+                "bid": bid, "ask": ask, "mark": mark, "volatility": 42.0}
+
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {
+        "status": "SUCCESS", "underlyingPrice": 112.5,
+        "callExpDateMap": {
+            "2026-07-10:5": {"105.0": [_leg("C5", 5, 7.10, 8.50, 7.80)]},
+            "2026-07-17:12": {"105.0": [_leg("C12", 12, 8.40, 9.90, 9.15)]},
+            "2026-07-24:19": {"105.0": [_leg("C19", 19, 9.10, 10.60, 9.85)]},
+        },
+        "putExpDateMap": {},
+    })
+    out = oc.option_chain("ON")
+    exps = out["weekly"]["expirations"]
+    # Nearest-first, capped at 2 (the third week is dropped).
+    assert [e["expiration"] for e in exps] == ["2026-07-10", "2026-07-17"]
+    assert exps[0]["dte"] == 5 and exps[1]["dte"] == 12
+    assert all(e["strikes"] for e in exps)
+    # Back-compat: top-level mirrors the current (first) week.
+    assert out["weekly"]["expiration"] == "2026-07-10"
+    assert out["weekly"]["dte"] == 5
+
+
 def test_implied_vol_put_roundtrip():
     p = ind._bs_put_price(117.7, 108.0, 2 / 365, 0.04, 0.90)
     assert ind.implied_vol_put(p, 117.7, 108.0, 2 / 365, 0.04) == pytest.approx(0.90, abs=1e-3)
