@@ -262,9 +262,11 @@ def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str
     atrp = indicators.atr_pct(df) if df is not None else None
     cons = indicators.consolidating(df) if df is not None else None
 
-    # Stock-level legs (gate Levels 3 & 4). The "beats sector" leg is waived
-    # (treated as satisfied) for a sector ETF entered as its own candidate.
-    beats = (rs_vs_spy is not None and rs_vs_spy > config.STOCK_RS_VS_SPY_MIN
+    # Stock-level legs (gate Levels 3 & 4). The "beats SPY" leg uses the lower
+    # ETF bar for any ETF (income sleeve, not a growth leader); the "beats sector"
+    # leg is waived for a sector ETF entered as its own candidate.
+    spy_min = config.rs_vs_spy_min(sector_data.is_etf(ticker))
+    beats = (rs_vs_spy is not None and rs_vs_spy > spy_min
              and (is_sector_etf
                   or (rs_vs_sector is not None and rs_vs_sector > config.STOCK_RS_VS_SECTOR_MIN)))
 
@@ -392,9 +394,12 @@ def entry_gate(ticker: str) -> dict:
     # fail) rather than blocking a real ETF entry on a meaningless self-check.
     rs_spy, rs_sec = row["rs3m_vs_spy"], row["rs3m_vs_sector"]
     is_etf = row.get("is_sector_etf", False)
+    # Any ETF (sector or added) beats SPY on the lower income-sleeve bar; only a
+    # sector ETF waives the beats-sector leg (it IS the sector).
+    spy_min = config.rs_vs_spy_min(sector_data.is_etf(ticker))
     l3_checks = [
-        _check(f"RS3M vs SPY > +{config.STOCK_RS_VS_SPY_MIN:g}%", rs_spy,
-               rs_spy is not None and rs_spy > config.STOCK_RS_VS_SPY_MIN),
+        _check(f"RS3M vs SPY > +{spy_min:g}%", rs_spy,
+               rs_spy is not None and rs_spy > spy_min),
         _check(f"RS3M vs Sector > {config.STOCK_RS_VS_SECTOR_MIN:g}%"
                + (" (N/A — is the sector)" if is_etf else ""),
                rs_sec, is_etf or (rs_sec is not None and rs_sec > config.STOCK_RS_VS_SECTOR_MIN)),

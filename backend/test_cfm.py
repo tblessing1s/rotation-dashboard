@@ -884,6 +884,50 @@ def test_entry_gate_level3_waives_sector_leg_for_a_sector_etf(monkeypatch):
     assert l3["detail"]["rs3m_vs_sector"] is None
 
 
+def test_rs_vs_spy_min_uses_a_lower_bar_for_etfs():
+    import config
+    assert config.rs_vs_spy_min(is_etf=False) == config.STOCK_RS_VS_SPY_MIN
+    assert config.rs_vs_spy_min(is_etf=True) == config.STOCK_RS_VS_SPY_MIN_ETF
+    assert config.STOCK_RS_VS_SPY_MIN_ETF < config.STOCK_RS_VS_SPY_MIN
+
+
+def test_etf_clears_level3_spy_leg_on_the_lower_income_sleeve_bar(monkeypatch):
+    # An ETF that merely leads SPY (+2%, below the +5% growth bar) must now clear
+    # the Level 3 "beats SPY" leg — it runs as an income sleeve, not a growth
+    # leader — while a regular stock at the same +2% still fails that leg.
+    import data_handler
+    import screening
+    screening._results.clear()
+
+    n = 260
+    spy = _frame([100.0] * n)
+    trend = _frame([100 + i * 0.3 for i in range(n)])
+    monkeypatch.setattr(data_handler, "get_daily",
+                        lambda s, force=False: spy if s.upper() == "SPY" else trend)
+    monkeypatch.setattr(data_handler, "get_many", lambda syms, force=False: {s.upper(): trend for s in syms})
+    monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
+    monkeypatch.setattr(ind, "rs3m", lambda d, b, **k: 2.0)  # +2% vs SPY for everything
+    monkeypatch.setattr(ind, "atr_pct", lambda d, **k: 2.0)
+    monkeypatch.setattr(ind, "consolidating", lambda d: True)
+    monkeypatch.setattr(screening, "regime",
+                        lambda: {"status": "green", "breadth": 70, "vix": 15, "spy_trend": "up"})
+    monkeypatch.setattr(screening, "sectors",
+                        lambda: {"XLK": {"name": "Technology", "rs3m": 20, "breadth": 70,
+                                         "atr_expanding": False, "status": "green"}})
+
+    # XLK (an ETF) clears the SPY leg on the >0% bar; the label reflects it.
+    etf_l3 = next(l for l in screening.entry_gate("XLK")["levels"] if l["level"] == 3)
+    spy_check = etf_l3["checks"][0]
+    assert spy_check["pass"] is True
+    assert "+0%" in spy_check["label"]
+
+    # NVDA (a stock) at the same +2% still fails — the growth bar is unchanged.
+    stock_l3 = next(l for l in screening.entry_gate("NVDA")["levels"] if l["level"] == 3)
+    stock_spy_check = stock_l3["checks"][0]
+    assert stock_spy_check["pass"] is False
+    assert "+5%" in stock_spy_check["label"]
+
+
 def test_stock_filter_includes_the_sector_etf_alongside_constituents(monkeypatch):
     import data_handler
     import screening

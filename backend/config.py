@@ -108,8 +108,20 @@ SECTOR_RS3M_MIN = 10.0         # sector RS3M vs SPY must clear +10%
 SECTOR_BREADTH_MIN = 60.0     # % of sector constituents above 50-DMA
 
 # ---- Stock gate (Levels 3 & 4) ---------------------------------------------
-STOCK_RS_VS_SPY_MIN = 5.0      # stock RS3M vs SPY > +5%
+STOCK_RS_VS_SPY_MIN = 5.0      # stock RS3M vs SPY > +5% (growth-leader bar)
+# ETFs run as an income sleeve, not growth leaders, so the "beat SPY" leg uses a
+# lower bar: merely leading SPY (> 0%) is enough. This mirrors the lower ETF
+# juice bar (weekly_yield_target_pct) — an income ETF shouldn't have to outrun
+# SPY by 5% to be entry-ready. (Sector ETFs already waive the beats-sector leg;
+# non-sector ETFs still beat their assigned sector.)
+STOCK_RS_VS_SPY_MIN_ETF = 0.0
 STOCK_RS_VS_SECTOR_MIN = 0.0  # stock RS3M vs Sector > 0
+
+
+def rs_vs_spy_min(is_etf: bool = False) -> float:
+    """The RS3M-vs-SPY floor for the Level 3 'beats SPY' leg: the lower ETF bar
+    for an ETF, the growth-leader bar for a stock."""
+    return STOCK_RS_VS_SPY_MIN_ETF if is_etf else STOCK_RS_VS_SPY_MIN
 CONSOLIDATION_ATR_PCT_MAX = 5.0   # daily ATR% of price below this = consolidating
 CONSOLIDATION_MA21_DIST_MAX = 4.0  # within this % of MA21 = near the mean
 
