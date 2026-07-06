@@ -1,6 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { Pill, Loading, fmt } from "./ui.jsx";
+import { useTradeMode, TradeModeBadge } from "../tradeMode.jsx";
 
 // Dollar formatter that tolerates nulls (—) for thin/closed quotes.
 function dollars(n) {
@@ -40,6 +41,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   // a blocked gate needs a typed, logged override reason before executing.
   const [cbPrice, setCbPrice] = React.useState("");
   const [overrideReason, setOverrideReason] = React.useState("");
+  const tradeMode = useTradeMode(); // "paper" | "live" | null — is this ticket routed to Schwab?
 
   React.useEffect(() => {
     const sug = accountGate?.suggested_circuit_breaker?.price;
@@ -214,8 +216,16 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
 
             {/* Order ticket — auto-detected action, quantity, payoff, execute */}
             <div className="rounded-lg border border-sky-800 bg-sky-500/5 p-3">
-              <div className="mb-2 text-xs uppercase tracking-wide text-sky-400">Order (auto-detected)</div>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <span className="text-xs uppercase tracking-wide text-sky-400">Order (auto-detected)</span>
+                <TradeModeBadge mode={tradeMode} />
+              </div>
               <p className="mb-3 text-xs text-slate-400">{chain.action_reason}</p>
+              {tradeMode === "paper" && (
+                <p className="-mt-2 mb-3 text-[11px] text-amber-300/90">
+                  Paper mode — this is logged to your ledger only; no order reaches Schwab.
+                </p>
+              )}
               <div className="grid grid-cols-2 gap-3 text-sm">
                 <label className="text-slate-400">Action
                   <select
@@ -321,7 +331,9 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                   disabled={!canExecute || busy}
                   className="rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-40"
                 >
-                  {busy ? "Executing…" : `Execute ${ACTION_LABELS[action]?.split(" ")[0] || ""} & log`}
+                  {busy
+                    ? "Executing…"
+                    : `Execute ${ACTION_LABELS[action]?.split(" ")[0] || ""} & log${tradeMode === "paper" ? " (paper)" : ""}`}
                 </button>
               </div>
               {execErr && <p className="mt-2 text-right text-xs text-rose-400">{execErr}</p>}

@@ -1,6 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { Pill, Loading, fmt } from "./ui.jsx";
+import { useTradeMode, TradeModeBadge } from "../tradeMode.jsx";
 
 function dollars(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -29,6 +30,7 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
   const [qty, setQty] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [execErr, setExecErr] = React.useState(null);
+  const tradeMode = useTradeMode(); // "paper" | "live" | null — is this roll routed to Schwab?
 
   React.useEffect(() => {
     let live = true;
@@ -118,8 +120,11 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
         className="max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-slate-700 bg-slate-900 p-5 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-slate-100">Roll short · {ticker}</h2>
+        <div className="mb-4 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <h2 className="text-lg font-semibold text-slate-100">Roll short · {ticker}</h2>
+            <TradeModeBadge mode={tradeMode} />
+          </div>
           <button onClick={onClose} className="rounded-lg px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200">✕</button>
         </div>
 
@@ -273,6 +278,11 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
                 New premium {bigDollars(newCredit)} − buyback {bigDollars(buyback)}.
                 {sameStrike && sameWeek ? " Choose a different week or strike to roll." : ""}
               </p>
+              {tradeMode === "paper" && (
+                <p className="mt-1 text-[11px] text-amber-300/90">
+                  Paper mode — logged to your ledger only; no order reaches Schwab.
+                </p>
+              )}
               <div className="mt-3 flex items-center justify-end gap-2">
                 <button onClick={onClose} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
                   Cancel
@@ -282,7 +292,7 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
                   disabled={!canExecute || busy}
                   className="rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-40"
                 >
-                  {busy ? "Rolling…" : "Roll & log"}
+                  {busy ? "Rolling…" : `Roll & log${tradeMode === "paper" ? " (paper)" : ""}`}
                 </button>
               </div>
               {execErr && <p className="mt-2 text-right text-xs text-rose-400">{execErr}</p>}

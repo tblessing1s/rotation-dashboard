@@ -380,3 +380,52 @@ def test_leap_mark_below_intrinsic_floors_and_flags():
     h = leap_policy.leap_health(position, df=_frame(100), stock_price=100.0)
     assert h["leap_extrinsic_remaining"] == 0.0          # floored, not negative
     assert h["leap_extrinsic_below_intrinsic"] is True   # liquidity flag set
+
+
+# ---------------------------------------------------------------------------
+# 8. Demo/paper mode must NEVER transmit a real order to the broker
+# ---------------------------------------------------------------------------
+class _ExplodingClient:
+    """Any broker contact from a demo session is a test failure — a demo/paper
+    trade must never resolve a live account or place a real order."""
+    def primary_account_hash(self):
+        raise AssertionError("demo session must not resolve a live account")
+
+    def place_order(self, account_hash, order):
+        raise AssertionError("demo session must not place a live order")
+
+
+def test_demo_mode_never_transmits_even_with_live_enabled(store, monkeypatch):
+    # Both live switches are ON, but the session is in demo/paper mode: the trade
+    # must be committed as paper (logged), never routed to the broker.
+    monkeypatch.setattr(config, "_demo_mode", True)
+    monkeypatch.setattr(executor, "live_enabled", lambda: True)
+    import schwab_api
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: _ExplodingClient())
+
+    assert executor.live_transmit() is False  # demo overrides the raw flag
+
+    res = executor.execute({"action": "buy_leap", "ticker": "NVDA", "strike": 75,
+                            "contracts": 5, "execution_price": 6000, "execution_total": 30000,
+                            "stock_price": 100, "extrinsic_captured": 2000,
+                            "expiration": "2026-06-18", "dte": 180,
+                            "override_reason": "test", "circuit_breaker_price": 80})
+    # Committed immediately as paper: no working order, no broker contact, and the
+    # execution is stamped logged / not live-transmitted.
+    assert res["status"] == "filled" and res["mode"] == "logged"
+    assert res["execution"]["live_transmitted"] is False
+    # Position landed in the demo book (the live state.json is untouched).
+    pos = log.find_position(log.load_state(), "NVDA")
+    assert pos is not None and pos["leap"]["contracts"] == 5
+    assert not os.path.exists(config.STATE_PATH)  # nothing written to the live store
+
+
+def test_place_live_guard_blocks_demo_broker_call(store, monkeypatch):
+    # Defense-in-depth: the broker-boundary guard raises if _place_live is reached
+    # in demo mode, even if a caller skipped the mode check upstream.
+    monkeypatch.setattr(config, "_demo_mode", True)
+    import schwab_api
+    with pytest.raises(schwab_api.SchwabError, match="demo/paper mode"):
+        executor._place_live({"option_symbol": "NVDA_X"}, "NVDA", "buy_leap",
+                             5, 75, 100.0, "supplied")
