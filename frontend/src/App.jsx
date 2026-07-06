@@ -17,11 +17,12 @@ import DataHealth from "./components/DataHealth.jsx";
 import LiveTradingSwitch from "./components/LiveTradingSwitch.jsx";
 import ReadyToEnter from "./components/ReadyToEnter.jsx";
 import ScanProgress from "./components/ScanProgress.jsx";
+import Overview from "./components/Overview.jsx";
 
-const TABS = ["Scan", "Execute", "Theta", "Kill Switch", "Positions", "History", "Checklist"];
+const TABS = ["Overview", "Scan", "Execute", "Theta", "Kill Switch", "Positions", "History", "Checklist"];
 
 export default function App() {
-  const [tab, setTab] = React.useState("Scan");
+  const [tab, setTab] = React.useState("Overview");
   const [regimeStatus, setRegimeStatus] = React.useState("unknown");
   const [selectedTicker, setSelectedTicker] = React.useState("");
   const [execNonce, setExecNonce] = React.useState(0);
@@ -161,6 +162,14 @@ export default function App() {
               posture={posture} postureBusy={postureBusy} onTogglePosture={togglePosture} />
       <main className="mx-auto max-w-7xl px-3 py-4 sm:px-4 sm:py-6">
         <SchwabStatus demo={demo} />
+        {tab === "Overview" && (
+          <Overview
+            onNavigate={setTab}
+            onSelectStock={selectStock}
+            onAction={goToAction}
+            onRegimeStatus={setRegimeStatus}
+          />
+        )}
         {tab === "Scan" && (
           <div className="grid gap-4">
             <ScanProgress onComplete={() => setScanNonce((n) => n + 1)} />
