@@ -1395,16 +1395,25 @@ def defend_recommendation(ticker: str) -> dict:
     if not pos:
         return {"ticker": ticker, "error": "no position"}
     df = data_handler.get_daily(ticker)
-    price = indicators.last(df)
+    close = indicators.last(df)
     atr_val = indicators.atr(df) if df is not None else None
     hv = indicators.hist_vol(df) if df is not None else None
-    if price is None or atr_val is None:
+    if close is None or atr_val is None:
         return {"ticker": ticker, "error": "insufficient data"}
 
+    # A short is breached only when BOTH the last daily close and the live price
+    # sit below the strike: close-confirmed (no intraday whipsaw), but cleared
+    # once the stock recovers above the strike intraday. The current price drives
+    # the roll-down suggestion, so use the live quote when we have one.
+    live = data_handler.live_price(ticker)
+    price = live if live is not None else close
+
     breached = [sc for sc in pos.get("short_calls", [])
-                if sc.get("strike") is not None and price < float(sc["strike"])]
+                if sc.get("strike") is not None
+                and close < float(sc["strike"]) and price < float(sc["strike"])]
     if not breached:
-        return {"ticker": ticker, "breached": False, "stock_price": round(price, 2)}
+        return {"ticker": ticker, "breached": False,
+                "stock_price": round(price, 2), "last_close": round(close, 2)}
     sc = min(breached, key=lambda s: s.get("dte") if s.get("dte") is not None else 1e9)
 
     regime = screening.regime().get("status", "yellow")
@@ -1428,6 +1437,7 @@ def defend_recommendation(ticker: str) -> dict:
         "ticker": ticker,
         "breached": True,
         "stock_price": round(price, 2),
+        "last_close": round(close, 2),
         "atr": round(atr_val, 2),
         "regime": regime,
         "atr_mult": atr_mult,

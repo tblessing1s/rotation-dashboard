@@ -203,13 +203,24 @@ def check_defend_position(state: dict) -> list[dict]:
     regime_status = None
     for p in _open_positions(state):
         t = p.get("ticker", "")
-        price = _last_close(t)
-        if price is None:
+        close = _last_close(t)
+        if close is None:
             continue
+        shorts = p.get("short_calls", [])
+        # Close-confirmed rule: only positions whose short strike the last daily
+        # close sits below are candidates. Skip (and don't spend a live quote on)
+        # anything the close hasn't breached.
+        if not any(sc.get("strike") is not None and close < float(sc["strike"]) for sc in shorts):
+            continue
+        # ...but the operator acts on the live price, so a stock that closed below
+        # the strike and has since recovered above it intraday isn't breached now.
+        # Require the live price below the strike too before flagging a defend.
+        live = data_handler.live_price(t)
+        price = live if live is not None else close
         atr_val = indicators.atr(data_handler.get_daily(t))
-        for sc in p.get("short_calls", []):
+        for sc in shorts:
             strike = sc.get("strike")
-            if strike is None or price >= strike:
+            if strike is None or close >= float(strike) or price >= float(strike):
                 continue
             sp = None
             if atr_val:
@@ -217,14 +228,20 @@ def check_defend_position(state: dict) -> list[dict]:
                     regime_status = screening.regime().get("status")
                 sp = strike_policy.suggest_strike(price, atr_val, regime_status)
             suggestion = sp["strike"] if sp else None
+            headline = (
+                f"{t} at {live:.2f} (last close {close:.2f}), below the short strike {strike}."
+                if live is not None and abs(live - close) >= 0.005
+                else f"{t} closed at {close:.2f}, below the short strike {strike}.")
             out.append(_alert(
                 "DEFEND_POSITION", t,
-                f"{t} closed at {price:.2f}, below the short strike {strike}.",
+                headline,
                 (f"Defensive roll-down: new strike ≈ {suggestion} "
                  f"({sp['atr_mult']:g}×ATR / {sp['itm_pct'] * 100:g}% ITM floor, "
                  f"{sp['posture']} posture)." if sp
                  else "Defensive roll-down: roll to a strike further below price."),
-                {"price": round(price, 2), "short_strike": strike,
+                {"price": round(price, 2), "last_close": round(close, 2),
+                 "live_price": round(live, 2) if live is not None else None,
+                 "short_strike": strike,
                  "suggested_strike": suggestion, "atr": round(atr_val, 2) if atr_val else None,
                  "atr_mult": sp["atr_mult"] if sp else None,
                  "itm_pct": sp["itm_pct"] if sp else None,

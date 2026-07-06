@@ -128,6 +128,31 @@ def test_defend_position_suggests_atr_roll_down(monkeypatch):
     assert alerts.check_defend_position(_state(p2)) == []
 
 
+def test_defend_position_requires_live_price_below_strike(monkeypatch):
+    """Close-confirmed, but a stock that closed below the strike and has since
+    recovered above it intraday isn't breached now — so no defend fires."""
+    import data_handler
+    import screening
+    import strike_policy
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([130.0] * 60))
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "yellow"})
+    monkeypatch.setattr(strike_policy, "get_posture", lambda state=None: "conservative")
+    sc = {"strike": 132, "contracts": 5, "dte": 4, "current_bid": 0.25,
+          "entry_premium_total": 600.0}
+
+    # Closed at 130 (below 132) but live at 133 (recovered above) -> suppressed.
+    monkeypatch.setattr(data_handler, "live_price", lambda s: 133.0)
+    assert alerts.check_defend_position(_state(_pos(short_calls=[sc]))) == []
+
+    # Closed at 130 and still below intraday (131) -> fires; the live price is
+    # surfaced in the message and the data payload.
+    monkeypatch.setattr(data_handler, "live_price", lambda s: 131.0)
+    out = alerts.check_defend_position(_state(_pos(short_calls=[sc])))
+    assert len(out) == 1 and out[0]["type"] == "DEFEND_POSITION"
+    assert out[0]["data"]["live_price"] == 131.0 and out[0]["data"]["last_close"] == 130.0
+    assert "131.00" in out[0]["message"] and "last close 130.00" in out[0]["message"]
+
+
 def test_circuit_breaker_trips_at_or_below_line(monkeypatch):
     monkeypatch.setattr(alerts, "_last_close", lambda t: 128.0)
     p = _pos(circuit_breaker={"price": 131.0})
