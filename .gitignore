@@ -8,6 +8,8 @@ venv/
 backend/state.json
 backend/schwab_token.json
 backend/earnings_cache.json
+backend/dividends_cache.json
+backend/iv_history.json
 backend/cache/
 data/cache/
 # Demo-mode store (synthetic data, never committed)

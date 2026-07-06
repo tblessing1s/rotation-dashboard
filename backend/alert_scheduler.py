@@ -52,6 +52,27 @@ def enabled() -> bool:
     return os.environ.get("CFM_ALERTS_SCHEDULER", "1").strip() not in ("0", "false", "no")
 
 
+def warm_scan_enabled() -> bool:
+    """Pre-open scan warm-up on by default; CFM_WARM_SCAN=0 turns it off."""
+    return os.environ.get("CFM_WARM_SCAN", "1").strip() not in ("0", "false", "no")
+
+
+def _warm_scan() -> None:
+    """Prime the full-universe scan cache so the first Scan of the day loads warm.
+    Best-effort: logged, never fatal to the tick or the process."""
+    if not warm_scan_enabled():
+        return
+    try:
+        import screening
+        result = screening.warm_scan_cache()
+        if result.get("ok"):
+            logger.info("scan cache warmed")
+        else:
+            logger.warning("scan cache warm-up incomplete: %s", result.get("error"))
+    except Exception as e:  # noqa: BLE001 — a warm-up must never break its caller
+        logger.warning("scan cache warm-up failed: %s", e)
+
+
 def due_slots(now: datetime, last_run: dict[str, date] | None = None) -> list[str]:
     """Schedule slots that should run at `now` (ET): time reached, market day,
     not yet run today. Pure so it's unit-testable without threads."""
@@ -110,6 +131,10 @@ def _tick() -> None:
         import heartbeat
         heartbeat.ping("/fail", force=True)
         logger.error("scheduled alert run (%s ET) failed: %s", "+".join(due), e)
+    # Warm the full-universe scan cache after the alert pass (which is what pages
+    # the operator, so it runs first). At the pre-open 08:30 slot this primes the
+    # morning's first Scan; later slots keep the daily-bar cache from ageing out.
+    _warm_scan()
 
 
 def _maybe_morning_reconcile(now: datetime, due: list[str]) -> None:
@@ -150,4 +175,8 @@ def start_once() -> bool:
         threading.Thread(target=_loop, name="alert-scheduler", daemon=True).start()
         _started = True
         logger.info("alert scheduler started (ET slots: %s)", ", ".join(config.ALERT_SCHEDULE_ET))
+        # Warm the scan cache once on startup, off-thread so it never delays boot,
+        # so a deploy/restart during the day doesn't leave the first Scan cold.
+        if warm_scan_enabled():
+            threading.Thread(target=_warm_scan, name="scan-warmup", daemon=True).start()
         return True

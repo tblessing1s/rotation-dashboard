@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Light, Stat, Pill, Loading, fmt, useApi } from "./ui.jsx";
+import { Card, Light, Stat, Pill, Loading, ErrorState, fmt, useApi } from "./ui.jsx";
 
 const REGIME_COPY = {
   green: "Market good — clear to hunt entries.",
@@ -10,14 +10,14 @@ const REGIME_COPY = {
 
 export default function RegimeScanner({ onStatus }) {
   // Level 1 market regime. Refreshes every 5 minutes per the routine.
-  const { data, error, loading } = useApi(api.regime, [], 5 * 60 * 1000);
+  const { data, error, loading, reload } = useApi(api.regime, [], 5 * 60 * 1000);
 
   React.useEffect(() => {
     if (data?.status) onStatus?.(data.status);
   }, [data, onStatus]);
 
   if (loading && !data) return <Card title="Market Regime"><Loading /></Card>;
-  if (error) return <Card title="Market Regime"><p className="text-rose-400 text-sm">{error}</p></Card>;
+  if (error && !data) return <Card title="Market Regime"><ErrorState error={error} onRetry={reload} /></Card>;
 
   const r = data || {};
   return (

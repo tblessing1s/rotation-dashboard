@@ -28,6 +28,40 @@ def clear_cache() -> None:
     _results.clear()
 
 
+def warm_scan_cache() -> dict:
+    """Pre-compute the full-universe scan so the operator's first Scan of the day
+    is served warm instead of triggering a cold ~500-name provider fetch and
+    indicator sweep on the request path.
+
+    Left cold, the morning's first hit on Ready-to-Enter / Stock Filter re-fetches
+    every symbol from Schwab (the overnight parquet has aged past its freshness
+    window) and then runs the indicator sweep — tens of seconds on the one shared
+    machine, which is exactly the "stocks won't load" the operator sees. Warming
+    the parquet cache in one parallel batch, then priming the memoized sweeps,
+    moves that cost off the request path. Called off the scheduler's market-day
+    slots (notably the pre-open 08:30 slot) and once shortly after startup.
+
+    Best-effort and self-contained: any failure is caught and returned, never
+    raised, so a warm-up can't break the scheduler tick that triggered it."""
+    try:
+        # One parallel batch warms daily bars for SPY + every sector ETF + every
+        # constituent; the sweeps below then read from the now-warm per-symbol
+        # cache instead of fetching one name at a time.
+        data_handler.prefetch(
+            [config.BENCHMARK] + sector_data.sector_etfs() + sector_data.all_tickers()
+        )
+        regime()
+        sectors()
+        stock_filter(None)
+        # The scorecard sweep is the heaviest Scan panel (Ready-to-Enter runs it);
+        # memoize it here too so its first request is a cache hit.
+        from metrics import scorecard as scorecard_metrics
+        scorecard_metrics.scorecard(None)
+        return {"ok": True}
+    except Exception as e:  # noqa: BLE001 — a warm-up must never break its caller
+        return {"ok": False, "error": str(e)}
+
+
 def _cached(key: str, fn, ttl: int = _RESULT_TTL, store_if=None):
     hit = _results.get(key)
     if hit and time.time() - hit[0] < ttl:
