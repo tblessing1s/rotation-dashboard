@@ -1,7 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { Pill, Loading, fmt } from "./ui.jsx";
-import { useTradeMode, TradeModeBadge } from "../tradeMode.jsx";
+import { useTradeMode, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
 
 // Dollar formatter that tolerates nulls (—) for thin/closed quotes.
 function dollars(n) {
@@ -42,6 +42,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   const [cbPrice, setCbPrice] = React.useState("");
   const [overrideReason, setOverrideReason] = React.useState("");
   const tradeMode = useTradeMode(); // "paper" | "live" | null — is this ticket routed to Schwab?
+  const [pendingLive, setPendingLive] = React.useState(null); // live order awaiting explicit confirm
 
   React.useEffect(() => {
     const sug = accountGate?.suggested_circuit_breaker?.price;
@@ -148,12 +149,22 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       (action === "close_short" && openShort) ||
       (action === "close_leap" && existingLeap));
 
-  async function execute() {
+  function execute() {
+    const payload = buildPayload();
+    // Gate on an explicit confirmation unless we KNOW this is paper — an
+    // unresolved mode (null) errs toward confirming so a live order can't slip
+    // through on a stray click when the mode fetch is slow or failed.
+    if (tradeMode !== "paper") { setPendingLive(payload); return; }
+    doExecute(payload);
+  }
+
+  async function doExecute(payload) {
     setBusy(true); setExecErr(null);
     try {
-      await onExecute?.(buildPayload());
+      await onExecute?.(payload);
+      setPendingLive(null);
       onClose?.();
-    } catch (e) { setExecErr(e.message); }
+    } catch (e) { setExecErr(e.message); setPendingLive(null); }
     finally { setBusy(false); }
   }
 
@@ -164,6 +175,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   const ivStatus = { rich: "green", cheap: "red", fair: "yellow" }[iv?.premium] || "unknown";
 
   return (
+    <>
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
       role="dialog" aria-modal="true" onClick={onClose}
@@ -479,5 +491,14 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
         )}
       </div>
     </div>
+    {pendingLive && (
+      <LiveOrderConfirm
+        payload={pendingLive}
+        busy={busy}
+        onConfirm={() => doExecute(pendingLive)}
+        onCancel={() => setPendingLive(null)}
+      />
+    )}
+    </>
   );
 }

@@ -130,6 +130,9 @@ export const api = {
   config: () => request("/api/config"),
   mode: () => request("/api/mode"),
   setMode: (demo) => request("/api/mode", { method: "POST", body: JSON.stringify({ demo }) }),
+  liveTrading: () => request("/api/live-trading"),
+  setLiveTrading: (enabled) =>
+    request("/api/live-trading", { method: "POST", body: JSON.stringify({ enabled }) }),
   state: () => request("/api/state"),
   saveState: (payload) => request("/api/state", { method: "POST", body: JSON.stringify(payload) }),
   accountStatus: () => request("/api/account/status"),
