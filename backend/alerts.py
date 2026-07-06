@@ -45,6 +45,7 @@ ALERT_TYPES = {
     "DATA_STALE": ("MEDIUM", "PROPOSED_DEFAULT: cached OHLCV older than expected on a market day"),
     "LEAP_ROLL_DUE": ("HIGH", "PROPOSED_DEFAULT: LEAP DTE below the floor or extrinsic runway too short -> roll the long leg"),
     "CAPITAL_BURN": ("HIGH", "PROPOSED_DEFAULT: weekly juice not covering LEAP decay -> the flywheel is running backwards"),
+    "JUICE_INADEQUATE": ("MEDIUM", "HARD_CFM_RULE: trailing weekly juice below the strategy's income target while capital is intact -> reassess/redeploy"),
     "DELTA_VELOCITY": ("MEDIUM", "PROPOSED_DEFAULT: LEAP delta bleeding fast while still above the 0.50 floor"),
     "SHORT_STOCK_DETECTED": ("CRITICAL", "HARD_CFM_RULE: assignment created short stock against the LEAP -> buy back the stock, never exercise the LEAP"),
     "RECONCILE_DIRTY": ("HIGH", "HARD_CFM_RULE: state.json diverged from the broker account -> freeze the position, resolve before trading it"),
@@ -66,7 +67,7 @@ _ROLL_ACTIONS = {
 _FOCUS_ACTIONS = {
     "KILL_SWITCH_SECTOR", "KILL_SWITCH_SPY", "CIRCUIT_BREAKER", "SHORT_STOCK_DETECTED",
     "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
-    "WHIPSAW_EXIT",
+    "WHIPSAW_EXIT", "JUICE_INADEQUATE",
 }
 
 
@@ -507,6 +508,43 @@ def check_capital_burn(state: dict) -> list[dict]:
     return out
 
 
+def check_juice_inadequate(state: dict) -> list[dict]:
+    """Ongoing juice-vs-target check. Juice adequacy is gated once at entry, but
+    if IV collapses mid-cycle a position can keep rolling while its realized
+    weekly juice falls below the strategy's income target. This owns the wide band
+    between "still covers LEAP theta" (self-funding — capital_burn owns the
+    below-theta extreme) and "no longer clears the income target": the position
+    quietly underperforms while its capital is still intact to redeploy. Warms up
+    once there are enough completed weeks of trailing juice."""
+    import leap_policy
+    out = []
+    for p in _open_positions(state):
+        if not (p.get("leap") or {}):
+            continue
+        t = p.get("ticker", "")
+        health = leap_policy.leap_health(p)
+        if health.get("juice_adequate") is not False:  # None (warming up) / True -> skip
+            continue
+        if health.get("maintenance_status") == "burning":  # capital_burn owns this regime
+            continue
+        yld, tgt = health.get("weekly_juice_yield_pct"), health.get("juice_target_pct")
+        if yld is None or tgt is None:
+            continue
+        out.append(_alert(
+            "JUICE_INADEQUATE", t,
+            (f"{t} trailing weekly juice is {yld:g}% of LEAP capital, below the {tgt:g}% "
+             f"income target (last {config.JUICE_TRAILING_WEEKS} completed weeks)."),
+            ("This position still funds its own decay but no longer clears the strategy's "
+             "income target — roll to a better strike/week, or redeploy the capital into a "
+             "candidate that pays before it erodes."),
+            {"weekly_juice_yield_pct": yld, "juice_target_pct": tgt,
+             "trailing_avg_weekly_juice": health.get("trailing_avg_weekly_juice"),
+             "trailing_weeks": config.JUICE_TRAILING_WEEKS,
+             "maintenance_status": health.get("maintenance_status")},
+            key="income"))
+    return out
+
+
 def check_delta_velocity(state: dict) -> list[dict]:
     """LEAP delta has dropped more than DELTA_VELOCITY_DROP over the last
     DELTA_VELOCITY_WINDOW sessions while still ABOVE the 0.50 floor (below the
@@ -643,6 +681,7 @@ EVALUATORS = [
     check_data_stale,
     check_leap_roll_due,
     check_capital_burn,
+    check_juice_inadequate,
     check_delta_velocity,
     check_short_stock_detected,
     check_reconcile_dirty,

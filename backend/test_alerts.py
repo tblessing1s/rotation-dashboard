@@ -196,6 +196,51 @@ def test_whipsaw_exit_quiet_when_under_thresholds_and_out_of_window():
     assert alerts.check_whipsaw_exit(state) == []
 
 
+def test_leap_health_juice_adequacy_fields(monkeypatch):
+    import data_handler
+    import leap_policy
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
+    p = _pos()  # leap cost_basis 12250; PG is a stock -> ~1.88%/wk target
+    p["trailing_avg_weekly_juice"] = 130.0  # 130/12250 = 1.06% < target
+    h = leap_policy.leap_health(p, stock_price=128.0)
+    assert h["weekly_juice_yield_pct"] == pytest.approx(1.06, abs=0.02)
+    assert h["juice_target_pct"] == pytest.approx(1.88, abs=0.01)
+    assert h["juice_adequate"] is False
+    p["trailing_avg_weekly_juice"] = 300.0  # 2.45% >= target
+    assert leap_policy.leap_health(p, stock_price=128.0)["juice_adequate"] is True
+    # No trailing juice yet (fresh position) -> unknown, never flagged.
+    p["trailing_avg_weekly_juice"] = None
+    assert leap_policy.leap_health(p, stock_price=128.0)["juice_adequate"] is None
+
+
+def test_juice_inadequate_owns_the_band_above_capital_burn(monkeypatch):
+    import leap_policy
+    p = _pos()
+
+    def _health(status, adequate, yld=1.1, tgt=1.88):
+        monkeypatch.setattr(leap_policy, "leap_health", lambda pos, **k: {
+            "juice_adequate": adequate, "maintenance_status": status,
+            "weekly_juice_yield_pct": yld, "juice_target_pct": tgt,
+            "trailing_avg_weekly_juice": 130.0})
+
+    # Below target but still self-funding -> the band this alert owns.
+    _health("self_funding", False)
+    out = alerts.check_juice_inadequate(_state(p))
+    assert len(out) == 1 and out[0]["type"] == "JUICE_INADEQUATE"
+    assert out[0]["data"]["weekly_juice_yield_pct"] == 1.1
+    # Clearing the target -> quiet.
+    _health("self_funding", True, yld=2.0)
+    assert alerts.check_juice_inadequate(_state(p)) == []
+    # Burning (below theta) -> capital_burn owns it, this stays quiet (no overlap).
+    _health("burning", False, yld=0.2)
+    assert alerts.check_juice_inadequate(_state(p)) == []
+    # Warming up (adequacy unknown) -> quiet.
+    monkeypatch.setattr(leap_policy, "leap_health", lambda pos, **k: {
+        "juice_adequate": None, "maintenance_status": "unknown",
+        "weekly_juice_yield_pct": None, "juice_target_pct": None})
+    assert alerts.check_juice_inadequate(_state(p)) == []
+
+
 def test_circuit_breaker_trips_at_or_below_line(monkeypatch):
     monkeypatch.setattr(alerts, "_last_close", lambda t: 128.0)
     p = _pos(circuit_breaker={"price": 131.0})

@@ -54,6 +54,7 @@ only *new* alerts to the notifier.
 | `ASSIGNMENT_RISK` | HIGH | HARD_CFM_RULE (assignment mechanics) | base: an ITM short whose extrinsic has collapsed below `ASSIGNMENT_EXTRINSIC_FLOOR` (a few cents) — assignable any time, deep-ITM early assignment is an extrinsic problem; escalation: extrinsic < upcoming dividend before ex-div. Note: the short is covered by a LEAP, not stock — assignment creates *short stock* that owes any dividend |
 | `TOKEN_EXPIRY` | HIGH | PROPOSED_DEFAULT (`TOKEN_WARN_AGE_DAYS`=5) | Schwab refresh token older than 5 days (dies at ~7) |
 | `BUYBACK_75` | MEDIUM | HARD_CFM_RULE (75% buyback) | short lost ≥75% of sale premium with >2 DTE → roll early to capture juice |
+| `JUICE_INADEQUATE` | MEDIUM | HARD_CFM_RULE (income target) | trailing weekly juice below the strategy's per-profile income target while the position still self-funds its decay (the band above `CAPITAL_BURN`) → reassess/redeploy while capital is intact |
 | `EARNINGS_WINDOW` | MEDIUM | HARD_CFM_RULE (earnings) | earnings within `EARNINGS_WARN_DAYS` for an open position |
 | `EXPIRY_FRIDAY` | MEDIUM | HARD_CFM_RULE (weekly roll) | short expiring today/tomorrow not yet rolled |
 | `DATA_STALE` | MEDIUM | PROPOSED_DEFAULT (`DATA_STALE_HOURS`=30) | cached OHLCV older than expected on a market day |
