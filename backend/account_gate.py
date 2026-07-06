@@ -154,18 +154,31 @@ def _position_reserve(p: dict) -> float | None:
 
 
 def suggested_circuit_breaker(ticker: str, df=None) -> dict:
-    """Default line-in-the-sand: max(MA50, price - 2xATR). Operator-editable."""
+    """Default line-in-the-sand: max(MA50, price - 2xATR), capped just below
+    spot when the stock is trading under its 50-day trend. Without the cap an
+    above-spot MA50 would put a fresh LEAP past its own exit line on day one
+    (today's close is already at/below the line). Operator-editable."""
     if df is None:
         df = data_handler.get_daily(ticker)
     price = indicators.last(df)
     atr_val = indicators.atr(df) if df is not None else None
     ma50 = indicators.sma(df, 50) if df is not None else None
     if price is None or atr_val is None:
-        return {"price": None, "ma50": ma50, "atr_stop": None}
+        return {"price": None, "spot": round(price, 2) if price else None,
+                "ma50": round(ma50, 2) if ma50 else None, "atr_stop": None,
+                "capped": False, "below_trend": None}
     atr_stop = price - config.CIRCUIT_BREAKER_ATR_MULT * atr_val
     line = max(v for v in (ma50, atr_stop) if v is not None)
-    return {"price": round(line, 2), "ma50": round(ma50, 2) if ma50 else None,
-            "atr_stop": round(atr_stop, 2)}
+    below_trend = ma50 is not None and price < ma50
+    # A stop at/above the current close is meaningless — clamp it just under
+    # spot so the suggestion is a real leash, and flag why (below_trend).
+    capped = line > price
+    if capped:
+        line = price - 0.01
+    return {"price": round(line, 2), "spot": round(price, 2),
+            "ma50": round(ma50, 2) if ma50 else None,
+            "atr_stop": round(atr_stop, 2),
+            "capped": capped, "below_trend": below_trend}
 
 
 def _check(id_: str, label: str, ok, blocking: bool, detail: dict) -> dict:

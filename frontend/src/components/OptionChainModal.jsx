@@ -257,6 +257,19 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                       ` = ${accountGate.suggested_circuit_breaker.price}`}
                     . Close at/below this = exit, no debate (CIRCUIT_BREAKER alert).
                   </p>
+                  {accountGate?.suggested_circuit_breaker?.below_trend && (
+                    <p className="mt-2 rounded-lg border border-amber-800 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-300">
+                      ⚠ Below trend: spot{" "}
+                      {accountGate.suggested_circuit_breaker.spot != null &&
+                        `$${accountGate.suggested_circuit_breaker.spot} `}
+                      is under its 50-day MA
+                      {accountGate.suggested_circuit_breaker.ma50 != null &&
+                        ` ($${accountGate.suggested_circuit_breaker.ma50})`}
+                      {accountGate.suggested_circuit_breaker.capped
+                        ? ". The MA50 stop would sit above spot, so the suggestion is capped just below price — a new LEAP here starts on a very tight leash. Consider whether to enter at all."
+                        : "."}
+                    </p>
+                  )}
                   {gateBlocked && (
                     <div className="mt-3 rounded-lg border border-rose-800 bg-rose-500/10 p-2">
                       <p className="text-xs font-semibold text-rose-300">

@@ -73,6 +73,18 @@ def test_suggested_circuit_breaker_max_of_ma50_and_atr_stop():
     df = _frame([100.0] * 260)  # flat: MA50 = 100, ATR = 2 -> price - 2*ATR = 96
     cb = account_gate.suggested_circuit_breaker("XYZ", df)
     assert cb["price"] == 100.0 and cb["ma50"] == 100.0 and cb["atr_stop"] == 96.0
+    assert cb["capped"] is False and cb["below_trend"] is False
+
+
+def test_suggested_circuit_breaker_caps_below_spot_when_under_trend():
+    # Ramp down into the close: last price sits below its own 50-day MA, so the
+    # max(MA50, atr_stop) line would land ABOVE spot. It must be capped under it.
+    df = _frame([100.0 - i * 0.1 for i in range(260)])
+    cb = account_gate.suggested_circuit_breaker("XYZ", df)
+    spot = cb["spot"]
+    assert cb["below_trend"] is True and cb["capped"] is True
+    assert cb["ma50"] > spot  # MA50 above spot is why the raw line was too high
+    assert cb["price"] < spot  # suggestion clamped just under the current close
 
 
 # ---- the gate ---------------------------------------------------------------
