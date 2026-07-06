@@ -6,6 +6,7 @@
 // when live order placement is enabled; until then the backend returns "filled".)
 
 const ACTION_VERB = {
+  open_position_atomic: "Open position",
   buy_leap: "Buy LEAP",
   sell_short: "Sell short",
   close_short: "Close short",

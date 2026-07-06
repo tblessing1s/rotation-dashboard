@@ -14,7 +14,8 @@ function bigDollars(n) {
 }
 
 const ACTION_LABELS = {
-  buy_leap: "Buy LEAP (deep ITM)",
+  open_position_atomic: "Open position — buy LEAP + sell weekly",
+  buy_leap: "Buy LEAP only (deep ITM)",
   sell_short: "Sell weekly short call",
   close_short: "Close / roll short call",
   close_leap: "Close LEAP (sell to close)",
@@ -59,8 +60,12 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
         setWeeklyStrike(sug ? sug.strike : null);
         const sugLeap = c.leap?.strikes?.find((s) => s.suggested) || c.leap?.strikes?.[0];
         setLeapStrike(sugLeap ? sugLeap.strike : null);
-        setAction(c.suggested_action || "buy_leap");
+        // A fresh entry (buy_leap) defaults to opening BOTH legs at once — buy
+        // the LEAP and sell this week's short on one ticket — provided a weekly
+        // strike is available; "Buy LEAP only" stays selectable in the dropdown.
         const sa = c.suggested_action;
+        const hasWeekly = (c.weekly?.strikes || []).length > 0;
+        setAction(sa === "buy_leap" && hasWeekly ? "open_position_atomic" : (sa || "buy_leap"));
         const defQty =
           sa === "close_short" && c.position?.open_short?.contracts ? c.position.open_short.contracts
           : sa === "close_leap" && c.position?.existing_leap?.contracts ? c.position.existing_leap.contracts
@@ -105,7 +110,23 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   function buildPayload() {
     const base = { action, ticker: chain.ticker, contracts: qtyNum };
     if (chain.underlying_price != null) base.stock_price = chain.underlying_price;
-    if (action === "buy_leap" && chosenLeap) {
+    if (action === "open_position_atomic" && chosenLeap && chosenWeekly) {
+      // LEAP leg (buy to open) — same keys as buy_leap so the gate + booking reuse.
+      base.strike = chosenLeap.strike;
+      if (chosenLeap.expiration) base.expiration = chosenLeap.expiration;
+      if (chosenLeap.symbol) base.option_symbol = chosenLeap.symbol;
+      if (chosenLeap.dte != null) base.dte = chosenLeap.dte;
+      if (chosenLeap.mark != null) base.execution_price = Math.round(chosenLeap.mark * 100 * 100) / 100;
+      if (cbPrice !== "" && !Number.isNaN(Number(cbPrice))) base.circuit_breaker_price = Number(cbPrice);
+      if (chosenWeekly.extrinsic != null) base.weekly_extrinsic_per_share = chosenWeekly.extrinsic;
+      if (overrideReason.trim()) base.override_reason = overrideReason.trim();
+      // Weekly short leg (sell to open).
+      base.short_strike = chosenWeekly.strike;
+      if (chosenWeekly.expiration || weekly?.expiration) base.short_expiration = chosenWeekly.expiration || weekly.expiration;
+      if (chosenWeekly.symbol) base.short_option_symbol = chosenWeekly.symbol;
+      if (chosenWeekly.mark != null) base.short_premium_per_share = chosenWeekly.mark;
+      if (chosenWeekly.dte != null) base.short_dte = chosenWeekly.dte;
+    } else if (action === "buy_leap" && chosenLeap) {
       base.strike = chosenLeap.strike;
       if (chosenLeap.expiration) base.expiration = chosenLeap.expiration;
       if (chosenLeap.symbol) base.option_symbol = chosenLeap.symbol;
@@ -139,11 +160,13 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
     return base;
   }
 
-  const gateBlocked = action === "buy_leap" && accountGate && !accountGate.pass;
+  const isEntry = action === "buy_leap" || action === "open_position_atomic";
+  const gateBlocked = isEntry && accountGate && !accountGate.pass;
   const canExecute =
     qtyNum > 0 &&
     (!gateBlocked || overrideReason.trim().length > 0) &&
-    ((action === "buy_leap" && chosenLeap) ||
+    ((action === "open_position_atomic" && chosenLeap && chosenWeekly) ||
+      (action === "buy_leap" && chosenLeap) ||
       (action === "sell_short" && chosenWeekly) ||
       (action === "close_short" && openShort) ||
       (action === "close_leap" && existingLeap));
@@ -249,7 +272,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
 
               {/* Level 5 (Account & Juice): circuit breaker is REQUIRED at entry;
                   a blocked gate needs a typed override reason, logged with the fill. */}
-              {action === "buy_leap" && (
+              {isEntry && (
                 <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3">
                   <label className="text-sm text-slate-400">
                     Circuit breaker — line-in-the-sand exit price (required)
@@ -333,7 +356,9 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                 >
                   {busy
                     ? "Executing…"
-                    : `Execute ${ACTION_LABELS[action]?.split(" ")[0] || ""} & log${tradeMode === "paper" ? " (paper)" : ""}`}
+                    : `${action === "open_position_atomic"
+                        ? "Open position"
+                        : `Execute ${ACTION_LABELS[action]?.split(" ")[0] || ""}`} & log${tradeMode === "paper" ? " (paper)" : ""}`}
                 </button>
               </div>
               {execErr && <p className="mt-2 text-right text-xs text-rose-400">{execErr}</p>}
@@ -341,7 +366,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
 
             {/* LEAP — pick a strike in the preferred delta band (entry only) */}
             {!mgmt && (
-            <div className={`rounded-lg border bg-slate-950 p-3 ${action === "buy_leap" ? "border-sky-700" : "border-slate-800"}`}>
+            <div className={`rounded-lg border bg-slate-950 p-3 ${isEntry ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">LEAP (pick a strike)</h3>
                 {leap?.delta_band && (
@@ -432,7 +457,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
 
             {/* Weekly short — ATR-suggested, user-adjustable (entry only) */}
             {!mgmt && (
-            <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" ? "border-sky-700" : "border-slate-800"}`}>
+            <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" || action === "open_position_atomic" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">Weekly short call ({weekly?.posture || "…"}-suggested)</h3>
                 {weekly && (

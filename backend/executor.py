@@ -19,7 +19,7 @@ import schwab_api
 import sector_data
 
 VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_short",
-                 "roll_leap", "close_position_atomic", "adjustment"}
+                 "roll_leap", "open_position_atomic", "close_position_atomic", "adjustment"}
 
 # Actions REJECTED on a frozen (needs_review) position — new risk cannot be added
 # to a position whose state is unverified. Closing actions (close_short,
@@ -27,7 +27,8 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
 # never trap the operator in a position during a kill-switch event — exiting is
 # safe in either state of the world. ``adjustment`` is the resolution path, also
 # allowed. See docs/reconciliation.md.
-FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap"}
+FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap",
+                          "open_position_atomic"}
 
 
 class PositionFrozenError(RuntimeError):
@@ -144,8 +145,9 @@ def execute(payload: dict) -> dict:
 
     # Level 5 gate (Account & Juice) — entry only. A blocking failure stops the
     # buy_leap unless the payload carries an explicit override_reason, which is
-    # recorded on the immutable execution (see _buy_leap).
-    if action == "buy_leap":
+    # recorded on the immutable execution (see _buy_leap). Applies to the atomic
+    # open too — it establishes the same LEAP long.
+    if action in ("buy_leap", "open_position_atomic"):
         _enforce_account_gate(payload, ticker, contracts)
 
     state = log.load_state()
@@ -166,6 +168,8 @@ def execute(payload: dict) -> dict:
 
     mode = "live" if live_transmit() else "logged"
 
+    if action == "open_position_atomic":
+        return _open_position_atomic(payload, ticker, contracts, stock_price, mode, price_source)
     if action == "roll_short":
         return _roll_short(payload, ticker, contracts, stock_price, mode, price_source)
     if action == "roll_leap":
@@ -504,6 +508,8 @@ def order_status(order_id: str) -> dict:
         kind = rec.get("kind")
         if kind == "roll_short":
             result = _commit_roll_from_pending(rec, order)
+        elif kind == "open":
+            result = _commit_open_from_pending(rec, order)
         elif kind == "exit":
             result = _commit_exit_from_pending(rec, order)
         elif kind == "roll_leap":
@@ -878,6 +884,143 @@ def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source):
         "net_credit": round(new_total - close_total, 2),
         "executions": [stored_close, stored_sell],
     }
+
+
+# ---------------------------------------------------------------------------
+# Atomic open (buy LEAP + sell weekly short on one ticket — a diagonal entry)
+# ---------------------------------------------------------------------------
+def _next_open_id(state) -> str:
+    n = len({e.get("open_id") for e in state.get("executions", []) if e.get("open_id")})
+    return f"open_{n + 1:03d}"
+
+
+def _open_position_atomic(payload, ticker, contracts, stock_price, mode, price_source):
+    """Open a full position on ONE ticket: buy-to-open the deep-ITM LEAP +
+    sell-to-open this week's short (a diagonal), a single net debit, pending ->
+    poll -> commit/auto-cancel. The long and its first cover go on together — no
+    legging risk, and the juice starts the day the position is opened. Paper mode
+    books both legs immediately."""
+    leap_strike = payload.get("strike")
+    short_strike = payload.get("short_strike")
+    if leap_strike is None or short_strike is None:
+        raise ValueError("open_position_atomic requires the LEAP strike and short_strike")
+    pos = log.find_position(log.load_state(), ticker)
+    if pos and (pos.get("leap") or {}):
+        raise ValueError(
+            f"{ticker} already holds a LEAP — use sell_short to add a cover, or roll. "
+            "open_position_atomic is for establishing a fresh position.")
+    if mode == "live" and schwab_api.configured():
+        return _place_live_open(payload, ticker, contracts, stock_price, price_source)
+    return _commit_open(payload, ticker, contracts, stock_price, mode, price_source)
+
+
+def _commit_open(payload, ticker, contracts, stock_price, mode, price_source):
+    """Book both entry legs: buy_leap (buy-to-open) + sell_short (sell-to-open),
+    linked by a shared open_id. Shared by the paper path and the live fill-
+    confirmation path."""
+    leap_strike = payload.get("strike")
+    short_strike = payload.get("short_strike")
+    leap_exec, leap_apply = _buy_leap(payload, ticker, leap_strike, contracts, stock_price)
+
+    short_payload = {
+        "ticker": ticker, "strike": short_strike, "contracts": contracts,
+        "premium_per_share": payload.get("short_premium_per_share"),
+        "premium_total": payload.get("short_premium_total"),
+        "stock_price": stock_price,
+        "expiration": payload.get("short_expiration"),
+        "dte": payload.get("short_dte", 5),
+    }
+    short_exec, short_apply = _sell_short(short_payload, ticker, short_strike, contracts, stock_price)
+
+    open_id = _next_open_id(log.load_state())
+    for e, leg in ((leap_exec, "leap"), (short_exec, "short")):
+        e["mode"] = mode
+        e["price_source"] = price_source
+        e["open_id"] = open_id
+        e["open_leg"] = leg
+
+    # Establish the long, then sell the cover. Apply both mutations once on fresh
+    # state (leap sets up the position; short appends its call).
+    stored_leap = log.append_execution(leap_exec)
+    stored_short = log.append_execution(short_exec)
+
+    state = log.load_state()
+    position = _ensure_position(state, ticker)
+    leap_apply(position)
+    short_apply(position)
+    log.recompute_derived(state)
+    log.save_state(state)
+
+    debit = float(stored_leap.get("execution_total") or 0)
+    credit = float(stored_short.get("premium_total") or 0)
+    return {
+        "success": True,
+        "status": "filled",
+        "open_id": open_id,
+        "execution_id": stored_leap["id"],
+        "short_execution_id": stored_short["id"],
+        "timestamp": stored_leap["date"],
+        "mode": mode,
+        "captured_price": stock_price,
+        "net_debit": round(debit - credit, 2),
+        "executions": [stored_leap, stored_short],
+    }
+
+
+def _place_live_open(payload, ticker, contracts, stock_price, price_source):
+    """Transmit the entry as ONE two-leg NET_DEBIT diagonal: buy-to-open the LEAP
+    + sell-to-open the weekly short on one ticket, so it can't leg out. Committed
+    on fill via the same pending -> poll lifecycle as the atomic exit."""
+    _assert_transmit_allowed("open_position_atomic")
+    leap_strike = payload.get("strike")
+    short_strike = payload.get("short_strike")
+    client = data_handler.client()
+    account_hash = client.primary_account_hash()
+
+    leap_symbol = payload.get("option_symbol") or (
+        schwab_api.occ_option_symbol(ticker, payload.get("expiration"), leap_strike, call=True)
+        if payload.get("expiration") else None)
+    short_symbol = payload.get("short_option_symbol") or (
+        schwab_api.occ_option_symbol(ticker, payload.get("short_expiration"), short_strike, call=True)
+        if payload.get("short_expiration") else None)
+    if not leap_symbol or not short_symbol:
+        raise ValueError("live open needs option_symbol/expiration for both the LEAP and the short")
+
+    leap_ps = float(payload.get("execution_price") or 0) / 100.0  # per-contract -> per-share
+    short_ps = float(payload.get("short_premium_per_share") or 0)
+    # Entry is a net DEBIT (the LEAP costs more than the short credit): the short
+    # credit minus the LEAP debit is negative, which build_net_order reads as a
+    # NET_DEBIT at that magnitude.
+    net_ps = round(short_ps - leap_ps, 2)
+    legs = [("BUY_TO_OPEN", leap_symbol, contracts), ("SELL_TO_OPEN", short_symbol, contracts)]
+    order = schwab_api.build_net_order(legs, net_ps)
+    placed = client.place_order(account_hash, order)
+    order_id = placed.get("orderId")
+    if not order_id:
+        raise schwab_api.SchwabError("Schwab accepted the open but returned no order id")
+    log.save_pending_order(order_id, {
+        "kind": "open", "payload": payload, "ticker": ticker, "action": "open_position_atomic",
+        "contracts": contracts, "stock_price": stock_price, "price_source": price_source,
+        "account_hash": account_hash, "leap_symbol": leap_symbol, "short_symbol": short_symbol,
+        "net_limit": net_ps, "placed_at": log.utcnow(),
+    })
+    return {"success": True, "status": "working", "order_id": str(order_id), "mode": "live",
+            "option_symbols": [leap_symbol, short_symbol], "net_limit": net_ps}
+
+
+def _commit_open_from_pending(rec: dict, order: dict) -> dict:
+    """Commit a filled atomic open, overlaying the real per-leg fills onto the
+    LEAP's execution_price and the short's premium before booking both legs."""
+    payload = dict(rec.get("payload") or {})
+    fills = _leg_fills(order, [rec.get("leap_symbol", ""), rec.get("short_symbol", "")])
+    leap_fill = fills.get((rec.get("leap_symbol") or "").strip())
+    short_fill = fills.get((rec.get("short_symbol") or "").strip())
+    if leap_fill is not None:
+        payload["execution_price"] = leap_fill * 100  # per-contract dollars
+    if short_fill is not None:
+        payload["short_premium_per_share"] = short_fill
+    return _commit_open(payload, rec["ticker"], int(rec["contracts"]),
+                        rec.get("stock_price"), "live", rec.get("price_source", "schwab"))
 
 
 # ---------------------------------------------------------------------------
