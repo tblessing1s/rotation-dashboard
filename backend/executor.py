@@ -569,13 +569,44 @@ def _capture_order_receipt(order_id, raw_status, rec, order, result) -> None:
 
 
 def cancel_order(order_id: str) -> dict:
-    """Cancel a working order at the broker and drop the pending entry."""
+    """Cancel a working order at the broker and drop the pending entry.
+
+    The local pending record is cleared ONLY once the order is confirmed gone at
+    the broker — either Schwab accepts the cancel or the order is already in a
+    terminal state. A cancel that fails must leave the pending record in place
+    and surface the error: dropping it would make us forget an order that is
+    still working at Schwab, and the operator's next order would then be rejected
+    for colliding with it ("an order is already running").
+
+    Two lifecycle races are handled first: the order may have FILLED in the gap
+    between the last poll and this cancel (cancelling a filled order fails at the
+    broker), in which case it is settled as a fill rather than silently dropped;
+    or it may already be canceled/rejected/expired, in which case the stale
+    pending record is simply cleared."""
     rec = log.get_pending_order(order_id)
-    if rec:
-        try:
-            data_handler.client().cancel_order(rec["account_hash"], order_id)
-        finally:
-            log.pop_pending_order(order_id)
+    if not rec:
+        # Already resolved (committed or cleared) — nothing left to cancel.
+        return {"order_id": order_id, "status": "canceled"}
+
+    client = data_handler.client()
+    # Reconcile against the broker's current view before attempting the cancel.
+    try:
+        raw = (client.get_order(rec["account_hash"], order_id).get("status") or "").upper()
+    except Exception:  # noqa: BLE001 — status is best-effort; fall through to cancel
+        raw = ""
+    if raw == "FILLED":
+        # It filled before we could pull it — commit the fill instead of losing it.
+        return order_status(order_id)
+    if raw in ("CANCELED", "REJECTED", "EXPIRED"):
+        log.pop_pending_order(order_id)
+        return {"order_id": order_id,
+                "status": "rejected" if raw == "REJECTED" else "canceled",
+                "raw_status": raw}
+
+    # Still working — cancel it. Only drop the pending record if this succeeds;
+    # a broker failure propagates so the caller knows the order is still live.
+    client.cancel_order(rec["account_hash"], order_id)
+    log.pop_pending_order(order_id)
     return {"order_id": order_id, "status": "canceled"}
 
 

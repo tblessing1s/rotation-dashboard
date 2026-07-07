@@ -675,6 +675,50 @@ def test_live_order_cancel_clears_pending(monkeypatch, tmp_path):
     assert "ORD1" not in state["pending_orders"] and state["executions"] == []
 
 
+def test_cancel_commits_a_fill_that_slipped_in(monkeypatch, tmp_path):
+    # The order can fill in the gap between the last poll and the cancel.
+    # cancel_order must settle that fill (cancelling a filled order fails at the
+    # broker) rather than drop the pending record and lose the trade.
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+
+    res = executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                            "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                            "expiration": "2026-07-10"})
+    assert res["status"] == "working"
+
+    fake._status, fake._fill_price = "FILLED", 5.0  # filled just before we cancel
+    out = executor.cancel_order("ORD1")
+    assert out["status"] == "filled"
+    assert fake.canceled is None  # never asked the broker to cancel a filled order
+    state = log.load_state()
+    assert "ORD1" not in state["pending_orders"]
+    pos = log.find_position(state, "ON")
+    assert len(pos["short_calls"]) == 1 and state["executions"][-1]["premium_per_share"] == 5.0
+
+
+def test_cancel_failure_keeps_pending_order(monkeypatch, tmp_path):
+    # A broker cancel that fails leaves the order STILL WORKING at Schwab — we
+    # must keep the pending record and surface the error, not silently forget it
+    # (else the operator's next order collides: "an order is already running").
+    import schwab_api
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+
+    executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                      "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                      "expiration": "2026-07-10"})
+
+    def boom(account_hash, order_id):
+        raise schwab_api.SchwabError("schwab cancel order: HTTP 400 order not cancelable")
+    fake.cancel_order = boom
+
+    with pytest.raises(schwab_api.SchwabError):
+        executor.cancel_order("ORD1")
+    state = log.load_state()
+    assert "ORD1" in state["pending_orders"]  # not forgotten while still live
+
+
 def test_roll_short_closes_old_and_opens_new(monkeypatch, tmp_path):
     # A roll is one operation: buy to close the old short and sell a new one at a
     # freely chosen week + strike. Both legs are logged; the position ends with a
