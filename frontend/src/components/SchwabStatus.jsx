@@ -65,7 +65,7 @@ export default function SchwabStatus({ demo = false }) {
           <Pill status="yellow">Demo data</Pill>
           <div className="text-sm text-slate-300">
             Showing a synthetic price feed and a sample CFM book — no live providers or orders.
-            Flip the navbar switch to <span className="font-semibold text-slate-100">Live data</span> to use Schwab/Alpha&nbsp;Vantage.
+            Switch to <span className="font-semibold text-slate-100">Live data</span> on the Settings tab to use Schwab/Alpha&nbsp;Vantage.
           </div>
         </div>
       </div>

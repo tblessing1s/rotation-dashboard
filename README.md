@@ -41,8 +41,8 @@ extrinsic sold and paid back, check the kill switch. The **Positions** tab rolls
 a short in place — pick the same or a different week, and the same or a different
 strike (e.g. deep-ITM into earnings) — as a single `roll_short` action.
 
-**Earnings:** each open position surfaces its next earnings date (Positions tab,
-Kill Switch, and the daily checklist) and flags it inside `EARNINGS_WARN_DAYS` so
+**Earnings:** each open position surfaces its next earnings date (Positions tab
+and the Overview action items) and flags it inside `EARNINGS_WARN_DAYS` so
 the short can be rolled deep-ITM for protection or the position exited entirely
 before the report.
 
@@ -85,10 +85,22 @@ maxes out.
 
 ### Frontend (`frontend/src/`, React + Tailwind)
 
-`App.jsx` drives six tabs: **Scan** (`RegimeScanner` + `StockFilter`),
-**Execute** (`ExecuteTab` — entry gate + execution), **Theta** (`ThetaLedger`),
-**Kill Switch** (`KillSwitchMonitor`), **Positions** (`PositionTracker`), and
-**Checklist** (`DailyChecklist`).
+`App.jsx` drives five tabs — one home per signal, no duplicates:
+
+- **Overview** (`Overview`) — the landing digest: regime, action items, the
+  book, positions glance, juice + payback (one `/api/overview` call).
+- **Scan** (`ScanProgress` + `ReadyToEnter`, full `Scorecard` behind a
+  collapse) — find an entry.
+- **Positions** (`PositionTracker` incl. per-card kill-switch strip,
+  `PortfolioRisk` collapsed to headlines) — manage the book.
+- **History** (`HistoryTab` incl. the theta ledger + per-week closes) — review
+  results.
+- **Settings** (`SettingsTab`: demo/posture toggles, `LiveTradingSwitch`,
+  `AlertsPanel`, `DataHealth`) — low-frequency controls and admin.
+
+**Execute** (`ExecuteTab` — entry gate + order ticket) is a flow, not a tab:
+it opens from a Ready-to-Enter pick, a position card, or Scan's "check any
+ticker" button, with a ← Back button to return.
 
 ---
 
@@ -96,6 +108,7 @@ maxes out.
 
 | Route | Purpose |
 |---|---|
+| `GET /api/overview` | One-call landing payload: regime + positions/capital + theta totals/payback + kill-switch, pre-joined (sections fail independently). |
 | `GET /api/regime` | Market regime: status (green/yellow/red), breadth, VIX, SPY trend. |
 | `GET /api/sectors` | Per-sector RS3M, breadth, ATR-expanding, status. |
 | `GET /api/stock-filter?sector=XLK` | Candidates with RS3M vs SPY/Sector, ATR%, consolidating, status. |
@@ -111,8 +124,7 @@ maxes out.
 | `GET /api/coverage?ticker=ON` | Delta-coverage guardrail: LEAP vs short deltas, the 0.50 LEAP floor, and whether the long still covers the short. |
 | `GET /api/theta-ledger` | Net juice (week/month/YTD) + extrinsic payback per position. |
 | `GET /api/kill-switch` | Per-position RS3M vs SPY/Sector + exit signals. |
-| `GET /api/daily-checklist` | Today's routine: regime, reserve, expiring shorts, LEAP DTE. |
-| `GET/POST /api/state` | Read the full state; POST updates metadata. |
+| `GET/POST /api/state` | Read the full state; POST updates metadata (operator escape hatch, no UI). |
 | `POST /api/refresh/hot` | Force-refresh the hot set (open positions + live entry/earnings candidates) now; the scheduler also runs it every `HOT_REFRESH_MINUTES` in market hours. `/api/data-health` reports the set + last run. |
 | `GET /api/config` | Thresholds, sector universe, Schwab/AV status, live-trading flag. |
 

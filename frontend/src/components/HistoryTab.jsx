@@ -4,6 +4,79 @@ import { Card, Pill, Stat, Loading, money, fmt, pct, useApi } from "./ui.jsx";
 
 // Closed-cycle history: the learning loop. Every number derives from the
 // immutable execution log (see logging_handler.recompute_derived).
+// Also home to the theta ledger (absorbed from the old Theta tab): the LEAP
+// extrinsic hurdle, roll totals, and the per-week closes table. Live juice
+// totals and per-ticker payback meters stay on Overview.
+
+function ThetaLedgerCards({ theta }) {
+  const summary = theta?.extrinsic_summary || {};
+  const hurdle = summary.leap_extrinsic_at_entry || 0;
+  const weeks = theta?.weeks || [];
+  const rollByTicker = theta?.roll_ledger?.by_ticker || {};
+  const rollTotals = Object.values(rollByTicker).reduce(
+    (a, r) => ({ count: a.count + (r.count || 0), net: a.net + (r.net_total || 0), drag: a.drag + (r.drag_total || 0) }),
+    { count: 0, net: 0, drag: 0 },
+  );
+  if (!hurdle && !rollTotals.count && weeks.length === 0) return null;
+
+  return (
+    <>
+      {(hurdle > 0 || rollTotals.count > 0) && (
+        <Card title="Theta ledger">
+          {hurdle > 0 && (
+            <div className="grid grid-cols-3 gap-4">
+              <Stat label="LEAP extrinsic hurdle" value={money(hurdle)} sub="income needed to net positive" />
+              <Stat label="Remaining to fill" value={money(summary.remaining_to_payback)}
+                    tone={summary.income_positive ? "text-emerald-300" : "text-amber-300"} />
+              <Stat label="Net income" value={money(summary.net_income)}
+                    tone={summary.income_positive ? "text-emerald-300" : "text-rose-300"}
+                    sub={summary.income_positive ? "income-positive ✓" : "still filling the LEAP"} />
+            </div>
+          )}
+          {rollTotals.count > 0 && (
+            <div className={`grid grid-cols-3 gap-4 ${hurdle > 0 ? "mt-4 border-t border-slate-800 pt-4" : ""}`}>
+              <Stat label="Rolls executed" value={rollTotals.count} sub="paired close+open tickets" />
+              <Stat label="Roll net" value={money(rollTotals.net)}
+                    tone={rollTotals.net >= 0 ? "text-emerald-300" : "text-rose-300"}
+                    sub="credits − buybacks across all rolls" />
+              <Stat label="Roll drag" value={money(rollTotals.drag)}
+                    tone={rollTotals.drag < 0 ? "text-rose-300" : "text-slate-100"}
+                    sub="debits paid on defensive rolls (whipsaw cost)" />
+            </div>
+          )}
+        </Card>
+      )}
+
+      <Card title="Per-week closes">
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
+                <th className="py-2 pr-3">Week</th>
+                <th className="py-2 pr-3">Ticker</th>
+                <th className="py-2 pr-3">Extrinsic sold</th>
+                <th className="py-2 pr-3">Paid back</th>
+                <th className="py-2 pr-3">Net juice</th>
+              </tr>
+            </thead>
+            <tbody>
+              {weeks.map((w, i) => (
+                <tr key={i} className="border-t border-slate-800">
+                  <td className="py-2 pr-3 text-slate-300">{w.week}</td>
+                  <td className="py-2 pr-3 font-semibold text-slate-100">{w.ticker}</td>
+                  <td className="py-2 pr-3">{money(w.extrinsic_sold)}</td>
+                  <td className="py-2 pr-3">{money(w.extrinsic_paid_back)}</td>
+                  <td className="py-2 pr-3 text-emerald-300">{money(w.net_juice)}</td>
+                </tr>
+              ))}
+              {weeks.length === 0 && <tr><td colSpan={5} className="py-6 text-center text-slate-500">No closes logged yet.</td></tr>}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </>
+  );
+}
 
 function WeeklyJuiceChart({ data }) {
   const weeks = data?.weeks || [];
@@ -106,6 +179,7 @@ function CycleRow({ c }) {
 
 export default function HistoryTab() {
   const { data, error, loading } = useApi(api.history, [], null);
+  const { data: theta } = useApi(api.thetaLedger, [], null);
   if (loading && !data) return <Card title="History"><Loading /></Card>;
   if (error) return <Card title="History"><p className="text-sm text-rose-400">{error}</p></Card>;
 
@@ -149,6 +223,8 @@ export default function HistoryTab() {
       <Card title="Weekly net juice vs target">
         <WeeklyJuiceChart data={data?.weekly_juice} />
       </Card>
+
+      <ThetaLedgerCards theta={theta} />
 
       <Card title="Cycle log">
         <div className="overflow-x-auto">

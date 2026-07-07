@@ -3,28 +3,23 @@ import { api } from "./api.js";
 import Navbar from "./components/Navbar.jsx";
 import Login from "./components/Login.jsx";
 import SchwabStatus from "./components/SchwabStatus.jsx";
-import RegimeScanner from "./components/RegimeScanner.jsx";
-import StockFilter from "./components/StockFilter.jsx";
 import Scorecard from "./components/Scorecard.jsx";
 import ExecuteTab from "./components/ExecuteTab.jsx";
-import ThetaLedger from "./components/ThetaLedger.jsx";
-import KillSwitchMonitor from "./components/KillSwitchMonitor.jsx";
 import PositionTracker from "./components/PositionTracker.jsx";
-import DailyChecklist from "./components/DailyChecklist.jsx";
-import AlertsPanel from "./components/AlertsPanel.jsx";
 import HistoryTab from "./components/HistoryTab.jsx";
-import DataHealth from "./components/DataHealth.jsx";
-import LiveTradingSwitch from "./components/LiveTradingSwitch.jsx";
 import ReadyToEnter from "./components/ReadyToEnter.jsx";
 import ScanProgress from "./components/ScanProgress.jsx";
 import Overview from "./components/Overview.jsx";
+import SettingsTab from "./components/SettingsTab.jsx";
 
-const TABS = ["Overview", "Scan", "Execute", "Theta", "Kill Switch", "Positions", "History", "Checklist"];
+const TABS = ["Overview", "Scan", "Positions", "History", "Settings"];
 
 export default function App() {
   const [tab, setTab] = React.useState("Overview");
   const [regimeStatus, setRegimeStatus] = React.useState("unknown");
-  const [selectedTicker, setSelectedTicker] = React.useState("");
+  // The order flow: a non-null value renders the entry-gate + ticket view over
+  // the current tab (ticker may be "" for a blank gate). Cleared on tab change.
+  const [execute, setExecute] = React.useState(null);
   const [execNonce, setExecNonce] = React.useState(0);
   const [demo, setDemo] = React.useState(false);
   const [modeBusy, setModeBusy] = React.useState(false);
@@ -37,8 +32,8 @@ export default function App() {
   // Set from the ?action=…&ticker=… URL (a tapped push notification) or an
   // in-app "Act" click, so an alert lands you on the prefilled ticket, not a tab.
   const [positionIntent, setPositionIntent] = React.useState(null);
-  // Scan details (full-universe Scorecard + Stock Filter) stay UNMOUNTED until
-  // opened, so their ~500-ticker sweeps aren't fetched on every Scan-tab visit.
+  // The full-universe Scorecard stays UNMOUNTED until opened, so its ~500-ticker
+  // sweep isn't fetched on every Scan-tab visit.
   const [scanDetails, setScanDetails] = React.useState(false);
   // Bumped when the detached background scan finishes, so the Scan panels reload
   // with the freshly-warmed data (see ScanProgress).
@@ -71,12 +66,18 @@ export default function App() {
     return () => window.removeEventListener("auth-required", onAuthRequired);
   }, []);
 
+  const goToTab = React.useCallback((t) => {
+    setExecute(null); // leaving the order flow — a tab tap always lands on the tab
+    setTab(t);
+  }, []);
+
   // Route an alert action (from a tapped push or an in-app "Act" click) to the
   // Positions tab with a prefilled intent. Each call gets a fresh id so the same
   // ticker/action re-triggers the modal.
   const goToAction = React.useCallback((action, ticker, reason) => {
     if (!action || !ticker) return;
     setPositionIntent({ action, ticker, reason, id: Date.now() });
+    setExecute(null);
     setTab("Positions");
   }, []);
 
@@ -140,9 +141,10 @@ export default function App() {
     }
   }
 
-  function selectStock(ticker) {
-    setSelectedTicker(ticker);
-    setTab("Execute");
+  // Open the entry-gate + order-ticket flow (from a scan pick, a position card,
+  // or the blank "check a ticker" button on Scan).
+  function openTicket(ticker = "") {
+    setExecute({ ticker, id: Date.now() });
   }
 
   if (authed === null) {
@@ -156,66 +158,62 @@ export default function App() {
 
   return (
     <div className="min-h-full bg-slate-950 text-slate-100">
-      <Navbar tabs={TABS} active={tab} onChange={setTab} regimeStatus={regimeStatus}
-              demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo} onLogout={logout}
-              alertCount={alertCount} onAlertsClick={() => setTab("Checklist")}
-              posture={posture} postureBusy={postureBusy} onTogglePosture={togglePosture} />
+      <Navbar tabs={TABS} active={tab} onChange={goToTab} regimeStatus={regimeStatus}
+              onLogout={logout} alertCount={alertCount}
+              onAlertsClick={() => goToTab("Settings")} />
       <main className="mx-auto max-w-7xl px-3 py-4 sm:px-4 sm:py-6">
         <SchwabStatus demo={demo} />
-        {tab === "Overview" && (
-          <Overview
-            onNavigate={setTab}
-            onSelectStock={selectStock}
-            onAction={goToAction}
-            onRegimeStatus={setRegimeStatus}
-          />
-        )}
-        {tab === "Scan" && (
-          <div className="grid gap-4">
-            <ScanProgress onComplete={() => setScanNonce((n) => n + 1)} />
-            <RegimeScanner onStatus={setRegimeStatus} />
-            <ReadyToEnter onSelectStock={selectStock} refreshKey={scanNonce} />
-            <div>
-              <button
-                onClick={() => setScanDetails((v) => !v)}
-                className="flex w-full items-center justify-between rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-2 text-sm text-slate-400 hover:bg-slate-900/70"
-              >
-                <span>
-                  {scanDetails ? "Hide" : "Show"} full universe — Scorecard &amp; Stock Filter
-                </span>
-                <span className="text-xs text-slate-600">
-                  {scanDetails ? "▲ collapse" : "▼ loads the full sweep on open"}
-                </span>
-              </button>
-            </div>
-            {scanDetails && (
-              <>
-                <Scorecard regimeStatus={regimeStatus} refreshKey={scanNonce} />
-                <StockFilter onSelectStock={selectStock} refreshKey={scanNonce} />
-              </>
-            )}
-          </div>
-        )}
-        {tab === "Execute" && (
+        {execute ? (
           <ExecuteTab
-            initialTicker={selectedTicker}
+            key={execute.id}
+            initialTicker={execute.ticker}
+            onBack={() => setExecute(null)}
             onExecuted={() => setExecNonce((n) => n + 1)}
           />
-        )}
-        {tab === "Theta" && <ThetaLedger key={execNonce} />}
-        {tab === "Kill Switch" && <KillSwitchMonitor />}
-        {tab === "Positions" && (
-          <PositionTracker key={execNonce} intent={positionIntent}
-                           onIntentHandled={() => setPositionIntent(null)} />
-        )}
-        {tab === "History" && <HistoryTab key={execNonce} />}
-        {tab === "Checklist" && (
-          <div className="grid gap-4">
-            <LiveTradingSwitch />
-            <AlertsPanel />
-            <DailyChecklist />
-            <DataHealth />
-          </div>
+        ) : (
+          <>
+            {tab === "Overview" && (
+              <Overview
+                onNavigate={goToTab}
+                onSelectStock={openTicket}
+                onAction={goToAction}
+                onRegimeStatus={setRegimeStatus}
+              />
+            )}
+            {tab === "Scan" && (
+              <div className="grid gap-4">
+                <ScanProgress onComplete={() => setScanNonce((n) => n + 1)} />
+                <ReadyToEnter onSelectStock={openTicket} refreshKey={scanNonce} />
+                <button
+                  onClick={() => openTicket("")}
+                  className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-2 text-left text-sm text-slate-400 hover:bg-slate-900/70"
+                >
+                  Check any ticker — entry gate &amp; order ticket →
+                </button>
+                <button
+                  onClick={() => setScanDetails((v) => !v)}
+                  className="flex w-full items-center justify-between rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-2 text-sm text-slate-400 hover:bg-slate-900/70"
+                >
+                  <span>{scanDetails ? "Hide" : "Show"} full universe scorecard</span>
+                  <span className="text-xs text-slate-600">
+                    {scanDetails ? "▲ collapse" : "▼ loads the full sweep on open"}
+                  </span>
+                </button>
+                {scanDetails && <Scorecard regimeStatus={regimeStatus} refreshKey={scanNonce} />}
+              </div>
+            )}
+            {tab === "Positions" && (
+              <PositionTracker key={execNonce} intent={positionIntent}
+                               onIntentHandled={() => setPositionIntent(null)}
+                               onOpenTicket={openTicket} />
+            )}
+            {tab === "History" && <HistoryTab key={execNonce} />}
+            {tab === "Settings" && (
+              <SettingsTab demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo}
+                           posture={posture} postureBusy={postureBusy}
+                           onTogglePosture={togglePosture} />
+            )}
+          </>
         )}
       </main>
       <footer

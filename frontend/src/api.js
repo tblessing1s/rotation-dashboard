@@ -51,9 +51,9 @@ async function request(path, opts = {}) {
 }
 
 export const api = {
+  // One-call landing payload: regime + positions/capital + theta + kill-switch.
+  overview: () => request("/api/overview"),
   regime: () => request("/api/regime"),
-  sectors: () => request("/api/sectors"),
-  stockFilter: (sector) => request(`/api/stock-filter${sector ? `?sector=${sector}` : ""}`),
   scorecard: (tickers) => request(`/api/scan/scorecard${tickers ? `?tickers=${tickers}` : ""}`),
   scanReady: (tickers) => request(`/api/scan/ready${tickers ? `?tickers=${tickers}` : ""}`),
   // Kick a detached server-side scan (keeps running if the tab is backgrounded)
@@ -87,8 +87,6 @@ export const api = {
     request("/api/strike-posture", { method: "POST", body: JSON.stringify({ posture }) }),
   rollOptions: (ticker) => request(`/api/roll-options?ticker=${ticker}`),
   coverage: (ticker) => request(`/api/coverage?ticker=${ticker}`),
-  ivRank: (ticker) => request(`/api/iv-rank?ticker=${ticker}`),
-  earnings: (ticker, refresh = false) => request(`/api/earnings?ticker=${ticker}${refresh ? "&refresh=1" : ""}`),
   optionChain: (ticker, strategy = "atr") => request(`/api/option-chain/${ticker}?strategy=${strategy}`),
   execute: (payload) => request("/api/execute", { method: "POST", body: JSON.stringify(payload) }),
   // Live order lifecycle (used when an order comes back "working"; paper fills immediately).
@@ -97,7 +95,6 @@ export const api = {
   positions: () => request("/api/positions"),
   thetaLedger: (params = "") => request(`/api/theta-ledger${params}`),
   killSwitch: () => request("/api/kill-switch"),
-  dailyChecklist: () => request("/api/daily-checklist"),
   history: () => request("/api/history"),
   portfolioRisk: () => request("/api/portfolio-risk"),
   dataHealth: () => request("/api/data-health"),
@@ -133,8 +130,6 @@ export const api = {
   liveTrading: () => request("/api/live-trading"),
   setLiveTrading: (enabled) =>
     request("/api/live-trading", { method: "POST", body: JSON.stringify({ enabled }) }),
-  state: () => request("/api/state"),
-  saveState: (payload) => request("/api/state", { method: "POST", body: JSON.stringify(payload) }),
   accountStatus: () => request("/api/account/status"),
   schwabAuth: () => request("/auth/schwab"),
   authStatus: () => request("/api/auth/status"),

@@ -84,7 +84,7 @@ function AccountGate({ gate }) {
   );
 }
 
-export default function ExecuteTab({ initialTicker, onExecuted }) {
+export default function ExecuteTab({ initialTicker, onExecuted, onBack }) {
   const toast = useToast();
   const [ticker, setTicker] = React.useState(initialTicker || "");
   const [gate, setGate] = React.useState(null);
@@ -132,7 +132,18 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
   }
 
   return (
-    <div className="grid gap-4 lg:grid-cols-2">
+    <div className="grid gap-4">
+      {onBack && (
+        <div>
+          <button
+            onClick={onBack}
+            className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-1.5 text-sm text-slate-400 hover:bg-slate-900/70 hover:text-slate-200"
+          >
+            ← Back
+          </button>
+        </div>
+      )}
+      <div className="grid gap-4 lg:grid-cols-2">
       <Card title="Entry Gate" right={gate ? <Pill status={ready ? "ready" : "wait"}>{gate.verdict}</Pill> : null}>
         <div className="mb-3 flex gap-2">
           <input
@@ -206,6 +217,7 @@ export default function ExecuteTab({ initialTicker, onExecuted }) {
           onClose={() => setChainOpen(false)}
         />
       )}
+      </div>
     </div>
   );
 }

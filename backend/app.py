@@ -440,12 +440,36 @@ def api_kill_switch():
         return _err(e)
 
 
-@app.route("/api/daily-checklist")
-def api_daily_checklist():
+@app.route("/api/overview")
+def api_overview():
+    """One-call landing payload for the Overview tab: regime + positions/capital
+    + theta totals/payback + kill-switch, pre-joined server-side so the landing
+    screen renders from a single fetch instead of stitching four.
+
+    Sections are best-effort independent — a data-provider hiccup in one (e.g.
+    regime needs fresh SPY/VIX bars) must not blank the position-derived rest,
+    so a failed section carries {"error": ...} instead of failing the request."""
+    def section(fn):
+        try:
+            return fn()
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
+
     try:
-        return jsonify({"items": screening.daily_checklist(log.load_state())})
+        state = log.load_state()
     except Exception as e:  # noqa: BLE001
         return _err(e)
+    ledger = state.get("theta_ledger", {})
+    return jsonify({
+        "regime": section(screening.regime),
+        "positions": section(lambda: position_manager.positions_view(state)),
+        "capital": section(lambda: position_manager.capital_summary(state)),
+        "theta": {
+            "totals": ledger.get("totals", {}),
+            "extrinsic_payback": state.get("extrinsic_payback", {}),
+        },
+        "kill_switch": section(lambda: kill_switch.evaluate_all(state)),
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -496,20 +520,6 @@ def api_alerts_settings():
 # ---------------------------------------------------------------------------
 # Web Push (PWA native push): VAPID key handshake + subscription registry.
 # ---------------------------------------------------------------------------
-@app.route("/api/iv-rank")
-def api_iv_rank():
-    """IV rank (current IV vs the ticker's own trailing-year range) — where this
-    week's premium sits in its own history, the signal juice-adequacy can't see."""
-    ticker = (request.args.get("ticker") or "").strip().upper()
-    if not ticker:
-        return jsonify({"error": "ticker is required"}), 400
-    try:
-        import iv_history
-        return jsonify(iv_history.iv_rank(ticker))
-    except Exception as e:  # noqa: BLE001
-        return _err(e)
-
-
 @app.route("/api/verify-fills", methods=["POST"])
 def api_verify_fills():
     """Re-fetch recent live orders from Schwab and diff their fills against what
@@ -741,12 +751,6 @@ def api_version():
     screen and external health checks can read it without a session."""
     import version
     return jsonify(version.info())
-
-
-@app.route("/api/data-status")
-def api_data_status():
-    syms = [config.BENCHMARK, config.VIX_SYMBOL] + sector_data.sector_etfs()
-    return jsonify({s: {"cache_age_hours": data_handler.cache_age_hours(s)} for s in syms})
 
 
 @app.route("/api/portfolio-risk")

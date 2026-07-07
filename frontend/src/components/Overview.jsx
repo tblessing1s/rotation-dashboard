@@ -267,10 +267,11 @@ function Flag({ tone, children }) {
 }
 
 export default function Overview({ onNavigate, onSelectStock, onAction, onRegimeStatus }) {
-  const regime = useApi(api.regime, [], 5 * 60 * 1000);
-  const positions = useApi(api.positions, [], null);
-  const theta = useApi(api.thetaLedger, [], null);
-  const kill = useApi(api.killSwitch, [], 5 * 60 * 1000);
+  // One aggregate call (see /api/overview) instead of stitching regime +
+  // positions + theta + kill-switch client-side. Sections are best-effort on
+  // the server: a failed one carries {error} without blanking the rest.
+  const ov = useApi(api.overview, [], 5 * 60 * 1000);
+  const regimeData = ov.data?.regime?.error ? null : ov.data?.regime;
 
   // Routing helpers passed down to every clickable signal.
   const nav = React.useMemo(() => ({
@@ -280,38 +281,44 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
     enter: (ticker) => onSelectStock?.(ticker),
   }), [onNavigate, onAction, onSelectStock]);
 
-  // Feed the navbar's regime light so it stays lit on the Overview landing,
-  // not only when the Scan tab's RegimeScanner is mounted.
+  // Feed the navbar's regime light (Overview is the landing tab, so the light
+  // is lit from first paint).
   React.useEffect(() => {
-    if (regime.data?.status) onRegimeStatus?.(regime.data.status);
-  }, [regime.data, onRegimeStatus]);
+    if (regimeData?.status) onRegimeStatus?.(regimeData.status);
+  }, [regimeData, onRegimeStatus]);
 
+  const allPositions = ov.data?.positions;
   const openPositions = React.useMemo(
-    () => (positions.data?.positions || []).filter((p) => p.status !== "closed"),
-    [positions.data],
+    () => (Array.isArray(allPositions) ? allPositions : []).filter((p) => p.status !== "closed"),
+    [allPositions],
   );
-  const killPositions = kill.data?.positions || [];
+  const killPositions = Array.isArray(ov.data?.kill_switch) ? ov.data.kill_switch : [];
   const killByTicker = React.useMemo(() => {
     const out = {};
     for (const k of killPositions) out[k.ticker] = k;
     return out;
   }, [killPositions]);
 
+  const capital = ov.data?.capital?.error ? null : ov.data?.capital;
   const actionItems = React.useMemo(
     () => buildActionItems({
       positions: openPositions,
-      capital: positions.data?.capital,
+      capital,
       killSwitch: killPositions,
     }, nav),
-    [openPositions, positions.data, killPositions, nav],
+    [openPositions, capital, killPositions, nav],
   );
 
-  const loading = regime.loading && !regime.data && positions.loading && !positions.data;
-  if (loading) return <Card title="Overview"><Loading label="Gathering your dashboard…" /></Card>;
+  if (ov.loading && !ov.data) {
+    return <Card title="Overview"><Loading label="Gathering your dashboard…" /></Card>;
+  }
+  if (ov.error && !ov.data) {
+    return <Card title="Overview"><ErrorState error={ov.error} onRetry={ov.reload} /></Card>;
+  }
 
-  const cap = positions.data?.capital || {};
-  const juice = theta.data?.totals || {};
-  const payback = theta.data?.extrinsic_payback || {};
+  const cap = capital || {};
+  const juice = ov.data?.theta?.totals || {};
+  const payback = ov.data?.theta?.extrinsic_payback || {};
 
   return (
     <div className="grid gap-4">
@@ -320,10 +327,10 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
         <Card>
           <div className="flex items-center justify-between">
             <div className="text-xs uppercase tracking-wide text-slate-500">Regime</div>
-            <Light status={regime.data?.status} />
+            <Light status={regimeData?.status} />
           </div>
           <div className="mt-1 text-2xl font-semibold text-slate-100">
-            {(regime.data?.status || "—").toUpperCase()}
+            {(regimeData?.status || "—").toUpperCase()}
           </div>
         </Card>
         <Card>
@@ -342,15 +349,15 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
         </Card>
       </div>
 
-      {positions.error ? (
-        <Card title="Needs attention"><ErrorState error={positions.error} onRetry={positions.reload} /></Card>
+      {ov.data?.positions?.error ? (
+        <Card title="Needs attention"><ErrorState error={ov.data.positions.error} onRetry={ov.reload} /></Card>
       ) : (
         <ActionItems items={actionItems} />
       )}
 
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="lg:col-span-2"><BookSummary capital={cap} juice={juice} /></div>
-        <RegimeHero regime={regime.data} />
+        <RegimeHero regime={regimeData} />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-3">

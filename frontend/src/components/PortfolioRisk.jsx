@@ -4,8 +4,12 @@ import { Card, Stat, Meter, Loading, money, fmt, useApi } from "./ui.jsx";
 
 // One glance = "what is my book actually exposed to": aggregate delta (raw and
 // SPY-beta-adjusted), theta/day, vega, capital vs cap, reserve, sector split.
+// Collapsed to the headline numbers by default — the sector split and per-
+// position greeks table are analytics, not decisions, so they load behind
+// "Details".
 export default function PortfolioRisk() {
   const { data, error, loading } = useApi(api.portfolioRisk, [], null);
+  const [open, setOpen] = React.useState(false);
   if (loading && !data) return <Card title="Portfolio risk"><Loading /></Card>;
   if (error) return <Card title="Portfolio risk"><p className="text-sm text-rose-400">{error}</p></Card>;
 
@@ -15,7 +19,17 @@ export default function PortfolioRisk() {
   if (!data?.positions?.length) return null;
 
   return (
-    <Card title="Portfolio risk">
+    <Card
+      title="Portfolio risk"
+      right={
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800"
+        >
+          {open ? "Hide details ▲" : "Details ▼"}
+        </button>
+      }
+    >
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Stat label="Δ dollars" value={money(t.delta_dollars)}
               sub={t.delta_dollars_spy_adj != null ? `${money(t.delta_dollars_spy_adj)} SPY-β adj` : "β unavailable"} />
@@ -27,6 +41,12 @@ export default function PortfolioRisk() {
               tone={cap.deployed > cap.cap ? "text-rose-300" : "text-slate-100"}
               sub={`cap ${money(cap.cap)} (${fmt(cap.pct_of_cap, 0)}%)`} />
       </div>
+      {!cap.reserve_ok && (
+        <p className="mt-3 text-xs text-rose-300">
+          Reserve underfunded — {money(cap.operating_cash)} cash vs {money(cap.reserve_required)} required.
+        </p>
+      )}
+      {open && (<>
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <div>
           <div className="mb-1 flex justify-between text-xs text-slate-400">
@@ -90,6 +110,7 @@ export default function PortfolioRisk() {
           </tbody>
         </table>
       </div>
+      </>)}
     </Card>
   );
 }
