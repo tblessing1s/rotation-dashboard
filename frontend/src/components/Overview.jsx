@@ -1,8 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { Card, Stat, Light, Pill, Meter, Loading, ErrorState, money, fmt, pct, useApi } from "./ui.jsx";
-import ShortJuiceCard from "./ShortJuice.jsx";
-import GroveCard from "./Grove.jsx";
+import JuiceStandCard from "./JuiceStand.jsx";
 
 // The dashboard landing tab: one screen that answers "where does everything
 // stand and what needs me today." It leans entirely on existing endpoints
@@ -356,8 +355,7 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
       ) : (
         <>
           <ActionItems items={actionItems} />
-          <ShortJuiceCard positions={openPositions} nav={nav} />
-          <GroveCard positions={openPositions} nav={nav} />
+          <JuiceStandCard positions={openPositions} nav={nav} />
         </>
       )}
 
