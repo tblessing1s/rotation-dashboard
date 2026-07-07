@@ -41,6 +41,7 @@ ALERT_TYPES = {
     "TOKEN_EXPIRY": ("HIGH", "PROPOSED_DEFAULT: Schwab refresh token dies at ~7 days; re-auth by day 5"),
     "BUYBACK_75": ("MEDIUM", "HARD_CFM_RULE: 75% of the sale premium captured with >2 DTE -> roll early"),
     "EARNINGS_WINDOW": ("MEDIUM", "HARD_CFM_RULE: roll deep-ITM or exit before the report"),
+    "EARNINGS_DATE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: a held name's earnings date hasn't refreshed recently (or providers disagree) -> the guardrail may be running blind"),
     "EXPIRY_FRIDAY": ("MEDIUM", "HARD_CFM_RULE: weekly shorts are rolled, never left to expire unmanaged"),
     "DATA_STALE": ("MEDIUM", "PROPOSED_DEFAULT: cached OHLCV older than expected on a market day"),
     "LEAP_ROLL_DUE": ("HIGH", "PROPOSED_DEFAULT: LEAP DTE below the floor or extrinsic runway too short -> roll the long leg"),
@@ -68,7 +69,7 @@ _ROLL_ACTIONS = {
 _FOCUS_ACTIONS = {
     "KILL_SWITCH_SECTOR", "KILL_SWITCH_SPY", "CIRCUIT_BREAKER", "SHORT_STOCK_DETECTED",
     "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
-    "WHIPSAW_EXIT", "JUICE_INADEQUATE",
+    "WHIPSAW_EXIT", "JUICE_INADEQUATE", "EARNINGS_DATE_STALE",
 }
 
 
@@ -310,6 +311,40 @@ def check_earnings_window(state: dict) -> list[dict]:
                 f"{t} reports earnings in {earn['days_until']}d ({earn['date']}).",
                 "Roll the short deep-ITM for protection or exit before the report.",
                 {"earnings": earn}, key=str(earn.get("date"))))
+    return out
+
+
+def check_earnings_date_stale(state: dict) -> list[dict]:
+    """The earnings guardrail runs on a date from a free-tier calendar that's
+    often wrong or late-updated, and a wrong date fails silently. Flag a held
+    name whose earnings date hasn't refreshed within EARNINGS_STALE_DAYS (nightly
+    maintenance refreshes held names daily, so a stale date means the refresh path
+    is broken) OR whose providers disagree — so the silence itself pages."""
+    if config.demo_enabled():  # ops condition about the real calendar, not the demo store
+        return []
+    out = []
+    for p in _open_positions(state):
+        t = p.get("ticker", "")
+        try:
+            info = earnings.cached_earnings(t)  # non-fetching read
+        except Exception:  # noqa: BLE001 — a cache read must not sink the run
+            continue
+        stale, conflict = info.get("stale"), info.get("conflict")
+        if not stale and not conflict:
+            continue
+        if conflict:
+            msg = (f"{t} earnings date disagrees between providers "
+                   f"(Alpha Vantage {info.get('av_date')} vs Schwab {info.get('schwab_date')}).")
+            action = ("Confirm the real report date before the cycle spans it — a wrong date "
+                      "silently disarms the earnings guardrail. Set an override if needed.")
+        else:
+            msg = (f"{t} earnings date hasn't refreshed in > {config.EARNINGS_STALE_DAYS}d "
+                   f"(last {info.get('fetched_at') or 'never'}).")
+            action = ("Refresh it (nightly maintenance / GET /api/earnings?refresh=1) and check "
+                      "the provider — a stale date can let you roll into a report unprotected.")
+        out.append(_alert(
+            "EARNINGS_DATE_STALE", t, msg, action,
+            {"earnings": info}, key="conflict" if conflict else "stale"))
     return out
 
 
@@ -709,6 +744,7 @@ EVALUATORS = [
     check_buyback_75,
     check_assignment_risk,
     check_earnings_window,
+    check_earnings_date_stale,
     check_expiry_friday,
     check_token_expiry,
     check_data_stale,

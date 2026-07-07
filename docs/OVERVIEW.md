@@ -56,6 +56,7 @@ only *new* alerts to the notifier.
 | `BUYBACK_75` | MEDIUM | HARD_CFM_RULE (75% buyback) | short lost ≥75% of sale premium with >2 DTE → roll early to capture juice |
 | `JUICE_INADEQUATE` | MEDIUM | HARD_CFM_RULE (income target) | trailing weekly juice below the strategy's per-profile income target while the position still self-funds its decay (the band above `CAPITAL_BURN`) → reassess/redeploy while capital is intact |
 | `EARNINGS_WINDOW` | MEDIUM | HARD_CFM_RULE (earnings) | earnings within `EARNINGS_WARN_DAYS` for an open position |
+| `EARNINGS_DATE_STALE` | MEDIUM | PROPOSED_DEFAULT (`EARNINGS_STALE_DAYS`=4) | a held name's earnings date hasn't refreshed within the window (the refresh path is broken) OR Alpha Vantage and Schwab disagree by > `EARNINGS_CONFLICT_DAYS` — the guardrail may be running on a wrong/blind date |
 | `EXPIRY_FRIDAY` | MEDIUM | HARD_CFM_RULE (weekly roll) | short expiring today/tomorrow not yet rolled |
 | `DATA_STALE` | MEDIUM | PROPOSED_DEFAULT (`DATA_STALE_HOURS`=30) | cached OHLCV older than expected on a market day |
 
@@ -352,6 +353,18 @@ suggestion (`executor.roll_suggestion`), and the `DEFEND_POSITION` alert
   held name and syncs each open position's `dividend` snapshot — Phases 0–2
   read from these caches instead of ad-hoc lookups. Manual trigger:
   `POST /api/maintenance/refresh`. Skipped in demo mode.
+- **Earnings guardrail — cross-check + staleness** (`backend/earnings.py`): the
+  guardrail is only as good as its calendar, and a wrong free-tier Alpha Vantage
+  date fails *silently* — the alert just doesn't fire and you roll in unprotected.
+  Two mitigations: `next_earnings` now cross-checks Schwab fundamentals when the
+  endpoint exposes a next-earnings field (fills when AV is blank; flags a
+  `conflict` when the two disagree by > `EARNINGS_CONFLICT_DAYS`), and every
+  earnings record carries `fetched_at` + a `stale` flag (`EARNINGS_STALE_DAYS`).
+  Since nightly maintenance refreshes held names daily, a stale date means the
+  refresh path itself broke — so the `EARNINGS_DATE_STALE` alert makes that
+  silence audible, and the Positions earnings badge shows "sources differ" /
+  "stale". The data-health earnings summary now reports `stale_entries` +
+  `conflicts`.
 - **Token lifecycle UX**: the Schwab card shows token age and days remaining
   with the one-click re-auth flow; the Phase 0 `TOKEN_EXPIRY` alert fires at
   day 5 (of the ~7-day token life).

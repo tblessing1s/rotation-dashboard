@@ -13,16 +13,23 @@ function EarningsBadge({ earnings }) {
     return <span className="text-xs text-slate-600">earnings —</span>;
   }
   const warn = earnings.warning;
+  const suspect = earnings.conflict || earnings.stale;
   const d = earnings.days_until;
   const when = d == null ? "" : d < 0 ? ` (${Math.abs(d)}d ago)` : ` (${d}d)`;
+  const title = earnings.conflict
+    ? `Providers disagree — Alpha Vantage ${earnings.av_date} vs Schwab ${earnings.schwab_date}. Confirm the real report date before the cycle spans it.`
+    : earnings.stale
+    ? `Earnings date last refreshed ${earnings.fetched_at || "never"} — it may be out of date; a wrong date silently disarms the guardrail.`
+    : warn ? "Earnings approaching — roll the short deep-ITM or exit" : "Next earnings report";
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
-        warn ? "border-amber-500/40 bg-amber-500/15 text-amber-300" : "border-slate-700 bg-slate-800/40 text-slate-400"
+        warn || suspect ? "border-amber-500/40 bg-amber-500/15 text-amber-300" : "border-slate-700 bg-slate-800/40 text-slate-400"
       }`}
-      title={warn ? "Earnings approaching — roll the short deep-ITM or exit" : "Next earnings report"}
+      title={title}
     >
       ⚠ earnings {earnings.date}{when}
+      {suspect && <span className="text-rose-300">· {earnings.conflict ? "sources differ" : "stale"}</span>}
     </span>
   );
 }

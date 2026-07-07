@@ -304,6 +304,32 @@ def test_assignment_risk_collapsed_extrinsic_no_dividend(monkeypatch):
     assert len(out2) == 1 and out2[0]["data"]["trigger"] == "dividend"
 
 
+def test_earnings_date_stale_and_conflict(monkeypatch):
+    import earnings
+    monkeypatch.setattr(config, "_demo_mode", False)
+    # Stale cache entry -> fires.
+    monkeypatch.setattr(earnings, "cached_earnings", lambda t: {
+        "ticker": t, "date": "2026-08-01", "stale": True, "conflict": False,
+        "fetched_at": "2026-06-01T00:00:00", "source": "cache"})
+    out = alerts.check_earnings_date_stale(_state(_pos()))
+    assert len(out) == 1 and out[0]["type"] == "EARNINGS_DATE_STALE"
+    assert "hasn't refreshed" in out[0]["message"]
+    # Provider conflict -> fires with the disagree message.
+    monkeypatch.setattr(earnings, "cached_earnings", lambda t: {
+        "ticker": t, "date": "2026-08-01", "stale": False, "conflict": True,
+        "av_date": "2026-08-01", "schwab_date": "2026-09-01", "source": "cache"})
+    out2 = alerts.check_earnings_date_stale(_state(_pos()))
+    assert len(out2) == 1 and "disagrees" in out2[0]["message"]
+    # Fresh + agreeing -> quiet.
+    monkeypatch.setattr(earnings, "cached_earnings", lambda t: {"stale": False, "conflict": False})
+    assert alerts.check_earnings_date_stale(_state(_pos())) == []
+    # Demo mode -> skipped (ops condition about the real calendar).
+    monkeypatch.setattr(config, "_demo_mode", True)
+    monkeypatch.setattr(earnings, "cached_earnings", lambda t: {"stale": True, "conflict": False})
+    assert alerts.check_earnings_date_stale(_state(_pos())) == []
+    monkeypatch.setattr(config, "_demo_mode", False)
+
+
 def test_expiry_friday():
     sc = {"strike": 126, "contracts": 5, "dte": 1, "current_bid": 2.30,
           "entry_premium_total": 450.0}

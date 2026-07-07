@@ -243,6 +243,20 @@ WEEKLIES_CACHE_TTL = 7 * 24 * 3600
 # Around earnings we either roll the short deep-ITM for protection or exit the
 # position entirely, so the next report date is surfaced on every open position.
 EARNINGS_WARN_DAYS = 7       # flag a position when earnings is within this many days
+
+# The earnings guardrail is only as good as the calendar behind it. Free-tier
+# Alpha Vantage dates are frequently wrong or late-updated, and a wrong date fails
+# SILENTLY — the earnings alert simply doesn't fire and you roll into a report
+# unprotected. Two mitigations (PROPOSED_DEFAULT thresholds):
+#  * cross-check Schwab fundamentals when the endpoint exposes a next-earnings
+#    field: fill when Alpha Vantage is blank, and flag a conflict when the two
+#    disagree by more than EARNINGS_CONFLICT_DAYS;
+#  * flag a held name whose earnings date hasn't been refreshed within
+#    EARNINGS_STALE_DAYS. Nightly maintenance refreshes held names every day, so a
+#    stale date means the refresh path itself is broken — exactly the state in
+#    which you'd roll in blind.
+EARNINGS_STALE_DAYS = 4
+EARNINGS_CONFLICT_DAYS = 3
 # PROPOSED_DEFAULT — deep-ITM protective roll THROUGH an earnings report: when a
 # candidate roll week spans the next report, the picker suggests a strike this
 # deep (the further-below-spot of the ATR-distance and ITM%-floor), beyond any
