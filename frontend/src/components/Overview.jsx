@@ -1,6 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { Card, Stat, Light, Pill, Meter, Loading, ErrorState, money, fmt, pct, useApi } from "./ui.jsx";
+import ShortJuiceCard from "./ShortJuice.jsx";
 
 // The dashboard landing tab: one screen that answers "where does everything
 // stand and what needs me today." It leans entirely on existing endpoints
@@ -352,7 +353,10 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
       {ov.data?.positions?.error ? (
         <Card title="Needs attention"><ErrorState error={ov.data.positions.error} onRetry={ov.reload} /></Card>
       ) : (
-        <ActionItems items={actionItems} />
+        <>
+          <ActionItems items={actionItems} />
+          <ShortJuiceCard positions={openPositions} nav={nav} />
+        </>
       )}
 
       <div className="grid gap-4 lg:grid-cols-3">

@@ -18,6 +18,41 @@ body {
   overscroll-behavior-y: none;
 }
 
+/* Juice-glass animations (Overview "Juice squeeze" short-call tracker):
+   the pour-in on load, the drifting wave crest, and the rising bubbles. */
+@keyframes juice-rise {
+  from { transform: scaleY(0); }
+  to { transform: scaleY(1); }
+}
+@keyframes juice-wave {
+  from { transform: translateX(0); }
+  to { transform: translateX(-40px); }
+}
+@keyframes juice-bubble {
+  0% { transform: translateY(0); opacity: 0; }
+  15% { opacity: 0.75; }
+  100% { transform: translateY(-36px); opacity: 0; }
+}
+.juice-rise {
+  animation: juice-rise 0.9s cubic-bezier(0.2, 0.7, 0.3, 1);
+  transform-box: fill-box;
+  transform-origin: bottom;
+}
+.juice-wave {
+  animation: juice-wave 3.2s linear infinite;
+}
+.juice-bubble {
+  animation: juice-bubble 2.8s ease-in infinite;
+  opacity: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .juice-rise,
+  .juice-wave,
+  .juice-bubble {
+    animation: none;
+  }
+}
+
 @layer utilities {
   /* Horizontal scroll strips (mobile tab bar) without a visible scrollbar. */
   .no-scrollbar {
