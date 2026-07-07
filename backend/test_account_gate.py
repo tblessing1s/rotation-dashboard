@@ -201,7 +201,7 @@ def test_executor_blocks_then_overrides_with_logged_reason(isolated_state, monke
 
     pos = log.find_position(log.load_state(), "NVDA")
     assert pos["circuit_breaker"] == {"price": 123.45, "source": "operator",
-                                      "set_at": ex["date"][:10]}
+                                      "set_at": ex["date"][:10], "entry_price": 140.0}
     assert "dividend" in pos  # snapshot stored (None fields offline)
 
 

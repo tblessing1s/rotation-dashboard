@@ -280,20 +280,24 @@ def check_whipsaw_exit(state: dict) -> list[dict]:
 
 
 def check_circuit_breaker(state: dict) -> list[dict]:
+    """The circuit breaker trips on WHICHEVER comes first — a 15% drop from
+    entry, 3 closes below the 50-day MA, a close below the 200-day MA, or the
+    operator's line-in-the-sand. circuit_breaker.py owns the rule; this just
+    turns a breached verdict into the CRITICAL alert."""
+    import circuit_breaker
     out = []
     for p in _open_positions(state):
         t = p.get("ticker", "")
-        cb = p.get("circuit_breaker") or {}
-        line = cb.get("price")
-        if line is None:
+        verdict = circuit_breaker.evaluate(p)
+        if not verdict.get("tripped"):
             continue
-        price = _last_close(t)
-        if price is not None and price <= float(line):
-            out.append(_alert(
-                "CIRCUIT_BREAKER", t,
-                f"{t} at {price:.2f} has hit the line-in-the-sand ({float(line):.2f}).",
-                f"EXIT {t} — the circuit-breaker price set at entry has been breached.",
-                {"price": round(price, 2), "line_in_the_sand": float(line)}))
+        price = verdict.get("price")
+        at = f" at {price:.2f}" if price is not None else ""
+        out.append(_alert(
+            "CIRCUIT_BREAKER", t,
+            f"{t}{at} — {verdict['headline']}.",
+            verdict["suggested_action"],
+            verdict))
     return out
 
 

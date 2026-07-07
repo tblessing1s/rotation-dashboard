@@ -681,8 +681,12 @@ def _buy_leap(payload, ticker, strike, contracts, stock_price):
         if cb_price is None:
             import account_gate
             cb_price = account_gate.suggested_circuit_breaker(ticker).get("price")
+    # entry_price is the underlying's price at entry — the reference the
+    # circuit-breaker drawdown leg (>= 15% drop) measures against.
     circuit_breaker = ({"price": round(float(cb_price), 2), "source": cb_source,
-                        "set_at": log.utcnow()[:10]} if cb_price is not None else None)
+                        "set_at": log.utcnow()[:10],
+                        "entry_price": round(float(stock_price), 2) if stock_price else None}
+                       if cb_price is not None else None)
     execution["circuit_breaker_price"] = circuit_breaker["price"] if circuit_breaker else None
 
     dividend = gate.get("dividend")

@@ -32,6 +32,26 @@ def sma(df: pd.DataFrame, window: int = config.MA_WINDOW) -> float | None:
     return float(c.rolling(window).mean().iloc[-1])
 
 
+def consecutive_closes_below_sma(df: pd.DataFrame | None, window: int) -> int | None:
+    """Number of trailing consecutive daily closes below the ``window``-day SMA.
+
+    The circuit breaker's "N closes below the 50-day MA" leg. Returns 0 when the
+    latest close is at/above the average, and None when there isn't enough
+    history to form the SMA at all. The SMA's warm-up NaNs read as "not below",
+    so a run can never extend past the point where the average first exists.
+    """
+    if df is None or len(df) < window:
+        return None
+    c = _close(df)
+    below = c < c.rolling(window).mean()
+    count = 0
+    for is_below in reversed(below.tolist()):
+        if not is_below:
+            break
+        count += 1
+    return count
+
+
 def rsi(df: pd.DataFrame, window: int = config.RSI_WINDOW) -> float | None:
     c = _close(df)
     if len(c) < window + 1:

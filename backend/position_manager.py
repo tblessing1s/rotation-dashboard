@@ -279,6 +279,14 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
     # Whipsaw circuit breaker: too many defensive rolls / too much cumulative drag
     # -> exit, not another defend (the roll-down spiral no single check owns).
     out["whipsaw"] = whipsaw_status(position, rolls)
+    # Price circuit breaker: 15% drop / 3 closes below the 50-day MA / close below
+    # the 200-day MA / operator line — whichever trips first (circuit_breaker.py).
+    if position.get("status") != "closed":
+        try:
+            import circuit_breaker
+            out["circuit_breaker_status"] = circuit_breaker.evaluate(position)
+        except Exception:  # noqa: BLE001 — the breaker view is informational, never block positions
+            out["circuit_breaker_status"] = None
     shares = dict(position.get("shares") or {})
     count = int(shares.get("count") or 0)
     cap = int(shares.get("cap") or config.SHARE_CAP)
