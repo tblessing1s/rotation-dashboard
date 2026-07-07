@@ -226,12 +226,13 @@ def expected_view_from_state(state: dict, live_only: bool = True) -> tuple[list[
                 excluded.append({"ticker": ticker, "reason": "unknown_live_status"})
                 continue
 
-        leap = p.get("leap") or {}
-        contracts = int(leap.get("contracts") or 0)
-        if leap and contracts:
-            out.append(_instrument(
-                None, ticker, OPTION, CALL, leap.get("strike"),
-                _norm_date(leap.get("expiration")), contracts))
+        import logging_handler as log
+        for leap in log.leap_legs(p):
+            contracts = int(leap.get("contracts") or 0)
+            if contracts:
+                out.append(_instrument(
+                    None, ticker, OPTION, CALL, leap.get("strike"),
+                    _norm_date(leap.get("expiration")), contracts))
 
         for sc in p.get("short_calls") or []:
             n = int(sc.get("contracts") or 0)

@@ -49,13 +49,14 @@ def roll_policy(leap_dte: int | None,
 # ---------------------------------------------------------------------------
 # Health block (Tasks 1a, 2a, 3) — needs live price + the stored mark
 # ---------------------------------------------------------------------------
-def _leap_dte(position: dict, df=None) -> int | None:
+def _leap_dte(position: dict, df=None, leg: dict | None = None) -> int | None:
     """Calendar days to LEAP expiry. Prefers the value recompute_derived stamped
     on the position; falls back to the stored expiration, then the static
-    entry-time snapshot."""
-    if position.get("leap_dte") is not None:
+    entry-time snapshot. With an explicit ``leg`` (multi-tranche health) the
+    position-level stamp is skipped — it describes the primary leg only."""
+    if leg is None and position.get("leap_dte") is not None:
         return position["leap_dte"]
-    leap = position.get("leap") or {}
+    leap = leg if leg is not None else (position.get("leap") or {})
     exp = leap.get("expiration")
     if exp:
         from datetime import datetime, timezone
@@ -86,17 +87,18 @@ def _delta_velocity(position: dict) -> dict:
 
 
 def leap_health(position: dict, df=None, stock_price: float | None = None,
-                q: float = 0.0) -> dict:
+                q: float = 0.0, leg: dict | None = None) -> dict:
     """Full LEAP-health block for one position. Combines stored derived fields
     (leap_dte, trailing_avg_weekly_juice from recompute_derived) with live
     price/mark to produce extrinsic remaining, weekly burn, net maintenance,
     the roll recommendation, and delta velocity. Every price-dependent field is
-    None when the leg can't be priced."""
-    leap = position.get("leap") or {}
+    None when the leg can't be priced. Pass ``leg`` to score one leg of a
+    multi-tranche engine; default is the primary leg (legacy behavior)."""
+    leap = leg if leg is not None else (position.get("leap") or {})
     contracts = int(leap.get("contracts") or 0)
     strike = leap.get("strike")
     ticker = position.get("ticker", "")
-    dte = _leap_dte(position, df)
+    dte = _leap_dte(position, df, leg=leg)
     trailing_juice = position.get("trailing_avg_weekly_juice")
 
     if stock_price is None:
@@ -166,6 +168,38 @@ def leap_health(position: dict, df=None, stock_price: float | None = None,
         "delta_velocity": _delta_velocity(position),
         "roll_due": policy["roll_due"],
         "roll_reasons": policy["reasons"],
+    }
+
+
+def aggregate_health(legs_health: list[dict]) -> dict:
+    """Fold per-leg health blocks into one engine-level verdict for a
+    multi-tranche position: burns/extrinsic/intrinsic sum, DTE is the most
+    urgent leg's, roll_due if ANY leg is due, and the juice-vs-burn maintenance
+    verdict is re-judged against the COMBINED weekly burn (a position isn't
+    self-funding unless its juice covers every leg's decay)."""
+    def _sum(key):
+        vals = [h.get(key) for h in legs_health if h.get(key) is not None]
+        return round(sum(vals), 2) if vals else None
+    burn = _sum("leap_weekly_burn")
+    extrinsic = _sum("leap_extrinsic_remaining")
+    juice = next((h.get("trailing_avg_weekly_juice") for h in legs_health
+                  if h.get("trailing_avg_weekly_juice") is not None), None)
+    net = round(juice - burn, 2) if juice is not None and burn is not None else None
+    dtes = [h.get("leap_dte") for h in legs_health if h.get("leap_dte") is not None]
+    return {
+        "legs": len(legs_health),
+        "leap_dte": min(dtes) if dtes else None,
+        "leap_intrinsic": _sum("leap_intrinsic"),
+        "leap_extrinsic_remaining": extrinsic,
+        "leap_weekly_burn": burn,
+        "trailing_avg_weekly_juice": juice,
+        "net_weekly_maintenance": net,
+        "maintenance_status": ("unknown" if net is None
+                               else "self_funding" if net >= 0 else "burning"),
+        "leap_extrinsic_weeks_remaining": (round(extrinsic / juice, 1)
+                                           if extrinsic is not None and juice else None),
+        "roll_due": any(h.get("roll_due") for h in legs_health),
+        "roll_reasons": [r for h in legs_health for r in (h.get("roll_reasons") or [])],
     }
 
 

@@ -43,10 +43,11 @@ function juiceOf(sc) {
 //             not just extrinsic — an ITM short's intrinsic swing is real P/L here)
 // Null only when no leg is knowable; missing legs otherwise contribute zero.
 function rowNetOf(p, shorts, payback) {
-  const leap = p.leap || {};
+  const t = p.leap_totals || p.leap || {};
   const banked = payback?.[p.ticker]?.collected_to_date ?? null;
-  const leapPL = leap.current_bid != null && leap.cost_basis != null
-    ? Number(leap.current_bid) - Number(leap.cost_basis)
+  const value = t.current_value ?? t.current_bid;
+  const leapPL = value != null && t.cost_basis != null
+    ? Number(value) - Number(t.cost_basis)
     : null;
   let shortPL = null;
   for (const { sc } of shorts) {
@@ -64,9 +65,15 @@ function signedMoney(n) {
   return `${n < 0 ? "−" : "+"}$${Math.abs(Number(n)).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
 }
 
-// Per-position pulp: LEAP intrinsic (live-priced leap_health first, enriched
-// leap split as fallback) vs the cost basis the orange must cover to be full.
+// Per-position pulp: total LEAP intrinsic across every leg vs the total cost
+// basis the orange must cover to be full. leap_totals aggregates the legs
+// server-side; the single-leg fallbacks keep older payloads rendering.
 function pulpOf(p) {
+  const t = p.leap_totals;
+  if (t) {
+    const pct = t.intrinsic != null && t.cost_basis ? (t.intrinsic / t.cost_basis) * 100 : null;
+    return { intrinsic: t.intrinsic, basis: t.cost_basis, pct };
+  }
   const lh = p.leap_health || {};
   const leap = p.leap || {};
   const intrinsic = lh.leap_intrinsic ?? leap.intrinsic ?? null;
@@ -171,8 +178,9 @@ const LEAF = {
 
 // One orange in an 80×100 viewBox. Pulp fills a clipped inner circle bottom-up
 // (same pour/wave idiom as the glasses, in fruit hues); seeds drift in the
-// pulp instead of bubbles.
-function Orange({ uid, pct, maintenance, maintained }) {
+// pulp instead of bubbles. ``mini`` renders a thumbnail (per-leg rows of a
+// multi-tranche engine): no leaf/seeds/label — the row text carries those.
+function Orange({ uid, pct, maintenance, maintained, mini = false }) {
   const fill = pct == null ? 0 : Math.max(0, Math.min(100, pct));
   const innerTop = 31;
   const innerBottom = 85;
@@ -182,7 +190,9 @@ function Orange({ uid, pct, maintenance, maintained }) {
   return (
     <svg
       viewBox="0 0 80 100"
-      className={`h-24 w-20 ${maintained ? "drop-shadow-[0_0_10px_rgba(52,211,153,0.35)]" : ""}`}
+      className={mini
+        ? "h-8 w-7 shrink-0"
+        : `h-24 w-20 ${maintained ? "drop-shadow-[0_0_10px_rgba(52,211,153,0.35)]" : ""}`}
       role="img"
       aria-label={pct == null ? "intrinsic coverage unknown" : `${fmt(pct, 0)}% of LEAP cost basis covered by intrinsic`}
     >
@@ -201,10 +211,14 @@ function Orange({ uid, pct, maintenance, maintained }) {
 
       {/* Stem + leaf. The leaf is the maintenance verdict: green upright when
           juice covers the LEAP's burn, amber and drooping when it doesn't. */}
-      <rect x="38.6" y="21" width="2.8" height="9" rx="1.4" fill="#78716c" />
-      <g transform={`rotate(${leaf.tilt} 41 24)`}>
-        <path d="M41 24 Q49 13 60 16 Q53 27 41 24 Z" fill={leaf.fill} opacity="0.9" />
-      </g>
+      {!mini && (
+        <>
+          <rect x="38.6" y="21" width="2.8" height="9" rx="1.4" fill="#78716c" />
+          <g transform={`rotate(${leaf.tilt} 41 24)`}>
+            <path d="M41 24 Q49 13 60 16 Q53 27 41 24 Z" fill={leaf.fill} opacity="0.9" />
+          </g>
+        </>
+      )}
 
       {/* Pulp: gradient body + wave crest + drifting seeds, clipped to fruit. */}
       <g clipPath={`url(#oc-${uid})`}>
@@ -220,7 +234,7 @@ function Orange({ uid, pct, maintenance, maintained }) {
               />
             </g>
           )}
-          {fill >= 20 && (
+          {fill >= 20 && !mini && (
             <g clipPath={`url(#op-${uid})`} fill="#ffedd5" opacity="0.4">
               <ellipse cx="32" cy="72" rx="2.4" ry="3.4" transform="rotate(-18 32 72)" />
               <ellipse cx="47" cy="66" rx="2.1" ry="3" transform="rotate(24 47 66)" />
@@ -237,10 +251,12 @@ function Orange({ uid, pct, maintenance, maintained }) {
             strokeLinecap="round" opacity="0.14" />
 
       {/* Direct label — actual coverage, even past 100%. */}
-      <text x="40" y="63" textAnchor="middle" fontSize="15" fontWeight="700"
-            fill="#f8fafc" stroke="#0f172a" strokeWidth="3" paintOrder="stroke">
-        {pct == null ? "—" : `${fmt(pct, 0)}%`}
-      </text>
+      {!mini && (
+        <text x="40" y="63" textAnchor="middle" fontSize="15" fontWeight="700"
+              fill="#f8fafc" stroke="#0f172a" strokeWidth="3" paintOrder="stroke">
+          {pct == null ? "—" : `${fmt(pct, 0)}%`}
+        </text>
+      )}
     </svg>
   );
 }
@@ -351,7 +367,10 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
           per ticker (a re-entry reuses it and starts a fresh cycle). */}
       <div className="flex flex-wrap justify-center gap-3 sm:justify-start">
         {rows.map(({ p, pulp, shorts }) => {
-          const lh = p.leap_health || {};
+          // Multi-tranche engines carry an aggregated health verdict (burn and
+          // extrinsic summed across legs); single-leg falls back to leap_health.
+          const lh = p.leap_health_agg || p.leap_health || {};
+          const legs = p.leap_legs || [];
           const ks = killByTicker?.[p.ticker];
           const orangeFlags = [];
           // A hollow orange — no intrinsic left at all — outranks the calm
@@ -397,9 +416,31 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                     <span className="ml-1 font-normal text-slate-500">{fmt(p.stock_price, 2)}</span>
                   )}
                 </div>
-                <div className="text-center text-[10px] text-slate-500">
-                  {leap.contracts || 0}×{fmt(leap.strike, 0)}C · {leap.dte ?? "—"}d
-                </div>
+                {legs.length > 1 ? (
+                  /* The lower level: each tranche is its own mini orange —
+                     fill = that leg's intrinsic vs its own cost basis. */
+                  <div className="mt-0.5 flex flex-col gap-0.5">
+                    {legs.map((leg, i) => {
+                      const hp = p.leap_health_legs?.[i] || {};
+                      const lpct = leg.intrinsic != null && leg.cost_basis
+                        ? (leg.intrinsic / leg.cost_basis) * 100 : null;
+                      return (
+                        <div key={`${leg.strike}-${leg.expiration}-${i}`}
+                             className="flex items-center gap-1 text-[10px] text-slate-400">
+                          <Orange uid={`${p.ticker}-leg${i}`} pct={lpct} mini />
+                          <span className="whitespace-nowrap">
+                            {leg.contracts || 0}×{fmt(leg.strike, 0)}C · {hp.leap_dte ?? leg.dte ?? "—"}d
+                            · {lpct == null ? "—" : `${fmt(lpct, 0)}%`}
+                          </span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="text-center text-[10px] text-slate-500">
+                    {leap.contracts || 0}×{fmt(leap.strike, 0)}C · {leap.dte ?? "—"}d
+                  </div>
+                )}
                 <div className="text-center text-[10px] text-slate-500">
                   {pulp.intrinsic != null && pulp.basis != null
                     ? `${money(pulp.intrinsic)} of ${money(pulp.basis)}`
@@ -470,8 +511,10 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
       </div>
 
       <div className="mt-3 border-t border-slate-800 pt-2 text-[11px] text-slate-500">
-        Orange = the LEAP: pulp is intrinsic vs cost basis (full = capital stock-backed), leaf
-        is juice-vs-burn (green upright = self-funding, amber droop = burning). Glasses = its
+        Orange = the LEAP engine: pulp is intrinsic vs cost basis (full = capital stock-backed),
+        leaf is juice-vs-burn (green upright = self-funding, amber droop = burning). An engine
+        holding several LEAPs lists each tranche as a mini orange — the big orange is all of
+        them together. Glasses = its
         shorts: fill is extrinsic captured since entry; the dashed line is the 75% buyback rule
         — a glass past the line is ready to roll. Paid back = how much of the LEAP's entry
         extrinsic this cycle's juice has recovered. All-in = juice banked this cycle + LEAP value

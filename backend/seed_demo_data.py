@@ -261,6 +261,21 @@ def seed_state(last_close: dict[str, float]) -> None:
             "stock_price": spec["cur_px"], "dte": sdte,
         })
 
+    # One multi-tranche engine in the demo book: AMD adds a second, later-dated
+    # LEAP leg (different strike + expiration) through the real executor path,
+    # so the leap_legs pipeline (merge/add stamps, payback continuity, per-leg
+    # health, the Overview's per-leg minis) is exercised end-to-end.
+    amd = next((s for s in BOOK if s["ticker"] == "AMD"), None)
+    if amd:
+        add_strike = amd["strike"] + 30
+        add_intrinsic_pc = max(amd["entry_px"] - add_strike, 0) * 100
+        executor.execute({
+            "action": "buy_leap", "ticker": "AMD", "strike": add_strike,
+            "contracts": 2, "execution_price": add_intrinsic_pc + amd["extr_per_contract"],
+            "stock_price": amd["entry_px"], "dte": amd["leap_dte"] + 180,
+            "expiration": "2027-06-18", "override_reason": "demo-seed book",
+        })
+
     # The alert-demo position: same execution-derived path, rigged numbers.
     ad = ALERT_DEMO
     t = ad["ticker"]
@@ -328,7 +343,9 @@ def seed_state(last_close: dict[str, float]) -> None:
             else:
                 e["date"] = "2026-06-25T15:30:00Z"
         for e in buys:
-            e["date"] = "2026-04-20T15:00:00Z"
+            # The multi-tranche add lands mid-cycle; original entries at open.
+            e["date"] = ("2026-06-10T15:00:00Z" if e.get("leap_add")
+                         else "2026-04-20T15:00:00Z")
 
         # Patch the position with what a live feed would fill in.
         pos = log.find_position(state, t)
@@ -341,6 +358,13 @@ def seed_state(last_close: dict[str, float]) -> None:
         px = last_close.get(t, spec["entry_px"])
         intrinsic_now = max(px - spec["strike"], 0.0) * CONTRACTS * 100
         leap["current_bid"] = round(intrinsic_now + spec["leap_tv"], 2)
+        # Extra tranches (the AMD multi-leg demo): same live-feed patch per leg —
+        # a longer-dated leg carries proportionally more time value.
+        for extra in pos.get("leap_legs", [])[1:]:
+            extra["dte"] = spec["leap_dte"] + 180
+            n = int(extra.get("contracts") or 0)
+            intr = max(px - float(extra["strike"]), 0.0) * n * 100
+            extra["current_bid"] = round(intr + spec["leap_tv"] * 1.4 * n / CONTRACTS, 2)
         sh = pos["shares"]
         sh["count"] = spec["shares"]
         sh["cost_basis_per_share"] = spec["share_cost"]

@@ -228,16 +228,45 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
     ticker = position.get("ticker", "")
     price = _stock_price(ticker)
     out["stock_price"] = price
-    if position.get("leap"):
-        out["leap"] = enrich_leap(position["leap"], price)
+    import logging_handler as log
+    legs = log.leap_legs(position)
+    if legs:
+        enriched_legs = [enrich_leap(l, price) for l in legs]
+        out["leap_legs"] = enriched_legs
+        out["leap"] = enriched_legs[0]
+
+        # Ticker-level totals across every leg — what the high-level views (the
+        # juice stand's orange, capital summaries) aggregate on. None-safe: a
+        # sum only exists when at least one leg carries the field.
+        def _sum(key):
+            vals = [l.get(key) for l in enriched_legs if l.get(key) is not None]
+            return round(sum(float(v) for v in vals), 2) if vals else None
+        out["leap_totals"] = {
+            "legs": len(enriched_legs),
+            "contracts": sum(int(l.get("contracts") or 0) for l in enriched_legs),
+            "cost_basis": _sum("cost_basis"),
+            "current_value": _sum("current_bid"),
+            "intrinsic": _sum("intrinsic"),
+            "extrinsic": _sum("extrinsic"),
+        }
+
         # LEAP long-leg health: DTE, extrinsic runway, juice-vs-burn, delta
         # velocity, and the roll recommendation (Task 1-3). Best-effort — a
-        # pricing gap degrades to Nones, never blanks the position.
+        # pricing gap degrades to Nones, never blanks the position. Multi-leg
+        # engines also get per-leg health + the aggregated verdict.
         try:
             import leap_policy
             out["leap_health"] = leap_policy.leap_health(position, stock_price=price)
+            if len(legs) > 1:
+                per_leg = [leap_policy.leap_health(position, stock_price=price, leg=l)
+                           for l in legs]
+                out["leap_health_legs"] = per_leg
+                out["leap_health_agg"] = leap_policy.aggregate_health(per_leg)
         except Exception:  # noqa: BLE001 — health is informational, never block positions
             out["leap_health"] = None
+    else:
+        out["leap_legs"] = []
+        out["leap_totals"] = None
     dividend = position.get("dividend")
     shorts = position.get("short_calls", [])
     marks = _live_short_marks(ticker, shorts)
@@ -294,11 +323,11 @@ def positions_view(state: dict) -> list[dict]:
 
 
 def position_capital(p: dict) -> float:
-    """Capital deployed in one position: the LEAP's cost basis plus any
+    """Capital deployed in one position: every LEAP leg's cost basis plus any
     accumulated shares (count x cost basis per share). The buy executions set
     these on the position, so this is the source of truth."""
-    leap = p.get("leap") or {}
-    total = float(leap.get("cost_basis") or 0)
+    import logging_handler as log
+    total = sum(float(l.get("cost_basis") or 0) for l in log.leap_legs(p))
     shares = p.get("shares") or {}
     count = int(shares.get("count") or 0)
     cps = shares.get("cost_basis_per_share")
