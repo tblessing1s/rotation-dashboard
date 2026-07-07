@@ -1,0 +1,45 @@
+name: Set up off-machine backups (Tigris)
+
+# One-click alternative to running flyctl locally: creates the Tigris bucket
+# (which auto-sets BUCKET_NAME + AWS_* secrets on the app) and turns on
+# CFM_BACKUP_S3. Run it from the Actions tab -> "Run workflow". Idempotent:
+# re-running skips bucket creation if the app already has one attached.
+#
+# Verify afterwards from the dashboard: Data Health -> refresh runs the
+# maintenance job now; success means no BACKUP_FAILURE alert fires.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  setup:
+    name: Create Tigris bucket + enable S3 backups
+    runs-on: ubuntu-latest
+    # Same group as the deploy workflow so secret changes never race a deploy.
+    concurrency:
+      group: fly-deploy
+      cancel-in-progress: false
+    steps:
+      - name: Set up flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Create Tigris bucket (skipped if one is already attached)
+        # `fly storage create` sets BUCKET_NAME, AWS_ACCESS_KEY_ID,
+        # AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL_S3 and AWS_REGION as app
+        # secrets; the backup code picks all of them up with no further config.
+        run: |
+          if flyctl secrets list --app rotation-dashboard | grep -q '^BUCKET_NAME'; then
+            echo "BUCKET_NAME secret already present; skipping bucket creation."
+          else
+            flyctl storage create --name rotation-dashboard-backups \
+              --app rotation-dashboard --yes
+          fi
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+      - name: Enable the S3 off-machine backup path
+        # Restarts the machine with the new secrets; the next nightly (or an
+        # on-demand Data Health refresh) ships the backup to Tigris.
+        run: flyctl secrets set CFM_BACKUP_S3=1 --app rotation-dashboard
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
