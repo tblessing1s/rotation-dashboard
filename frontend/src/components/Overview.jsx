@@ -128,20 +128,18 @@ function RegimeHero({ regime }) {
   );
 }
 
-function BookSummary({ capital, juice }) {
+function BookSummary({ capital }) {
   const cap = capital || {};
   const ms = cap.milestones || {};
-  const totals = juice || {};
   return (
     <Card title="The book">
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
         <Stat label="Deployed" value={money(cap.capital_deployed)} />
         <Stat label="Operating cash" value={money(cap.operating_cash)}
               sub={cap.operating_cash_source === "schwab" ? "live from Schwab" : undefined} />
         <Stat label="Reserve req." value={money(cap.reserve_required)}
               tone={cap.reserve_ok ? "text-slate-100" : "text-rose-300"}
               sub={cap.reserve_ok ? "funded" : "underfunded"} />
-        <Stat label="Juice YTD" value={money(cap.juice_ytd ?? totals.ytd)} tone="text-emerald-300" />
       </div>
       {(ms.half_nut || ms.quit_safe) && (
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
@@ -159,111 +157,6 @@ function BookSummary({ capital, juice }) {
         </div>
       )}
     </Card>
-  );
-}
-
-function JuiceCard({ juice, payback }) {
-  const t = juice || {};
-  const rows = Object.entries(payback || {});
-  return (
-    <Card title="Net juice">
-      <div className="grid grid-cols-3 gap-3">
-        <Stat label="This week" value={money(t.this_week)} tone="text-emerald-300" />
-        <Stat label="This month" value={money(t.this_month)} />
-        <Stat label="YTD" value={money(t.ytd)} />
-      </div>
-      {rows.length > 0 && (
-        <div className="mt-4 space-y-3 border-t border-slate-800 pt-4">
-          <div className="text-xs uppercase tracking-wide text-slate-500">Extrinsic payback</div>
-          {rows.map(([ticker, p]) => (
-            <div key={ticker}>
-              <div className="mb-1 flex justify-between text-xs">
-                <span className="font-semibold text-slate-200">{ticker}</span>
-                <span className="text-slate-400">{fmt(p.pct_complete, 0)}%</span>
-              </div>
-              <Meter pct={p.pct_complete} tone={p.pct_complete >= 100 ? "bg-emerald-400" : "bg-sky-500"} />
-            </div>
-          ))}
-        </div>
-      )}
-    </Card>
-  );
-}
-
-// Compact per-position row — the same badges the Positions tab shows, condensed.
-function PositionsGlance({ positions, killByTicker, nav }) {
-  if (positions.length === 0) {
-    return (
-      <Card title="Positions">
-        <p className="text-sm text-slate-500">No open positions. Scan for an entry to get started.</p>
-      </Card>
-    );
-  }
-  return (
-    <Card title={`Positions — ${positions.length}`}>
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
-              <th className="py-1 pr-3">Ticker</th>
-              <th className="py-1 pr-3">Stock</th>
-              <th className="py-1 pr-3">LEAP</th>
-              <th className="py-1 pr-3">Shorts</th>
-              <th className="py-1 pr-3">Flags</th>
-            </tr>
-          </thead>
-          <tbody>
-            {positions.map((p) => {
-              const leap = p.leap || {};
-              const shorts = p.short_calls || [];
-              const ks = killByTicker[p.ticker];
-              return (
-                <tr key={p.ticker} className="border-t border-slate-800/60">
-                  <td className="py-1.5 pr-3">
-                    <button onClick={() => nav.focus(p.ticker)}
-                            className="font-semibold text-slate-100 hover:text-emerald-300">
-                      {p.ticker}
-                    </button>
-                    <span className="ml-2 text-xs text-slate-500">{p.sector || ""}</span>
-                  </td>
-                  <td className="py-1.5 pr-3 text-slate-300">{fmt(p.stock_price, 2)}</td>
-                  <td className="py-1.5 pr-3 text-slate-300">
-                    {leap.contracts || 0}×{fmt(leap.strike, 0)}C
-                    <span className="text-slate-500"> · {leap.dte ?? "—"}d</span>
-                  </td>
-                  <td className="py-1.5 pr-3 text-slate-300">{shorts.length}</td>
-                  <td className="py-1.5 pr-3">
-                    <div className="flex flex-wrap gap-1">
-                      {p.needs_review && <Flag tone="rose">review</Flag>}
-                      {p.defend && <Flag tone="rose">defend</Flag>}
-                      {ks?.alert && <Flag tone={ks.status === "red" ? "rose" : "amber"}>kill switch</Flag>}
-                      {p.earnings?.warning && <Flag tone="amber">earnings</Flag>}
-                      {shorts.some((s) => s.dte != null && s.dte <= 2) && <Flag tone="amber">expiring</Flag>}
-                      {shorts.some((s) => s.roll_now) && <Flag tone="emerald">roll now</Flag>}
-                      {p.leap_health?.roll_due && <Flag tone="amber">leap roll</Flag>}
-                      {p.wash_sale_flag && <Flag tone="amber">wash-sale</Flag>}
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-  );
-}
-
-const FLAG_TONE = {
-  rose: "border-rose-500/40 bg-rose-500/15 text-rose-300",
-  amber: "border-amber-500/40 bg-amber-500/15 text-amber-300",
-  emerald: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
-};
-function Flag({ tone, children }) {
-  return (
-    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${FLAG_TONE[tone] || FLAG_TONE.amber}`}>
-      {children}
-    </span>
   );
 }
 
@@ -341,6 +234,7 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
         <Card>
           <div className="text-xs uppercase tracking-wide text-slate-500">Net juice · week</div>
           <div className="mt-1 text-2xl font-semibold text-emerald-300">{money(juice.this_week)}</div>
+          <div className="text-xs text-slate-500">month {money(juice.this_month)}</div>
         </Card>
         <Card>
           <div className="text-xs uppercase tracking-wide text-slate-500">Juice · YTD</div>
@@ -355,20 +249,14 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
       ) : (
         <>
           <ActionItems items={actionItems} />
-          <JuiceStandCard positions={openPositions} payback={payback} nav={nav} />
+          <JuiceStandCard positions={openPositions} payback={payback}
+                          killByTicker={killByTicker} nav={nav} />
         </>
       )}
 
       <div className="grid gap-4 lg:grid-cols-3">
-        <div className="lg:col-span-2"><BookSummary capital={cap} juice={juice} /></div>
+        <div className="lg:col-span-2"><BookSummary capital={cap} /></div>
         <RegimeHero regime={regimeData} />
-      </div>
-
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="lg:col-span-2">
-          <PositionsGlance positions={openPositions} killByTicker={killByTicker} nav={nav} />
-        </div>
-        <JuiceCard juice={juice} payback={payback} />
       </div>
     </div>
   );
