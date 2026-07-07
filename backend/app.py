@@ -913,6 +913,42 @@ def api_refresh_hot():
         return _err(e)
 
 
+@app.route("/api/refresh/ticker", methods=["POST"])
+def api_refresh_ticker():
+    """Force-refresh ONE ticker's daily bars now and return its fresh scorecard
+    row — the on-demand 'this quote is stale, pull it live' path for a single
+    name in the Scan. Names outside the hot set otherwise ride the daily cadence
+    and read stale intraday; this pulls the current session's price on demand."""
+    payload = request.get_json(silent=True) or {}
+    ticker = (payload.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        import refresh_policy
+        return jsonify(refresh_policy.refresh_tickers([ticker]))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/refresh/sector", methods=["POST"])
+def api_refresh_sector():
+    """Force-refresh a whole sector — the ETF plus its constituents — now and
+    return their fresh scorecard rows. 'Refresh this sector' from the Scan, for
+    when you want the whole group live at once rather than name by name."""
+    payload = request.get_json(silent=True) or {}
+    sector = (payload.get("sector") or "").strip().upper()
+    if not sector:
+        return jsonify({"error": "sector is required"}), 400
+    if sector not in sector_data.sector_etfs():
+        return jsonify({"error": f"unknown sector '{sector}'"}), 400
+    try:
+        import refresh_policy
+        names = [sector] + sector_data.constituents(sector)
+        return jsonify(refresh_policy.refresh_tickers(names))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/diagnostics/vix")
 def api_diag_vix():
     """Live, cache-bypassing probe of the VIX so a missing value can be

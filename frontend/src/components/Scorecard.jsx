@@ -84,7 +84,32 @@ function sortRows(rows, sort) {
   });
 }
 
-function ScoreRow({ row, expanded, onToggle }) {
+// A compact ↻ that force-pulls a live quote (one ticker, or a whole sector),
+// bypassing the daily cache. Spins while in flight; turns emerald once a name
+// has been refreshed this session, and red with a tooltip if the pull failed.
+function RefreshButton({ onClick, busy, error, title, refreshedAt }) {
+  const tip = error
+    ? `Refresh failed: ${error}`
+    : refreshedAt
+      ? `Live quote pulled — as of ${refreshedAt}`
+      : title;
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onClick(); }}
+      disabled={busy}
+      title={tip}
+      aria-label={title}
+      className={`inline-flex h-5 w-5 items-center justify-center rounded text-xs hover:bg-slate-700/60 disabled:opacity-60 ${
+        error ? "text-rose-400" : refreshedAt ? "text-emerald-400" : "text-slate-500 hover:text-slate-200"
+      }`}
+    >
+      {busy ? <Spinner size="h-3 w-3" /> : error ? "!" : "↻"}
+    </button>
+  );
+}
+
+function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt, refreshError }) {
   const weak = row.verdict === "AVOID";
   const caution = row.verdict === "CAUTION";
   return (
@@ -119,6 +144,13 @@ function ScoreRow({ row, expanded, onToggle }) {
                     no weeklies
                   </span>
                 )}
+                <RefreshButton
+                  onClick={onRefresh}
+                  busy={refreshing}
+                  error={refreshError}
+                  refreshedAt={refreshedAt}
+                  title={`Refresh ${row.ticker} — pull a live quote now`}
+                />
               </span>
             ) : c.render ? (
               c.render(row)
@@ -154,8 +186,60 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);
   const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
+  // On-demand live-quote refresh: rows we've force-refreshed since the last full
+  // sweep (fresher than the memoized scorecard), plus per-key in-flight/when/error.
+  const [overrides, setOverrides] = React.useState({});
+  const [busy, setBusy] = React.useState({});
+  const [refreshedAt, setRefreshedAt] = React.useState({});
+  const [refreshErr, setRefreshErr] = React.useState({});
 
-  const results = data?.results || [];
+  // A new full sweep supersedes every manual override — drop them so the newest
+  // scorecard wins (keyed on as_of, which only changes on a real reload).
+  React.useEffect(() => {
+    setOverrides({});
+    setRefreshedAt({});
+    setRefreshErr({});
+  }, [data?.as_of]);
+
+  async function refreshTicker(ticker) {
+    setBusy((b) => ({ ...b, [ticker]: true }));
+    setRefreshErr((e) => ({ ...e, [ticker]: null }));
+    try {
+      const res = await api.refreshTicker(ticker);
+      const row = (res.rows || [])[0];
+      if (row) {
+        setOverrides((o) => ({ ...o, [row.ticker]: row }));
+        setRefreshedAt((t) => ({ ...t, [row.ticker]: res.as_of }));
+      }
+    } catch (err) {
+      setRefreshErr((e) => ({ ...e, [ticker]: err.message || "failed" }));
+    } finally {
+      setBusy((b) => ({ ...b, [ticker]: false }));
+    }
+  }
+
+  async function refreshSector(sector) {
+    const key = `sector:${sector}`;
+    setBusy((b) => ({ ...b, [key]: true }));
+    setRefreshErr((e) => ({ ...e, [key]: null }));
+    try {
+      const res = await api.refreshSector(sector);
+      const patch = {};
+      const at = {};
+      (res.rows || []).forEach((r) => { patch[r.ticker] = r; at[r.ticker] = res.as_of; });
+      setOverrides((o) => ({ ...o, ...patch }));
+      setRefreshedAt((t) => ({ ...t, ...at }));
+    } catch (err) {
+      setRefreshErr((e) => ({ ...e, [key]: err.message || "failed" }));
+    } finally {
+      setBusy((b) => ({ ...b, [key]: false }));
+    }
+  }
+
+  const results = React.useMemo(
+    () => (data?.results || []).map((r) => overrides[r.ticker] || r),
+    [data, overrides],
+  );
   // Monthly-only names can't run CFM (no weekly short); count them so the toggle
   // can show how many are being hidden. `null` = undetermined, treated as tradeable.
   const noWeeklies = React.useMemo(
@@ -251,7 +335,17 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
               <React.Fragment key={sector}>
                 <tr className="bg-slate-800/30">
                   <td colSpan={COLUMNS.length} className="px-2 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                    {sector || "—"}
+                    <span className="flex items-center gap-2">
+                      {sector || "—"}
+                      {sector && (
+                        <RefreshButton
+                          onClick={() => refreshSector(sector)}
+                          busy={!!busy[`sector:${sector}`]}
+                          error={refreshErr[`sector:${sector}`]}
+                          title={`Refresh all of ${sector} — pull live quotes for the sector`}
+                        />
+                      )}
+                    </span>
                   </td>
                 </tr>
                 {rows.map((row) => (
@@ -260,6 +354,10 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
                     row={row}
                     expanded={!!open[row.ticker]}
                     onToggle={() => setOpen((o) => ({ ...o, [row.ticker]: !o[row.ticker] }))}
+                    onRefresh={() => refreshTicker(row.ticker)}
+                    refreshing={!!busy[row.ticker]}
+                    refreshedAt={refreshedAt[row.ticker]}
+                    refreshError={refreshErr[row.ticker]}
                   />
                 ))}
               </React.Fragment>

@@ -124,6 +124,33 @@ def refresh_hot(state: dict | None = None) -> dict:
     return {"tickers": hot, "count": len(hot)}
 
 
+def refresh_tickers(tickers: list[str]) -> dict:
+    """Force-refresh a SPECIFIC set of tickers' daily bars now (bypassing the
+    freshness window), then return their freshly-computed scorecard rows.
+
+    The on-demand "this quote is stale, pull it live" path for names OUTSIDE the
+    hot set — which otherwise ride the daily pre-open warm-up and so read stale
+    intraday. Re-fetching the daily bars is the same mechanism the hot-set
+    refresh uses: Schwab's daily history carries the current session's forming
+    candle during market hours, so the last close reads ~live and every derived
+    metric in the row (RS, MA distances, verdict) updates together — not just an
+    overlaid price. SPY and each ticker's sector ETF are force-refreshed
+    alongside, so relative strength is measured against equally-fresh benchmarks.
+    In demo mode get_daily is cache-only and force is a no-op, so this simply
+    recomputes from the synthetic cache."""
+    import sector_data
+    names = list(dict.fromkeys(t.strip().upper() for t in tickers if t and t.strip()))
+    if not names:
+        return {"tickers": [], "rows": [], "count": 0, "as_of": None}
+    etfs = sorted({e for e in (sector_data.sector_for(t) for t in names) if e})
+    force_set = list(dict.fromkeys(names + [config.BENCHMARK] + etfs))
+    data_handler.prefetch(force_set, force=True)
+    from metrics import scorecard as scorecard_metrics
+    sc = scorecard_metrics.scorecard(names)  # explicit list => computes fresh, no memo
+    return {"tickers": names, "rows": sc.get("results", []),
+            "count": len(names), "as_of": sc.get("as_of")}
+
+
 def maybe_refresh_hot(now: datetime | None = None, force: bool = False) -> dict | None:
     """Refresh the hot set if the cadence has elapsed since the last one. ``now``
     defaults to the current ET time; the scheduler passes its own ET clock so the
