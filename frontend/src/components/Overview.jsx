@@ -355,7 +355,7 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
       ) : (
         <>
           <ActionItems items={actionItems} />
-          <JuiceStandCard positions={openPositions} nav={nav} />
+          <JuiceStandCard positions={openPositions} payback={payback} nav={nav} />
         </>
       )}
 

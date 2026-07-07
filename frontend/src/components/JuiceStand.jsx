@@ -34,6 +34,36 @@ function juiceOf(sc) {
   return { pct: null, captured: null, total: null };
 }
 
+// The all-in verdict for one row: is this position actually making money?
+// Three legs, summed from what the payload already carries:
+//   banked  — realized net juice this LEAP cycle (extrinsic_payback meter's
+//             collected_to_date: close_short executions, carried across rolls)
+//   leapPL  — the orange's value change: LEAP mark now vs cost basis
+//   shortPL — open shorts marked-to-market: premium sold x decay (whole-premium,
+//             not just extrinsic — an ITM short's intrinsic swing is real P/L here)
+// Null only when no leg is knowable; missing legs otherwise contribute zero.
+function rowNetOf(p, shorts, payback) {
+  const leap = p.leap || {};
+  const banked = payback?.[p.ticker]?.collected_to_date ?? null;
+  const leapPL = leap.current_bid != null && leap.cost_basis != null
+    ? Number(leap.current_bid) - Number(leap.cost_basis)
+    : null;
+  let shortPL = null;
+  for (const { sc } of shorts) {
+    if (sc.entry_premium_total != null && sc.decay_pct != null) {
+      shortPL = (shortPL || 0) + (Number(sc.entry_premium_total) * sc.decay_pct) / 100;
+    }
+  }
+  if (banked == null && leapPL == null && shortPL == null) return null;
+  return { net: (banked || 0) + (leapPL || 0) + (shortPL || 0), banked, leapPL, shortPL };
+}
+
+// money() with an explicit sign, for P/L readouts.
+function signedMoney(n) {
+  if (n == null) return "—";
+  return `${n < 0 ? "−" : "+"}$${Math.abs(Number(n)).toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+}
+
 // Per-position pulp: LEAP intrinsic (live-priced leap_health first, enriched
 // leap split as fallback) vs the cost basis the orange must cover to be full.
 function pulpOf(p) {
@@ -254,7 +284,7 @@ function SqueezeBar({ pct, gradient, caption }) {
 }
 
 // ---------------------------------------------------------------------------
-export default function JuiceStandCard({ positions, nav }) {
+export default function JuiceStandCard({ positions, payback, nav }) {
   const rows = React.useMemo(() => {
     const out = (positions || [])
       .map((p) => ({
@@ -324,6 +354,7 @@ export default function JuiceStandCard({ positions, nav }) {
           if (lh.roll_due) orangeFlags.push("roll due");
           const juice = lh.trailing_avg_weekly_juice;
           const burn = lh.leap_weekly_burn;
+          const rowNet = rowNetOf(p, shorts, payback);
 
           return (
             <div key={p.ticker} className="flex flex-wrap items-start gap-x-2 gap-y-3 py-3 first:pt-0 last:pb-0">
@@ -335,7 +366,11 @@ export default function JuiceStandCard({ positions, nav }) {
                   pulp.pct != null ? ` (${fmt(pulp.pct, 0)}%)` : ""
                 }${juice != null && burn != null
                   ? ` · juice ${money(juice)}/wk vs burn ${money(burn)}/wk` : ""
-                }${lh.leap_dte != null ? ` · LEAP ${lh.leap_dte} DTE` : ""}`}
+                }${lh.leap_dte != null ? ` · LEAP ${lh.leap_dte} DTE` : ""}${
+                  rowNet
+                    ? ` · all-in ${signedMoney(rowNet.net)} (juice banked ${signedMoney(rowNet.banked)}, LEAP ${signedMoney(rowNet.leapPL)}, open shorts ${signedMoney(rowNet.shortPL)})`
+                    : ""
+                }`}
               >
                 <Orange uid={p.ticker} pct={pulp.pct}
                         maintenance={lh.maintenance_status || "unknown"}
@@ -351,6 +386,11 @@ export default function JuiceStandCard({ positions, nav }) {
                 {juice != null && burn != null && (
                   <div className="text-center text-[10px] text-slate-500">
                     juice {money(juice)}/wk · burn {money(burn)}/wk
+                  </div>
+                )}
+                {rowNet && (
+                  <div className={`text-[11px] font-semibold ${rowNet.net >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+                    all-in {signedMoney(rowNet.net)}
                   </div>
                 )}
                 <FlagRow flags={orangeFlags} />
@@ -408,7 +448,8 @@ export default function JuiceStandCard({ positions, nav }) {
         Orange = the LEAP: pulp is intrinsic vs cost basis (full = capital stock-backed), leaf
         is juice-vs-burn (green upright = self-funding, amber droop = burning). Glasses = its
         shorts: fill is extrinsic captured since entry; the dashed line is the 75% buyback rule
-        — a glass past the line is ready to roll.
+        — a glass past the line is ready to roll. All-in = juice banked this cycle + LEAP value
+        change + open shorts marked-to-market: is the row making money, glasses and orange together?
       </div>
     </Card>
   );
