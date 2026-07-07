@@ -343,9 +343,26 @@ def _failed_stock_gate_level(gate: dict | None) -> int | None:
     return first_failed if first_failed in _STOCK_GATE_LEVELS else None
 
 
+def _apply_price_override(df, price_override):
+    """Return a copy of the daily frame with its LAST bar's close set to a live
+    quote (and its high/low widened to stay coherent), or the frame unchanged
+    when there's no override / no data. Never mutates the cached frame."""
+    if price_override is None or df is None or df.empty:
+        return df
+    df = df.copy()
+    px = float(price_override)
+    ci = df.columns.get_loc("Close")
+    hi = df.columns.get_loc("High")
+    lo = df.columns.get_loc("Low")
+    df.iat[-1, ci] = px
+    df.iat[-1, hi] = max(float(df.iat[-1, hi]), px)
+    df.iat[-1, lo] = min(float(df.iat[-1, lo]), px)
+    return df
+
+
 def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                  sector_df: pd.DataFrame | None, gate: dict | None = None,
-                 has_weeklies: bool | None = None) -> dict:
+                 has_weeklies: bool | None = None, price_override: float | None = None) -> dict:
     """One scorecard row: numeric metrics + the composite verdict.
 
     Only the stock's own gate legs decide it: a beats-peers (L3) or consolidating
@@ -358,8 +375,14 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
 
     `has_weeklies` (True/False/None) is carried through untouched — CFM can't trade
     a monthly-only chain, so the UI hides/flags those, but it does NOT change the
-    verdict (a strong name that simply lacks weeklies still scores on its merits)."""
+    verdict (a strong name that simply lacks weeklies still scores on its merits).
+
+    `price_override` (a live quote) replaces the last daily-bar close before the
+    metrics are computed, so an on-demand refresh shows the CURRENT price and the
+    price-derived legs (%>MA, below-MA, ATR extension) all reflect it together —
+    daily bars are end-of-day and would otherwise leave the row stale intraday."""
     df = data_handler.get_daily(ticker)
+    df = _apply_price_override(df, price_override)
     metrics = metrics_for(df, spy_df, sector_df)
     # A sector ETF scored as its own candidate has no distinct peer sector to
     # beat — rs3m_vs_sector would otherwise compute to a tautological ~0 every
@@ -409,10 +432,12 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     return row
 
 
-def _compute_scorecard(names: list[str]) -> dict:
+def _compute_scorecard(names: list[str], price_overrides: dict | None = None) -> dict:
     import logging_handler as log
     import screening  # local imports avoid any import-time cycle
     import weeklies
+
+    price_overrides = price_overrides or {}
 
     # Resolve each ticker's sector once; collect the sector ETFs we'll need.
     sector_of = {t: (sector_data.sector_for(t) or "") for t in names}
@@ -431,13 +456,14 @@ def _compute_scorecard(names: list[str]) -> dict:
         except Exception:  # noqa: BLE001 — a gate failure must never sink the row
             gate = None
         rows.append(score_ticker(t, spy, etf, sector_frames.get(etf), gate,
-                                 has_weeklies=weeklies.has_weeklies(t)))
+                                 has_weeklies=weeklies.has_weeklies(t),
+                                 price_override=price_overrides.get(t.upper())))
 
     rows.sort(key=lambda r: (r["sector"], r["ticker"]))
     return {"as_of": log.utcnow(), "results": rows}
 
 
-def scorecard(tickers: list[str] | None = None) -> dict:
+def scorecard(tickers: list[str] | None = None, price_overrides: dict | None = None) -> dict:
     """Build the scorecard for a list of tickers (default: every holding across
     every sector). Warms the cache for SPY + sector ETFs + the tickers in one
     parallel batch, then computes a row each — reusing the existing 4-level entry
@@ -454,7 +480,7 @@ def scorecard(tickers: list[str] | None = None) -> dict:
     (e.g. one ticker's entry snapshot at trade time) always computes fresh."""
     if tickers:
         names = [t.strip().upper() for t in tickers if t.strip()]
-        return _compute_scorecard(names)
+        return _compute_scorecard(names, price_overrides=price_overrides)
 
     import screening  # local import avoids any import-time cycle
     names = sector_data.all_tickers()

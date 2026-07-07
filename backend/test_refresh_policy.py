@@ -21,6 +21,8 @@ def _reset(monkeypatch):
     calls = {"prefetch": []}
     monkeypatch.setattr(data_handler, "prefetch",
                         lambda syms, force=False: calls["prefetch"].append((list(syms), force)))
+    # Never touch a real quote provider; individual tests override as needed.
+    monkeypatch.setattr(data_handler, "live_prices", lambda syms: {})
     yield calls
     refresh_policy._last_refresh = None
 
@@ -141,7 +143,7 @@ def test_refresh_tickers_forces_ticker_spy_and_sector_etf(_reset, monkeypatch):
                         lambda t: None if t.upper() == "SPY" else "XLK")
     seen = {}
 
-    def fake_scorecard(names):
+    def fake_scorecard(names, price_overrides=None):
         seen["names"] = list(names)
         return {"as_of": "2026-07-07T14:00:00Z",
                 "results": [{"ticker": n, "price": 100.0} for n in names]}
@@ -158,19 +160,58 @@ def test_refresh_tickers_forces_ticker_spy_and_sector_etf(_reset, monkeypatch):
     assert seen["names"] == ["NVDA"]                       # scored only the requested name
 
 
+def test_refresh_tickers_overlays_live_quote_and_tags_source(_reset, monkeypatch):
+    import sector_data
+    from metrics import scorecard as scorecard_metrics
+    monkeypatch.setattr(sector_data, "sector_for", lambda t: None if t.upper() == "SPY" else "XLK")
+    # The live quote (179.18) must be overlaid as the price, not the daily close.
+    monkeypatch.setattr(data_handler, "live_prices",
+                        lambda syms: {"NVDA": {"price": 179.18, "source": "schwab"}})
+    seen = {}
+
+    def fake(names, price_overrides=None):
+        seen["overrides"] = price_overrides
+        return {"as_of": "t",
+                "results": [{"ticker": n, "price": (price_overrides or {}).get(n)} for n in names]}
+
+    monkeypatch.setattr(scorecard_metrics, "scorecard", fake)
+
+    out = refresh_policy.refresh_tickers(["nvda"])
+    assert seen["overrides"] == {"NVDA": 179.18}           # live quote threaded to the scorecard
+    assert out["rows"][0]["price"] == 179.18               # row shows the live price
+    assert out["rows"][0]["price_source"] == "schwab"      # provenance tagged
+    assert out["quote_sources"] == ["schwab"]
+
+
+def test_refresh_tickers_flags_a_cache_fallback_source(_reset, monkeypatch):
+    import sector_data
+    from metrics import scorecard as scorecard_metrics
+    monkeypatch.setattr(sector_data, "sector_for", lambda t: None)
+    # Providers didn't answer -> live_prices degraded to the cached close.
+    monkeypatch.setattr(data_handler, "live_prices",
+                        lambda syms: {"NVDA": {"price": 183.57, "source": "cache"}})
+    monkeypatch.setattr(scorecard_metrics, "scorecard",
+                        lambda names, price_overrides=None: {"as_of": "t",
+                        "results": [{"ticker": n} for n in names]})
+    out = refresh_policy.refresh_tickers(["nvda"])
+    assert out["rows"][0]["price_source"] == "cache"       # UI can flag it amber, not "live"
+    assert out["quote_sources"] == ["cache"]
+
+
 def test_refresh_tickers_dedupes_uppercases_and_skips_blanks(_reset, monkeypatch):
     import sector_data
     from metrics import scorecard as scorecard_metrics
     monkeypatch.setattr(sector_data, "sector_for", lambda t: None)
     monkeypatch.setattr(scorecard_metrics, "scorecard",
-                        lambda names: {"as_of": "x", "results": [{"ticker": n} for n in names]})
+                        lambda names, price_overrides=None: {"as_of": "x",
+                        "results": [{"ticker": n} for n in names]})
     out = refresh_policy.refresh_tickers([" nvda ", "NVDA", "on", ""])
     assert out["tickers"] == ["NVDA", "ON"]
 
 
 def test_refresh_tickers_empty_is_a_noop(_reset):
     out = refresh_policy.refresh_tickers(["", "   "])
-    assert out == {"tickers": [], "rows": [], "count": 0, "as_of": None}
+    assert out == {"tickers": [], "rows": [], "count": 0, "as_of": None, "quote_sources": []}
     assert _reset["prefetch"] == []                        # nothing fetched
 
 
@@ -183,7 +224,8 @@ def test_api_refresh_ticker_and_sector(_reset, monkeypatch):
     monkeypatch.setattr(sector_data, "constituents",
                         lambda e: ["NVDA", "AVGO"] if e.upper() == "XLK" else [])
     monkeypatch.setattr(scorecard_metrics, "scorecard",
-                        lambda names: {"as_of": "t", "results": [{"ticker": n} for n in names]})
+                        lambda names, price_overrides=None: {"as_of": "t",
+                        "results": [{"ticker": n} for n in names]})
     import app as app_module
     client = app_module.app.test_client()
 

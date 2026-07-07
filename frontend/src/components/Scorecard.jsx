@@ -88,11 +88,23 @@ function sortRows(rows, sort) {
 // bypassing the daily cache. Spins while in flight; turns emerald once a name
 // has been refreshed this session, and red with a tooltip if the pull failed.
 function RefreshButton({ onClick, busy, error, title, refreshedAt }) {
+  // refreshedAt is { at, source } once a name has been pulled. A "cache" source
+  // means the live providers didn't answer — flag it amber, not emerald, so a
+  // stale price never masquerades as a fresh live quote.
+  const source = refreshedAt?.source;
+  const stale = source === "cache";
   const tip = error
     ? `Refresh failed: ${error}`
     : refreshedAt
-      ? `Live quote pulled — as of ${refreshedAt}`
+      ? `${stale ? "No live quote available — showing cached close" : `Live quote (${source})`} · as of ${refreshedAt.at}`
       : title;
+  const tone = error
+    ? "text-rose-400"
+    : stale
+      ? "text-amber-400"
+      : refreshedAt
+        ? "text-emerald-400"
+        : "text-slate-500 hover:text-slate-200";
   return (
     <button
       type="button"
@@ -100,9 +112,7 @@ function RefreshButton({ onClick, busy, error, title, refreshedAt }) {
       disabled={busy}
       title={tip}
       aria-label={title}
-      className={`inline-flex h-5 w-5 items-center justify-center rounded text-xs hover:bg-slate-700/60 disabled:opacity-60 ${
-        error ? "text-rose-400" : refreshedAt ? "text-emerald-400" : "text-slate-500 hover:text-slate-200"
-      }`}
+      className={`inline-flex h-5 w-5 items-center justify-center rounded text-xs hover:bg-slate-700/60 disabled:opacity-60 ${tone}`}
     >
       {busy ? <Spinner size="h-3 w-3" /> : error ? "!" : "↻"}
     </button>
@@ -209,7 +219,7 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
       const row = (res.rows || [])[0];
       if (row) {
         setOverrides((o) => ({ ...o, [row.ticker]: row }));
-        setRefreshedAt((t) => ({ ...t, [row.ticker]: res.as_of }));
+        setRefreshedAt((t) => ({ ...t, [row.ticker]: { at: res.as_of, source: row.price_source } }));
       }
     } catch (err) {
       setRefreshErr((e) => ({ ...e, [ticker]: err.message || "failed" }));
@@ -226,7 +236,10 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
       const res = await api.refreshSector(sector);
       const patch = {};
       const at = {};
-      (res.rows || []).forEach((r) => { patch[r.ticker] = r; at[r.ticker] = res.as_of; });
+      (res.rows || []).forEach((r) => {
+        patch[r.ticker] = r;
+        at[r.ticker] = { at: res.as_of, source: r.price_source };
+      });
       setOverrides((o) => ({ ...o, ...patch }));
       setRefreshedAt((t) => ({ ...t, ...at }));
     } catch (err) {
