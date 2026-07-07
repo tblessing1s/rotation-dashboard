@@ -352,6 +352,21 @@ ALERT_LOG_MAX = 500            # PROPOSED_DEFAULT — alert history cap in state
 # the earnings/dividend caches for held names and sync position snapshots.
 MAINTENANCE_ET = "17:30"
 
+# ---- Paper-fill slippage (mid-fill assumption) -----------------------------
+# Paper fills are booked at the quoted MIDPOINT, but deep-ITM options rarely fill
+# at mid — so every paper cycle's juice is optimistic by ~half the spread, twice a
+# week, compounding through the payback meter and the calibration harness's
+# threshold tuning. Until enough live fills exist to measure it, paper results
+# carry a mid-fill caveat and a default per-leg haircut; once realized slippage is
+# measured (broker fill vs the reference mid captured at order time), that
+# supersedes the assumption. See backend/slippage.py.
+# PROPOSED_DEFAULT — assumed adverse slippage per leg as a fraction of the option
+# mid, applied until live data replaces it (~half a 10%-of-mid deep-ITM spread).
+ASSUMED_SLIPPAGE_PCT = 0.05
+# PROPOSED_DEFAULT — live fills needed before measured slippage supersedes the
+# assumed haircut (a handful, so one bad fill doesn't set the calibration).
+SLIPPAGE_MIN_FILLS = 5
+
 # ---- Durability / backups --------------------------------------------------
 # state.json is the single source of truth on a single Fly volume, so the
 # nightly job keeps rotating local copies AND ships one copy off the machine.

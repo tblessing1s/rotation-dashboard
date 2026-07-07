@@ -316,6 +316,19 @@ suggestion (`executor.roll_suggestion`), and the `DEFEND_POSITION` alert
   returns, buckets by verdict, and sweeps the ATR-extension cutoff (2.0–4.0)
   and MFI band variants — a markdown report that upgrades PROPOSED_DEFAULT
   thresholds from guess to measured. Offline only; reads the parquet cache.
+- **Paper-fill slippage / mid-fill caveat** (`backend/slippage.py`,
+  `GET /api/slippage`): paper fills are booked at the quoted **midpoint**, but
+  deep-ITM options rarely fill at mid — so every paper cycle's juice is optimistic
+  by ~half the spread, twice a week, and that bias compounds through the payback
+  meter and into any threshold tuned against it. Every execution now records its
+  fill provenance (`fill_assumption` = `mid` for paper / `broker` for live) and,
+  for a live fill, the reference mid captured at order time (`quoted_mid_per_share`
+  = the placement limit). `slippage.report` turns real fills into a measured
+  adverse-slippage % (signed by side: paying above mid on a buy, receiving below
+  on a sell); until `SLIPPAGE_MIN_FILLS` live fills exist it falls back to the
+  `ASSUMED_SLIPPAGE_PCT` default and paper results carry a **mid-fill caveat** (a
+  banner on the Theta tab, a note in the calibration report). Once measured, the
+  realized haircut supersedes the assumption.
 - **Juice journal export**: `GET /api/export/juice-journal?format=csv|md` —
   weekly juice ledger + roll ledger + closed cycles (the operator's off-system
   record per CFM's juice-journal rule). Buttons on the History tab.
