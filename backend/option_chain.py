@@ -23,6 +23,7 @@ import dividends
 import indicators
 import iv_history
 import logging_handler as log
+import market_calendar
 import schwab_api
 import screening
 import strike_policy
@@ -72,6 +73,37 @@ def _median(vals: list) -> float | None:
         return None
     mid = len(nums) // 2
     return nums[mid] if len(nums) % 2 else (nums[mid - 1] + nums[mid]) / 2
+
+
+def _is_weekly_boundary(exp: str | None) -> bool:
+    """True when an expiration date is the standard end-of-week expiration to
+    sell a weekly against: a Friday, or — when that Friday is a market holiday
+    (so the series expires a day early) — the Thursday before it.
+
+    Names like IWM/SPY now list a fresh daily expiration every trading day; CFM
+    sells one *weekly* call, so Mon–Thu dailies are skipped and the short lands
+    on Friday (Thursday on a Good-Friday / holiday week)."""
+    if not exp:
+        return False
+    try:
+        d = datetime.strptime(str(exp)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return False
+    if d.weekday() == 4:  # Friday — unless the exchange is closed that day
+        return not market_calendar.is_market_holiday(d)
+    if d.weekday() == 3:  # Thursday — only when the next day's Friday is a holiday
+        return market_calendar.is_market_holiday(d + timedelta(days=1))
+    return False
+
+
+def _weekly_expiration(contracts: list[dict]) -> str | None:
+    """The expiration for this week's short: the nearest weekly boundary
+    (Friday, or a holiday-week Thursday) with dte>0. Falls back to the nearest
+    dated expiration when the chain lists no Friday boundary (e.g. a monthly-only
+    name). dte>0 excludes today's 0-DTE contract, whose time value is gone."""
+    dated = [c for c in contracts if c.get("dte") is not None and c["dte"] > 0]
+    pool = [c for c in dated if _is_weekly_boundary(c.get("expiration"))] or dated
+    return min(pool, key=lambda c: c["dte"])["expiration"] if pool else None
 
 
 def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None,
@@ -212,6 +244,12 @@ def roll_options(ticker: str) -> dict:
     for c in contracts:
         exp, dte = c.get("expiration"), c.get("dte")
         if exp is None or dte is None or dte < 0 or dte > config.ROLL_MAX_DTE:
+            continue
+        # Offer only weekly boundaries (Friday, or a holiday-week Thursday) — the
+        # same rule the entry chain uses — so the daily expirations on IWM/SPY
+        # don't clutter the picker. The current short's own expiration is always
+        # kept so a same-week roll stays selectable even if it sits off-Friday.
+        if exp != cur_exp and not _is_weekly_boundary(exp):
             continue
         by_exp.setdefault(exp, {"expiration": exp, "dte": dte, "contracts": []})["contracts"].append(c)
 
@@ -467,14 +505,11 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     if atr_val is not None and price is not None:
         sp = strike_policy.suggest_strike(price, atr_val, regime_status)
         suggested_strike = sp["strike"]
-        # Nearest expiration with at least one day left = this week's short.
-        # dte > 0 (not >= 0): a 0-DTE contract expires today, so it has almost no
-        # time value left and its delta collapses to ~1.0/~0.0 near expiration —
-        # useless for a fresh entry, which wants a full week of premium to sell.
-        dated = [c for c in contracts if c.get("dte") is not None and c["dte"] > 0]
-        weekly_exp = None
-        if dated:
-            weekly_exp = min(dated, key=lambda c: c["dte"])["expiration"]
+        # This week's short expires on the coming Friday (Thursday on a holiday
+        # week) — the nearest weekly boundary, not the nearest *daily*. IWM/SPY
+        # list a new daily expiration every trading day, but CFM sells one weekly
+        # call, so Mon–Thu dailies are skipped in favour of the Friday.
+        weekly_exp = _weekly_expiration(contracts)
         exp_contracts = [c for c in contracts if c["expiration"] == weekly_exp] if weekly_exp else []
         strikes = indicators.get_nearby_strikes(exp_contracts, suggested_strike, underlying)
         sug = next((s for s in strikes if s.get("suggested")), strikes[0] if strikes else None)
