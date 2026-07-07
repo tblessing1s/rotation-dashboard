@@ -186,6 +186,33 @@ def test_verdict_skips_none_metrics():
     assert v["verdict"] == "GO" and v["reasons"] == []
 
 
+# ---- compute_verdict: ETF income-sleeve waivers ----------------------------
+def test_verdict_etf_waives_growth_momentum_cautions():
+    # The MFI-band, thin-volume, and ATR-expansion CAUTIONs are growth-stock
+    # momentum filters — a trending low-vol ETF (MFI>60, steady volume, slightly
+    # expanding ATR) is NOT knocked to CAUTION for them; the same metrics on a
+    # stock still are.
+    momentum = dict(mfi=80.0, volume_ratio=0.5, atr_momentum=1.2)
+    assert sc.compute_verdict(_clean_metrics(**momentum))["verdict"] == "CAUTION"
+    assert sc.compute_verdict(_clean_metrics(is_etf=True, **momentum))["verdict"] == "GO"
+
+
+def test_verdict_etf_waives_beats_sector_avoid():
+    # An ETF lagging its (assigned or own) broad sector isn't AVOID'd for it —
+    # the income sleeve waives the beats-sector leg, same as the entry gate.
+    assert sc.compute_verdict(_clean_metrics(rs3m_vs_sector=-5.0))["verdict"] == "AVOID"
+    assert sc.compute_verdict(_clean_metrics(is_etf=True, rs3m_vs_sector=-5.0))["verdict"] == "GO"
+
+
+def test_verdict_etf_still_caught_by_the_real_risk_rails():
+    # The genuine risk rails apply to ETFs exactly as to stocks: broken trend
+    # (below MA200), over-extension, and the MA50 trend filters.
+    assert sc.compute_verdict(_clean_metrics(is_etf=True, below_ma200=True))["verdict"] == "AVOID"
+    assert sc.compute_verdict(_clean_metrics(is_etf=True, atr_extension=3.5))["verdict"] == "AVOID"
+    assert sc.compute_verdict(_clean_metrics(is_etf=True, below_ma50=True))["verdict"] == "CAUTION"
+    assert sc.compute_verdict(_clean_metrics(is_etf=True, ma50_slope=-0.5))["verdict"] == "CAUTION"
+
+
 # ---- score_ticker gate layering --------------------------------------------
 def test_score_ticker_surfaces_stock_level_gate_failure(monkeypatch):
     import data_handler

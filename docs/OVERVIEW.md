@@ -428,6 +428,34 @@ number instead of "not applicable" and silently breaks three places:
 entering the ETF itself correctly counts as one more position in that sector
 if any constituent is already held.
 
+### ETFs as a lower-bar income sleeve
+
+ETFs (the 11 sector headers + SPY, plus the curated `config.KNOWN_ETFS` like
+SMH/QQQ/GDX seeded as constituents) run as a lower-vol *income sleeve*, not
+growth leaders — so they clear a lower bar than growth stocks at every gate,
+which is what lets them actually reach GO / Ready to Enter instead of being
+knocked to CAUTION/AVOID by growth-stock filters:
+
+- **Juice** — the ETF weekly-yield target is `ETF_WEEKLY_JUICE_TARGET_PCT`
+  (1.0%/wk) vs the ~1.88% growth bar (`account_gate.weekly_yield_target_pct`).
+- **Beats-SPY (Level 3)** — any ETF uses `STOCK_RS_VS_SPY_MIN_ETF` (0%, merely
+  lead SPY) rather than the +5% growth-leader bar (`config.rs_vs_spy_min`).
+- **Beats-sector (Level 3)** — waived for *any* ETF, not just a sector header:
+  a curated ETF (SMH→XLK, GDX→XLB, …) isn't required to outrun its assigned
+  broad sector. `rs3m_vs_sector` is still computed and shown for a curated ETF
+  (informational), just not gated on; the label reads "N/A — ETF sleeve".
+- **Verdict CFM filters** — `compute_verdict` waives the growth-momentum
+  CAUTIONs for an ETF (`metrics["is_etf"]`): the MFI 40–60 band, the
+  thin-volume floor, and the ATR-expansion check. A steadily-trending ETF sits
+  at MFI 60–90 with calm, non-spiking volume, so those growth-stock filters
+  would otherwise hold *every* strong ETF at CAUTION and out of Ready to Enter.
+
+The genuine risk rails still apply to ETFs exactly as to stocks: below-MA200
+and over-extension (AVOID), the MA50 trend filters (CAUTION), and Level 4
+consolidation — so a broken-trend, stretched, or breaking-out ETF is still
+caught. Net effect: strong, consolidating ETFs leading SPY now reach GO and
+surface in Ready to Enter, while weak or non-consolidating ones don't.
+
 **UI**: an "ETF" badge next to the ticker on the Scorecard and Stock Filter
 rows (tooltip explains the N/A sector leg); the Execute tab's ticker box
 already accepts any symbol, so typing a sector ETF there worked mechanically

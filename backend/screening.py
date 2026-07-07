@@ -256,6 +256,7 @@ def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str
     # beat — comparing it to itself is tautologically zero every time, so that
     # leg is waived (not applicable) rather than scored as a fail.
     is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
+    is_etf = sector_data.is_etf(ticker)
     rs_vs_sector = None
     if not is_sector_etf and rs_vs_spy is not None and sector_rs_vs_spy is not None:
         rs_vs_sector = round(rs_vs_spy - sector_rs_vs_spy, 2)
@@ -264,10 +265,13 @@ def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str
 
     # Stock-level legs (gate Levels 3 & 4). The "beats SPY" leg uses the lower
     # ETF bar for any ETF (income sleeve, not a growth leader); the "beats sector"
-    # leg is waived for a sector ETF entered as its own candidate.
-    spy_min = config.rs_vs_spy_min(sector_data.is_etf(ticker))
+    # leg is waived for ANY ETF — a sector header IS its sector, and a curated ETF
+    # runs as an income sleeve, not a growth name required to outrun its assigned
+    # broad sector. rs3m_vs_sector stays computed/shown for a curated ETF
+    # (informational), it's just not gated on.
+    spy_min = config.rs_vs_spy_min(is_etf)
     beats = (rs_vs_spy is not None and rs_vs_spy > spy_min
-             and (is_sector_etf
+             and (is_etf
                   or (rs_vs_sector is not None and rs_vs_sector > config.STOCK_RS_VS_SECTOR_MIN)))
 
     # "ready" means the FULL gate would pass, so it matches the entry gate's
@@ -388,20 +392,23 @@ def entry_gate(ticker: str) -> dict:
                      regime_green=_all(l1_checks), sector_strong=_all(l2_checks))
 
     # The two legs are checked separately: "beats SPY" and "beats its sector"
-    # are distinct conditions, so the UI can show exactly which one failed. A
-    # sector ETF entered as its own candidate has no peer sector to beat — the
-    # comparison is tautologically itself, so that leg is waived (N/A, not a
-    # fail) rather than blocking a real ETF entry on a meaningless self-check.
+    # are distinct conditions, so the UI can show exactly which one failed. The
+    # beats-sector leg is waived for ANY ETF (N/A, not a fail): a sector header
+    # entered as its own candidate has no peer sector to beat (tautologically
+    # itself), and a curated ETF runs as an income sleeve, not a growth name
+    # required to outrun its assigned broad sector.
     rs_spy, rs_sec = row["rs3m_vs_spy"], row["rs3m_vs_sector"]
-    is_etf = row.get("is_sector_etf", False)
-    # Any ETF (sector or added) beats SPY on the lower income-sleeve bar; only a
-    # sector ETF waives the beats-sector leg (it IS the sector).
-    spy_min = config.rs_vs_spy_min(sector_data.is_etf(ticker))
+    is_sector_etf = row.get("is_sector_etf", False)
+    is_etf = sector_data.is_etf(ticker)
+    # Any ETF beats SPY on the lower income-sleeve bar and waives the beats-sector
+    # leg; the label says which kind of waiver applies.
+    spy_min = config.rs_vs_spy_min(is_etf)
+    sector_note = (" (N/A — is the sector)" if is_sector_etf
+                   else " (N/A — ETF sleeve)" if is_etf else "")
     l3_checks = [
         _check(f"RS3M vs SPY > +{spy_min:g}%", rs_spy,
                rs_spy is not None and rs_spy > spy_min),
-        _check(f"RS3M vs Sector > {config.STOCK_RS_VS_SECTOR_MIN:g}%"
-               + (" (N/A — is the sector)" if is_etf else ""),
+        _check(f"RS3M vs Sector > {config.STOCK_RS_VS_SECTOR_MIN:g}%" + sector_note,
                rs_sec, is_etf or (rs_sec is not None and rs_sec > config.STOCK_RS_VS_SECTOR_MIN)),
     ]
     levels.append({"level": 3, "name": "Stock beating peers", "pass": _all(l3_checks),
