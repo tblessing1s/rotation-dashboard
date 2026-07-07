@@ -60,11 +60,27 @@ export async function submitOrder(api, toast, payload) {
     }
   }
 
-  // Still unfilled after the window — cancel the resting order.
+  // Still unfilled after the window — cancel the resting order. The cancel is
+  // only "done" once the backend confirms it against the broker; if it fails the
+  // order is STILL WORKING at Schwab, so say so plainly rather than claim it was
+  // cancelled — otherwise the operator's next order collides with this one.
+  let cancelled;
   try {
-    await api.cancelOrder(orderId);
-  } catch {
-    /* report cancellation regardless; a stuck order is surfaced on the next poll */
+    cancelled = await api.cancelOrder(orderId);
+  } catch (e) {
+    toast.update(
+      id,
+      `${label} didn't fill within 3s and could NOT be cancelled (${e.message}). ` +
+        `The order may still be working — cancel it in your broker before placing another.`,
+      { type: "error", duration: 0 },
+    );
+    return { ...res, status: "working" };
+  }
+  // A fill can slip in between the last poll and the cancel — the backend commits
+  // it and reports "filled" rather than cancelling a filled order.
+  if (cancelled.status === "filled") {
+    toast.update(id, `${label} filled & logged.`, { type: "success" });
+    return cancelled;
   }
   toast.update(id, `${label} didn't fill within 3s — order cancelled.`, { type: "error", duration: 8000 });
   return { ...res, status: "canceled" };
