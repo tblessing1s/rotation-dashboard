@@ -203,9 +203,12 @@ def _s3_upload(backup_path: str) -> dict:
             "CFM_BACKUP_S3 is on but boto3 is not installed. "
             "`pip install boto3` or turn the flag off.") from e
     import boto3
-    bucket = os.environ.get("BACKUP_S3_BUCKET")
+    # BUCKET_NAME is what `fly storage create` (Tigris) sets automatically;
+    # BACKUP_S3_BUCKET wins so a non-Tigris target can still be pointed at.
+    bucket = os.environ.get("BACKUP_S3_BUCKET") or os.environ.get("BUCKET_NAME")
     if not bucket:
-        raise RuntimeError("CFM_BACKUP_S3 is on but BACKUP_S3_BUCKET is unset.")
+        raise RuntimeError(
+            "CFM_BACKUP_S3 is on but no bucket is set (BACKUP_S3_BUCKET or BUCKET_NAME).")
     endpoint = os.environ.get("BACKUP_S3_ENDPOINT")  # e.g. https://fly.storage.tigris.dev
     prefix = os.environ.get("BACKUP_S3_KEY_PREFIX", "cfm-backups")
     key = f"{prefix.rstrip('/')}/{os.path.basename(backup_path)}"

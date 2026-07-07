@@ -383,8 +383,10 @@ BACKUP_EMAIL_MAX_BYTES = 5 * 1024 * 1024
 
 # PROPOSED_DEFAULT — optional S3-compatible off-machine upload (Tigris/S3/B2),
 # OFF by default. When on, boto3 is imported lazily and the target comes from
-# env: BACKUP_S3_BUCKET, BACKUP_S3_ENDPOINT, BACKUP_S3_KEY_PREFIX, plus AWS_*
-# credentials. Lets an operator point backups off-machine without a code change.
+# env: BACKUP_S3_BUCKET (falls back to BUCKET_NAME, which `fly storage create`
+# sets), BACKUP_S3_ENDPOINT (falls back to boto3's AWS_ENDPOINT_URL_S3, also
+# set by Tigris), BACKUP_S3_KEY_PREFIX, plus AWS_* credentials. On Fly the
+# whole setup is: `fly storage create` + `fly secrets set CFM_BACKUP_S3=1`.
 BACKUP_S3_ENABLED = os.environ.get("CFM_BACKUP_S3", "").strip() in ("1", "true", "yes")
 
 

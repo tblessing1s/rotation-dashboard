@@ -40,7 +40,8 @@ def _install_fake_boto3(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_env():
-    for k in ("BACKUP_S3_BUCKET", "BACKUP_S3_ENDPOINT", "BACKUP_S3_KEY_PREFIX", "CFM_BACKUP_S3"):
+    for k in ("BACKUP_S3_BUCKET", "BACKUP_S3_ENDPOINT", "BACKUP_S3_KEY_PREFIX",
+              "CFM_BACKUP_S3", "BUCKET_NAME"):
         os.environ.pop(k, None)
     yield
 
@@ -79,6 +80,23 @@ def test_s3_upload_requires_bucket(monkeypatch, tmp_path):
     _install_fake_boto3(monkeypatch)
     with pytest.raises(RuntimeError, match="BACKUP_S3_BUCKET"):
         backups._s3_upload(_backup_file(tmp_path))
+
+
+def test_s3_upload_falls_back_to_tigris_bucket_name(monkeypatch, tmp_path):
+    # `fly storage create` sets BUCKET_NAME (not BACKUP_S3_BUCKET).
+    os.environ["BUCKET_NAME"] = "tigris-bucket"
+    client, _ = _install_fake_boto3(monkeypatch)
+    out = backups._s3_upload(_backup_file(tmp_path))
+    assert out["ok"] is True and out["bucket"] == "tigris-bucket"
+    assert client.uploads[0][1] == "tigris-bucket"
+
+
+def test_s3_upload_explicit_bucket_wins_over_bucket_name(monkeypatch, tmp_path):
+    os.environ["BUCKET_NAME"] = "tigris-bucket"
+    os.environ["BACKUP_S3_BUCKET"] = "explicit-bucket"
+    client, _ = _install_fake_boto3(monkeypatch)
+    backups._s3_upload(_backup_file(tmp_path))
+    assert client.uploads[0][1] == "explicit-bucket"
 
 
 def test_send_offmachine_routes_to_s3_when_enabled(monkeypatch, tmp_path):

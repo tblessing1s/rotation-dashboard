@@ -99,6 +99,18 @@ copy off the machine:
   `AWS_*` credentials). `boto3` is imported lazily — install it only if you turn
   this on. When on, S3 takes precedence over email.
 
+  On Fly the easy path is Tigris, which needs no manual bucket config at all:
+
+  ```
+  fly storage create -a rotation-dashboard   # creates the bucket, sets BUCKET_NAME + AWS_* secrets
+  fly secrets set CFM_BACKUP_S3=1 -a rotation-dashboard
+  ```
+
+  `BACKUP_S3_BUCKET` falls back to the `BUCKET_NAME` secret Tigris sets, and
+  boto3 picks the endpoint up from `AWS_ENDPOINT_URL_S3`. Verify with an
+  on-demand run (`POST /api/maintenance/refresh`) and check the `backup`
+  section of the response for `"method": "s3", "ok": true`.
+
 If neither is configured the nightly job logs that no off-machine method
 succeeded. Restoring one of these off-machine copies is a manual step: download
 it into `/data/backups/` (or anywhere) and point `restore_state.py --restore` at
