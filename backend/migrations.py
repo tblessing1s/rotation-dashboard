@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 9
+CURRENT_VERSION = 10
 
 
 class MigrationAbortedError(RuntimeError):
@@ -130,6 +130,18 @@ def _v8_to_v9(state: dict) -> dict:
     return state
 
 
+def _v9_to_v10(state: dict) -> dict:
+    """v10 (multi-tranche LEAPs): positions gain ``leap_legs`` — a list of LEAP
+    leg dicts keyed by (strike, expiration), with the legacy single ``leap``
+    becoming legs[0]. ``leap`` stays in the schema as a mirror of the first leg
+    (re-aliased to the same object on every load) so single-leg positions and
+    older readers behave exactly as before. Additive only."""
+    for p in state.get("positions", []):
+        if "leap_legs" not in p:
+            p["leap_legs"] = [p["leap"]] if p.get("leap") else []
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -139,6 +151,7 @@ MIGRATIONS = {
     6: _v6_to_v7,
     7: _v7_to_v8,
     8: _v8_to_v9,
+    9: _v9_to_v10,
 }
 
 

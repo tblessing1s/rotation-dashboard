@@ -111,6 +111,7 @@ def _ensure_position(state: dict, ticker: str) -> dict:
         "entry_date": log.utcnow()[:10],
         "status": "active",
         "leap": None,
+        "leap_legs": [],
         "shares": {"count": 0, "cost_basis_per_share": None, "cap": config.SHARE_CAP, "pct_to_cap": 0},
         "short_calls": [],
         "kill_switch": {},
@@ -224,13 +225,16 @@ def _apply_adjustment(position: dict, itype: str, strike, qty_delta: int) -> Non
                 else:
                     sc["contracts"] = -new_signed
                 return
-        leap = position.get("leap") or {}
-        if leap and (strike is None or _strike_eq(leap.get("strike"), strike)):
+        legs = log.leap_legs(position)
+        leap = next((l for l in legs if strike is None or _strike_eq(l.get("strike"), strike)), None)
+        if leap is not None:
             new = int(leap.get("contracts") or 0) + qty_delta
             if new <= 0:
-                position["leap"] = None
+                legs.remove(leap)
+                position["leap_legs"] = legs
+                position["leap"] = legs[0] if legs else None
                 shares = position.get("shares") or {}
-                if not position.get("short_calls") and int(shares.get("count") or 0) == 0:
+                if not legs and not position.get("short_calls") and int(shares.get("count") or 0) == 0:
                     position["status"] = "closed"
             else:
                 leap["contracts"] = new
@@ -586,6 +590,22 @@ def _entry_snapshot(ticker: str) -> dict | None:
         return None
 
 
+def _norm_exp(value) -> str | None:
+    return str(value)[:10] if value else None
+
+
+def _match_leg(legs: list[dict], strike, expiration=None) -> dict | None:
+    """Find the LEAP leg a strike (+ optional expiration) identifies. Strike
+    alone matches when it's unambiguous; expiration disambiguates same-strike
+    ladders. Used identically at build time (to stamp the execution) and at
+    apply time (to mutate the position), so the two can never disagree."""
+    exp = _norm_exp(expiration)
+    matches = [l for l in legs if _strike_eq(l.get("strike"), strike)]
+    if exp is not None:
+        matches = [l for l in matches if _norm_exp(l.get("expiration")) == exp]
+    return matches[0] if matches else None
+
+
 def _buy_leap(payload, ticker, strike, contracts, stock_price):
     # execution_price is per-contract total dollars; execution_total is the trade.
     price_per_contract = float(payload.get("execution_price") or 0)
@@ -597,7 +617,19 @@ def _buy_leap(payload, ticker, strike, contracts, stock_price):
         "ticker": ticker, "action": "buy_leap", "strike": strike, "contracts": contracts,
         "execution_price": price_per_contract, "execution_total": total,
         "extrinsic_captured": round(extrinsic_at_entry, 2), "stock_price": stock_price,
+        "expiration": _norm_exp(payload.get("expiration")),
     }
+
+    # Multi-tranche classification, stamped on the immutable record so the
+    # derived-ledger replay never needs position state: "merge" = more of the
+    # identical contract (scale-in), "add" = a new leg beside existing ones.
+    # Absent = fresh entry (or a roll — the roll id decides that at replay).
+    existing = log.find_position(log.load_state(), ticker)
+    legs_now = log.leap_legs(existing) if existing else []
+    if _match_leg(legs_now, strike, payload.get("expiration")) is not None:
+        execution["leap_add"] = "merge"
+    elif legs_now:
+        execution["leap_add"] = "add"
 
     # Level-5 gate context: log any override (with what it overrode) on the
     # immutable record, and resolve the circuit breaker + dividend to store.
@@ -636,17 +668,41 @@ def _buy_leap(payload, ticker, strike, contracts, stock_price):
     execution["entry_snapshot"] = _entry_snapshot(ticker)
 
     def apply(position):
-        position["entry_date"] = log.utcnow()[:10]  # a new LEAP starts a new cycle
-        position["circuit_breaker"] = circuit_breaker
-        position["dividend"] = dividend
-        position["leap"] = {
-            "strike": strike, "contracts": contracts, "cost_basis": total,
-            "current_bid": total, "intrinsic": round(intrinsic_per_contract * contracts, 2),
-            "extrinsic": round(extrinsic_at_entry, 2),
-            "entry_date": log.utcnow()[:10], "dte": payload.get("dte", config.LEAP_TARGET_DTE),
-            "expiration": payload.get("expiration"),
-            "extrinsic_at_entry": round(extrinsic_at_entry, 2), "extrinsic_collected_to_date": 0,
-        }
+        legs = log.leap_legs(position)
+        position["leap_legs"] = legs
+        match = _match_leg(legs, strike, payload.get("expiration"))
+        if match is not None:
+            # Scale-in: more of the identical contract — counts, cost and the
+            # extrinsic payback target all add; the cycle just grows.
+            match["contracts"] = int(match.get("contracts") or 0) + contracts
+            match["cost_basis"] = round(float(match.get("cost_basis") or 0) + total, 2)
+            match["current_bid"] = round(float(match.get("current_bid") or 0) + total, 2)
+            match["intrinsic"] = round(intrinsic_per_contract * match["contracts"], 2)
+            match["extrinsic"] = round(float(match.get("extrinsic") or 0) + extrinsic_at_entry, 2)
+            match["extrinsic_at_entry"] = round(
+                float(match.get("extrinsic_at_entry") or 0) + extrinsic_at_entry, 2)
+        else:
+            legs.append({
+                "strike": strike, "contracts": contracts, "cost_basis": total,
+                "current_bid": total, "intrinsic": round(intrinsic_per_contract * contracts, 2),
+                "extrinsic": round(extrinsic_at_entry, 2),
+                "entry_date": log.utcnow()[:10], "dte": payload.get("dte", config.LEAP_TARGET_DTE),
+                "expiration": payload.get("expiration"),
+                "extrinsic_at_entry": round(extrinsic_at_entry, 2), "extrinsic_collected_to_date": 0,
+            })
+        if len(legs) == 1 and match is None:
+            # Fresh entry (or a roll's buy side): a new engine starts a new
+            # cycle. Adds to a running engine keep the original entry date and
+            # line-in-the-sand — scaling in must not move the sand line.
+            position["entry_date"] = log.utcnow()[:10]
+            position["circuit_breaker"] = circuit_breaker
+            position["dividend"] = dividend
+        else:
+            if position.get("circuit_breaker") is None:
+                position["circuit_breaker"] = circuit_breaker
+            if position.get("dividend") is None:
+                position["dividend"] = dividend
+        position["leap"] = legs[0]
         position["status"] = "active"
     return execution, apply
 
@@ -663,12 +719,14 @@ def _close_leap(payload, ticker, strike, contracts, stock_price):
     intrinsic_per_contract = max((stock_price or 0) - (strike or 0), 0) * 100
     extrinsic_remaining = max(close_per_contract - intrinsic_per_contract, 0) * contracts
 
-    # Cost basis from the stored LEAP (caller may override).
+    # Cost basis from the stored LEAP leg the strike/expiration identifies
+    # (caller may override). With one leg this is exactly the old behavior.
     state = log.load_state()
     position = log.find_position(state, ticker)
-    leap = (position or {}).get("leap") or {}
+    legs_now = log.leap_legs(position) if position else []
+    leg = _match_leg(legs_now, strike, payload.get("expiration")) or (legs_now[0] if legs_now else {})
     cost_basis = payload.get("cost_basis")
-    cost_basis = float(cost_basis if cost_basis is not None else leap.get("cost_basis") or 0)
+    cost_basis = float(cost_basis if cost_basis is not None else leg.get("cost_basis") or 0)
     realized_pnl = round(close_total - cost_basis, 2)
 
     exit_reason = (payload.get("exit_reason") or "").strip()
@@ -678,12 +736,21 @@ def _close_leap(payload, ticker, strike, contracts, stock_price):
         "cost_basis": round(cost_basis, 2), "realized_pnl": realized_pnl,
         "extrinsic_remaining": round(extrinsic_remaining, 2),
         "exit_reason": exit_reason if exit_reason in EXIT_REASONS else "discretionary",
+        "expiration": _norm_exp(leg.get("expiration") or payload.get("expiration")),
+        # Stamped so the payback replay knows whether this close ended the
+        # cycle (last leg out) or the engine kept running on remaining legs.
+        "legs_remaining": max(len(legs_now) - 1, 0),
     }
 
     def apply(position):
-        position["leap"] = None
+        legs = log.leap_legs(position)
+        position["leap_legs"] = legs
+        target = _match_leg(legs, strike, payload.get("expiration")) or (legs[0] if legs else None)
+        if target is not None:
+            legs.remove(target)
+        position["leap"] = legs[0] if legs else None
         shares = position.get("shares") or {}
-        if not position.get("short_calls") and int(shares.get("count") or 0) == 0:
+        if not legs and not position.get("short_calls") and int(shares.get("count") or 0) == 0:
             position["status"] = "closed"
     return execution, apply
 

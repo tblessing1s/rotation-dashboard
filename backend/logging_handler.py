@@ -61,6 +61,31 @@ def _default_state() -> dict:
     }
 
 
+def leap_legs(position: dict) -> list[dict]:
+    """The position's LEAP legs as a list — the multi-tranche source of truth.
+    Falls back to wrapping the legacy single ``leap`` so states built before
+    v10 (and test fixtures that never went through load_state) still work."""
+    legs = position.get("leap_legs")
+    if legs is not None:
+        return legs
+    return [position["leap"]] if position.get("leap") else []
+
+
+def _sync_leap_alias(state: dict) -> None:
+    """Re-bind position["leap"] to leap_legs[0] AFTER a JSON round-trip.
+
+    In memory ``leap`` and ``leap_legs[0]`` are the same dict, so mutations
+    through either name stay coherent — but serialization writes them as two
+    independent copies, so every load must restore the aliasing or a mark
+    refresh through one name would silently diverge from the other."""
+    for p in state.get("positions", []):
+        legs = p.get("leap_legs")
+        if legs is None:
+            p["leap_legs"] = [p["leap"]] if p.get("leap") else []
+        else:
+            p["leap"] = legs[0] if legs else None
+
+
 def load_state() -> dict:
     with _lock:
         path = config.active_state_path()
@@ -93,6 +118,7 @@ def load_state() -> dict:
         state, migrated = migrations.migrate(state, state_path=path)
         for k, v in _default_state().items():
             state.setdefault(k, v)
+        _sync_leap_alias(state)
         if migrated:
             # Rebuild the derived ledgers so migration-added derived structures
             # (e.g. the roll ledger) are populated from day one, not first-write.
@@ -344,6 +370,12 @@ def recompute_derived(state: dict) -> dict:
             extr = float(e.get("extrinsic_captured") or 0)
             if rid and _pending_close_roll.get(t) == rid:
                 cycle_target[t] = cycle_target.get(t, 0.0) + extr   # roll: add extrinsic, carry juice
+            elif e.get("leap_add") in ("merge", "add"):
+                # Multi-tranche add to a running engine (scale-in or a new leg):
+                # the payback target grows by the new extrinsic bought; collected
+                # juice carries — the cycle is continuous, exactly like a roll.
+                cycle_collected.setdefault(t, 0.0)
+                cycle_target[t] = cycle_target.get(t, 0.0) + extr
             else:
                 cycle_collected[t] = 0.0                            # fresh cycle
                 cycle_target[t] = extr
@@ -354,6 +386,11 @@ def recompute_derived(state: dict) -> dict:
             rid = e.get("leap_roll_id")
             if rid:
                 _pending_close_roll[t] = rid    # a roll IF a matching buy_leap follows
+            elif int(e.get("legs_remaining") or 0) > 0:
+                # One leg of a multi-tranche engine closed; others still run, so
+                # the cycle (and its target — that extrinsic WAS bought this
+                # cycle) carries on the surviving legs.
+                pass
             else:
                 cycle_collected.pop(t, None)     # true exit — cycle ends, juice does not carry
                 cycle_target.pop(t, None)
