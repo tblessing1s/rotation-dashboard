@@ -100,6 +100,12 @@ export const api = {
   dataHealth: () => request("/api/data-health"),
   maintenanceRefresh: () => request("/api/maintenance/refresh", { method: "POST" }),
   refreshHot: () => request("/api/refresh/hot", { method: "POST" }),
+  // Force-pull a live quote for one name / a whole sector (ETF + constituents),
+  // bypassing the daily cache; returns fresh scorecard rows to patch into the Scan.
+  refreshTicker: (ticker) =>
+    request("/api/refresh/ticker", { method: "POST", body: JSON.stringify({ ticker }) }),
+  refreshSector: (sector) =>
+    request("/api/refresh/sector", { method: "POST", body: JSON.stringify({ sector }) }),
   alerts: () => request("/api/alerts"),
   runAlerts: (dryRun) =>
     request("/api/alerts/run", {

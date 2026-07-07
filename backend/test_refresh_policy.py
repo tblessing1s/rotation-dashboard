@@ -134,6 +134,71 @@ def test_peek_cached_is_read_only_and_age_bounded(monkeypatch):
     screening.clear_cache()
 
 
+def test_refresh_tickers_forces_ticker_spy_and_sector_etf(_reset, monkeypatch):
+    import sector_data
+    from metrics import scorecard as scorecard_metrics
+    monkeypatch.setattr(sector_data, "sector_for",
+                        lambda t: None if t.upper() == "SPY" else "XLK")
+    seen = {}
+
+    def fake_scorecard(names):
+        seen["names"] = list(names)
+        return {"as_of": "2026-07-07T14:00:00Z",
+                "results": [{"ticker": n, "price": 100.0} for n in names]}
+
+    monkeypatch.setattr(scorecard_metrics, "scorecard", fake_scorecard)
+
+    out = refresh_policy.refresh_tickers(["nvda"])
+    syms, force = _reset["prefetch"][0]
+    assert force is True                                   # bypasses the daily window
+    assert {"NVDA", config.BENCHMARK, "XLK"} <= set(syms)  # ticker + SPY + its sector ETF
+    assert out["tickers"] == ["NVDA"] and out["count"] == 1
+    assert out["rows"][0]["ticker"] == "NVDA"
+    assert out["as_of"] == "2026-07-07T14:00:00Z"
+    assert seen["names"] == ["NVDA"]                       # scored only the requested name
+
+
+def test_refresh_tickers_dedupes_uppercases_and_skips_blanks(_reset, monkeypatch):
+    import sector_data
+    from metrics import scorecard as scorecard_metrics
+    monkeypatch.setattr(sector_data, "sector_for", lambda t: None)
+    monkeypatch.setattr(scorecard_metrics, "scorecard",
+                        lambda names: {"as_of": "x", "results": [{"ticker": n} for n in names]})
+    out = refresh_policy.refresh_tickers([" nvda ", "NVDA", "on", ""])
+    assert out["tickers"] == ["NVDA", "ON"]
+
+
+def test_refresh_tickers_empty_is_a_noop(_reset):
+    out = refresh_policy.refresh_tickers(["", "   "])
+    assert out == {"tickers": [], "rows": [], "count": 0, "as_of": None}
+    assert _reset["prefetch"] == []                        # nothing fetched
+
+
+def test_api_refresh_ticker_and_sector(_reset, monkeypatch):
+    import sector_data
+    from metrics import scorecard as scorecard_metrics
+    monkeypatch.setattr(sector_data, "sector_for",
+                        lambda t: None if t.upper() == "SPY" else "XLK")
+    monkeypatch.setattr(sector_data, "sector_etfs", lambda: ["XLK", "XLP"])
+    monkeypatch.setattr(sector_data, "constituents",
+                        lambda e: ["NVDA", "AVGO"] if e.upper() == "XLK" else [])
+    monkeypatch.setattr(scorecard_metrics, "scorecard",
+                        lambda names: {"as_of": "t", "results": [{"ticker": n} for n in names]})
+    import app as app_module
+    client = app_module.app.test_client()
+
+    r = client.post("/api/refresh/ticker", json={"ticker": "nvda"})
+    assert r.status_code == 200
+    assert r.get_json()["tickers"] == ["NVDA"]
+
+    r2 = client.post("/api/refresh/sector", json={"sector": "xlk"})
+    assert r2.status_code == 200
+    assert set(r2.get_json()["tickers"]) == {"XLK", "NVDA", "AVGO"}  # ETF + constituents
+
+    assert client.post("/api/refresh/ticker", json={}).status_code == 400          # ticker required
+    assert client.post("/api/refresh/sector", json={"sector": "NOPE"}).status_code == 400  # unknown
+
+
 def test_status_reports_shape(monkeypatch):
     monkeypatch.setattr(maintenance, "open_tickers", lambda state=None: ["ON"])
     monkeypatch.setattr(screening, "peek_cached", lambda key, max_age=None: None)
