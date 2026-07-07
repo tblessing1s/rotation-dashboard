@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 10
+CURRENT_VERSION = 11
 
 
 class MigrationAbortedError(RuntimeError):
@@ -142,6 +142,32 @@ def _v9_to_v10(state: dict) -> dict:
     return state
 
 
+def _v10_to_v11(state: dict) -> dict:
+    """v11 (multi-condition circuit breaker): the circuit breaker now trips on
+    whichever comes first — a 15% drop from entry, 3 closes below the 50-day MA,
+    or a close below the 200-day MA (backend/circuit_breaker.py). The drawdown
+    leg needs the underlying's ENTRY price; backfill it onto each position's
+    stored circuit_breaker from the earliest buy_leap execution's stock_price.
+
+    Additive. Positions with no circuit_breaker, or no locatable entry fill, are
+    left as-is — the drawdown leg stays inert (None) while the MA legs still work,
+    and the field fills in naturally on the next fresh entry."""
+    entry_by_ticker: dict[str, float] = {}
+    for e in state.get("executions", []):  # append-only, oldest first
+        if e.get("action") != "buy_leap":
+            continue
+        t = e.get("ticker")
+        if t and t not in entry_by_ticker and e.get("stock_price") is not None:
+            entry_by_ticker[t] = float(e["stock_price"])
+    for p in state.get("positions", []):
+        cb = p.get("circuit_breaker")
+        if isinstance(cb, dict) and cb.get("entry_price") is None:
+            ep = entry_by_ticker.get(p.get("ticker"))
+            if ep is not None:
+                cb["entry_price"] = round(ep, 2)
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -152,6 +178,7 @@ MIGRATIONS = {
     7: _v7_to_v8,
     8: _v8_to_v9,
     9: _v9_to_v10,
+    10: _v10_to_v11,
 }
 
 

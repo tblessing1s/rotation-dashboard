@@ -505,6 +505,20 @@ KNOWN_ETFS = {"QQQ", "IWM", "DIA", "SMH", "ARKK", "XBI", "GDX", "XOP", "KRE", "X
 # storing SOME line is required (HARD_CFM_RULE), only the formula is tunable.
 CIRCUIT_BREAKER_ATR_MULT = 2.0
 
+# ---- Position circuit breaker (the exit rule) ------------------------------
+# HARD_CFM_RULE — a position is a hard EXIT on WHICHEVER of these trips first.
+# backend/circuit_breaker.py is the single source of truth that evaluates them;
+# the thresholds here are tunable, that the rule exists is not.
+#   1. Drawdown  — the underlying has fallen CIRCUIT_BREAKER_DROP_PCT from the
+#      price it was entered at.
+#   2. Fast-MA break — CIRCUIT_BREAKER_MA_FAST_CLOSES consecutive daily closes
+#      below the CIRCUIT_BREAKER_MA_FAST-day moving average.
+#   3. Slow-MA break — a single close below the CIRCUIT_BREAKER_MA_SLOW-day MA.
+CIRCUIT_BREAKER_DROP_PCT = 0.15        # 15% drop from the entry price
+CIRCUIT_BREAKER_MA_FAST = 50           # fast MA window (days)
+CIRCUIT_BREAKER_MA_FAST_CLOSES = 3     # consecutive closes below the fast MA (the "2-3" rule)
+CIRCUIT_BREAKER_MA_SLOW = 200          # slow MA window; a single close below is a breach
+
 # HARD_CFM_RULE (candidate — OFF by default, pending confirmation): block
 # pullback share-accumulation on any ticker whose kill switch reads non-green
 # (red = exit in progress, yellow = RS3M thinning toward the kill line). The

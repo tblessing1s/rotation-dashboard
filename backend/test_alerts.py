@@ -242,13 +242,16 @@ def test_juice_inadequate_owns_the_band_above_capital_burn(monkeypatch):
 
 
 def test_circuit_breaker_trips_at_or_below_line(monkeypatch):
-    monkeypatch.setattr(alerts, "_last_close", lambda t: 128.0)
+    import data_handler
+    # A short frame: too little history for the MA legs (they read None), so only
+    # the operator line-in-the-sand drives this case. Last close is 128.
+    monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: _frame([128.0] * 5))
     p = _pos(circuit_breaker={"price": 131.0})
     out = alerts.check_circuit_breaker(_state(p))
     assert len(out) == 1 and out[0]["severity"] == "CRITICAL"
     p2 = _pos(circuit_breaker={"price": 120.0})
     assert alerts.check_circuit_breaker(_state(p2)) == []
-    assert alerts.check_circuit_breaker(_state(_pos())) == []  # no line stored
+    assert alerts.check_circuit_breaker(_state(_pos())) == []  # no line, MA legs inert
 
 
 def test_earnings_window(monkeypatch):
