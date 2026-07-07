@@ -105,9 +105,13 @@ enable/disable, channel toggles, dry-run).
 history) plus a navbar bell with the active count.
 
 **Demo**: seeding adds a deliberately broken 5th position
-(`seed_demo_data.ALERT_DEMO`, PG) that trips every position-based condition in
-one evaluator run — kill switch, circuit breaker, both delta flavors, defend,
-75% buyback, assignment risk, earnings window, and expiry — exactly 9 alerts.
+(`seed_demo_data.ALERT_DEMO`, PG) that trips every *point-in-time* position
+condition in one evaluator run — kill switch, circuit breaker, both delta
+flavors, defend, 75% buyback, assignment risk, earnings window, and expiry: the
+canonical 9 (asserted by `test_engineered_state_trips_every_position_condition`).
+The later *cumulative/temporal* guards (whipsaw, ongoing juice adequacy,
+book correlation, earnings staleness) fire off the seeded ledgers/positions when
+their windows are met, so a full demo-store run surfaces more than these 9.
 
 ## Level 5 entry gate — Account & Juice (Phase 1)
 
