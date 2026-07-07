@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Stat, Meter, Pill, Loading, money, fmt, useApi } from "./ui.jsx";
+import { Card, Meter, Pill, Light, Loading, money, fmt, pct, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { useToast } from "./Toast.jsx";
@@ -315,6 +315,43 @@ function DiffRow({ ticker, diff, toast, onDone }) {
   );
 }
 
+// Kill-switch verdict for one position (RS3M vs SPY / vs Sector), inlined on the
+// card — this absorbed the old Kill Switch tab. Quiet single line when green;
+// a toned banner with the suggested action when the switch has tripped.
+function KillSwitchStrip({ ks }) {
+  if (!ks) return null;
+  if (!ks.alert) {
+    return (
+      <div className="mt-4 border-t border-slate-800 pt-3">
+        <div className="flex items-center justify-between text-xs">
+          <span className="flex items-center gap-2 uppercase tracking-wide text-slate-500">
+            Kill switch <Light status={ks.status} size="h-2.5 w-2.5" />
+          </span>
+          <span className="text-slate-500">
+            RS3M vs SPY <span className={ks.rs3m_vs_spy < 0 ? "text-rose-400" : "text-slate-300"}>{pct(ks.rs3m_vs_spy)}</span>
+            {" · "}vs Sector <span className={ks.rs3m_vs_sector < 0 ? "text-rose-400" : "text-slate-300"}>{pct(ks.rs3m_vs_sector)}</span>
+          </span>
+        </div>
+      </div>
+    );
+  }
+  const red = ks.status === "red";
+  return (
+    <div className={`mt-4 rounded-lg border p-3 text-sm ${
+      red ? "border-rose-800 bg-rose-500/10" : "border-amber-800 bg-amber-500/10"}`}>
+      <div className="flex items-center justify-between">
+        <span className={`text-xs font-semibold uppercase tracking-wide ${red ? "text-rose-300" : "text-amber-300"}`}>
+          Kill switch — {ks.status}
+        </span>
+        <span className="text-xs text-slate-400">
+          vs SPY {pct(ks.rs3m_vs_spy)} · vs Sector {pct(ks.rs3m_vs_sector)}
+        </span>
+      </div>
+      <p className={`mt-1 ${red ? "text-rose-200" : "text-amber-200"}`}>{ks.suggested_action}</p>
+    </div>
+  );
+}
+
 // Defensive roll-down recommendation, shown when a short strike is breached.
 function DefendPanel({ ticker, onStage }) {
   const { data } = useApi(React.useCallback(() => api.defend(ticker), [ticker]), [ticker], null);
@@ -361,10 +398,11 @@ function DefendPanel({ ticker, onStage }) {
   );
 }
 
-export default function PositionTracker({ intent, onIntentHandled } = {}) {
+export default function PositionTracker({ intent, onIntentHandled, onOpenTicket } = {}) {
   const toast = useToast();
   const { data, error, loading, reload } = useApi(api.positions, [], null);
   const { data: recon, reload: reloadRecon } = useApi(api.reconcile, [], null);
+  const { data: kill } = useApi(api.killSwitch, [], 5 * 60 * 1000);
   const [rolling, setRolling] = React.useState(null); // {ticker, reason}
   const [focusedTicker, setFocusedTicker] = React.useState(null);
   const handledIntentId = React.useRef(null);
@@ -413,45 +451,15 @@ export default function PositionTracker({ intent, onIntentHandled } = {}) {
   if (loading && !data) return <Card title="Positions"><Loading /></Card>;
   if (error) return <Card title="Positions"><p className="text-sm text-rose-400">{error}</p></Card>;
 
-  // Closed positions live on the History tab as cycle records.
+  // Closed positions live on the History tab as cycle records; the capital /
+  // milestones summary is on Overview (its one home).
   const positions = (data?.positions || []).filter((p) => p.status !== "closed");
-  const cap = data?.capital || {};
-  const ms = cap.milestones || {};
+  const killByTicker = {};
+  for (const k of kill?.positions || []) killByTicker[k.ticker] = k;
 
   return (
     <div className="grid gap-4">
       <PortfolioRisk />
-      <Card title="Capital">
-        <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <Stat label="Deployed" value={money(cap.capital_deployed)} />
-          <Stat label="Reserve req." value={money(cap.reserve_required)} tone={cap.reserve_ok ? "text-slate-100" : "text-rose-300"} />
-          <Stat
-            label="Operating cash"
-            value={money(cap.operating_cash)}
-            sub={
-              cap.operating_cash_source === "schwab"
-                ? "live from Schwab"
-                : cap.operating_cash_source === "manual"
-                ? (cap.operating_cash_error ? `manual (Schwab: ${cap.operating_cash_error})` : "manual entry")
-                : undefined
-            }
-          />
-          <Stat label="Juice YTD" value={money(cap.juice_ytd)} tone="text-emerald-300" />
-        </div>
-        <div className="mt-5 grid gap-4 sm:grid-cols-2">
-          {["half_nut", "quit_safe"].map((k) => (
-            ms[k] && (
-              <div key={k}>
-                <div className="mb-1 flex justify-between text-sm">
-                  <span className="text-slate-300">{k === "half_nut" ? "Half-nut ($/mo)" : "Quit-safe ($/mo)"}</span>
-                  <span className="text-slate-400">{money(ms[k].current)} / {money(ms[k].target)}</span>
-                </div>
-                <Meter pct={ms[k].pct} tone="bg-emerald-500" />
-              </div>
-            )
-          ))}
-        </div>
-      </Card>
 
       {positions.length === 0 && <Card>No open positions.</Card>}
       {positions.map((p) => {
@@ -551,7 +559,17 @@ export default function PositionTracker({ intent, onIntentHandled } = {}) {
                 )}
               </div>
               {shorts.length === 0 ? (
-                <p className="text-xs text-slate-500">No open short — sell this week's call from the Execute tab.</p>
+                <div className="flex items-center justify-between">
+                  <p className="text-xs text-slate-500">No open short — sell this week's call.</p>
+                  {onOpenTicket && (
+                    <button
+                      onClick={() => onOpenTicket(p.ticker)}
+                      className="rounded-lg border border-sky-700 bg-sky-500/10 px-3 py-1 text-xs font-semibold text-sky-300 hover:bg-sky-500/20"
+                    >
+                      Open order ticket
+                    </button>
+                  )}
+                </div>
               ) : (
                 <div className="space-y-1.5">
                   {shorts.map((sc, i) => (
@@ -642,6 +660,8 @@ export default function PositionTracker({ intent, onIntentHandled } = {}) {
                 onStage={() => setRolling({ ticker: p.ticker, reason: "defend" })}
               />
             )}
+
+            <KillSwitchStrip ks={killByTicker[p.ticker]} />
 
             <DeltaCoverage ticker={p.ticker} />
           </Card>

@@ -117,7 +117,9 @@ function Settings({ settings, types, onSaved }) {
 }
 
 export default function AlertsPanel() {
-  const { data, error, loading, reload } = useApi(api.alerts, [], 60000);
+  // No interval here — App already polls /api/alerts every minute for the navbar
+  // bell; this panel loads once and refreshes on Run-now / acknowledge.
+  const { data, error, loading, reload } = useApi(api.alerts, [], null);
   const [showSettings, setShowSettings] = React.useState(false);
   const [showHistory, setShowHistory] = React.useState(false);
   const [running, setRunning] = React.useState(false);

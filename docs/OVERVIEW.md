@@ -101,7 +101,7 @@ implement `name`, `configured()`, `send()` and add to `CHANNELS`. Shipped:
 `POST /api/alerts/ack {id}`, `POST /api/alerts/settings` (per-type
 enable/disable, channel toggles, dry-run).
 
-**UI**: Alerts panel on the Checklist tab (acknowledge, run-now, settings,
+**UI**: Alerts panel on the Settings tab (acknowledge, run-now, settings,
 history) plus a navbar bell with the active count.
 
 **Demo**: seeding adds a deliberately broken 5th position
@@ -222,7 +222,7 @@ list.
   (scheduled | 75%-rule | defend | earnings | kill-switch-exit);
   `recompute_derived` rebuilds per-roll entries (buyback cost, new premium,
   net) and per-ticker aggregates (count, net_total, drag_total = debits paid).
-  Positions tab shows cumulative roll drag per position; Theta tab nets rolls
+  Positions tab shows cumulative roll drag per position; History tab (theta ledger) nets rolls
   against juice. This is the dataset that later validates 1.5× vs 2×ATR strike
   placement.
 - **Whipsaw circuit breaker** (`position_manager.whipsaw_status`, the
@@ -331,7 +331,7 @@ suggestion (`executor.roll_suggestion`), and the `DEFEND_POSITION` alert
   adverse-slippage % (signed by side: paying above mid on a buy, receiving below
   on a sell); until `SLIPPAGE_MIN_FILLS` live fills exist it falls back to the
   `ASSUMED_SLIPPAGE_PCT` default and paper results carry a **mid-fill caveat** (a
-  banner on the Theta tab, a note in the calibration report). Once measured, the
+  banner on the History tab (theta ledger), a note in the calibration report). Once measured, the
   realized haircut supersedes the assumption.
 - **Juice journal export**: `GET /api/export/juice-journal?format=csv|md` —
   weekly juice ledger + roll ledger + closed cycles (the operator's off-system
@@ -385,7 +385,7 @@ suggestion (`executor.roll_suggestion`), and the `DEFEND_POSITION` alert
 - **Token lifecycle UX**: the Schwab card shows token age and days remaining
   with the one-click re-auth flow; the Phase 0 `TOKEN_EXPIRY` alert fires at
   day 5 (of the ~7-day token life).
-- **Data health panel** (Checklist tab; `GET /api/data-health`):
+- **Data health panel** (Settings tab; `GET /api/data-health`):
   last-successful-fetch timestamp per source (Schwab bars/quotes, Alpha
   Vantage fallbacks), count of fallback events, recent per-symbol errors,
   OHLCV cache age for key symbols, and earnings/dividends cache staleness —

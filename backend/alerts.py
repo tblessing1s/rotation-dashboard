@@ -458,7 +458,7 @@ def check_data_stale(state: dict) -> list[dict]:
     return [_alert(
         "DATA_STALE", None,
         f"Cached OHLCV for {config.BENCHMARK} is {age:.0f}h old on a market day.",
-        "Check provider health (/api/data-status) — kill-switch math is running on stale data.",
+        "Check provider health (Settings → Data health) — kill-switch math is running on stale data.",
         {"symbol": config.BENCHMARK, "cache_age_hours": age},
         key=now.strftime("%Y-%m-%d"))]
 
@@ -730,7 +730,7 @@ def check_reconcile_stale(state: dict) -> list[dict]:
         "RECONCILE_STALE", None,
         f"Position reconciliation is stale — {detail} (threshold {config.RECONCILE_STALE_HOURS}h).",
         "Check the Schwab connection and the scheduler — the state-vs-broker safety "
-        "check is not running. Trigger it from the Checklist tab (Reconcile now).",
+        "check is not running. Trigger it from Settings → Data health (Reconcile now).",
         {"last_success": last_success, "age_hours": round(age_h, 1) if age_h is not None else None},
         key="stale")]
 

@@ -2,7 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import { Card, Pill } from "./ui.jsx";
 
-// Checklist control for the live-trading toggle. Enabling it means executed
+// Settings control for the live-trading toggle. Enabling it means executed
 // orders transmit to the real Schwab account. Enabling requires an explicit
 // confirmation; turning it off is immediate. Locked when CFM_LIVE_TRADING is set
 // in the environment (an ops override that must be cleared at the deploy level).

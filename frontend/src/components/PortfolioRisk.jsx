@@ -4,8 +4,12 @@ import { Card, Stat, Meter, Loading, money, fmt, useApi } from "./ui.jsx";
 
 // One glance = "what is my book actually exposed to": aggregate delta (raw and
 // SPY-beta-adjusted), theta/day, vega, capital vs cap, reserve, sector split.
+// Collapsed to the headline numbers by default — the sector split and per-
+// position greeks table are analytics, not decisions, so they load behind
+// "Details".
 export default function PortfolioRisk() {
   const { data, error, loading } = useApi(api.portfolioRisk, [], null);
+  const [open, setOpen] = React.useState(false);
   if (loading && !data) return <Card title="Portfolio risk"><Loading /></Card>;
   if (error) return <Card title="Portfolio risk"><p className="text-sm text-rose-400">{error}</p></Card>;
 
@@ -15,7 +19,17 @@ export default function PortfolioRisk() {
   if (!data?.positions?.length) return null;
 
   return (
-    <Card title="Portfolio risk">
+    <Card
+      title="Portfolio risk"
+      right={
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800"
+        >
+          {open ? "Hide details ▲" : "Details ▼"}
+        </button>
+      }
+    >
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
         <Stat label="Δ dollars" value={money(t.delta_dollars)}
               sub={t.delta_dollars_spy_adj != null ? `${money(t.delta_dollars_spy_adj)} SPY-β adj` : "β unavailable"} />
@@ -27,6 +41,30 @@ export default function PortfolioRisk() {
               tone={cap.deployed > cap.cap ? "text-rose-300" : "text-slate-100"}
               sub={`cap ${money(cap.cap)} (${fmt(cap.pct_of_cap, 0)}%)`} />
       </div>
+      {!cap.reserve_ok && (
+        <p className="mt-3 text-xs text-rose-300">
+          Reserve underfunded — {money(cap.operating_cash)} cash vs {money(cap.reserve_required)} required.
+        </p>
+      )}
+      {/* A live risk warning stays visible even with the details collapsed. */}
+      {data.concentration?.warn && (
+        <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-amber-300">
+            <span>⚠ Concentration — diversification thinner than 1/sector implies</span>
+            {data.concentration.max_correlation != null && (
+              <span className="text-xs font-normal text-amber-400/80">
+                max pair corr {fmt(data.concentration.max_correlation, 2)}
+                {data.concentration.beta_adj_leverage != null &&
+                  ` · β-adj Δ ${fmt(data.concentration.beta_adj_leverage, 2)}× capital`}
+              </span>
+            )}
+          </div>
+          <ul className="mt-1 list-disc pl-5 text-xs text-amber-200/90">
+            {data.concentration.warnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </div>
+      )}
+      {open && (<>
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <div>
           <div className="mb-1 flex justify-between text-xs text-slate-400">
@@ -57,23 +95,6 @@ export default function PortfolioRisk() {
           </div>
         </div>
       </div>
-      {data.concentration?.warn && (
-        <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
-          <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-amber-300">
-            <span>⚠ Concentration — diversification thinner than 1/sector implies</span>
-            {data.concentration.max_correlation != null && (
-              <span className="text-xs font-normal text-amber-400/80">
-                max pair corr {fmt(data.concentration.max_correlation, 2)}
-                {data.concentration.beta_adj_leverage != null &&
-                  ` · β-adj Δ ${fmt(data.concentration.beta_adj_leverage, 2)}× capital`}
-              </span>
-            )}
-          </div>
-          <ul className="mt-1 list-disc pl-5 text-xs text-amber-200/90">
-            {data.concentration.warnings.map((w, i) => <li key={i}>{w}</li>)}
-          </ul>
-        </div>
-      )}
       <div className="mt-4 overflow-x-auto border-t border-slate-800 pt-3">
         <table className="w-full text-sm">
           <thead>
@@ -107,6 +128,7 @@ export default function PortfolioRisk() {
           </tbody>
         </table>
       </div>
+      </>)}
     </Card>
   );
 }

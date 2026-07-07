@@ -14,7 +14,7 @@ positions — both inside DATA_DIR (gitignored, so this never touches tracked fi
      *derived* from those executions exactly as in production (nothing is
      hand-maintained), so what you see is what the app produces from real use.
 
-Demo mode is toggled from the navbar (Live/Demo switch) — which calls seed() on
+Demo mode is toggled from the Settings tab (Live/Demo data switch) — which calls seed() on
 first use — or from the CLI:
 
     python backend/seed_demo_data.py            # build demo store, switch ON
@@ -480,7 +480,7 @@ def _build_demo_broker(state: dict) -> list:
 
 def seed_reconciliation() -> None:
     """Write the synthetic broker fixture into the demo cache and run a demo
-    reconciliation so the Positions/Checklist tabs render the freeze + diff UI.
+    reconciliation so the Positions/Settings tabs render the freeze + diff UI.
     Extends the deliberately-broken demo-position pattern."""
     import reconcile
 
