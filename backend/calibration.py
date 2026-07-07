@@ -143,7 +143,13 @@ def report(rows: list[dict]) -> str:
               "- Pick the ATR-extension cutoff whose GO bucket has the best "
               "risk-adjusted profile with a usable sample size (n).",
               "- The MFI sweep shows whether the 40-60 coil band (HARD rule) is "
-              "binding or could be relaxed.", ""]
+              "binding or could be relaxed.",
+              "- Mid-fill caveat: this sweep uses forward *price* returns, but the "
+              "paper juice/payback figures the strategy 'proved' are booked at the "
+              "quoted mid. Deep-ITM options rarely fill at mid, so realized income "
+              "runs below the paper numbers — see `slippage.report` / GET "
+              "/api/slippage for the measured (or assumed) haircut before trusting "
+              "a threshold tuned against optimistic fills.", ""]
     return "\n".join(lines) + "\n"
 
 

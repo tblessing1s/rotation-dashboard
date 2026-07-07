@@ -17,10 +17,33 @@ function ThetaLedgerCards({ theta }) {
     (a, r) => ({ count: a.count + (r.count || 0), net: a.net + (r.net_total || 0), drag: a.drag + (r.drag_total || 0) }),
     { count: 0, net: 0, drag: 0 },
   );
+  const slip = theta?.slippage;
   if (!hurdle && !rollTotals.count && weeks.length === 0) return null;
 
   return (
     <>
+      {slip && (
+        <div
+          className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200/90"
+          title="Paper fills are booked at the quoted midpoint; deep-ITM options rarely fill at mid, so realized juice runs below these figures."
+        >
+          {slip.mid_fill_caveat ? (
+            <>
+              <span className="font-semibold text-amber-300">Mid-fill assumption.</span>{" "}
+              These figures book paper fills at the quoted mid — realized fills run below them
+              (~{fmt(slip.roundtrip_haircut_pct, 1)}% of premium per weekly round trip, {slip.source}).
+              {" "}{slip.live_fills}/{slip.min_fills} live fills logged; the haircut becomes measured after that.
+            </>
+          ) : (
+            <>
+              <span className="font-semibold text-amber-300">Measured slippage.</span>{" "}
+              Realized fills run ~{fmt(slip.effective_slippage_pct, 2)}% below mid per leg
+              (from {slip.live_fills} live fills) — apply ~{fmt(slip.roundtrip_haircut_pct, 1)}% of premium
+              per weekly round trip when reading these paper figures.
+            </>
+          )}
+        </div>
+      )}
       {(hurdle > 0 || rollTotals.count > 0) && (
         <Card title="Theta ledger">
           {hurdle > 0 && (

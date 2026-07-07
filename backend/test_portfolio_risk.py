@@ -114,6 +114,61 @@ def test_portfolio_view_aggregates_and_sectors(isolated_state, monkeypatch):
     assert view["capital"]["reserve_required"] > 0
 
 
+# ---- correlation / concentration -----------------------------------------------
+def test_correlation_of_scaled_series_is_high():
+    spy = _trend_frame(seed=7)
+    a = _scaled_frame(spy, 1.4, base=128.0)
+    b = _scaled_frame(spy, 0.7, base=110.0)
+    # Both are deterministic functions of SPY returns -> ~perfectly correlated.
+    assert pr.correlation(a, b) == pytest.approx(1.0, abs=0.02)
+    assert pr.correlation(a, None) is None
+
+
+def test_concentration_flags_correlated_pair(isolated_state, monkeypatch):
+    import data_handler
+    spy = _trend_frame(seed=7)
+    frames = {"SPY": spy,
+              "NVDA": _scaled_frame(spy, 1.4, base=128.0),
+              "MSFT": _scaled_frame(spy, 1.3, base=140.0)}  # different sectors, ~1.0 corr
+    monkeypatch.setattr(data_handler, "get_daily",
+                        lambda s, force=False: frames.get(s.upper()))
+    state = log.load_state()
+    state["positions"] = [
+        {"ticker": "NVDA", "sector": "XLK", "status": "active",
+         "leap": {"strike": 90, "contracts": 5, "dte": 150,
+                  "current_bid": 20000, "cost_basis": 12000}, "short_calls": [], "shares": {"count": 0}},
+        {"ticker": "MSFT", "sector": "XLC", "status": "active",
+         "leap": {"strike": 100, "contracts": 5, "dte": 150,
+                  "current_bid": 21000, "cost_basis": 12000}, "short_calls": [], "shares": {"count": 0}},
+    ]
+    log.save_state(state)
+    conc = pr.concentration(log.load_state())
+    assert conc["applicable"] is True
+    assert conc["max_correlation"] >= config.CORRELATION_WARN_THRESHOLD
+    assert conc["high_correlation_pairs"] and conc["warn"] is True
+    out = __import__("alerts").check_book_correlation(log.load_state())
+    assert any(a["type"] == "BOOK_CORRELATION" for a in out)
+    assert out[0]["ticker"] is None  # book-level
+
+
+def test_concentration_not_applicable_with_one_position(isolated_state, monkeypatch):
+    import data_handler
+    import alerts
+    spy = _trend_frame(seed=7)
+    frames = {"SPY": spy, "NVDA": _scaled_frame(spy, 1.4, base=128.0)}
+    monkeypatch.setattr(data_handler, "get_daily",
+                        lambda s, force=False: frames.get(s.upper()))
+    state = log.load_state()
+    state["positions"] = [
+        {"ticker": "NVDA", "sector": "XLK", "status": "active",
+         "leap": {"strike": 90, "contracts": 5, "dte": 150,
+                  "current_bid": 20000, "cost_basis": 12000}, "short_calls": [], "shares": {"count": 0}}]
+    log.save_state(state)
+    conc = pr.concentration(log.load_state())
+    assert conc["applicable"] is False and conc["warn"] is False
+    assert alerts.check_book_correlation(log.load_state()) == []
+
+
 # ---- maintenance ---------------------------------------------------------------
 def test_nightly_refresh_updates_position_dividends(isolated_state, monkeypatch):
     import dividends

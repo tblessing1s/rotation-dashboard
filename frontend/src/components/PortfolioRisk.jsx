@@ -46,6 +46,24 @@ export default function PortfolioRisk() {
           Reserve underfunded — {money(cap.operating_cash)} cash vs {money(cap.reserve_required)} required.
         </p>
       )}
+      {/* A live risk warning stays visible even with the details collapsed. */}
+      {data.concentration?.warn && (
+        <div className="mt-4 rounded-lg border border-amber-500/40 bg-amber-500/10 p-3">
+          <div className="flex flex-wrap items-center gap-2 text-sm font-semibold text-amber-300">
+            <span>⚠ Concentration — diversification thinner than 1/sector implies</span>
+            {data.concentration.max_correlation != null && (
+              <span className="text-xs font-normal text-amber-400/80">
+                max pair corr {fmt(data.concentration.max_correlation, 2)}
+                {data.concentration.beta_adj_leverage != null &&
+                  ` · β-adj Δ ${fmt(data.concentration.beta_adj_leverage, 2)}× capital`}
+              </span>
+            )}
+          </div>
+          <ul className="mt-1 list-disc pl-5 text-xs text-amber-200/90">
+            {data.concentration.warnings.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </div>
+      )}
       {open && (<>
       <div className="mt-4 grid gap-4 sm:grid-cols-2">
         <div>

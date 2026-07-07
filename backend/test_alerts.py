@@ -153,6 +153,94 @@ def test_defend_position_requires_live_price_below_strike(monkeypatch):
     assert "131.00" in out[0]["message"] and "last close 130.00" in out[0]["message"]
 
 
+def _roll(ticker, days_ago, reason="defend", net=-50.0):
+    d = (date.today() - timedelta(days=days_ago)).isoformat()
+    return {"roll_id": f"{ticker}-{days_ago}", "ticker": ticker, "date": d,
+            "reason": reason, "net": net}
+
+
+def test_whipsaw_exit_trips_on_defensive_roll_count():
+    entry = (date.today() - timedelta(days=90)).isoformat()
+    rolls = [_roll("PG", 1), _roll("PG", 8), _roll("PG", 15)]  # 3 defends in 4wk
+    state = _state(_pos(entry_date=entry))
+    state["roll_ledger"] = {"rolls": rolls, "by_ticker": {}}
+    out = alerts.check_whipsaw_exit(state)
+    assert len(out) == 1 and out[0]["type"] == "WHIPSAW_EXIT" and out[0]["severity"] == "CRITICAL"
+    assert out[0]["data"]["rolls_trip"] is True and out[0]["data"]["defensive_rolls"] == 3
+    assert "EXIT" in out[0]["action"]
+
+
+def test_whipsaw_exit_trips_on_cumulative_drag():
+    entry = (date.today() - timedelta(days=90)).isoformat()
+    # Only 2 defends (below the count bar) but heavy drag: 800 / 12250 capital ~6.5% > 5%.
+    rolls = [_roll("PG", 1, net=-400.0), _roll("PG", 8, net=-400.0)]
+    state = _state(_pos(entry_date=entry))
+    state["roll_ledger"] = {"rolls": rolls, "by_ticker": {}}
+    out = alerts.check_whipsaw_exit(state)
+    assert len(out) == 1 and out[0]["data"]["drag_trip"] is True
+    assert out[0]["data"]["rolls_trip"] is False
+
+
+def test_whipsaw_exit_quiet_when_under_thresholds_and_out_of_window():
+    entry = (date.today() - timedelta(days=180)).isoformat()
+    # 1 recent defend + 2 OLD ones outside the 4-week window; small drag -> no trip.
+    rolls = [_roll("PG", 2), _roll("PG", 40), _roll("PG", 50)]
+    state = _state(_pos(entry_date=entry))
+    state["roll_ledger"] = {"rolls": rolls, "by_ticker": {}}
+    out = alerts.check_whipsaw_exit(state)
+    assert out == []
+    # Credit rolls (net >= 0) are not drag and non-defend reasons don't count.
+    scheduled = [_roll("PG", 1, reason="scheduled", net=200.0),
+                 _roll("PG", 8, reason="75%-rule", net=150.0)]
+    state["roll_ledger"] = {"rolls": scheduled, "by_ticker": {}}
+    assert alerts.check_whipsaw_exit(state) == []
+
+
+def test_leap_health_juice_adequacy_fields(monkeypatch):
+    import data_handler
+    import leap_policy
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
+    p = _pos()  # leap cost_basis 12250; PG is a stock -> ~1.88%/wk target
+    p["trailing_avg_weekly_juice"] = 130.0  # 130/12250 = 1.06% < target
+    h = leap_policy.leap_health(p, stock_price=128.0)
+    assert h["weekly_juice_yield_pct"] == pytest.approx(1.06, abs=0.02)
+    assert h["juice_target_pct"] == pytest.approx(1.88, abs=0.01)
+    assert h["juice_adequate"] is False
+    p["trailing_avg_weekly_juice"] = 300.0  # 2.45% >= target
+    assert leap_policy.leap_health(p, stock_price=128.0)["juice_adequate"] is True
+    # No trailing juice yet (fresh position) -> unknown, never flagged.
+    p["trailing_avg_weekly_juice"] = None
+    assert leap_policy.leap_health(p, stock_price=128.0)["juice_adequate"] is None
+
+
+def test_juice_inadequate_owns_the_band_above_capital_burn(monkeypatch):
+    import leap_policy
+    p = _pos()
+
+    def _health(status, adequate, yld=1.1, tgt=1.88):
+        monkeypatch.setattr(leap_policy, "leap_health", lambda pos, **k: {
+            "juice_adequate": adequate, "maintenance_status": status,
+            "weekly_juice_yield_pct": yld, "juice_target_pct": tgt,
+            "trailing_avg_weekly_juice": 130.0})
+
+    # Below target but still self-funding -> the band this alert owns.
+    _health("self_funding", False)
+    out = alerts.check_juice_inadequate(_state(p))
+    assert len(out) == 1 and out[0]["type"] == "JUICE_INADEQUATE"
+    assert out[0]["data"]["weekly_juice_yield_pct"] == 1.1
+    # Clearing the target -> quiet.
+    _health("self_funding", True, yld=2.0)
+    assert alerts.check_juice_inadequate(_state(p)) == []
+    # Burning (below theta) -> capital_burn owns it, this stays quiet (no overlap).
+    _health("burning", False, yld=0.2)
+    assert alerts.check_juice_inadequate(_state(p)) == []
+    # Warming up (adequacy unknown) -> quiet.
+    monkeypatch.setattr(leap_policy, "leap_health", lambda pos, **k: {
+        "juice_adequate": None, "maintenance_status": "unknown",
+        "weekly_juice_yield_pct": None, "juice_target_pct": None})
+    assert alerts.check_juice_inadequate(_state(p)) == []
+
+
 def test_circuit_breaker_trips_at_or_below_line(monkeypatch):
     monkeypatch.setattr(alerts, "_last_close", lambda t: 128.0)
     p = _pos(circuit_breaker={"price": 131.0})
@@ -190,6 +278,56 @@ def test_assignment_risk_extrinsic_vs_dividend(monkeypatch):
     # Ex-div after the short's expiry -> the short doesn't span the dividend.
     late = {"ex_date": (today + timedelta(days=10)).isoformat(), "amount": 0.55}
     assert alerts.check_assignment_risk(_state(_pos(dividend=late, short_calls=[sc]))) == []
+
+
+def test_assignment_risk_collapsed_extrinsic_no_dividend(monkeypatch):
+    """Base trigger: a deep-ITM short whose extrinsic has collapsed to a few
+    cents is assignable any time, no dividend required."""
+    monkeypatch.setattr(alerts, "_last_close", lambda t: 128.0)
+    # ITM 118 short marked 10.03 -> intrinsic 10.00, extrinsic 0.03 < 0.10 floor.
+    sc = {"strike": 118, "contracts": 5, "dte": 3, "current_bid": 10.03,
+          "entry_premium_total": 5100.0}
+    out = alerts.check_assignment_risk(_state(_pos(short_calls=[sc])))
+    assert len(out) == 1 and out[0]["type"] == "ASSIGNMENT_RISK"
+    assert out[0]["data"]["trigger"] == "extrinsic"
+    assert "no ex-div required" in out[0]["message"]
+    # Still meaningful time value -> no risk.
+    rich = dict(sc, current_bid=10.60)  # extrinsic 0.60
+    assert alerts.check_assignment_risk(_state(_pos(short_calls=[rich]))) == []
+    # OTM short with thin extrinsic is never early-assigned absent a dividend.
+    otm = {"strike": 132, "contracts": 5, "dte": 3, "current_bid": 0.04,
+           "entry_premium_total": 600.0}
+    assert alerts.check_assignment_risk(_state(_pos(short_calls=[otm]))) == []
+    # A dividend the extrinsic no longer covers escalates (preferred over base).
+    div = {"ex_date": (date.today() + timedelta(days=1)).isoformat(), "amount": 0.55}
+    out2 = alerts.check_assignment_risk(_state(_pos(dividend=div, short_calls=[sc])))
+    assert len(out2) == 1 and out2[0]["data"]["trigger"] == "dividend"
+
+
+def test_earnings_date_stale_and_conflict(monkeypatch):
+    import earnings
+    monkeypatch.setattr(config, "_demo_mode", False)
+    # Stale cache entry -> fires.
+    monkeypatch.setattr(earnings, "cached_earnings", lambda t: {
+        "ticker": t, "date": "2026-08-01", "stale": True, "conflict": False,
+        "fetched_at": "2026-06-01T00:00:00", "source": "cache"})
+    out = alerts.check_earnings_date_stale(_state(_pos()))
+    assert len(out) == 1 and out[0]["type"] == "EARNINGS_DATE_STALE"
+    assert "hasn't refreshed" in out[0]["message"]
+    # Provider conflict -> fires with the disagree message.
+    monkeypatch.setattr(earnings, "cached_earnings", lambda t: {
+        "ticker": t, "date": "2026-08-01", "stale": False, "conflict": True,
+        "av_date": "2026-08-01", "schwab_date": "2026-09-01", "source": "cache"})
+    out2 = alerts.check_earnings_date_stale(_state(_pos()))
+    assert len(out2) == 1 and "disagrees" in out2[0]["message"]
+    # Fresh + agreeing -> quiet.
+    monkeypatch.setattr(earnings, "cached_earnings", lambda t: {"stale": False, "conflict": False})
+    assert alerts.check_earnings_date_stale(_state(_pos())) == []
+    # Demo mode -> skipped (ops condition about the real calendar).
+    monkeypatch.setattr(config, "_demo_mode", True)
+    monkeypatch.setattr(earnings, "cached_earnings", lambda t: {"stale": True, "conflict": False})
+    assert alerts.check_earnings_date_stale(_state(_pos())) == []
+    monkeypatch.setattr(config, "_demo_mode", False)
 
 
 def test_expiry_friday():
@@ -393,12 +531,36 @@ def test_v1_state_file_migrates_on_load(isolated_state):
 def test_due_slots_market_days_and_once_per_day():
     et = alert_scheduler.ET
     wed_1003 = datetime(2026, 7, 1, 10, 3, tzinfo=et)
-    assert alert_scheduler.due_slots(wed_1003, {}) == ["08:30", "10:00"]
-    already = {"08:30": date(2026, 7, 1), "10:00": date(2026, 7, 1)}
+    # Fixed anchors + the post-open gap-cadence slots (09:40, 09:50) all past by 10:03.
+    assert alert_scheduler.due_slots(wed_1003, {}) == ["08:30", "09:40", "09:50", "10:00"]
+    already = {s: date(2026, 7, 1) for s in ("08:30", "09:40", "09:50", "10:00")}
     assert alert_scheduler.due_slots(wed_1003, already) == []
     yesterday = {"08:30": date(2026, 6, 30)}
-    assert alert_scheduler.due_slots(wed_1003, yesterday) == ["08:30", "10:00"]
+    assert alert_scheduler.due_slots(wed_1003, yesterday) == ["08:30", "09:40", "09:50", "10:00"]
     sat = datetime(2026, 7, 4, 12, 0, tzinfo=et)
     assert alert_scheduler.due_slots(sat, {}) == []
     early = datetime(2026, 7, 1, 7, 0, tzinfo=et)
     assert alert_scheduler.due_slots(early, {}) == []
+
+
+def test_open_gap_cadence_slots_close_the_blind_window():
+    """The post-open window (09:30→10:00) is covered by tighter gap slots so a
+    9:31 gap through a circuit breaker is seen well before the 10:00 anchor."""
+    et = alert_scheduler.ET
+    # Just after 09:40: the first gap slot is due, the pre-market anchor too.
+    at_0941 = datetime(2026, 7, 1, 9, 41, tzinfo=et)
+    assert alert_scheduler.due_slots(at_0941, {"08:30": date(2026, 7, 1)}) == ["09:40"]
+    # 09:35 (inside the window, before the first gap slot) — nothing new yet.
+    at_0935 = datetime(2026, 7, 1, 9, 35, tzinfo=et)
+    assert alert_scheduler.due_slots(at_0935, {"08:30": date(2026, 7, 1)}) == []
+    assert config._open_gap_slots() == ["09:40", "09:50", "10:00"]
+
+
+def test_post_close_slot_fires_the_evening():
+    """A post-close slot (16:15) is on the schedule so confirmed-close signals
+    and end-of-day breaches page the same evening, not next morning."""
+    assert config.POST_CLOSE_SLOT_ET in config.ALERT_SCHEDULE_ET
+    et = alert_scheduler.ET
+    ran = {s: date(2026, 7, 1) for s in config.ALERT_SCHEDULE_ET if s < "16:15"}
+    at_1620 = datetime(2026, 7, 1, 16, 20, tzinfo=et)
+    assert alert_scheduler.due_slots(at_1620, ran) == ["16:15"]

@@ -21,7 +21,7 @@ broker data — it detects and suggests; only you commit truth to the record.
   reconciliation before the alert pass — assignments materialize overnight, and
   pre-market is when you can act calmly.
 - **Nightly.** The maintenance job runs it again.
-- **On demand.** Checklist tab → Data health → **Reconcile now**, or
+- **On demand.** Settings tab → Data health → **Reconcile now**, or
   `POST /api/reconcile`.
 
 It runs whenever Schwab is connected — a **read-only** account call, so

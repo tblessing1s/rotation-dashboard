@@ -391,14 +391,28 @@ def api_theta_ledger():
                 "by_ticker": {k: v for k, v in roll_ledger.get("by_ticker", {}).items()
                               if k.upper() == ticker.upper()},
             }
+        import slippage
         out = {"weeks": weeks, "totals": totals,
                "extrinsic_summary": ledger.get("extrinsic_summary", {}),
                "extrinsic_payback": state.get("extrinsic_payback", {}),
-               "roll_ledger": roll_ledger}
+               "roll_ledger": roll_ledger,
+               # Paper juice is booked at the quoted mid; this caveat/haircut says
+               # how far realized fills will run below it (measured once live).
+               "slippage": slippage.report(state)}
         if period in ("week", "month", "ytd"):
             key = {"week": "this_week", "month": "this_month", "ytd": "ytd"}[period]
             out["period"] = {"period": period, "net_juice": totals.get(key)}
         return jsonify(out)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/slippage")
+def api_slippage():
+    """Realized paper-fill slippage vs the quoted mid (mid-fill caveat + haircut)."""
+    try:
+        import slippage
+        return jsonify(slippage.report(log.load_state()))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

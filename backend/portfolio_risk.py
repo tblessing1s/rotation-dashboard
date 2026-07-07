@@ -105,6 +105,94 @@ def position_risk(p: dict, spy_df) -> dict | None:
     }
 
 
+def _returns(df, lookback: int):
+    return df["Close"].astype(float).pct_change().dropna().tail(lookback)
+
+
+def correlation(df_a, df_b, lookback: int = config.CORRELATION_LOOKBACK) -> float | None:
+    """Pearson correlation of two tickers' daily returns over `lookback`
+    sessions, on their overlapping dates. None when either frame is missing or
+    the overlap is too short / degenerate."""
+    if df_a is None or df_b is None:
+        return None
+    a, b = _returns(df_a, lookback), _returns(df_b, lookback)
+    joined = a.to_frame("a").join(b.to_frame("b"), how="inner").dropna()
+    if len(joined) < 30 or joined["a"].std() == 0 or joined["b"].std() == 0:
+        return None
+    return float(joined["a"].corr(joined["b"]))
+
+
+def concentration(state: dict, rows: list[dict] | None = None) -> dict:
+    """Cross-position concentration the 1/sector rule can't see: pairwise trailing
+    correlation of the open underlyings, plus the book's net SPY-beta-adjusted
+    delta as a multiple of deployed capital. Warns when two names are too
+    correlated to count as diversified, or when the beta-adjusted book delta says
+    the 'spread' is really one directional bet. Only meaningful with ≥2 open
+    positions. Pure (cached data only) — no cash/Schwab side effects, so the alert
+    engine can call it directly."""
+    open_pos = [p for p in state.get("positions", []) if p.get("status") != "closed"]
+    tickers = [p.get("ticker", "") for p in open_pos]
+    applicable = len(open_pos) >= 2
+
+    dfs = {t: data_handler.get_daily(t) for t in tickers}
+    pairs, max_corr = [], None
+    if applicable:
+        for i in range(len(tickers)):
+            for j in range(i + 1, len(tickers)):
+                ta, tb = tickers[i], tickers[j]
+                c = correlation(dfs.get(ta), dfs.get(tb))
+                if c is None:
+                    continue
+                pairs.append({"a": ta, "b": tb, "correlation": round(c, 2),
+                              "high": c >= config.CORRELATION_WARN_THRESHOLD})
+                max_corr = c if max_corr is None else max(max_corr, c)
+
+    if rows is None:
+        spy_df = data_handler.get_daily(config.BENCHMARK)
+        rows = []
+        for p in open_pos:
+            try:
+                r = position_risk(p, spy_df)
+            except Exception:  # noqa: BLE001 — one bad position must not blank the check
+                r = None
+            if r:
+                rows.append(r)
+    beta_adj = [r["delta_dollars_spy_adj"] for r in rows
+                if r.get("delta_dollars_spy_adj") is not None]
+    net_beta_adj = round(sum(beta_adj), 2) if beta_adj else None
+
+    import position_manager
+    deployed = position_manager.deployed_capital(state)
+    leverage = (round(abs(net_beta_adj) / deployed, 2)
+                if net_beta_adj is not None and deployed else None)
+
+    warnings, high_pairs = [], [p for p in pairs if p["high"]]
+    if applicable:
+        for hp in high_pairs:
+            warnings.append(
+                f"{hp['a']} and {hp['b']} are {hp['correlation']:.2f} correlated "
+                f"(≥ {config.CORRELATION_WARN_THRESHOLD:.2f}) — one shock hits both, "
+                f"despite satisfying the 1-per-sector rule.")
+        if leverage is not None and leverage >= config.BETA_ADJ_LEVERAGE_WARN:
+            warnings.append(
+                f"Beta-adjusted book delta ${net_beta_adj:,.0f} is {leverage:g}× deployed "
+                f"capital (≥ {config.BETA_ADJ_LEVERAGE_WARN:g}×) — the book is effectively "
+                f"one directional bet.")
+    return {
+        "applicable": applicable,
+        "pairs": pairs,
+        "high_correlation_pairs": high_pairs,
+        "max_correlation": round(max_corr, 2) if max_corr is not None else None,
+        "correlation_threshold": config.CORRELATION_WARN_THRESHOLD,
+        "correlation_lookback": config.CORRELATION_LOOKBACK,
+        "net_beta_adj_delta_dollars": net_beta_adj,
+        "beta_adj_leverage": leverage,
+        "beta_adj_leverage_threshold": config.BETA_ADJ_LEVERAGE_WARN,
+        "warnings": warnings,
+        "warn": bool(warnings),
+    }
+
+
 def portfolio_view(state: dict) -> dict:
     spy_df = data_handler.get_daily(config.BENCHMARK)
     rows = []
@@ -164,4 +252,7 @@ def portfolio_view(state: dict) -> dict:
             {"sector": s, "capital": c, "pct": round(c / total_cap * 100, 1)}
             for s, c in sorted(sectors.items(), key=lambda kv: -kv[1])
         ],
+        # Cross-position correlation / beta-adjusted concentration the 1/sector
+        # rule can't see. Reuses the rows already priced above.
+        "concentration": concentration(state, rows=rows),
     }

@@ -383,6 +383,18 @@ def _commit(payload, ticker, action, contracts, strike, stock_price, price_sourc
     execution, position_update = _build_leg(payload, ticker, action, strike, contracts, stock_price)
     execution["mode"] = mode
     execution["price_source"] = price_source
+    # Fill-quality provenance for the slippage / mid-fill caveat: a paper fill is
+    # booked at the quoted MIDPOINT (fill == mid), a live fill at the broker's
+    # actual price. Capturing the reference mid (the placement limit for a live
+    # fill; the fill itself for paper) lets realized slippage be measured later.
+    execution["fill_assumption"] = "mid" if mode == "logged" else "broker"
+    qm = payload.get("quoted_mid_per_share")
+    if qm is None and mode == "logged":
+        try:
+            qm = round(_limit_price(action, payload), 4)
+        except (TypeError, ValueError):
+            qm = None
+    execution["quoted_mid_per_share"] = qm
     stored = log.append_execution(execution)
 
     state = log.load_state()
@@ -468,6 +480,10 @@ def _commit_from_pending(rec: dict, fill_price):
     the right payload field so the logged execution reflects the real fill."""
     payload = dict(rec.get("payload") or {})
     action = rec["action"]
+    # Reference mid at order time (the placement limit was set at the quoted mid),
+    # carried onto the execution so realized slippage = broker fill vs this mid.
+    if rec.get("limit_price") is not None:
+        payload["quoted_mid_per_share"] = round(float(rec["limit_price"]), 4)
     if fill_price is not None:
         if action == "buy_leap":
             payload["execution_price"] = fill_price * 100
@@ -1433,6 +1449,12 @@ def defend_recommendation(ticker: str) -> dict:
         new_extrinsic = round(max(bs - max(price - new_strike, 0.0), 0.0), 2)
     net = (round((new_premium - float(buyback)) * contracts * 100, 2)
            if (new_premium is not None and buyback is not None) else None)
+    # Whipsaw circuit breaker: if this position has already rolled down too many
+    # times / bled too much drag, the correct move is to EXIT, not defend again —
+    # surface that on the very recommendation the operator opens to roll.
+    import position_manager
+    whipsaw = position_manager.whipsaw_status(
+        pos, (state.get("roll_ledger") or {}).get("rolls", []))
     return {
         "ticker": ticker,
         "breached": True,
@@ -1443,6 +1465,7 @@ def defend_recommendation(ticker: str) -> dict:
         "atr_mult": atr_mult,
         "itm_pct": itm_pct,
         "posture": posture,
+        "whipsaw": whipsaw,
         "current_short": {"strike": sc.get("strike"), "contracts": contracts,
                           "dte": dte, "expiration": sc.get("expiration"),
                           "buyback_per_share": buyback},
