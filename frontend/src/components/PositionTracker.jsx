@@ -97,18 +97,36 @@ function LeapHealth({ ticker, health }) {
     <div className="mt-4 border-t border-slate-800 pt-3">
       <div className="mb-1 flex items-center justify-between">
         <span className="text-xs uppercase tracking-wide text-slate-500">LEAP health</span>
-        {health.roll_due && (
-          <button
-            onClick={showEstimate}
-            title={(health.roll_reasons || []).join("; ") || "LEAP roll recommended"}
-            className="rounded-full border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300 hover:bg-amber-500/25"
-          >
-            ROLL LEAP DUE
-          </button>
-        )}
+        <span className="flex items-center gap-1.5">
+          {health.juice_adequate === false && (
+            <span
+              title={`Trailing weekly juice ${fmt(health.weekly_juice_yield_pct, 2)}% of LEAP capital is below the ${fmt(health.juice_target_pct, 2)}% income target — this position no longer clears the strategy's income bar. Roll to a better strike/week or redeploy the capital.`}
+              className="cursor-help rounded-full border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300"
+            >
+              JUICE LOW
+            </span>
+          )}
+          {health.roll_due && (
+            <button
+              onClick={showEstimate}
+              title={(health.roll_reasons || []).join("; ") || "LEAP roll recommended"}
+              className="rounded-full border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300 hover:bg-amber-500/25"
+            >
+              ROLL LEAP DUE
+            </button>
+          )}
+        </span>
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-300">
         <span>DTE <span className="font-semibold text-slate-100">{health.leap_dte ?? "—"}</span></span>
+        {health.weekly_juice_yield_pct != null && (
+          <span title={`Trailing weekly juice as a % of LEAP capital vs the ${fmt(health.juice_target_pct, 2)}% income target`}>
+            juice <span className={`font-semibold ${health.juice_adequate === false ? "text-amber-300" : "text-slate-100"}`}>
+              {fmt(health.weekly_juice_yield_pct, 2)}%
+            </span>
+            <span className="text-slate-500"> / {fmt(health.juice_target_pct, 2)}% tgt</span>
+          </span>
+        )}
         <span title={health.leap_extrinsic_below_intrinsic ? "Mark quoted below intrinsic — a liquidity signal, not real negative extrinsic" : ""}>
           extrinsic <span className="font-semibold text-slate-100">{money(health.leap_extrinsic_remaining)}</span>
           {health.leap_extrinsic_weeks_remaining != null && (
@@ -323,6 +341,12 @@ function DefendPanel({ ticker, onStage }) {
           <> · cost basis {data.cost_basis_effect <= 0 ? "−" : "+"}{money(Math.abs(data.cost_basis_effect))}</>
         )}
       </p>
+      {data.whipsaw?.tripped && (
+        <p className="mt-2 rounded border border-rose-500/50 bg-rose-500/15 px-2 py-1 text-xs font-medium text-rose-200">
+          ⚠ Whipsaw — consider EXITing instead of rolling again ({(data.whipsaw.reasons || []).join("; ")}).
+          Another roll-down just locks a lower strike.
+        </p>
+      )}
       <p className="mt-0.5 text-xs text-slate-500">
         Estimated from trailing vol — the staged roll re-prices from the live chain.
       </p>
@@ -484,6 +508,15 @@ export default function PositionTracker({ intent, onIntentHandled } = {}) {
 
             <LeapHealth ticker={p.ticker} health={p.leap_health} />
 
+            {p.whipsaw?.tripped && (
+              <div className="mt-3 rounded-lg border border-rose-500/50 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+                <span className="font-semibold text-rose-300">⚠ Whipsaw — exit, don't defend again.</span>{" "}
+                {(p.whipsaw.reasons || []).join("; ")}. The roll-down spiral is bleeding this
+                position while the kill switch and circuit breaker stay quiet — another roll-down
+                just locks a lower strike.
+              </div>
+            )}
+
             {/* Open shorts — each rollable in place (pick week + strike) */}
             <div className="mt-4 border-t border-slate-800 pt-3">
               <div className="mb-2 flex items-center justify-between">
@@ -550,7 +583,9 @@ export default function PositionTracker({ intent, onIntentHandled } = {}) {
                             title={sc.assignment_risk.note}
                             className="cursor-help rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300"
                           >
-                            assignment risk (div {fmt(sc.assignment_risk.dividend, 2)} ex {sc.assignment_risk.ex_date})
+                            {sc.assignment_risk.trigger === "extrinsic"
+                              ? `assignment risk (extrinsic ${fmt(sc.assignment_risk.extrinsic, 2)})`
+                              : `assignment risk (div ${fmt(sc.assignment_risk.dividend, 2)} ex ${sc.assignment_risk.ex_date})`}
                           </span>
                         )}
                         {sc.dte != null && sc.dte <= 2 && (

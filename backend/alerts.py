@@ -46,6 +46,7 @@ ALERT_TYPES = {
     "LEAP_ROLL_DUE": ("HIGH", "PROPOSED_DEFAULT: LEAP DTE below the floor or extrinsic runway too short -> roll the long leg"),
     "CAPITAL_BURN": ("HIGH", "PROPOSED_DEFAULT: weekly juice not covering LEAP decay -> the flywheel is running backwards"),
     "JUICE_INADEQUATE": ("MEDIUM", "HARD_CFM_RULE: trailing weekly juice below the strategy's income target while capital is intact -> reassess/redeploy"),
+    "BOOK_CORRELATION": ("MEDIUM", "PROPOSED_DEFAULT: two open underlyings too correlated / beta-adjusted book delta too concentrated -> the 1/sector diversification is thinner than it looks"),
     "DELTA_VELOCITY": ("MEDIUM", "PROPOSED_DEFAULT: LEAP delta bleeding fast while still above the 0.50 floor"),
     "SHORT_STOCK_DETECTED": ("CRITICAL", "HARD_CFM_RULE: assignment created short stock against the LEAP -> buy back the stock, never exercise the LEAP"),
     "RECONCILE_DIRTY": ("HIGH", "HARD_CFM_RULE: state.json diverged from the broker account -> freeze the position, resolve before trading it"),
@@ -634,6 +635,38 @@ def check_reconcile_dirty(state: dict) -> list[dict]:
     return out
 
 
+def check_book_correlation(state: dict) -> list[dict]:
+    """Two positions can satisfy the 1-per-sector cap while being ~0.9 correlated
+    (e.g. a mega-cap in XLK and one in XLC) — the book is really one bet. Warn on
+    high trailing correlation between open underlyings, or when the beta-adjusted
+    book delta says the 'spread' is one directional bet. Book-level (no ticker)."""
+    import portfolio_risk
+    conc = portfolio_risk.concentration(state)
+    if not conc.get("warn"):
+        return []
+    out = []
+    for hp in conc.get("high_correlation_pairs", []):
+        out.append(_alert(
+            "BOOK_CORRELATION", None,
+            (f"{hp['a']} and {hp['b']} are {hp['correlation']:.2f} correlated — the book's "
+             f"1-per-sector diversification is thinner than it looks."),
+            "Two open underlyings move together, so a single shock hits both — trim or "
+            "avoid adding more correlated exposure.",
+            {"pair": hp, "correlation_threshold": conc.get("correlation_threshold")},
+            key=f"corr:{hp['a']}:{hp['b']}"))
+    lev, bar = conc.get("beta_adj_leverage"), conc.get("beta_adj_leverage_threshold")
+    if lev is not None and bar is not None and lev >= bar:
+        out.append(_alert(
+            "BOOK_CORRELATION", None,
+            (f"Beta-adjusted book delta is {lev:g}× deployed capital — the book is "
+             f"effectively one directional (index-beta) bet."),
+            "Beta-adjusted delta concentration is high: the positions aren't diversifying — "
+            "reassess sizing / net directional exposure.",
+            {"net_beta_adj_delta_dollars": conc.get("net_beta_adj_delta_dollars"),
+             "beta_adj_leverage": lev, "threshold": bar}, key="leverage"))
+    return out
+
+
 def check_reconcile_stale(state: dict) -> list[dict]:
     """Reconciliation hasn't run successfully within RECONCILE_STALE_HOURS while
     Schwab is connected and positions are open. Silence is itself a failure
@@ -686,6 +719,7 @@ EVALUATORS = [
     check_short_stock_detected,
     check_reconcile_dirty,
     check_reconcile_stale,
+    check_book_correlation,
 ]
 
 

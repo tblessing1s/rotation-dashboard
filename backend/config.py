@@ -482,6 +482,21 @@ CIRCUIT_BREAKER_ATR_MULT = 2.0
 # Flip to True to enforce; the Positions tab surfaces the block either way.
 BLOCK_ACCUMULATION_ON_RS_DETERIORATION = False
 
+# ---- Book concentration / correlation --------------------------------------
+# MAX_POSITIONS_PER_SECTOR stops two names in the SAME sector, but two mega-caps
+# in DIFFERENT sectors (e.g. a name in XLK and one in XLC) can still be ~0.9
+# correlated — the 1/sector rule is satisfied while the book is really one bet.
+# The portfolio-risk card already computes per-name beta and beta-adjusted delta;
+# these bars turn that into a warning (portfolio_risk.concentration).
+# PROPOSED_DEFAULT — trailing daily-return correlation above which two open
+# underlyings are "too correlated to count as diversified".
+CORRELATION_WARN_THRESHOLD = 0.80
+CORRELATION_LOOKBACK = 60         # trailing sessions for the correlation estimate
+# PROPOSED_DEFAULT — net SPY-beta-adjusted book delta as a multiple of deployed
+# capital, above which the book is effectively one directional (index-beta) bet
+# even if it's spread across sectors.
+BETA_ADJ_LEVERAGE_WARN = 1.5
+
 # ---- Capital ---------------------------------------------------------------
 CAPITAL = 35000
 RESERVE_REQUIRED = 13000

@@ -336,6 +336,16 @@ suggestion (`executor.roll_suggestion`), and the `DEFEND_POSITION` alert
   the 2×ATR defensive-reserve status, and the sector-exposure breakdown.
   Greeks imply vol from each leg's stored mark, so the card works offline and
   in demo mode; partially-priced positions are marked.
+- **Correlation / beta-adjusted concentration** (`portfolio_risk.concentration`,
+  the `BOOK_CORRELATION` alert): the 1-per-sector cap stops two names in the same
+  sector, but two mega-caps in *different* sectors (e.g. XLK and XLC) can still be
+  ~0.9 correlated — the rule is satisfied while the book is really one bet. The
+  check reads the card's own numbers: it warns when any pair of open underlyings
+  exceeds `CORRELATION_WARN_THRESHOLD` (0.80) trailing correlation, or when the
+  net SPY-beta-adjusted book delta exceeds `BETA_ADJ_LEVERAGE_WARN` (1.5×) of
+  deployed capital (the "spread" is one directional bet). Only meaningful with ≥2
+  open positions; surfaced as a banner on the Positions-tab risk card and the
+  book-level `BOOK_CORRELATION` alert. Both thresholds are PROPOSED_DEFAULT.
 - **Earnings & dividends as first-class cached data**
   (`backend/maintenance.py`): a nightly slot (`MAINTENANCE_ET`, 17:30 ET,
   every calendar day) refreshes the earnings + dividend day-caches for every
