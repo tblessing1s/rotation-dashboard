@@ -36,14 +36,18 @@ ALERT_TYPES = {
     "CIRCUIT_BREAKER": ("CRITICAL", "HARD_CFM_RULE: line-in-the-sand exit price stored at entry"),
     "DELTA_UNCOVERED": ("HIGH", "HARD_CFM_RULE: LEAP below 0.50 delta (or below the short's delta) no longer covers the short"),
     "DEFEND_POSITION": ("HIGH", "HARD_CFM_RULE: underlying closed below the short strike -> defensive roll-down"),
+    "WHIPSAW_EXIT": ("CRITICAL", "HARD_CFM_RULE: defend whipsaw (too many roll-downs / too much cumulative drag) -> exit, not another defend"),
     "ASSIGNMENT_RISK": ("HIGH", "HARD_CFM_RULE: short extrinsic below the coming dividend invites early assignment"),
     "TOKEN_EXPIRY": ("HIGH", "PROPOSED_DEFAULT: Schwab refresh token dies at ~7 days; re-auth by day 5"),
     "BUYBACK_75": ("MEDIUM", "HARD_CFM_RULE: 75% of the sale premium captured with >2 DTE -> roll early"),
     "EARNINGS_WINDOW": ("MEDIUM", "HARD_CFM_RULE: roll deep-ITM or exit before the report"),
+    "EARNINGS_DATE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: a held name's earnings date hasn't refreshed recently (or providers disagree) -> the guardrail may be running blind"),
     "EXPIRY_FRIDAY": ("MEDIUM", "HARD_CFM_RULE: weekly shorts are rolled, never left to expire unmanaged"),
     "DATA_STALE": ("MEDIUM", "PROPOSED_DEFAULT: cached OHLCV older than expected on a market day"),
     "LEAP_ROLL_DUE": ("HIGH", "PROPOSED_DEFAULT: LEAP DTE below the floor or extrinsic runway too short -> roll the long leg"),
     "CAPITAL_BURN": ("HIGH", "PROPOSED_DEFAULT: weekly juice not covering LEAP decay -> the flywheel is running backwards"),
+    "JUICE_INADEQUATE": ("MEDIUM", "HARD_CFM_RULE: trailing weekly juice below the strategy's income target while capital is intact -> reassess/redeploy"),
+    "BOOK_CORRELATION": ("MEDIUM", "PROPOSED_DEFAULT: two open underlyings too correlated / beta-adjusted book delta too concentrated -> the 1/sector diversification is thinner than it looks"),
     "DELTA_VELOCITY": ("MEDIUM", "PROPOSED_DEFAULT: LEAP delta bleeding fast while still above the 0.50 floor"),
     "SHORT_STOCK_DETECTED": ("CRITICAL", "HARD_CFM_RULE: assignment created short stock against the LEAP -> buy back the stock, never exercise the LEAP"),
     "RECONCILE_DIRTY": ("HIGH", "HARD_CFM_RULE: state.json diverged from the broker account -> freeze the position, resolve before trading it"),
@@ -65,6 +69,7 @@ _ROLL_ACTIONS = {
 _FOCUS_ACTIONS = {
     "KILL_SWITCH_SECTOR", "KILL_SWITCH_SPY", "CIRCUIT_BREAKER", "SHORT_STOCK_DETECTED",
     "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
+    "WHIPSAW_EXIT", "JUICE_INADEQUATE", "EARNINGS_DATE_STALE",
 }
 
 
@@ -250,6 +255,30 @@ def check_defend_position(state: dict) -> list[dict]:
     return out
 
 
+def check_whipsaw_exit(state: dict) -> list[dict]:
+    """Cumulative defend-whipsaw guard: a position taking roll-down after
+    roll-down in a slow grind bleeds via drag while neither the RS kill switch
+    nor the price circuit breaker trips. Fires when too many defensive rolls
+    landed in the trailing window OR cumulative roll drag has passed a fraction
+    of the position's capital — recommend EXIT, not another defend."""
+    import position_manager
+    out = []
+    rolls = (state.get("roll_ledger") or {}).get("rolls", [])
+    for p in _open_positions(state):
+        t = p.get("ticker", "")
+        ws = position_manager.whipsaw_status(p, rolls)
+        if not ws["tripped"]:
+            continue
+        out.append(_alert(
+            "WHIPSAW_EXIT", t,
+            f"{t} is in a defend whipsaw — " + "; ".join(ws["reasons"]) + ".",
+            "Stop defending — the roll-down spiral is bleeding the position while the "
+            "kill switch and circuit breaker stay quiet. EXIT and redeploy the capital; "
+            "another roll-down just locks a lower strike.",
+            ws, key="whipsaw"))
+    return out
+
+
 def check_circuit_breaker(state: dict) -> list[dict]:
     out = []
     for p in _open_positions(state):
@@ -285,31 +314,76 @@ def check_earnings_window(state: dict) -> list[dict]:
     return out
 
 
+def check_earnings_date_stale(state: dict) -> list[dict]:
+    """The earnings guardrail runs on a date from a free-tier calendar that's
+    often wrong or late-updated, and a wrong date fails silently. Flag a held
+    name whose earnings date hasn't refreshed within EARNINGS_STALE_DAYS (nightly
+    maintenance refreshes held names daily, so a stale date means the refresh path
+    is broken) OR whose providers disagree — so the silence itself pages."""
+    if config.demo_enabled():  # ops condition about the real calendar, not the demo store
+        return []
+    out = []
+    for p in _open_positions(state):
+        t = p.get("ticker", "")
+        try:
+            info = earnings.cached_earnings(t)  # non-fetching read
+        except Exception:  # noqa: BLE001 — a cache read must not sink the run
+            continue
+        stale, conflict = info.get("stale"), info.get("conflict")
+        if not stale and not conflict:
+            continue
+        if conflict:
+            msg = (f"{t} earnings date disagrees between providers "
+                   f"(Alpha Vantage {info.get('av_date')} vs Schwab {info.get('schwab_date')}).")
+            action = ("Confirm the real report date before the cycle spans it — a wrong date "
+                      "silently disarms the earnings guardrail. Set an override if needed.")
+        else:
+            msg = (f"{t} earnings date hasn't refreshed in > {config.EARNINGS_STALE_DAYS}d "
+                   f"(last {info.get('fetched_at') or 'never'}).")
+            action = ("Refresh it (nightly maintenance / GET /api/earnings?refresh=1) and check "
+                      "the provider — a stale date can let you roll into a report unprotected.")
+        out.append(_alert(
+            "EARNINGS_DATE_STALE", t, msg, action,
+            {"earnings": info}, key="conflict" if conflict else "stale"))
+    return out
+
+
 def check_assignment_risk(state: dict) -> list[dict]:
+    """Early-assignment risk. The base trigger is an EXTRINSIC one: an ITM short
+    whose remaining time value has collapsed below ASSIGNMENT_EXTRINSIC_FLOOR is
+    assignable any time (the counterparty forfeits nothing by exercising), no
+    ex-date required. The coming dividend is an ESCALATION: extrinsic below the
+    dividend before ex-div makes early exercise rational on a specific date. At
+    most one alert per short — the dividend escalation preempts the bare floor."""
     out = []
     today = datetime.now(ET).date()
     for p in _open_positions(state):
         t = p.get("ticker", "")
+        price = _last_close(t)
+        if price is None:
+            continue
         div = p.get("dividend") or {}
         ex_date, amount = div.get("ex_date"), div.get("amount")
-        if not ex_date or not amount:
-            continue
-        try:
-            ex = datetime.strptime(str(ex_date)[:10], "%Y-%m-%d").date()
-        except ValueError:
-            continue
-        if ex < today:
-            continue
-        price = _last_close(t)
+        ex = None
+        if ex_date and amount:
+            try:
+                ex = datetime.strptime(str(ex_date)[:10], "%Y-%m-%d").date()
+            except ValueError:
+                ex = None
+            if ex is not None and ex < today:
+                ex = None  # already gone ex — no longer a dividend-capture trigger
         for sc in p.get("short_calls", []):
+            strike, current, dte = sc.get("strike"), sc.get("current_bid"), sc.get("dte")
+            if strike is None or current is None:
+                continue
+            intrinsic = max(price - float(strike), 0.0)
+            extrinsic = max(float(current) - intrinsic, 0.0)
+            itm = price > float(strike)
             expiry = _short_expiry(sc, today)
-            if expiry is None or ex > expiry:
-                continue
-            strike, current = sc.get("strike"), sc.get("current_bid")
-            if strike is None or current is None or price is None:
-                continue
-            extrinsic = max(float(current) - max(price - float(strike), 0.0), 0.0)
-            if extrinsic < float(amount):
+
+            # Escalation: the short spans a dividend its extrinsic no longer covers.
+            if (ex is not None and amount is not None and expiry is not None
+                    and ex <= expiry and extrinsic < float(amount)):
                 out.append(_alert(
                     "ASSIGNMENT_RISK", t,
                     (f"{t} short {strike} extrinsic {extrinsic:.2f}/sh is below the "
@@ -317,9 +391,25 @@ def check_assignment_risk(state: dict) -> list[dict]:
                     ("Roll the short before the ex-div date (or accept assignment: the short "
                      "is covered by a LEAP, not stock, so assignment creates SHORT STOCK that "
                      "owes the dividend — usually roll)."),
-                    {"strike": strike, "extrinsic": round(extrinsic, 2),
+                    {"strike": strike, "extrinsic": round(extrinsic, 2), "trigger": "dividend",
                      "dividend": float(amount), "ex_date": ex_date},
                     key=f"{strike}:{ex_date}"))
+                continue
+
+            # Base: an ITM short with near-zero extrinsic is assignable any time.
+            if (itm and dte is not None and dte > 0
+                    and extrinsic < config.ASSIGNMENT_EXTRINSIC_FLOOR):
+                out.append(_alert(
+                    "ASSIGNMENT_RISK", t,
+                    (f"{t} short {strike} extrinsic {extrinsic:.2f}/sh has collapsed below "
+                     f"the {config.ASSIGNMENT_EXTRINSIC_FLOOR:.2f} floor (deep ITM, {dte} DTE) "
+                     f"— assignable any time, no ex-div required."),
+                    ("Roll the short up/out to re-establish time value (or accept assignment "
+                     "deliberately: the short is covered by a LEAP, not stock, so assignment "
+                     "creates SHORT STOCK — never exercise the LEAP to cover)."),
+                    {"strike": strike, "extrinsic": round(extrinsic, 2), "trigger": "extrinsic",
+                     "floor": config.ASSIGNMENT_EXTRINSIC_FLOOR, "dte": dte},
+                    key=f"{strike}:extrinsic"))
     return out
 
 
@@ -454,6 +544,43 @@ def check_capital_burn(state: dict) -> list[dict]:
     return out
 
 
+def check_juice_inadequate(state: dict) -> list[dict]:
+    """Ongoing juice-vs-target check. Juice adequacy is gated once at entry, but
+    if IV collapses mid-cycle a position can keep rolling while its realized
+    weekly juice falls below the strategy's income target. This owns the wide band
+    between "still covers LEAP theta" (self-funding — capital_burn owns the
+    below-theta extreme) and "no longer clears the income target": the position
+    quietly underperforms while its capital is still intact to redeploy. Warms up
+    once there are enough completed weeks of trailing juice."""
+    import leap_policy
+    out = []
+    for p in _open_positions(state):
+        if not (p.get("leap") or {}):
+            continue
+        t = p.get("ticker", "")
+        health = leap_policy.leap_health(p)
+        if health.get("juice_adequate") is not False:  # None (warming up) / True -> skip
+            continue
+        if health.get("maintenance_status") == "burning":  # capital_burn owns this regime
+            continue
+        yld, tgt = health.get("weekly_juice_yield_pct"), health.get("juice_target_pct")
+        if yld is None or tgt is None:
+            continue
+        out.append(_alert(
+            "JUICE_INADEQUATE", t,
+            (f"{t} trailing weekly juice is {yld:g}% of LEAP capital, below the {tgt:g}% "
+             f"income target (last {config.JUICE_TRAILING_WEEKS} completed weeks)."),
+            ("This position still funds its own decay but no longer clears the strategy's "
+             "income target — roll to a better strike/week, or redeploy the capital into a "
+             "candidate that pays before it erodes."),
+            {"weekly_juice_yield_pct": yld, "juice_target_pct": tgt,
+             "trailing_avg_weekly_juice": health.get("trailing_avg_weekly_juice"),
+             "trailing_weeks": config.JUICE_TRAILING_WEEKS,
+             "maintenance_status": health.get("maintenance_status")},
+            key="income"))
+    return out
+
+
 def check_delta_velocity(state: dict) -> list[dict]:
     """LEAP delta has dropped more than DELTA_VELOCITY_DROP over the last
     DELTA_VELOCITY_WINDOW sessions while still ABOVE the 0.50 floor (below the
@@ -543,6 +670,38 @@ def check_reconcile_dirty(state: dict) -> list[dict]:
     return out
 
 
+def check_book_correlation(state: dict) -> list[dict]:
+    """Two positions can satisfy the 1-per-sector cap while being ~0.9 correlated
+    (e.g. a mega-cap in XLK and one in XLC) — the book is really one bet. Warn on
+    high trailing correlation between open underlyings, or when the beta-adjusted
+    book delta says the 'spread' is one directional bet. Book-level (no ticker)."""
+    import portfolio_risk
+    conc = portfolio_risk.concentration(state)
+    if not conc.get("warn"):
+        return []
+    out = []
+    for hp in conc.get("high_correlation_pairs", []):
+        out.append(_alert(
+            "BOOK_CORRELATION", None,
+            (f"{hp['a']} and {hp['b']} are {hp['correlation']:.2f} correlated — the book's "
+             f"1-per-sector diversification is thinner than it looks."),
+            "Two open underlyings move together, so a single shock hits both — trim or "
+            "avoid adding more correlated exposure.",
+            {"pair": hp, "correlation_threshold": conc.get("correlation_threshold")},
+            key=f"corr:{hp['a']}:{hp['b']}"))
+    lev, bar = conc.get("beta_adj_leverage"), conc.get("beta_adj_leverage_threshold")
+    if lev is not None and bar is not None and lev >= bar:
+        out.append(_alert(
+            "BOOK_CORRELATION", None,
+            (f"Beta-adjusted book delta is {lev:g}× deployed capital — the book is "
+             f"effectively one directional (index-beta) bet."),
+            "Beta-adjusted delta concentration is high: the positions aren't diversifying — "
+            "reassess sizing / net directional exposure.",
+            {"net_beta_adj_delta_dollars": conc.get("net_beta_adj_delta_dollars"),
+             "beta_adj_leverage": lev, "threshold": bar}, key="leverage"))
+    return out
+
+
 def check_reconcile_stale(state: dict) -> list[dict]:
     """Reconciliation hasn't run successfully within RECONCILE_STALE_HOURS while
     Schwab is connected and positions are open. Silence is itself a failure
@@ -579,20 +738,24 @@ def check_reconcile_stale(state: dict) -> list[dict]:
 EVALUATORS = [
     check_kill_switch,
     check_circuit_breaker,
+    check_whipsaw_exit,
     check_delta_uncovered,
     check_defend_position,
     check_buyback_75,
     check_assignment_risk,
     check_earnings_window,
+    check_earnings_date_stale,
     check_expiry_friday,
     check_token_expiry,
     check_data_stale,
     check_leap_roll_due,
     check_capital_burn,
+    check_juice_inadequate,
     check_delta_velocity,
     check_short_stock_detected,
     check_reconcile_dirty,
     check_reconcile_stale,
+    check_book_correlation,
 ]
 
 

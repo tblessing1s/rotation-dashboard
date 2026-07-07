@@ -134,6 +134,20 @@ def leap_health(position: dict, df=None, stock_price: float | None = None,
     else:
         maintenance_status = "burning"
 
+    # Ongoing income adequacy: realized trailing weekly juice as a % of deployed
+    # LEAP capital vs the strategy's per-profile target — the same bar the entry
+    # gate (juice_adequacy) checks ONCE, re-checked every recompute. Distinct from
+    # capital-burn (juice below LEAP THETA, the extreme): this owns the wide band
+    # where a position still self-funds its decay but no longer clears the income
+    # target — quietly underperforming while capital is intact to redeploy.
+    juice_yield_pct = juice_target_pct = juice_adequate = None
+    leap_cost = float(leap.get("cost_basis") or 0)
+    if trailing_juice is not None and leap_cost:
+        import account_gate
+        juice_target_pct = account_gate.weekly_yield_target_pct(ticker)
+        juice_yield_pct = round(trailing_juice / leap_cost * 100, 2)
+        juice_adequate = juice_yield_pct >= juice_target_pct
+
     policy = roll_policy(dte, weeks_remaining)
     return {
         "leap_dte": dte,
@@ -145,6 +159,9 @@ def leap_health(position: dict, df=None, stock_price: float | None = None,
         "leap_weekly_burn": weekly_burn,
         "net_weekly_maintenance": net_maintenance,
         "maintenance_status": maintenance_status,
+        "weekly_juice_yield_pct": juice_yield_pct,
+        "juice_target_pct": juice_target_pct,
+        "juice_adequate": juice_adequate,
         "leap_delta": leap_delta,
         "delta_velocity": _delta_velocity(position),
         "roll_due": policy["roll_due"],

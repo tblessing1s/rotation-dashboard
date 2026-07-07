@@ -243,6 +243,20 @@ WEEKLIES_CACHE_TTL = 7 * 24 * 3600
 # Around earnings we either roll the short deep-ITM for protection or exit the
 # position entirely, so the next report date is surfaced on every open position.
 EARNINGS_WARN_DAYS = 7       # flag a position when earnings is within this many days
+
+# The earnings guardrail is only as good as the calendar behind it. Free-tier
+# Alpha Vantage dates are frequently wrong or late-updated, and a wrong date fails
+# SILENTLY — the earnings alert simply doesn't fire and you roll into a report
+# unprotected. Two mitigations (PROPOSED_DEFAULT thresholds):
+#  * cross-check Schwab fundamentals when the endpoint exposes a next-earnings
+#    field: fill when Alpha Vantage is blank, and flag a conflict when the two
+#    disagree by more than EARNINGS_CONFLICT_DAYS;
+#  * flag a held name whose earnings date hasn't been refreshed within
+#    EARNINGS_STALE_DAYS. Nightly maintenance refreshes held names every day, so a
+#    stale date means the refresh path itself is broken — exactly the state in
+#    which you'd roll in blind.
+EARNINGS_STALE_DAYS = 4
+EARNINGS_CONFLICT_DAYS = 3
 # PROPOSED_DEFAULT — deep-ITM protective roll THROUGH an earnings report: when a
 # candidate roll week spans the next report, the picker suggests a strike this
 # deep (the further-below-spot of the ATR-distance and ITM%-floor), beyond any
@@ -265,6 +279,16 @@ BUYBACK_MIN_DTE = 2            # HARD_CFM_RULE — ">2 days to expiration" leg o
 # stock, so the short call is effectively uncovered risk.
 LEAP_DELTA_FLOOR = 0.50
 
+# Assignment risk is fundamentally an EXTRINSIC problem, not a dividend problem: a
+# deep-ITM short is assignable whenever its extrinsic collapses to ~0 (the
+# counterparty forfeits no time value by exercising), no ex-date required — a
+# dividend just makes early exercise rational on a specific date. So the trigger
+# is "an ITM short's extrinsic below this floor", with the coming dividend as an
+# ESCALATION of it (extrinsic below the dividend before ex-div; see the ASSIGNMENT
+# section of the assignment/dividend rule). PROPOSED_DEFAULT floor — a few cents
+# of remaining time value per share.
+ASSIGNMENT_EXTRINSIC_FLOOR = 0.10
+
 # PROPOSED_DEFAULT — Schwab refresh tokens die at 7 days (no programmatic
 # renewal); alert at day 5 so re-auth happens before data goes dark.
 TOKEN_WARN_AGE_DAYS = 5
@@ -276,14 +300,72 @@ DATA_STALE_HOURS = 30.0
 # PROPOSED_DEFAULT — shorts expiring within this many days and not yet rolled.
 EXPIRY_WARN_DTE = 1
 
-# PROPOSED_DEFAULT — evaluator schedule, ET, market days only: pre-market,
-# ~30 min after open, mid-day, ~30 min before close.
-ALERT_SCHEDULE_ET = ["08:30", "10:00", "12:30", "15:30"]
+# PROPOSED_DEFAULT — evaluator schedule, ET, market days only. Fixed anchor
+# slots: pre-market, ~30 min after open, mid-day, ~30 min before close, and a
+# post-close sweep. The full ALERT_SCHEDULE_ET below merges these with the
+# post-open gap-cadence slots.
+ALERT_SCHEDULE_ANCHORS_ET = ["08:30", "10:00", "12:30", "15:30", "16:15"]
+
+# PROPOSED_DEFAULT — post-close sweep (the 16:15 anchor above). The kill switch's
+# "confirmed close" condition and an end-of-day circuit-breaker breach can only
+# be evaluated AFTER the 16:00 close, so the 15:30 slot is too early to see them;
+# without a post-close slot their earliest fire is the next morning's 08:30 —
+# i.e. "exit immediately" degrades to "exit at tomorrow's open". A ~16:15 slot
+# pages the same evening instead. The scheduler force-refreshes the hot set at
+# this slot first so the official close is in the cache before evaluation.
+POST_CLOSE_SLOT_ET = "16:15"
+
+# PROPOSED_DEFAULT — gap-risk cadence. The open (09:30) to the first fixed slot
+# (10:00) is a 30-min blind window: a gap straight through a position's circuit
+# breaker at 09:31 isn't seen until 10:00, and the post-open window is
+# statistically high-volatility. CFM deliberately uses alerts, not resting stop
+# orders, so the evaluation cadence IS the only tripwire — tighten it over the
+# first OPEN_GAP_WINDOW_MIN minutes after the open, every OPEN_GAP_CADENCE_MIN.
+MARKET_OPEN_ET = "09:30"
+OPEN_GAP_WINDOW_MIN = 30
+OPEN_GAP_CADENCE_MIN = 10
+
+
+def _open_gap_slots() -> list[str]:
+    """Extra ET evaluation slots across the post-open gap window — open+cadence,
+    open+2·cadence, … up to and including open+window. With the defaults
+    (cadence 10, window 30) that's 09:40, 09:50, 10:00 (10:00 is already an
+    anchor, so the merge dedups it). Empty when the cadence/window are disabled."""
+    from datetime import datetime as _dt, timedelta as _td
+    if OPEN_GAP_CADENCE_MIN <= 0 or OPEN_GAP_WINDOW_MIN <= 0:
+        return []
+    open_t = _dt.strptime(MARKET_OPEN_ET, "%H:%M")
+    out, step = [], OPEN_GAP_CADENCE_MIN
+    while step <= OPEN_GAP_WINDOW_MIN:
+        out.append((open_t + _td(minutes=step)).strftime("%H:%M"))
+        step += OPEN_GAP_CADENCE_MIN
+    return out
+
+
+# The evaluator slots the scheduler actually runs: the fixed anchors plus the
+# post-open gap-cadence slots, sorted and deduped. The first slot (08:30) stays
+# the pre-market anchor everything else keys off (e.g. morning reconciliation).
+ALERT_SCHEDULE_ET = sorted(set(ALERT_SCHEDULE_ANCHORS_ET) | set(_open_gap_slots()))
 ALERT_LOG_MAX = 500            # PROPOSED_DEFAULT — alert history cap in state.json
 
 # PROPOSED_DEFAULT — nightly maintenance slot (ET, every calendar day): refresh
 # the earnings/dividend caches for held names and sync position snapshots.
 MAINTENANCE_ET = "17:30"
+
+# ---- Paper-fill slippage (mid-fill assumption) -----------------------------
+# Paper fills are booked at the quoted MIDPOINT, but deep-ITM options rarely fill
+# at mid — so every paper cycle's juice is optimistic by ~half the spread, twice a
+# week, compounding through the payback meter and the calibration harness's
+# threshold tuning. Until enough live fills exist to measure it, paper results
+# carry a mid-fill caveat and a default per-leg haircut; once realized slippage is
+# measured (broker fill vs the reference mid captured at order time), that
+# supersedes the assumption. See backend/slippage.py.
+# PROPOSED_DEFAULT — assumed adverse slippage per leg as a fraction of the option
+# mid, applied until live data replaces it (~half a 10%-of-mid deep-ITM spread).
+ASSUMED_SLIPPAGE_PCT = 0.05
+# PROPOSED_DEFAULT — live fills needed before measured slippage supersedes the
+# assumed haircut (a handful, so one bad fill doesn't set the calibration).
+SLIPPAGE_MIN_FILLS = 5
 
 # ---- Durability / backups --------------------------------------------------
 # state.json is the single source of truth on a single Fly volume, so the
@@ -344,6 +426,21 @@ DELTA_HISTORY_DAYS = 30
 # rate-based earlier tier.
 DELTA_VELOCITY_DROP = 0.08
 DELTA_VELOCITY_WINDOW = 5
+
+
+# ---- Whipsaw circuit breaker (cumulative defend guard) ---------------------
+# The defend engine's individual roll-downs are each correct, but the WHIPSAW —
+# roll-down after roll-down in a slow grind, each locking a lower strike — is the
+# strategy's real killer, and no single check owns it: the RS kill switch and the
+# price circuit breaker can both stay untripped while defend bleeds the position
+# weekly. This is the cumulative guard, computed from the roll ledger the app
+# already derives: too many defensive rolls in a short window, OR cumulative roll
+# drag past a fraction of the position's capital -> recommend EXIT, not another
+# defend. HARD_CFM_RULE concept (whipsaw is the killer); the specific counts /
+# percent are PROPOSED_DEFAULT pending the roll-ledger data that validates them.
+WHIPSAW_DEFEND_ROLLS = 3       # defensive (reason="defend") rolls...
+WHIPSAW_WINDOW_WEEKS = 4       # ...within this trailing window, OR
+WHIPSAW_DRAG_PCT = 0.05        # cumulative roll drag > this fraction of position capital
 
 
 def alerts_dry_run_default() -> bool:
@@ -413,6 +510,21 @@ CIRCUIT_BREAKER_ATR_MULT = 2.0
 # guard the two rules can add to a name the strategy is 1-2 days from exiting.
 # Flip to True to enforce; the Positions tab surfaces the block either way.
 BLOCK_ACCUMULATION_ON_RS_DETERIORATION = False
+
+# ---- Book concentration / correlation --------------------------------------
+# MAX_POSITIONS_PER_SECTOR stops two names in the SAME sector, but two mega-caps
+# in DIFFERENT sectors (e.g. a name in XLK and one in XLC) can still be ~0.9
+# correlated — the 1/sector rule is satisfied while the book is really one bet.
+# The portfolio-risk card already computes per-name beta and beta-adjusted delta;
+# these bars turn that into a warning (portfolio_risk.concentration).
+# PROPOSED_DEFAULT — trailing daily-return correlation above which two open
+# underlyings are "too correlated to count as diversified".
+CORRELATION_WARN_THRESHOLD = 0.80
+CORRELATION_LOOKBACK = 60         # trailing sessions for the correlation estimate
+# PROPOSED_DEFAULT — net SPY-beta-adjusted book delta as a multiple of deployed
+# capital, above which the book is effectively one directional (index-beta) bet
+# even if it's spread across sectors.
+BETA_ADJ_LEVERAGE_WARN = 1.5
 
 # ---- Capital ---------------------------------------------------------------
 CAPITAL = 35000

@@ -756,6 +756,42 @@ def test_earnings_unknown_when_provider_unconfigured(monkeypatch):
     assert out["date"] is None and out["source"] == "alpha_vantage"
 
 
+def test_earnings_summary_staleness_and_conflict():
+    import time
+    import config
+    import earnings
+    from datetime import date, timedelta
+    soon = (date.today() + timedelta(days=3)).isoformat()
+    assert earnings._summary("ON", soon, "cache", rec={"fetched_at": time.time()})["stale"] is False
+    old = {"fetched_at": time.time() - (config.EARNINGS_STALE_DAYS + 1) * 86400}
+    assert earnings._summary("ON", soon, "cache", rec=old)["stale"] is True
+    # A hand-set override never goes stale.
+    assert earnings._summary("ON", soon, "override", rec={"fetched_at": 0})["stale"] is False
+    # Conflict flag flows through from the cache rec.
+    assert earnings._summary("ON", soon, "cache",
+                             rec={"conflict": True, "schwab_date": soon})["conflict"] is True
+
+
+def test_earnings_cross_check_fills_and_flags_conflict(monkeypatch):
+    import earnings
+    from datetime import date, timedelta
+    av = (date.today() + timedelta(days=5)).isoformat()
+    schwab = (date.today() + timedelta(days=20)).isoformat()
+    monkeypatch.setattr(earnings, "_fetch_av_date", lambda t: av)
+    monkeypatch.setattr(earnings, "_fetch_schwab_date", lambda t: schwab)
+    rec = earnings._fetch_combined("ON")
+    assert rec["date"] == av and rec["source"] == "alpha_vantage"
+    assert rec["conflict"] is True and rec["schwab_date"] == schwab
+    # AV blank -> Schwab fills the gap, no conflict.
+    monkeypatch.setattr(earnings, "_fetch_av_date", lambda t: None)
+    rec2 = earnings._fetch_combined("ON")
+    assert rec2["date"] == schwab and rec2["source"] == "schwab" and rec2["conflict"] is False
+    # Agreeing sources within the tolerance -> no conflict.
+    monkeypatch.setattr(earnings, "_fetch_av_date", lambda t: av)
+    monkeypatch.setattr(earnings, "_fetch_schwab_date", lambda t: av)
+    assert earnings._fetch_combined("ON")["conflict"] is False
+
+
 def test_earnings_calendar_parses_soonest_first(monkeypatch):
     import alpha_vantage
     csv_text = ("symbol,name,reportDate,fiscalDateEnding,estimate,currency\n"

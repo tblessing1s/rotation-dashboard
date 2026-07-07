@@ -147,6 +147,10 @@ def _tick() -> None:
     # Pre-market reconciliation runs on the FIRST morning slot, before the alert
     # pass, so reconcile_dirty / short_stock_detected fire off a fresh report.
     _maybe_morning_reconcile(now, due)
+    # Post-close slot: force the hot set current so the OFFICIAL close is in the
+    # cache before the confirmed-close kill switch / end-of-day circuit breaker
+    # evaluate. _maybe_hot_refresh above skips it (past 16:00), so refresh here.
+    _maybe_post_close_refresh(now, due)
     # A restart mid-day makes several slots due at once; one evaluator pass
     # covers them all (the conditions are the same state either way).
     for slot in due:
@@ -166,6 +170,25 @@ def _tick() -> None:
     # the operator, so it runs first). At the pre-open 08:30 slot this primes the
     # morning's first Scan; later slots keep the daily-bar cache from ageing out.
     _warm_scan()
+
+
+def _maybe_post_close_refresh(now: datetime, due: list[str]) -> None:
+    """At the post-close slot, force-refresh the hot set so today's official
+    close is cached before the alert pass evaluates confirmed-close conditions.
+    Best-effort — logged, never fatal to the tick. Skipped in demo mode / when
+    the refresh tier is off (a demo/offline evaluation reads the pinned store)."""
+    if config.POST_CLOSE_SLOT_ET not in due:
+        return
+    import refresh_policy
+    if not refresh_policy.enabled():
+        return
+    try:
+        result = refresh_policy.maybe_refresh_hot(now, force=True)
+        if result and result.get("count"):
+            logger.info("post-close refresh: %d tickers before EOD alert pass",
+                        result["count"])
+    except Exception as e:  # noqa: BLE001 — a refresh must never break the tick
+        logger.warning("post-close refresh failed: %s", e)
 
 
 def _maybe_morning_reconcile(now: datetime, due: list[str]) -> None:

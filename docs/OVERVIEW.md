@@ -50,10 +50,13 @@ only *new* alerts to the notifier.
 | `CIRCUIT_BREAKER` | CRITICAL | HARD_CFM_RULE (line in the sand) | last close at/below the position's stored circuit-breaker price |
 | `DELTA_UNCOVERED` | HIGH | HARD_CFM_RULE (coverage) | LEAP delta < 0.50 floor, or long delta < a short leg's delta |
 | `DEFEND_POSITION` | HIGH | HARD_CFM_RULE (defense) | underlying closed below the short strike; includes suggested roll-down strike (price − 1.5×ATR) |
-| `ASSIGNMENT_RISK` | HIGH | HARD_CFM_RULE (dividend/assignment) | short extrinsic < upcoming dividend before ex-div. Note: the short is covered by a LEAP, not stock — assignment creates *short stock* that owes the dividend |
+| `WHIPSAW_EXIT` | CRITICAL | HARD_CFM_RULE (whipsaw) | cumulative defend guard: ≥`WHIPSAW_DEFEND_ROLLS` defensive rolls in `WHIPSAW_WINDOW_WEEKS`, OR cumulative roll drag > `WHIPSAW_DRAG_PCT` of position capital → exit, not another defend (the slow-grind bleed no single check owns) |
+| `ASSIGNMENT_RISK` | HIGH | HARD_CFM_RULE (assignment mechanics) | base: an ITM short whose extrinsic has collapsed below `ASSIGNMENT_EXTRINSIC_FLOOR` (a few cents) — assignable any time, deep-ITM early assignment is an extrinsic problem; escalation: extrinsic < upcoming dividend before ex-div. Note: the short is covered by a LEAP, not stock — assignment creates *short stock* that owes any dividend |
 | `TOKEN_EXPIRY` | HIGH | PROPOSED_DEFAULT (`TOKEN_WARN_AGE_DAYS`=5) | Schwab refresh token older than 5 days (dies at ~7) |
 | `BUYBACK_75` | MEDIUM | HARD_CFM_RULE (75% buyback) | short lost ≥75% of sale premium with >2 DTE → roll early to capture juice |
+| `JUICE_INADEQUATE` | MEDIUM | HARD_CFM_RULE (income target) | trailing weekly juice below the strategy's per-profile income target while the position still self-funds its decay (the band above `CAPITAL_BURN`) → reassess/redeploy while capital is intact |
 | `EARNINGS_WINDOW` | MEDIUM | HARD_CFM_RULE (earnings) | earnings within `EARNINGS_WARN_DAYS` for an open position |
+| `EARNINGS_DATE_STALE` | MEDIUM | PROPOSED_DEFAULT (`EARNINGS_STALE_DAYS`=4) | a held name's earnings date hasn't refreshed within the window (the refresh path is broken) OR Alpha Vantage and Schwab disagree by > `EARNINGS_CONFLICT_DAYS` — the guardrail may be running on a wrong/blind date |
 | `EXPIRY_FRIDAY` | MEDIUM | HARD_CFM_RULE (weekly roll) | short expiring today/tomorrow not yet rolled |
 | `DATA_STALE` | MEDIUM | PROPOSED_DEFAULT (`DATA_STALE_HOURS`=30) | cached OHLCV older than expected on a market day |
 
@@ -62,9 +65,24 @@ real providers, not the demo store).
 
 **Scheduler** (`backend/alert_scheduler.py`): an in-process daemon thread —
 the volume attaches to one machine and state.json is single-writer, so a
-separate scheduled machine can't share `/data`. Fires at ET slots
-(`ALERT_SCHEDULE_ET`: 08:30, 10:00, 12:30, 15:30) on weekdays, once per slot
-per day; fly.toml pins `min_machines_running = 1` so the machine is awake.
+separate scheduled machine can't share `/data`. Fires at ET slots on weekdays,
+once per slot per day; fly.toml pins `min_machines_running = 1` so the machine
+is awake. The schedule (`config.ALERT_SCHEDULE_ET`) is the fixed anchors
+(`ALERT_SCHEDULE_ANCHORS_ET`: 08:30, 10:00, 12:30, 15:30, **16:15**) merged with
+the **post-open gap-cadence** slots (09:40, 09:50):
+
+- **16:15 post-close slot** (`POST_CLOSE_SLOT_ET`) — the kill switch's
+  confirmed-close condition and an end-of-day circuit-breaker breach can only be
+  evaluated after the 16:00 close, so the 15:30 slot can't see them; without a
+  post-close slot their earliest fire is the next morning's 08:30 ("exit
+  immediately" → "exit at tomorrow's open"). The scheduler force-refreshes the
+  hot set at this slot first so the official close is cached before evaluation.
+- **Post-open gap cadence** (`MARKET_OPEN_ET` + `OPEN_GAP_WINDOW_MIN`=30 /
+  `OPEN_GAP_CADENCE_MIN`=10) — the open (09:30) to the first fixed slot (10:00)
+  was a 30-min blind window: a gap straight through a position's circuit breaker
+  at 09:31 wasn't seen until 10:00. CFM deliberately uses alerts, not resting
+  stops, so the cadence *is* the only tripwire — it's tightened across the
+  high-volatility post-open window.
 Alternative/backup: an external cron can `POST /api/alerts/run` (auto-start
 wakes the machine; dedup makes repeat runs no-ops). Disable the thread with
 `CFM_ALERTS_SCHEDULER=0`.
@@ -87,9 +105,13 @@ enable/disable, channel toggles, dry-run).
 history) plus a navbar bell with the active count.
 
 **Demo**: seeding adds a deliberately broken 5th position
-(`seed_demo_data.ALERT_DEMO`, PG) that trips every position-based condition in
-one evaluator run — kill switch, circuit breaker, both delta flavors, defend,
-75% buyback, assignment risk, earnings window, and expiry — exactly 9 alerts.
+(`seed_demo_data.ALERT_DEMO`, PG) that trips every *point-in-time* position
+condition in one evaluator run — kill switch, circuit breaker, both delta
+flavors, defend, 75% buyback, assignment risk, earnings window, and expiry: the
+canonical 9 (asserted by `test_engineered_state_trips_every_position_condition`).
+The later *cumulative/temporal* guards (whipsaw, ongoing juice adequacy,
+book correlation, earnings staleness) fire off the seeded ledgers/positions when
+their windows are met, so a full demo-store run surfaces more than these 9.
 
 ## Level 5 entry gate — Account & Juice (Phase 1)
 
@@ -203,11 +225,28 @@ list.
   Positions tab shows cumulative roll drag per position; Theta tab nets rolls
   against juice. This is the dataset that later validates 1.5× vs 2×ATR strike
   placement.
-- **Assignment-risk monitor**: each short is checked against the position's
-  stored dividend (extrinsic < dividend before ex-div → flag + alert). The
-  flag's tooltip explains the PMCC nuance: the short is covered by a LEAP, not
-  stock, so assignment creates SHORT STOCK that owes the dividend — roll
-  before ex-div.
+- **Whipsaw circuit breaker** (`position_manager.whipsaw_status`, the
+  `WHIPSAW_EXIT` alert): the individual defend roll-downs are each correct, but
+  the whipsaw — roll-down after roll-down in a slow grind, each locking a lower
+  strike — is the strategy's real killer, and no single check owns it (the RS
+  kill switch and the price circuit breaker can both stay untripped while defend
+  bleeds the position weekly). This cumulative guard reads the roll ledger above:
+  it trips when ≥`WHIPSAW_DEFEND_ROLLS` (3) defensive rolls landed in the trailing
+  `WHIPSAW_WINDOW_WEEKS` (4), OR cumulative roll drag passed `WHIPSAW_DRAG_PCT`
+  (5%) of the position's capital — recommending EXIT, not another defend. Scoped
+  to the current cycle (rolls on/after the position's entry). Surfaced on the
+  Positions tab, on the defend recommendation itself (`GET /api/defend` — so the
+  ticket you open to roll tells you to exit instead), and as the alert. The
+  counts/percent are PROPOSED_DEFAULT pending the roll-ledger data that tunes them.
+- **Assignment-risk monitor**: assignment is modelled as an *extrinsic* problem,
+  not a dividend one. The base trigger is an ITM short whose remaining time value
+  has collapsed below `ASSIGNMENT_EXTRINSIC_FLOOR` (a few cents) — assignable any
+  time, no ex-date required, because the counterparty forfeits no time value by
+  exercising. The stored dividend is an *escalation*: extrinsic below the coming
+  dividend before ex-div makes early exercise rational on a specific date. Either
+  way the flag's tooltip explains the PMCC nuance: the short is covered by a LEAP,
+  not stock, so assignment creates SHORT STOCK (that owes any dividend) — roll to
+  re-establish time value, never exercise the LEAP to cover.
 - **Accumulation vs kill-switch** (`BLOCK_ACCUMULATION_ON_RS_DETERIORATION`,
   HARD_CFM_RULE candidate, OFF by default pending confirmation): when on,
   `can_add_shares` refuses accumulation on any name whose kill switch reads
@@ -281,6 +320,19 @@ suggestion (`executor.roll_suggestion`), and the `DEFEND_POSITION` alert
   returns, buckets by verdict, and sweeps the ATR-extension cutoff (2.0–4.0)
   and MFI band variants — a markdown report that upgrades PROPOSED_DEFAULT
   thresholds from guess to measured. Offline only; reads the parquet cache.
+- **Paper-fill slippage / mid-fill caveat** (`backend/slippage.py`,
+  `GET /api/slippage`): paper fills are booked at the quoted **midpoint**, but
+  deep-ITM options rarely fill at mid — so every paper cycle's juice is optimistic
+  by ~half the spread, twice a week, and that bias compounds through the payback
+  meter and into any threshold tuned against it. Every execution now records its
+  fill provenance (`fill_assumption` = `mid` for paper / `broker` for live) and,
+  for a live fill, the reference mid captured at order time (`quoted_mid_per_share`
+  = the placement limit). `slippage.report` turns real fills into a measured
+  adverse-slippage % (signed by side: paying above mid on a buy, receiving below
+  on a sell); until `SLIPPAGE_MIN_FILLS` live fills exist it falls back to the
+  `ASSUMED_SLIPPAGE_PCT` default and paper results carry a **mid-fill caveat** (a
+  banner on the Theta tab, a note in the calibration report). Once measured, the
+  realized haircut supersedes the assumption.
 - **Juice journal export**: `GET /api/export/juice-journal?format=csv|md` —
   weekly juice ledger + roll ledger + closed cycles (the operator's off-system
   record per CFM's juice-journal rule). Buttons on the History tab.
@@ -302,12 +354,34 @@ suggestion (`executor.roll_suggestion`), and the `DEFEND_POSITION` alert
   the 2×ATR defensive-reserve status, and the sector-exposure breakdown.
   Greeks imply vol from each leg's stored mark, so the card works offline and
   in demo mode; partially-priced positions are marked.
+- **Correlation / beta-adjusted concentration** (`portfolio_risk.concentration`,
+  the `BOOK_CORRELATION` alert): the 1-per-sector cap stops two names in the same
+  sector, but two mega-caps in *different* sectors (e.g. XLK and XLC) can still be
+  ~0.9 correlated — the rule is satisfied while the book is really one bet. The
+  check reads the card's own numbers: it warns when any pair of open underlyings
+  exceeds `CORRELATION_WARN_THRESHOLD` (0.80) trailing correlation, or when the
+  net SPY-beta-adjusted book delta exceeds `BETA_ADJ_LEVERAGE_WARN` (1.5×) of
+  deployed capital (the "spread" is one directional bet). Only meaningful with ≥2
+  open positions; surfaced as a banner on the Positions-tab risk card and the
+  book-level `BOOK_CORRELATION` alert. Both thresholds are PROPOSED_DEFAULT.
 - **Earnings & dividends as first-class cached data**
   (`backend/maintenance.py`): a nightly slot (`MAINTENANCE_ET`, 17:30 ET,
   every calendar day) refreshes the earnings + dividend day-caches for every
   held name and syncs each open position's `dividend` snapshot — Phases 0–2
   read from these caches instead of ad-hoc lookups. Manual trigger:
   `POST /api/maintenance/refresh`. Skipped in demo mode.
+- **Earnings guardrail — cross-check + staleness** (`backend/earnings.py`): the
+  guardrail is only as good as its calendar, and a wrong free-tier Alpha Vantage
+  date fails *silently* — the alert just doesn't fire and you roll in unprotected.
+  Two mitigations: `next_earnings` now cross-checks Schwab fundamentals when the
+  endpoint exposes a next-earnings field (fills when AV is blank; flags a
+  `conflict` when the two disagree by > `EARNINGS_CONFLICT_DAYS`), and every
+  earnings record carries `fetched_at` + a `stale` flag (`EARNINGS_STALE_DAYS`).
+  Since nightly maintenance refreshes held names daily, a stale date means the
+  refresh path itself broke — so the `EARNINGS_DATE_STALE` alert makes that
+  silence audible, and the Positions earnings badge shows "sources differ" /
+  "stale". The data-health earnings summary now reports `stale_entries` +
+  `conflicts`.
 - **Token lifecycle UX**: the Schwab card shows token age and days remaining
   with the one-click re-auth flow; the Phase 0 `TOKEN_EXPIRY` alert fires at
   day 5 (of the ~7-day token life).

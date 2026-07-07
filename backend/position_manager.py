@@ -124,7 +124,12 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
     out["below_strike"] = bool(stock_price is not None and strike is not None
                                and stock_price < float(strike))
 
+    # Assignment risk is an EXTRINSIC problem: an ITM short whose time value has
+    # collapsed to ~0 is assignable any time (base trigger); a dividend the
+    # extrinsic no longer covers before ex-div is an escalation of it. Dividend
+    # escalation is preferred when both apply.
     out["assignment_risk"] = None
+    itm = stock_price is not None and strike is not None and float(stock_price) > float(strike)
     ex_date, amount = (dividend or {}).get("ex_date"), (dividend or {}).get("amount")
     if ex_date and amount and current is not None and strike is not None and stock_price is not None:
         from datetime import date, datetime, timedelta
@@ -136,6 +141,7 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
             extrinsic = max(float(current) - max(stock_price - float(strike), 0.0), 0.0)
             if expiry and date.today() <= ex <= expiry and extrinsic < float(amount):
                 out["assignment_risk"] = {
+                    "trigger": "dividend",
                     "extrinsic": round(extrinsic, 2), "dividend": float(amount),
                     "ex_date": ex_date,
                     "note": ("Extrinsic below the dividend before ex-div — early assignment "
@@ -145,10 +151,79 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
                 }
         except (TypeError, ValueError):
             pass
+    if (out["assignment_risk"] is None and itm and current is not None
+            and current_extrinsic is not None and dte is not None and int(dte) > 0
+            and current_extrinsic < config.ASSIGNMENT_EXTRINSIC_FLOOR):
+        out["assignment_risk"] = {
+            "trigger": "extrinsic",
+            "extrinsic": round(current_extrinsic, 2),
+            "floor": config.ASSIGNMENT_EXTRINSIC_FLOOR,
+            "note": ("Extrinsic has collapsed below a few cents while deep ITM — assignable "
+                     "any time, no ex-div required. Roll the short up/out to re-establish "
+                     "time value. The short is covered by a LEAP, not stock: never exercise "
+                     "the LEAP to cover an assignment."),
+        }
     return out
 
 
-def enrich_position(position: dict, roll_summary: dict | None = None) -> dict:
+def _parse_day(value):
+    from datetime import datetime
+    try:
+        return datetime.strptime(str(value)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return None
+
+
+def whipsaw_status(position: dict, rolls: list[dict] | None = None,
+                   today=None) -> dict:
+    """The cumulative defend-whipsaw guard for one position, derived from its
+    roll-ledger entries. Trips when EITHER too many defensive (reason="defend")
+    rolls landed in the trailing WHIPSAW_WINDOW_WEEKS, OR cumulative roll drag
+    (debits paid) has passed WHIPSAW_DRAG_PCT of the position's capital. Scoped to
+    the current cycle (rolls on/after the position's entry_date, when known) so a
+    prior cycle's rolls don't bleed in. Pure — no market data."""
+    from datetime import date, timedelta
+    today = today or date.today()
+    ticker = position.get("ticker", "")
+    rolls = [r for r in (rolls or []) if r.get("ticker") == ticker]
+    entry = _parse_day(position.get("entry_date"))
+    if entry:
+        rolls = [r for r in rolls if (_parse_day(r.get("date")) or today) >= entry]
+
+    window_start = today - timedelta(weeks=config.WHIPSAW_WINDOW_WEEKS)
+    defends = [r for r in rolls if r.get("reason") == "defend"
+               and (_parse_day(r.get("date")) or today) >= window_start]
+    n_def = len(defends)
+    drag = round(sum(r["net"] for r in rolls
+                     if r.get("net") is not None and r["net"] < 0), 2)
+    capital = position_capital(position)
+    drag_pct = round(abs(drag) / capital * 100, 1) if capital else None
+
+    rolls_trip = n_def >= config.WHIPSAW_DEFEND_ROLLS
+    drag_trip = drag_pct is not None and drag_pct >= config.WHIPSAW_DRAG_PCT * 100
+    reasons = []
+    if rolls_trip:
+        reasons.append(f"{n_def} defensive rolls in {config.WHIPSAW_WINDOW_WEEKS}wk")
+    if drag_trip:
+        reasons.append(f"cumulative roll drag ${abs(drag):,.0f} = {drag_pct:g}% "
+                       f"of ${capital:,.0f} capital")
+    return {
+        "tripped": rolls_trip or drag_trip,
+        "defensive_rolls": n_def,
+        "window_weeks": config.WHIPSAW_WINDOW_WEEKS,
+        "defend_roll_threshold": config.WHIPSAW_DEFEND_ROLLS,
+        "roll_drag": drag,
+        "drag_pct": drag_pct,
+        "drag_pct_threshold": round(config.WHIPSAW_DRAG_PCT * 100, 1),
+        "position_capital": capital,
+        "rolls_trip": rolls_trip,
+        "drag_trip": drag_trip,
+        "reasons": reasons,
+    }
+
+
+def enrich_position(position: dict, roll_summary: dict | None = None,
+                    rolls: list[dict] | None = None) -> dict:
     out = dict(position)
     ticker = position.get("ticker", "")
     price = _stock_price(ticker)
@@ -172,6 +247,9 @@ def enrich_position(position: dict, roll_summary: dict | None = None) -> dict:
         for sc in shorts]
     out["defend"] = any(sc["below_strike"] for sc in out["short_calls"])
     out["roll_summary"] = roll_summary or {"count": 0, "net_total": 0.0, "drag_total": 0.0}
+    # Whipsaw circuit breaker: too many defensive rolls / too much cumulative drag
+    # -> exit, not another defend (the roll-down spiral no single check owns).
+    out["whipsaw"] = whipsaw_status(position, rolls)
     shares = dict(position.get("shares") or {})
     count = int(shares.get("count") or 0)
     cap = int(shares.get("cap") or config.SHARE_CAP)
@@ -193,8 +271,10 @@ def enrich_position(position: dict, roll_summary: dict | None = None) -> dict:
 
 
 def positions_view(state: dict) -> list[dict]:
-    by_ticker = (state.get("roll_ledger") or {}).get("by_ticker", {})
-    out = [enrich_position(p, by_ticker.get(p.get("ticker", "")))
+    roll_ledger = state.get("roll_ledger") or {}
+    by_ticker = roll_ledger.get("by_ticker", {})
+    all_rolls = roll_ledger.get("rolls", [])
+    out = [enrich_position(p, by_ticker.get(p.get("ticker", "")), rolls=all_rolls)
            for p in state.get("positions", [])]
     # Wash-sale visibility on OPEN positions: the cycle derivation marks a
     # loss-closing cycle "flagged" when the underlying is re-entered inside the
