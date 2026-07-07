@@ -130,25 +130,38 @@ def refresh_tickers(tickers: list[str]) -> dict:
 
     The on-demand "this quote is stale, pull it live" path for names OUTSIDE the
     hot set — which otherwise ride the daily pre-open warm-up and so read stale
-    intraday. Re-fetching the daily bars is the same mechanism the hot-set
-    refresh uses: Schwab's daily history carries the current session's forming
-    candle during market hours, so the last close reads ~live and every derived
-    metric in the row (RS, MA distances, verdict) updates together — not just an
-    overlaid price. SPY and each ticker's sector ETF are force-refreshed
-    alongside, so relative strength is measured against equally-fresh benchmarks.
-    In demo mode get_daily is cache-only and force is a no-op, so this simply
-    recomputes from the synthetic cache."""
+    intraday. Two steps:
+
+      1. Force-refresh the daily bars (plus SPY and each ticker's sector ETF, so
+         relative strength / MAs are measured against equally-fresh history).
+      2. Pull a LIVE quote per name (Schwab last/mark -> Alpha Vantage -> cached
+         close) and overlay it as the price before scoring. Daily bars are
+         end-of-day, so they lag the live market intraday; the quote is the
+         authoritative current price, and overlaying it means the price AND every
+         price-derived leg (%>MA, below-MA, ATR extension) reflect it together.
+
+    Each returned row carries a ``price_source`` (schwab / alphavantage / cache /
+    demo) so a stale provider is visible instead of masquerading as live. In demo
+    mode force is a no-op and quotes come from the synthetic cache."""
     import sector_data
     names = list(dict.fromkeys(t.strip().upper() for t in tickers if t and t.strip()))
     if not names:
-        return {"tickers": [], "rows": [], "count": 0, "as_of": None}
+        return {"tickers": [], "rows": [], "count": 0, "as_of": None, "quote_sources": []}
     etfs = sorted({e for e in (sector_data.sector_for(t) for t in names) if e})
     force_set = list(dict.fromkeys(names + [config.BENCHMARK] + etfs))
     data_handler.prefetch(force_set, force=True)
+    quotes = data_handler.live_prices(names)
+    overrides = {t: q["price"] for t, q in quotes.items() if q.get("price") is not None}
     from metrics import scorecard as scorecard_metrics
-    sc = scorecard_metrics.scorecard(names)  # explicit list => computes fresh, no memo
-    return {"tickers": names, "rows": sc.get("results", []),
-            "count": len(names), "as_of": sc.get("as_of")}
+    sc = scorecard_metrics.scorecard(names, price_overrides=overrides)  # explicit list => no memo
+    rows = sc.get("results", [])
+    for row in rows:
+        q = quotes.get(row.get("ticker"))
+        if q:
+            row["price_source"] = q.get("source")
+    return {"tickers": names, "rows": rows, "count": len(names),
+            "as_of": sc.get("as_of"),
+            "quote_sources": sorted({q.get("source") for q in quotes.values() if q.get("source")})}
 
 
 def maybe_refresh_hot(now: datetime | None = None, force: bool = False) -> dict | None:

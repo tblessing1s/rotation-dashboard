@@ -23,6 +23,28 @@ def _frame(values, vol=1e6, highs=None, lows=None):
     return pd.DataFrame({"Open": c, "High": high, "Low": low, "Close": c, "Volume": v}, index=idx)
 
 
+# ---- live-quote price override (Scan on-demand refresh) --------------------
+def test_apply_price_override_patches_last_close_without_mutating():
+    df = _frame([100.0, 101.0, 102.0])
+    out = sc._apply_price_override(df, 95.0)
+    assert out["Close"].iloc[-1] == 95.0          # last close replaced by the live quote
+    assert out["Low"].iloc[-1] == 95.0            # low widened so the day's range stays coherent
+    assert df["Close"].iloc[-1] == 102.0          # the cached frame is never mutated
+    assert sc._apply_price_override(df, None) is df       # no override -> unchanged
+    assert sc._apply_price_override(None, 95.0) is None    # no data -> unchanged
+
+
+def test_score_ticker_reflects_the_live_price_override(monkeypatch):
+    import data_handler
+    df = _frame([100.0] * 60)                     # flat history: price sits on its MAs
+    monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: df)
+    base = sc.score_ticker("NVDA", df, "XLK", df)
+    over = sc.score_ticker("NVDA", df, "XLK", df, price_override=90.0)
+    assert base["price"] == 100.0
+    assert over["price"] == 90.0                   # the row shows the live price...
+    assert over["pct_above_ma21"] < 0              # ...and the price-derived legs follow it
+
+
 # ---- extension metrics -----------------------------------------------------
 def test_pct_above_ma21_normal_and_edges():
     assert sc.pct_above_ma21(110.0, 100.0) == pytest.approx(10.0)
@@ -360,7 +382,7 @@ def _reset_scan_cache():
 
 def test_scorecard_full_universe_is_cached_ticker_subset_is_not(monkeypatch, _reset_scan_cache):
     calls = []
-    monkeypatch.setattr(sc, "_compute_scorecard", lambda names: calls.append(names) or {"as_of": "x", "results": []})
+    monkeypatch.setattr(sc, "_compute_scorecard", lambda names, price_overrides=None: calls.append(names) or {"as_of": "x", "results": []})
     monkeypatch.setattr(sc.sector_data, "all_tickers", lambda: ["AAA", "BBB"])
 
     sc.scorecard()          # full-universe (tickers=None) -> computes once
@@ -376,7 +398,7 @@ def test_scorecard_full_universe_is_cached_ticker_subset_is_not(monkeypatch, _re
 def test_scorecard_cache_cleared_on_demo_live_switch(monkeypatch, _reset_scan_cache):
     import screening
     calls = []
-    monkeypatch.setattr(sc, "_compute_scorecard", lambda names: calls.append(1) or {"as_of": "x", "results": []})
+    monkeypatch.setattr(sc, "_compute_scorecard", lambda names, price_overrides=None: calls.append(1) or {"as_of": "x", "results": []})
     monkeypatch.setattr(sc.sector_data, "all_tickers", lambda: ["AAA"])
 
     sc.scorecard()

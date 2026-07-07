@@ -255,6 +255,64 @@ def live_price(symbol: str) -> float | None:
     return float(price) if price is not None else None
 
 
+def live_prices(symbols) -> dict[str, dict]:
+    """Live prices for many symbols, resolved in as few provider calls as
+    possible: ONE Schwab batch-quotes call, then Alpha Vantage GLOBAL_QUOTE
+    per-symbol for whatever Schwab didn't cover, then the last cached close as a
+    last resort. Returns {symbol: {"price": float, "source": str}} for every
+    symbol that resolved (missing symbols are simply absent).
+
+    Unlike daily bars — which are end-of-day and so lag the live market intraday
+    — a quote carries the CURRENT price (Schwab last/mark). This is what the Scan
+    refresh overlays onto a row so the displayed price is actually live."""
+    syms = list(dict.fromkeys(s.upper() for s in symbols if s))
+    out: dict[str, dict] = {}
+    if not syms:
+        return out
+    # Demo mode has no providers — serve the synthetic cached close.
+    if config.demo_enabled():
+        for s in syms:
+            df = get_daily(s)
+            if df is not None and not df.empty:
+                out[s] = {"price": float(df["Close"].iloc[-1]), "source": "demo"}
+        return out
+
+    remaining = set(syms)
+    if schwab_api.configured():
+        try:
+            quotes = client().get_quotes(syms)
+            for s, q in quotes.items():
+                price = (q or {}).get("last") or (q or {}).get("mark") or (q or {}).get("close")
+                if price:
+                    out[s] = {"price": float(price), "source": "schwab"}
+                    remaining.discard(s)
+                    _last_error.pop(s, None)
+                    _record_success("schwab_quote", s)
+        except Exception as e:  # noqa: BLE001 — degrade to the per-symbol fallbacks
+            for s in syms:
+                _last_error[s] = str(e)
+
+    if remaining and alpha_vantage.configured():
+        for s in list(remaining):
+            try:
+                q = alpha_vantage.global_quote(s)
+                if q.get("last"):
+                    out[s] = {"price": float(q["last"]), "source": "alphavantage"}
+                    remaining.discard(s)
+                    _last_error.pop(s, None)
+                    _record_success("alpha_vantage_quote", s)
+            except Exception as e:  # noqa: BLE001
+                _last_error[s] = str(e)
+
+    # Last resort — the cached daily close (visibly labelled, so a stale
+    # provider is obvious in the UI instead of masquerading as a live quote).
+    for s in list(remaining):
+        df = get_daily(s)
+        if df is not None and not df.empty:
+            out[s] = {"price": float(df["Close"].iloc[-1]), "source": "cache"}
+    return out
+
+
 def cache_age_hours(symbol: str) -> float | None:
     path = _cache_path(symbol.upper())
     if not os.path.exists(path):
