@@ -240,13 +240,24 @@ def compute_verdict(metrics: dict) -> dict:
     AVOID dominates CAUTION; within a tier every applicable reason is collected
     (not just the first). A metric that is None can't be judged, so its rule is
     skipped rather than firing. This is the CFM-suitability lens only — callers
-    layer it on top of the existing 4-level entry gate (see `scorecard`)."""
+    layer it on top of the existing 4-level entry gate (see `scorecard`).
+
+    ETFs run as a lower-vol income sleeve, not growth leaders, so — matching the
+    lower juice / beats-SPY bars and the entry gate's beats-sector waiver — the
+    growth-momentum filters are waived when `metrics["is_etf"]` is set: the
+    beats-assigned-sector AVOID and the MFI-band / thin-volume / ATR-expansion
+    CAUTIONs. The genuine risk rails still apply to ETFs — below MA200,
+    over-extension, and the MA50 trend filters — so a broken-trend or overextended
+    ETF is still caught."""
     avoid: list[str] = []
     caution: list[str] = []
+    is_etf = bool(metrics.get("is_etf"))
 
     # --- AVOID rules ---
     rs_sec = metrics.get("rs3m_vs_sector")
-    if rs_sec is not None and rs_sec < T.RS3M_VS_SECTOR_MIN:
+    # An ETF isn't required to outrun its (assigned or own) broad sector — the
+    # income sleeve waives this leg, same as the entry gate does.
+    if not is_etf and rs_sec is not None and rs_sec < T.RS3M_VS_SECTOR_MIN:
         avoid.append(f"rs3m_vs_sector negative ({rs_sec:+.1f}%)")
     if metrics.get("below_ma200") is True:
         avoid.append("price below MA200")
@@ -257,14 +268,17 @@ def compute_verdict(metrics: dict) -> dict:
         return {"verdict": "AVOID", "reasons": avoid}
 
     # --- CAUTION rules (only when not already AVOID) ---
+    # The MFI band, thin-participation volume floor, and ATR-expansion check are
+    # growth-stock momentum filters (a coiling single name); a low-vol ETF income
+    # sleeve is judged on trend health only, so these three are waived for ETFs.
     m = metrics.get("mfi")
-    if m is not None and (m < T.MFI_MIN or m > T.MFI_MAX):
+    if not is_etf and m is not None and (m < T.MFI_MIN or m > T.MFI_MAX):
         caution.append(f"MFI {m:.0f} outside {T.MFI_MIN:g}–{T.MFI_MAX:g} band")
     vr = metrics.get("volume_ratio")
-    if vr is not None and vr < T.VOLUME_RATIO_MIN:
+    if not is_etf and vr is not None and vr < T.VOLUME_RATIO_MIN:
         caution.append(f"volume ratio {vr:.2f} < {T.VOLUME_RATIO_MIN:g} (thin participation)")
     atrm = metrics.get("atr_momentum")
-    if atrm is not None and atrm > T.ATR_MOMENTUM_MAX:
+    if not is_etf and atrm is not None and atrm > T.ATR_MOMENTUM_MAX:
         caution.append(f"ATR expanding ({atrm:.2f} > {T.ATR_MOMENTUM_MAX:g}) — wants APP, not CFM")
     if metrics.get("below_ma50") is True:
         caution.append("price below MA50")

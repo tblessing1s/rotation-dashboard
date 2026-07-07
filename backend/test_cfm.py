@@ -1008,6 +1008,53 @@ def test_etf_clears_level3_spy_leg_on_the_lower_income_sleeve_bar(monkeypatch):
     assert "+5%" in stock_spy_check["label"]
 
 
+def test_entry_gate_level3_waives_sector_leg_for_a_curated_etf(monkeypatch):
+    # A curated (non-header) ETF like SMH that leads SPY but LAGS its assigned
+    # broad sector (XLK) must still clear Level 3 — an income-sleeve ETF isn't
+    # required to outrun its sector — while a stock in the same spot fails on it.
+    import data_handler
+    import screening
+    screening._results.clear()
+
+    n = 260
+    spy = _frame([100.0] * n)
+    xlk = _frame([100 + i * 0.6 for i in range(n)])   # the assigned sector
+    other = _frame([100 + i * 0.3 for i in range(n)])  # SMH / the stock
+
+    def fake_get_daily(symbol, force=False):
+        u = symbol.upper()
+        return spy if u == "SPY" else xlk if u == "XLK" else other
+
+    monkeypatch.setattr(data_handler, "get_daily", fake_get_daily)
+    monkeypatch.setattr(data_handler, "get_many", lambda syms, force=False: {s.upper(): other for s in syms})
+    monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
+    # The sector (XLK) leads SPY by +10%; SMH / the stock lead SPY by only +2% —
+    # so RS3M-vs-sector is -8% (lagging the assigned sector).
+    monkeypatch.setattr(ind, "rs3m", lambda d, b, **k: 10.0 if d is xlk else 2.0)
+    monkeypatch.setattr(ind, "atr_pct", lambda d, **k: 2.0)
+    monkeypatch.setattr(ind, "consolidating", lambda d: True)
+    monkeypatch.setattr(screening, "regime",
+                        lambda: {"status": "green", "breadth": 70, "vix": 15, "spy_trend": "up"})
+    monkeypatch.setattr(screening, "sectors",
+                        lambda: {"XLK": {"name": "Technology", "rs3m": 20, "breadth": 70,
+                                         "atr_expanding": False, "status": "green"}})
+
+    # SMH (a curated ETF) clears Level 3: the SPY leg passes on the >0% bar and
+    # the beats-sector leg is waived (N/A) even though it lags XLK by 8%.
+    etf_l3 = next(l for l in screening.entry_gate("SMH")["levels"] if l["level"] == 3)
+    etf_spy, etf_sector = etf_l3["checks"]
+    assert etf_spy["pass"] is True
+    assert etf_sector["pass"] is True and "N/A" in etf_sector["label"]
+    assert etf_l3["pass"] is True
+    assert etf_l3["detail"]["is_sector_etf"] is False   # curated, not a header
+    assert etf_l3["detail"]["rs3m_vs_sector"] == -8.0   # still shown, just not gated
+
+    # NVDA (a stock) in the same spot fails Level 3 — both legs bite.
+    stock_l3 = next(l for l in screening.entry_gate("NVDA")["levels"] if l["level"] == 3)
+    assert stock_l3["pass"] is False
+    assert stock_l3["checks"][1]["pass"] is False        # beats-sector NOT waived
+
+
 def test_stock_filter_includes_the_sector_etf_alongside_constituents(monkeypatch):
     import data_handler
     import screening
