@@ -345,7 +345,11 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
         </div>
       )}
 
-      <div className="divide-y divide-slate-800/60">
+      {/* One compact tile per position, flowing left to right — the shared
+          tile border is what says "this orange feeds these glasses." A ticker
+          can only ever hold one tile: the book keeps a single position slot
+          per ticker (a re-entry reuses it and starts a fresh cycle). */}
+      <div className="flex flex-wrap justify-center gap-3 sm:justify-start">
         {rows.map(({ p, pulp, shorts }) => {
           const lh = p.leap_health || {};
           const ks = killByTicker?.[p.ticker];
@@ -368,7 +372,8 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
           const leap = p.leap || {};
 
           return (
-            <div key={p.ticker} className="flex flex-wrap items-start gap-x-2 gap-y-3 py-3 first:pt-0 last:pb-0">
+            <div key={p.ticker}
+                 className="flex items-start gap-1 rounded-lg border border-slate-800/60 bg-slate-900/40 p-2">
               {/* The fruit: this position's LEAP engine. */}
               <button
                 onClick={() => nav?.focus?.(p.ticker)}
@@ -418,15 +423,13 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                 <FlagRow flags={orangeFlags} />
               </button>
 
-              <span className="hidden self-center text-slate-600 sm:block" aria-hidden="true">→</span>
-
               {/* The squeeze: this orange's glasses, one per open short. */}
               {shorts.length === 0 ? (
-                <div className="flex min-h-[6rem] flex-1 items-center text-xs italic text-slate-500">
-                  not being squeezed — no shorts working against this LEAP
+                <div className="flex h-24 w-16 items-center text-center text-[10px] italic leading-snug text-slate-500">
+                  not being squeezed
                 </div>
               ) : (
-                <div className="flex min-w-0 flex-1 flex-wrap items-start justify-center gap-x-3 gap-y-2 sm:justify-start">
+                <div className="flex max-w-[14.5rem] flex-wrap items-start justify-center gap-x-1 gap-y-2">
                   {shorts.map(({ sc, pct, captured, total }, i) => {
                     const flags = [];
                     if (sc.below_strike) flags.push("defend");
