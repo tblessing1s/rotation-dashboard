@@ -550,7 +550,8 @@ def test_close_leap_clears_position_and_records_pnl(monkeypatch, tmp_path):
                       "override_reason": "test fixture"})
     # Sell the LEAP to close: proceeds 3600*5=18000 vs cost basis 3300*5=16500.
     res = executor.execute({"action": "close_leap", "ticker": "ON", "strike": 130,
-                            "contracts": 5, "close_price": 3600, "stock_price": 150})
+                            "contracts": 5, "close_price": 3600, "stock_price": 150,
+                            "exit_reason": "TARGET_REACHED"})
     assert res["execution"]["realized_pnl"] == 1500.0
     # intrinsic/contract = (150-130)*100 = 2000; extrinsic remaining = (3600-2000)*5 = 8000
     assert res["execution"]["extrinsic_remaining"] == 8000.0

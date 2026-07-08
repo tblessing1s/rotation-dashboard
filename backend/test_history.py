@@ -27,7 +27,8 @@ def isolated_state(tmp_path, monkeypatch):
 
 
 def _run_cycle(ticker="NVDA", exec_price=2400, close_price=2600, weeks=2,
-               sold=0.80, paid=0.30, exit_reason="target hit", with_roll=False):
+               sold=0.80, paid=0.30, exit_reason="TARGET_REACHED", exit_note=None,
+               with_roll=False):
     executor.execute({"action": "buy_leap", "ticker": ticker, "strike": 75,
                       "contracts": 5, "execution_price": exec_price, "stock_price": 95,
                       "override_reason": "fixture"})
@@ -50,7 +51,7 @@ def _run_cycle(ticker="NVDA", exec_price=2400, close_price=2600, weeks=2,
                           "stock_price": 89, "extrinsic_sold": 1.50})
     executor.execute({"action": "close_leap", "ticker": ticker, "strike": 75,
                       "contracts": 5, "close_price": close_price, "stock_price": 98,
-                      "exit_reason": exit_reason})
+                      "exit_reason": exit_reason, "exit_note": exit_note})
 
 
 def test_cycle_record_hand_computed(isolated_state):
@@ -69,20 +70,21 @@ def test_cycle_record_hand_computed(isolated_state):
     assert c["net_result"] == 1500.0
     assert c["net_return_pct"] == 12.5
     assert c["target_met"] is False and c["target_range_pct"] == [15.0, 25.0]
-    assert c["exit_reason"] == "target hit"
+    assert c["exit_reason"] == "TARGET_REACHED"
     assert c["days_held"] == 0  # same-day fixture
     assert c["roll_count"] == 0 and c["roll_drag"] == 0.0
-    assert "entry_snapshot" in c  # captured at entry (None-fields offline is fine)
+    assert "entry_context" in c  # captured at entry (None-fields offline is fine)
+    assert "entry_summary" in c and "exit_metrics" in c
     assert c["wash_sale"] is None  # profitable exit
 
 
 def test_cycle_includes_roll_drag(isolated_state):
-    _run_cycle(with_roll=True, close_price=2400, exit_reason="kill switch")
+    _run_cycle(with_roll=True, close_price=2400, exit_reason="KILL_SWITCH_SECTOR")
     c = log.load_state()["cycles"][0]
     # Roll: buyback 2.00*500=1000, new premium 1.50*500=750 -> net -250 (drag).
     assert c["roll_count"] == 1
     assert c["roll_net"] == -250.0 and c["roll_drag"] == -250.0
-    assert c["exit_reason"] == "kill switch"
+    assert c["exit_reason"] == "KILL_SWITCH_SECTOR"
     # Juice: 2 weekly closes at +250 each, the roll's buyback close nets
     # (0.50-2.00)= -1.50/sh -> -750, the final close nets 0. Total = -250.
     assert c["gross_juice"] == -250.0
@@ -90,13 +92,27 @@ def test_cycle_includes_roll_drag(isolated_state):
     assert c["net_result"] == -250.0
 
 
-def test_invalid_exit_reason_normalizes(isolated_state):
-    _run_cycle(exit_reason="because I felt like it")
-    assert log.load_state()["cycles"][0]["exit_reason"] == "discretionary"
+def test_unrecognized_exit_reason_rejected(isolated_state):
+    # An unrecognized (e.g. legacy free-text) reason is rejected at the boundary
+    # rather than silently coerced — catches typos and stale callers.
+    with pytest.raises(ValueError, match="unknown exit_reason"):
+        _run_cycle(exit_reason="because I felt like it")
+
+
+def test_operator_discretion_requires_note(isolated_state):
+    # A blank reason is treated as a discretionary close, which REQUIRES a typed
+    # note; with no note the close is rejected.
+    with pytest.raises(ValueError, match="requires a typed exit_note"):
+        _run_cycle(exit_reason="")
+    # With a note it lands OPERATOR_DISCRETION + the note on the cycle.
+    _run_cycle(exit_reason="OPERATOR_DISCRETION", exit_note="stepping aside — macro")
+    c = log.load_state()["cycles"][0]
+    assert c["exit_reason"] == "OPERATOR_DISCRETION"
+    assert c["exit_note"] == "stepping aside — macro"
 
 
 def test_wash_sale_flagged_on_reentry(isolated_state):
-    _run_cycle(close_price=2000, exit_reason="circuit breaker")  # LEAP P&L -2000 (loss)
+    _run_cycle(close_price=2000, exit_reason="CB_DRAWDOWN_15")  # LEAP P&L -2000 (loss)
     # Re-enter the same underlying (same day -> inside the 30d window).
     executor.execute({"action": "buy_leap", "ticker": "NVDA", "strike": 70,
                       "contracts": 5, "execution_price": 2500, "stock_price": 92,
@@ -112,7 +128,7 @@ def test_wash_sale_flagged_on_reentry(isolated_state):
 
 
 def test_wash_sale_window_open_without_reentry(isolated_state):
-    _run_cycle(close_price=2000, exit_reason="circuit breaker")
+    _run_cycle(close_price=2000, exit_reason="CB_DRAWDOWN_15")
     c = log.load_state()["cycles"][0]
     assert c["wash_sale"]["status"] == "window_open"
     exit_d = datetime.now(timezone.utc).date()
@@ -121,7 +137,7 @@ def test_wash_sale_window_open_without_reentry(isolated_state):
 
 def test_history_aggregates_and_export(isolated_state):
     _run_cycle(ticker="NVDA", close_price=2600)                    # +12.5% win
-    _run_cycle(ticker="AMD", close_price=2000, exit_reason="kill switch")  # loss
+    _run_cycle(ticker="AMD", close_price=2000, exit_reason="KILL_SWITCH_SECTOR")  # loss
     state = log.load_state()
     view = history.view(state)
     agg = view["aggregates"]
@@ -133,7 +149,9 @@ def test_history_aggregates_and_export(isolated_state):
     assert view["cycles"][0]["ticker"] == "AMD"  # newest first
 
     csv_text = history.juice_journal_csv(state)
-    assert "# closed cycles" in csv_text and "NVDA" in csv_text and "kill switch" in csv_text
+    assert "# closed cycles" in csv_text and "NVDA" in csv_text and "KILL_SWITCH_SECTOR" in csv_text
+    # Compact entry-context summary columns are present (values may be null offline).
+    assert "verdict" in csv_text and "iv_rank" in csv_text and "exit_note" in csv_text
     md_text = history.juice_journal_markdown(state)
     assert "# CFM Juice Journal" in md_text and "| NVDA |" in md_text
 

@@ -293,7 +293,7 @@ def test_atomic_exit_books_both_legs_with_shared_exit_id(store, monkeypatch):
     _seed_open_position(monkeypatch)
     res = executor.execute({"action": "close_position_atomic", "ticker": "NVDA",
                             "leap_close_price": 6500, "stock_price": 100,
-                            "exit_reason": "kill switch",
+                            "exit_reason": "KILL_SWITCH_SECTOR",
                             # short buyback comes from the stored short mark
                             })
     assert res["status"] == "filled"
@@ -351,7 +351,7 @@ def test_atomic_exit_live_lifecycle_mocked(store, monkeypatch):
 
     placed = executor.execute({
         "action": "close_position_atomic", "ticker": "NVDA", "stock_price": 100,
-        "exit_reason": "circuit breaker",
+        "exit_reason": "CB_DRAWDOWN_15",
         "leap_option_symbol": "NVDA_LEAP",
         "short_option_symbols": {"100": "NVDA_SHORT"},
         "leap_close_price": 6500,

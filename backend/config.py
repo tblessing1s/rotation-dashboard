@@ -588,6 +588,30 @@ CYCLE_WEEKS_MAX = 8
 # income ("juice too rich"). Warn, don't block.
 JUICE_RICH_FACTOR = 1.75
 
+# ---- Entry-context snapshots + coded exit reasons --------------------------
+# Every closed cycle needs (a) the entry-time feature values that produced the
+# GO verdict and (b) a machine-readable exit reason, or the calibration harness
+# can never validate a threshold against it. Both are frozen onto the immutable
+# executions at trade time (entry_context on the buy_leap, exit_reason on the
+# close_leap) — they cannot be reconstructed after the fact. See
+# backend/entry_context.py and backend/exit_reasons.py.
+
+# HARD_CFM_RULE — the snapshot schema is versioned from day one, INDEPENDENT of
+# the state.json schema_version, so the snapshot shape can evolve on its own
+# cadence and old snapshots stay readable by their own version tag.
+SNAPSHOT_SCHEMA_VERSION = 1
+
+# HARD_CFM_RULE — a trade must NEVER be blocked or delayed because telemetry
+# capture failed. Snapshot capture is best-effort and wrapped so any failure
+# degrades to null-with-reason; it never raises into the execution path.
+SNAPSHOT_NEVER_BLOCKS_EXECUTION = True
+
+# PROPOSED_DEFAULT — if more than this fraction of the snapshot's tracked
+# scalar fields come back null (stale/unavailable/provider_error), fire a
+# LOW-severity data-quality alert. This is worth-knowing-about, not a trade
+# blocker (see SNAPSHOT_NEVER_BLOCKS_EXECUTION).
+SNAPSHOT_NULL_FIELD_ALERT_FRACTION = 0.25
+
 # ---- ETF income sleeve ------------------------------------------------------
 # ETFs carry lower IV than single growth stocks, so their weekly juice is
 # thinner — but steadier, with no earnings-gap risk. They run as a lower-income,

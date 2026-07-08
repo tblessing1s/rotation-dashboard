@@ -187,10 +187,10 @@ CONTRACTS = 5
 CLOSED_DEMO = [
     dict(ticker="PLTR", strike=75, entry_px=95, exec_price=2400, weeks=6,
          sold=0.80, paid=0.30, close_price=2600, close_px=98,
-         exit_reason="target hit", entry_date="2026-01-12", exit_date="2026-03-06"),
+         exit_reason="TARGET_REACHED", entry_date="2026-01-12", exit_date="2026-03-06"),
     dict(ticker="COIN", strike=210, entry_px=250, exec_price=4600, weeks=3,
          sold=1.10, paid=0.85, close_price=3680, close_px=242,
-         exit_reason="kill switch", entry_date="2026-03-23", exit_date="2026-04-17"),
+         exit_reason="KILL_SWITCH_SECTOR", entry_date="2026-03-23", exit_date="2026-04-17"),
 ]
 
 # A 5th, deliberately broken position that trips every position-based alert

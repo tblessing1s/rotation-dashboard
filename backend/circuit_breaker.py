@@ -138,3 +138,26 @@ def evaluate_all(state: dict) -> list[dict]:
             continue
         out.append(evaluate(p))
     return out
+
+
+# Circuit-breaker condition id -> coded exit reason (exit_reasons.ExitReason).
+# One member per real condition, including the operator line-in-the-sand.
+_CONDITION_EXIT_CODE = {
+    "drawdown": "CB_DRAWDOWN_15",
+    "ma_fast": "CB_MA50_3CLOSE",
+    "ma_slow": "CB_MA200_CLOSE",
+    "manual_line": "CB_MANUAL_LINE",
+}
+
+
+def exit_reason_code(evaluation: dict) -> str | None:
+    """The coded exit reason a breach implies, or None when nothing is tripped.
+    Takes the FIRST tripped condition in evaluation order (drawdown, fast-MA,
+    slow-MA, manual line) so the reason is set at the point the breaker fires.
+    Advisory: circuit_breaker never closes on its own."""
+    import exit_reasons
+    for cid in evaluation.get("tripped_conditions") or []:
+        code = _CONDITION_EXIT_CODE.get(cid)
+        if code and exit_reasons.is_valid(code):
+            return code
+    return None

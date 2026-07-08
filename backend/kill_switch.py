@@ -84,3 +84,21 @@ def evaluate_all(state: dict) -> list[dict]:
             continue
         out.append(evaluate(p.get("ticker", "")))
     return out
+
+
+def exit_reason_code(evaluation: dict) -> str | None:
+    """The coded exit reason (exit_reasons.ExitReason) a kill-switch trip
+    implies, or None when the position is not on a red exit. This is the single
+    source the close path stamps so the reason is set AT the point the rule
+    fires — RS3M vs Sector negative dominates (exit now); RS3M vs SPY negative is
+    the confirm-on-close exit. Advisory: kill_switch never closes on its own."""
+    import exit_reasons
+    if evaluation.get("status") != "red":
+        return None
+    rs_sector = evaluation.get("rs3m_vs_sector")
+    if rs_sector is not None and rs_sector < 0:
+        return exit_reasons.ExitReason.KILL_SWITCH_SECTOR
+    rs_spy = evaluation.get("rs3m_vs_spy")
+    if rs_spy is not None and rs_spy < 0:
+        return exit_reasons.ExitReason.KILL_SWITCH_SPY
+    return None
