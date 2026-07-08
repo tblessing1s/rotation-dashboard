@@ -96,14 +96,43 @@ def _is_weekly_boundary(exp: str | None) -> bool:
     return False
 
 
+def _weekly_expirations(contracts: list[dict], count: int = 2) -> list[str]:
+    """The next `count` weekly-short expirations, nearest first: weekly boundaries
+    (Friday, or a holiday-week Thursday) with dte>0. Falls back to the nearest
+    dated expirations when the chain lists no Friday boundary (e.g. a monthly-only
+    name). dte>0 excludes today's 0-DTE contract, whose time value is gone.
+
+    CFM sells one weekly, but the juice comparison needs a full week of premium,
+    so callers want both this week's boundary and next week's to work with."""
+    dated = [c for c in contracts if c.get("dte") is not None and c["dte"] > 0]
+    pool = [c for c in dated if _is_weekly_boundary(c.get("expiration"))] or dated
+    by_exp: dict[str, int] = {}
+    for c in pool:
+        exp = c.get("expiration")
+        if exp is not None:
+            by_exp[exp] = min(by_exp.get(exp, c["dte"]), c["dte"])
+    return sorted(by_exp, key=lambda e: by_exp[e])[:count]
+
+
 def _weekly_expiration(contracts: list[dict]) -> str | None:
     """The expiration for this week's short: the nearest weekly boundary
     (Friday, or a holiday-week Thursday) with dte>0. Falls back to the nearest
-    dated expiration when the chain lists no Friday boundary (e.g. a monthly-only
-    name). dte>0 excludes today's 0-DTE contract, whose time value is gone."""
-    dated = [c for c in contracts if c.get("dte") is not None and c["dte"] > 0]
-    pool = [c for c in dated if _is_weekly_boundary(c.get("expiration"))] or dated
-    return min(pool, key=lambda c: c["dte"])["expiration"] if pool else None
+    dated expiration when the chain lists no Friday boundary."""
+    exps = _weekly_expirations(contracts, count=1)
+    return exps[0] if exps else None
+
+
+def _pick_comparison_weekly(groups: list[dict]) -> dict | None:
+    """From the weekly expiration groups (nearest first, each carrying a `dte`),
+    pick the one whose extrinsic is a fair juice comparison: the nearest with at
+    least WEEKLY_MIN_COMPARISON_DTE days of premium. When even the furthest listed
+    weekly is a stub, fall back to that furthest one (most time value available)."""
+    if not groups:
+        return None
+    for g in groups:
+        if g.get("dte") is not None and g["dte"] >= config.WEEKLY_MIN_COMPARISON_DTE:
+            return g
+    return groups[-1]
 
 
 def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None,
@@ -505,27 +534,45 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     if atr_val is not None and price is not None:
         sp = strike_policy.suggest_strike(price, atr_val, regime_status)
         suggested_strike = sp["strike"]
-        # This week's short expires on the coming Friday (Thursday on a holiday
+        # CFM sells one weekly call on the coming Friday (Thursday on a holiday
         # week) — the nearest weekly boundary, not the nearest *daily*. IWM/SPY
-        # list a new daily expiration every trading day, but CFM sells one weekly
-        # call, so Mon–Thu dailies are skipped in favour of the Friday.
-        weekly_exp = _weekly_expiration(contracts)
-        exp_contracts = [c for c in contracts if c["expiration"] == weekly_exp] if weekly_exp else []
-        strikes = indicators.get_nearby_strikes(exp_contracts, suggested_strike, underlying)
+        # list a new daily expiration every trading day, so Mon–Thu dailies are
+        # skipped in favour of the Friday. We surface this week's AND next week's
+        # weekly so the operator can see both — and so the juice comparison has a
+        # full-week short to price against when the coming Friday is a 1–2 DTE
+        # stub whose thin extrinsic would otherwise falsely block the Level-5 gate.
+        weekly_exps = _weekly_expirations(contracts, count=2)
+        exp_groups = []
+        for exp in weekly_exps:
+            exp_contracts = [c for c in contracts if c["expiration"] == exp]
+            exp_groups.append({
+                "expiration": exp,
+                "dte": exp_contracts[0]["dte"] if exp_contracts else None,
+                "strikes": indicators.get_nearby_strikes(exp_contracts, suggested_strike, underlying),
+            })
+        # Each week is a full chain with its own ATR-target `suggested` strike.
+        # The comparison week (>= a full week of DTE) is the one flagged
+        # is_comparison: it seeds the default selection and feeds the Level-5
+        # juice gate, so a 1–2 DTE stub's thin extrinsic can't falsely block.
+        comparison = _pick_comparison_weekly(exp_groups)
+        for g in exp_groups:
+            g["is_comparison"] = g is comparison
+        strikes = comparison["strikes"] if comparison else []
         sug = next((s for s in strikes if s.get("suggested")), strikes[0] if strikes else None)
         weekly_iv = (sug or {}).get("volatility") or _median([s.get("volatility") for s in strikes])
         # Accrue one IV-history point per day from the IV we already computed —
         # this is what IV rank is measured against (zero extra chain fetches).
         iv_history.record(ticker, weekly_iv)
         weekly = {
-            "expiration": weekly_exp,
-            "dte": exp_contracts[0]["dte"] if exp_contracts else None,
+            "expiration": comparison["expiration"] if comparison else None,
+            "dte": comparison["dte"] if comparison else None,
             "suggested_strike": suggested_strike,
             "atr": round(atr_val, 2),
             "atr_mult": sp["atr_mult"],
             "itm_pct": sp["itm_pct"],
             "posture": sp["posture"],
             "strikes": strikes,
+            "expirations": exp_groups,
         }
 
     # --- If a short is already open, surface its live buy-to-close cost ------

@@ -64,3 +64,44 @@ def test_falls_back_to_nearest_when_no_friday_boundary():
 def test_none_when_no_dated_contracts():
     assert option_chain._weekly_expiration([_c("2026-07-07", 0)]) is None
     assert option_chain._weekly_expiration([]) is None
+
+
+# --- Current + next weekly for the juice comparison --------------------------
+def test_weekly_expirations_returns_current_and_next_boundaries():
+    contracts = [_c("2026-07-10", 2), _c("2026-07-17", 9), _c("2026-07-24", 16)]
+    assert option_chain._weekly_expirations(contracts, count=2) == ["2026-07-10", "2026-07-17"]
+
+
+def test_weekly_expirations_skips_dailies_and_zero_dte():
+    # Wed/Thu dailies (07-08/07-09) aren't weekly boundaries; the 0-DTE contract
+    # is dropped too. Only the two Fridays qualify.
+    contracts = [_c("2026-07-08", 0), _c("2026-07-09", 1),
+                 _c("2026-07-10", 2), _c("2026-07-17", 9)]
+    assert option_chain._weekly_expirations(contracts, count=2) == ["2026-07-10", "2026-07-17"]
+
+
+def test_weekly_expirations_dedupes_strikes_within_an_expiration():
+    contracts = [{"expiration": "2026-07-10", "dte": 2, "strike": 100.0},
+                 {"expiration": "2026-07-10", "dte": 2, "strike": 101.0},
+                 {"expiration": "2026-07-17", "dte": 9, "strike": 100.0}]
+    assert option_chain._weekly_expirations(contracts, count=2) == ["2026-07-10", "2026-07-17"]
+
+
+def test_comparison_weekly_skips_stub_current_week():
+    # A 2-DTE current weekly is a stub; the comparison rolls to the full-week one.
+    groups = [{"expiration": "2026-07-10", "dte": 2}, {"expiration": "2026-07-17", "dte": 9}]
+    assert option_chain._pick_comparison_weekly(groups)["expiration"] == "2026-07-17"
+
+
+def test_comparison_weekly_keeps_current_when_it_has_a_full_week():
+    groups = [{"expiration": "2026-07-17", "dte": 7}, {"expiration": "2026-07-24", "dte": 14}]
+    assert option_chain._pick_comparison_weekly(groups)["expiration"] == "2026-07-17"
+
+
+def test_comparison_weekly_falls_back_to_furthest_when_all_stubs():
+    groups = [{"expiration": "2026-07-10", "dte": 1}, {"expiration": "2026-07-13", "dte": 3}]
+    assert option_chain._pick_comparison_weekly(groups)["expiration"] == "2026-07-13"
+
+
+def test_comparison_weekly_none_when_no_groups():
+    assert option_chain._pick_comparison_weekly([]) is None
