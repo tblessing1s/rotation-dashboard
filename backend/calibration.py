@@ -77,6 +77,44 @@ def collect_rows(tickers: list[str] | None = None, step: int = 5) -> list[dict]:
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Closed-cycle loader — the real training data (entry context -> outcome).
+# ---------------------------------------------------------------------------
+def load_closed_cycles(state: dict) -> tuple[list[tuple], int]:
+    """Yield ``(entry_context, exit_reason, cycle_outcome_metrics)`` for every
+    closed cycle that carries a frozen entry_context, and a count of legacy
+    cycles skipped.
+
+    A cycle with ``entry_context is None`` was closed before the snapshot feature
+    shipped (exit_reason ``LEGACY_UNRECORDED``); it can never be calibration-usable
+    and is NOT fabricated — it's skipped and counted. This is the input shape the
+    threshold calibration consumes: the entry-time feature values that produced
+    the GO verdict, why the cycle ended, and how it turned out (including the
+    exit-time counterpart metrics for entry->exit deltas)."""
+    tuples: list[tuple] = []
+    skipped = 0
+    for c in state.get("cycles", []):
+        ec = c.get("entry_context")
+        if ec is None:
+            skipped += 1
+            continue
+        outcome = {
+            "ticker": c.get("ticker"),
+            "entry_date": c.get("entry_date"),
+            "exit_date": c.get("exit_date"),
+            "days_held": c.get("days_held"),
+            "net_result": c.get("net_result"),
+            "net_return_pct": c.get("net_return_pct"),
+            "gross_juice": c.get("gross_juice"),
+            "leap_pnl": c.get("leap_pnl"),
+            "roll_drag": c.get("roll_drag"),
+            "target_met": c.get("target_met"),
+            "exit_metrics": c.get("exit_metrics"),
+        }
+        tuples.append((ec, c.get("exit_reason"), outcome))
+    return tuples, skipped
+
+
 def _bucket(rows: list[dict], key) -> dict[str, dict]:
     """Aggregate forward returns per bucket label produced by key(row)."""
     buckets: dict[str, list[dict]] = {}

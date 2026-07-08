@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 11
+CURRENT_VERSION = 12
 
 
 class MigrationAbortedError(RuntimeError):
@@ -168,6 +168,19 @@ def _v10_to_v11(state: dict) -> dict:
     return state
 
 
+def _v11_to_v12(state: dict) -> dict:
+    """v12 (entry-context snapshots + coded exit reasons): positions gain an
+    immutable ``entry_context`` snapshot, frozen at the next FRESH entry. Existing
+    positions are seeded None — no snapshot is fabricated from historical bars
+    (fabricated training data is worse than missing data). Closed cycles are
+    DERIVED (recompute_derived): a cycle whose close_leap carries no recognized
+    coded exit_reason becomes ``LEGACY_UNRECORDED`` at the post-migration
+    recompute — never backfilled. Additive; executions are never rewritten."""
+    for p in state.get("positions", []):
+        p.setdefault("entry_context", None)
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -179,6 +192,7 @@ MIGRATIONS = {
     8: _v8_to_v9,
     9: _v9_to_v10,
     10: _v10_to_v11,
+    11: _v11_to_v12,
 }
 
 

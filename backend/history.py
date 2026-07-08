@@ -64,12 +64,22 @@ def view(state: dict) -> dict:
 # Juice journal export (CSV / markdown)
 # ---------------------------------------------------------------------------
 _WEEK_COLS = ["week", "ticker", "extrinsic_sold", "extrinsic_paid_back", "net_juice"]
+# The cycle columns include the coded exit reason + note and a COMPACT entry-
+# context summary (verdict, regime, IV rank, RS3M pair). The full snapshot is
+# not in the CSV — it's available per cycle via the /api/history detail.
 _CYCLE_COLS = ["id", "ticker", "entry_date", "exit_date", "days_held",
                "capital_deployed", "gross_juice", "roll_count", "roll_net",
                "roll_drag", "leap_pnl", "net_result", "net_return_pct",
-               "target_met", "exit_reason"]
+               "target_met", "exit_reason", "exit_note",
+               "verdict", "regime", "iv_rank", "rs3m_vs_spy", "rs3m_vs_sector"]
 _ROLL_COLS = ["roll_id", "ticker", "date", "reason", "from_strike", "to_strike",
               "buyback_cost", "new_premium", "net"]
+
+
+def _cycle_export_row(c: dict) -> dict:
+    """Flatten a cycle for export: its own fields plus the compact entry_summary
+    (verdict/regime/iv_rank/rs3m pair) hoisted to top-level column keys."""
+    return {**c, **(c.get("entry_summary") or {})}
 
 
 def juice_journal_csv(state: dict) -> str:
@@ -89,7 +99,8 @@ def juice_journal_csv(state: dict) -> str:
     w.writerow(["# closed cycles"])
     w.writerow(_CYCLE_COLS)
     for row in state.get("cycles", []):
-        w.writerow([row.get(c) for c in _CYCLE_COLS])
+        flat = _cycle_export_row(row)
+        w.writerow([flat.get(c) for c in _CYCLE_COLS])
     return buf.getvalue()
 
 
@@ -115,5 +126,5 @@ def juice_journal_markdown(state: dict) -> str:
     lines += ["", "## Roll ledger", ""]
     lines += _md_table(_ROLL_COLS, state.get("roll_ledger", {}).get("rolls", []))
     lines += ["", "## Closed cycles", ""]
-    lines += _md_table(_CYCLE_COLS, state.get("cycles", []))
+    lines += _md_table(_CYCLE_COLS, [_cycle_export_row(c) for c in state.get("cycles", [])])
     return "\n".join(lines) + "\n"

@@ -47,10 +47,11 @@ class PositionFrozenError(RuntimeError):
 # "scheduled" so the ledger enum stays clean for later calibration.
 ROLL_REASONS = {"scheduled", "75%-rule", "defend", "earnings", "kill-switch-exit"}
 
-# Why a cycle ended — logged on the close_leap execution, carried onto the
-# derived cycle record. Unrecognized values fall back to "discretionary".
-EXIT_REASONS = {"target hit", "trailing stop", "kill switch", "circuit breaker",
-                "earnings", "discretionary"}
+# Why a cycle ended — a CODED reason (exit_reasons.ExitReason) logged on the
+# close_leap execution and carried onto the derived cycle record. Validated at
+# the execute() boundary (see _validate_exit_reason); OPERATOR_DISCRETION
+# requires a typed exit_note. The coded enum replaced the old free-text set so
+# calibration can bucket outcomes by why they ended.
 
 # Schwab order instruction per single-leg CFM action (all legs are calls).
 INSTRUCTION = {
@@ -165,6 +166,12 @@ def execute(payload: dict) -> dict:
             "Refusing single-leg close_leap while an open short remains — it would "
             "leave a naked short call. Use close_position_atomic to exit both legs "
             "on one ticket, or close/roll the short first.")
+
+    # Coded exit reason (+ typed note for OPERATOR_DISCRETION) — validated here,
+    # at the operator-facing boundary, so a bad reason is rejected BEFORE any
+    # order is placed. Normalizes payload["exit_reason"]/["exit_note"] in place.
+    if action in ("close_leap", "close_position_atomic"):
+        _validate_exit_reason(payload)
 
     log.save_state(state)  # persist the shell position before recording the fill
 
@@ -368,6 +375,35 @@ def _enforce_account_gate(payload, ticker, contracts):
         raise ValueError(
             f"Level 5 gate blocked entry ({failed}) — {details}. "
             "Pass override_reason to enter anyway (logged).")
+
+
+def _validate_exit_reason(payload):
+    """Normalize + validate the coded exit reason for an operator close, mutating
+    ``payload['exit_reason']`` (canonical code) and ``payload['exit_note']`` in
+    place. Rules (see exit_reasons.py):
+      * a recognized coded reason passes through;
+      * a blank reason is treated as OPERATOR_DISCRETION (the operator closed
+        without categorizing);
+      * an unrecognized non-blank reason is REJECTED (catches typos/legacy text);
+      * OPERATOR_DISCRETION requires a typed exit_note — a no-note manual close is
+        rejected (mirrors the account gate's typed-override pattern).
+    """
+    import exit_reasons
+    raw = payload.get("exit_reason")
+    note = (payload.get("exit_note") or "").strip()
+    code = exit_reasons.normalize(raw)
+    if code is None:
+        if raw and str(raw).strip():
+            raise ValueError(
+                f"unknown exit_reason '{raw}' — expected one of "
+                f"{sorted(exit_reasons.OPERATOR_SELECTABLE)}")
+        code = exit_reasons.ExitReason.OPERATOR_DISCRETION  # blank -> discretionary
+    if exit_reasons.requires_note(code) and not note:
+        raise ValueError(
+            f"exit_reason {code} requires a typed exit_note explaining the close "
+            "(mirrors the Level-5 typed-override rule).")
+    payload["exit_reason"] = code
+    payload["exit_note"] = note or None
 
 
 def _build_leg(payload, ticker, action, strike, contracts, stock_price):
@@ -610,15 +646,36 @@ def cancel_order(order_id: str) -> dict:
     return {"order_id": order_id, "status": "canceled"}
 
 
-def _entry_snapshot(ticker: str) -> dict | None:
-    """One scorecard row for the ticker, computed at entry time. Best-effort:
-    offline/missing data degrades to a row of Nones, never an error."""
+def _capture_entry_context(ticker: str, payload: dict) -> dict | None:
+    """Freeze the immutable entry_context snapshot at entry time, and fire the
+    low-severity data-quality alert if too many tracked fields came back null.
+
+    entry_context.capture is already fully guarded (never raises, never fetches),
+    but this wrapper is belt-and-suspenders: snapshot capture must NEVER block or
+    delay an execution (config.SNAPSHOT_NEVER_BLOCKS_EXECUTION), so any failure
+    here degrades to a null snapshot and the trade still logs."""
     try:
-        from metrics import scorecard as scorecard_metrics
-        rows = scorecard_metrics.scorecard([ticker]).get("results") or []
-        return rows[0] if rows else None
+        import entry_context
+        snap = entry_context.capture(ticker, payload)
     except Exception:  # noqa: BLE001 — a snapshot must never block an entry
         return None
+    try:
+        dq = (snap or {}).get("data_quality") or {}
+        if dq.get("over_null_threshold"):
+            import alerts
+            alerts.record_event(
+                "SNAPSHOT_DATA_QUALITY", ticker,
+                f"{ticker} entry snapshot: {dq['null_fields']}/{dq['tracked_fields']} "
+                f"tracked fields null ({dq['null_field_fraction']:.0%}) — "
+                "calibration telemetry for this entry is thin.",
+                data={"null_field_fraction": dq["null_field_fraction"],
+                      "missing": dq.get("missing", [])},
+                # LOW-severity telemetry — logged for visibility, not pushed to
+                # the operator's phone (a data-quality note, not a trade signal).
+                notify=False)
+    except Exception:  # noqa: BLE001 — alerting is best-effort too
+        pass
+    return snap
 
 
 def _norm_exp(value) -> str | None:
@@ -697,10 +754,12 @@ def _buy_leap(payload, ticker, strike, contracts, stock_price):
         except Exception:  # noqa: BLE001 — dividend data must never block an entry
             dividend = {"ex_date": None, "amount": None, "source": "error"}
 
-    # Scorecard verdict + metric snapshot AT ENTRY, frozen onto the immutable
-    # execution — the closed-cycle record later shows what the numbers said the
-    # day the trade went on (this cannot be re-derived after the fact).
-    execution["entry_snapshot"] = _entry_snapshot(ticker)
+    # Entry-context snapshot AT ENTRY, frozen onto the immutable execution — the
+    # closed-cycle record later shows every feature value that produced the GO
+    # verdict (this cannot be re-derived after the fact). It's also mirrored onto
+    # the position (apply below) for the live UI. Captured once; never modified.
+    entry_context = _capture_entry_context(ticker, payload)
+    execution["entry_context"] = entry_context
 
     def apply(position):
         legs = log.leap_legs(position)
@@ -732,6 +791,9 @@ def _buy_leap(payload, ticker, strike, contracts, stock_price):
             position["entry_date"] = log.utcnow()[:10]
             position["circuit_breaker"] = circuit_breaker
             position["dividend"] = dividend
+            # Freeze the entry-context onto the position (written once, never
+            # regenerated — recompute_derived treats it as opaque raw record).
+            position["entry_context"] = entry_context
         else:
             if position.get("circuit_breaker") is None:
                 position["circuit_breaker"] = circuit_breaker
@@ -764,13 +826,23 @@ def _close_leap(payload, ticker, strike, contracts, stock_price):
     cost_basis = float(cost_basis if cost_basis is not None else leg.get("cost_basis") or 0)
     realized_pnl = round(close_total - cost_basis, 2)
 
-    exit_reason = (payload.get("exit_reason") or "").strip()
+    # Coded exit reason + optional typed note, frozen on the immutable close so
+    # the derived cycle can be bucketed by why it ended (and never re-inferred).
+    # For operator closes these were validated/normalized at the execute()
+    # boundary; the internal LEAP-roll close supplies its own coded reason.
+    import entry_context
+    import exit_reasons
+    exit_reason = exit_reasons.normalize(payload.get("exit_reason"))
     execution = {
         "ticker": ticker, "action": "close_leap", "strike": strike, "contracts": contracts,
         "close_price": close_per_contract, "close_total": close_total, "stock_price": stock_price,
         "cost_basis": round(cost_basis, 2), "realized_pnl": realized_pnl,
         "extrinsic_remaining": round(extrinsic_remaining, 2),
-        "exit_reason": exit_reason if exit_reason in EXIT_REASONS else "discretionary",
+        "exit_reason": exit_reason,
+        "exit_note": (payload.get("exit_note") or None),
+        # Exit-time counterpart metrics (same stock-level set as the entry
+        # snapshot) so calibration can compute entry->exit deltas.
+        "exit_metrics": entry_context.exit_metrics(ticker),
         "expiration": _norm_exp(leg.get("expiration") or payload.get("expiration")),
         # Stamped so the payback replay knows whether this close ended the
         # cycle (last leg out) or the engine kept running on remaining legs.
@@ -1202,6 +1274,7 @@ def _build_exit_legs(position, payload, stock_price):
         "close_price": leap_pc, "stock_price": stock_price,
         "cost_basis": payload.get("cost_basis", leap.get("cost_basis")),
         "exit_reason": payload.get("exit_reason"),
+        "exit_note": payload.get("exit_note"),
     }
     leap_exec, leap_apply = _close_leap(leap_payload, position["ticker"], leap_strike, n_leap, stock_price)
 
@@ -1397,9 +1470,14 @@ def _commit_leap_roll(payload, ticker, position, stock_price, mode, price_source
 
     # Close the old LEAP.
     close_pc = _leap_close_per_contract(old_leap, payload)
+    import exit_reasons
     close_payload = {"ticker": ticker, "strike": old_leap.get("strike"), "contracts": n,
                      "close_price": close_pc, "stock_price": stock_price,
-                     "cost_basis": old_leap.get("cost_basis"), "exit_reason": "discretionary"}
+                     "cost_basis": old_leap.get("cost_basis"),
+                     # A LEAP roll is a mechanical continuation, not a graded exit;
+                     # the derivation still treats it as a cycle boundary, so it
+                     # gets its own coded reason (no operator note needed).
+                     "exit_reason": exit_reasons.ExitReason.LEAP_ROLL}
     close_exec, close_apply = _close_leap(close_payload, ticker, old_leap.get("strike"), n, stock_price)
 
     # Open the replacement LEAP.

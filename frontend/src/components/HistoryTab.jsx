@@ -138,9 +138,18 @@ function WeeklyJuiceChart({ data }) {
   );
 }
 
+// Humanize a coded exit reason (exit_reasons.ExitReason) for display, e.g.
+// "KILL_SWITCH_SECTOR" -> "Kill switch sector". LEGACY_UNRECORDED reads plainly.
+function exitLabel(code) {
+  if (!code) return "—";
+  return code.charAt(0) + code.slice(1).toLowerCase().replace(/_/g, " ");
+}
+
 function CycleRow({ c }) {
   const [open, setOpen] = React.useState(false);
   const ret = c.net_return_pct;
+  const summary = c.entry_summary || {};
+  const legacy = c.exit_reason === "LEGACY_UNRECORDED" || c.entry_context == null;
   const retTone = ret == null ? "text-slate-400" : ret >= 0 ? "text-emerald-300" : "text-rose-300";
   return (
     <>
@@ -160,7 +169,9 @@ function CycleRow({ c }) {
             {c.target_met ? "target" : ret != null && ret < 0 ? "loss" : "under"}
           </Pill>
         </td>
-        <td className="py-2 pr-3 text-slate-400">{c.exit_reason}</td>
+        <td className="py-2 pr-3 text-slate-400" title={c.exit_note || (legacy ? "closed before exit reasons were recorded" : "")}>
+          {exitLabel(c.exit_reason)}{c.exit_note ? " ✎" : ""}
+        </td>
         <td className="py-2 pr-3">
           {c.wash_sale && (
             <span
@@ -181,16 +192,22 @@ function CycleRow({ c }) {
               <span>
                 {c.roll_count} roll(s), net {money(c.roll_net)} · target {c.target_range_pct?.[0]}–{c.target_range_pct?.[1]}%
               </span>
-              {c.entry_snapshot ? (
+              {c.exit_note && (
                 <span className="text-xs text-slate-400">
-                  At entry: verdict <span className="font-semibold text-slate-200">{c.entry_snapshot.verdict}</span>
-                  {c.entry_snapshot.reasons?.length > 0 && <> ({c.entry_snapshot.reasons.join("; ")})</>}
-                  {" · "}RS vs SPY {pct(c.entry_snapshot.rs3m_vs_spy)} · RS vs Sec {pct(c.entry_snapshot.rs3m_vs_sector)}
-                  {" · "}ATR ext {fmt(c.entry_snapshot.atr_extension, 2)} · MFI {fmt(c.entry_snapshot.mfi, 0)}
-                  {" · "}juice/wk {c.entry_snapshot.juice_weekly_pct != null ? `${fmt(c.entry_snapshot.juice_weekly_pct, 2)}%` : "—"}
+                  Exit: <span className="font-semibold text-slate-200">{exitLabel(c.exit_reason)}</span> — {c.exit_note}
+                </span>
+              )}
+              {!legacy ? (
+                <span className="text-xs text-slate-400">
+                  At entry: verdict <span className="font-semibold text-slate-200">{summary.verdict ?? "—"}</span>
+                  {" · "}regime <span className="font-semibold text-slate-200">{summary.regime ?? "—"}</span>
+                  {" · "}IV rank {summary.iv_rank != null ? `${fmt(summary.iv_rank, 0)}` : "—"}
+                  {" · "}RS vs SPY {pct(summary.rs3m_vs_spy)} · RS vs Sec {pct(summary.rs3m_vs_sector)}
                 </span>
               ) : (
-                <span className="text-xs text-slate-500">No entry snapshot (position predates snapshots).</span>
+                <span className="text-xs text-slate-500">
+                  No entry snapshot — cycle closed before entry-context capture (LEGACY_UNRECORDED).
+                </span>
               )}
             </div>
           </td>

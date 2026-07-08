@@ -52,6 +52,7 @@ ALERT_TYPES = {
     "SHORT_STOCK_DETECTED": ("CRITICAL", "HARD_CFM_RULE: assignment created short stock against the LEAP -> buy back the stock, never exercise the LEAP"),
     "RECONCILE_DIRTY": ("HIGH", "HARD_CFM_RULE: state.json diverged from the broker account -> freeze the position, resolve before trading it"),
     "RECONCILE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: reconciliation has not run successfully within the expected window -> the safety check is silent"),
+    "SNAPSHOT_DATA_QUALITY": ("LOW", "PROPOSED_DEFAULT: >25% of an entry-context snapshot's tracked fields came back null (stale/unavailable) -> the entry telemetry for calibration is thin, not a trade blocker"),
 }
 
 
@@ -792,6 +793,37 @@ def evaluate(state: dict) -> list[dict]:
 
 
 _run_lock = threading.Lock()
+
+
+def record_event(type_: str, ticker: str | None, message: str,
+                 data: dict | None = None, key: str = "", notify: bool = True) -> dict | None:
+    """Append a ONE-OFF, point-in-time alert to the log (not the dedup ``active``
+    set, so the auto-resolve pass never touches it) and notify. Unlike the
+    condition evaluators, this records an event that happened once rather than a
+    condition that keeps firing — used by snapshot capture for the data-quality
+    alert. Best-effort and fully swallowed on error: telemetry must never break
+    its caller (SNAPSHOT_NEVER_BLOCKS_EXECUTION). Returns the record or None."""
+    try:
+        with _run_lock:
+            state = log.load_state()
+            alerts_state = state.setdefault("alerts", {})
+            log_list = alerts_state.setdefault("log", [])
+            now = log.utcnow()
+            record = {**_alert(type_, ticker, message, "", data=data, key=key),
+                      "id": f"alert_{len(log_list) + 1:04d}",
+                      "first_seen": now, "last_seen": now,
+                      "status": "event", "acknowledged": False}
+            log_list.append(record)
+            del log_list[:-config.ALERT_LOG_MAX]
+            log.save_state(state)
+        if notify:
+            try:
+                notifier.dispatch([record], get_settings(state), dry_run=False)
+            except Exception:  # noqa: BLE001 — delivery failure never propagates
+                pass
+        return record
+    except Exception:  # noqa: BLE001 — recording an event must never raise
+        return None
 
 
 def run(notify: bool = True, dry_run: bool | None = None) -> dict:

@@ -231,7 +231,8 @@ def test_frozen_allows_close_short(store):
 def test_frozen_allows_atomic_exit(store):
     _save(store, _frozen_position())
     out = executor.execute({"action": "close_position_atomic", "ticker": "NVDA",
-                            "stock_price": 128, "leap_close_price": 20000})
+                            "stock_price": 128, "leap_close_price": 20000,
+                            "exit_reason": "RECONCILIATION"})
     assert out["status"] == "filled"
 
 

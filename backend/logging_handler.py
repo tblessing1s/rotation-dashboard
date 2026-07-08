@@ -472,9 +472,14 @@ def recompute_derived(state: dict) -> dict:
 
     # Closed-cycle records — one immutable summary per buy_leap -> close_leap
     # window, entirely derived from the executions between them. The entry
-    # scorecard snapshot and the exit reason live ON those executions (captured
-    # at trade time; they can't be reconstructed later), so this recompute is
-    # deterministic and idempotent.
+    # context snapshot and the coded exit reason live ON those executions
+    # (frozen at trade time; they can't be reconstructed later), so this
+    # recompute is deterministic and idempotent — it only COPIES them onto the
+    # derived cycle, never regenerates them (they are raw record, like the
+    # executions themselves). See docs/entry-context-audit.md §5.
+    import exit_reasons  # deferred: coded exit-reason enum + validation
+    import entry_context  # deferred: compact snapshot summary for the cycle
+
     def _parse_day(s):
         try:
             return datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
@@ -530,8 +535,19 @@ def recompute_derived(state: dict) -> dict:
                 "target_range_pct": [config.CYCLE_RETURN_MIN * 100, config.CYCLE_RETURN_MAX * 100],
                 "target_met": (net_return_pct is not None
                                and net_return_pct >= config.CYCLE_RETURN_MIN * 100),
-                "exit_reason": e.get("exit_reason") or "discretionary",
-                "entry_snapshot": entry.get("entry_snapshot"),
+                # Coded exit reason copied from the close_leap execution. A close
+                # with no recognized coded reason is a pre-feature cycle -> it is
+                # permanently LEGACY_UNRECORDED (never fabricated). exit_note and
+                # exit_metrics ride along for calibration's entry->exit deltas.
+                "exit_reason": (e.get("exit_reason")
+                                if exit_reasons.is_valid(e.get("exit_reason"))
+                                else exit_reasons.ExitReason.LEGACY_UNRECORDED),
+                "exit_note": e.get("exit_note"),
+                "exit_metrics": e.get("exit_metrics"),
+                # Immutable entry snapshot (full) + a compact summary for the
+                # History tab / juice-journal CSV. Copied from the buy_leap.
+                "entry_context": entry.get("entry_context"),
+                "entry_summary": entry_context.summary(entry.get("entry_context")),
                 "wash_sale": None,
             })
             del open_cycle[t]

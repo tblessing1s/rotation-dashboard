@@ -9,8 +9,9 @@ const SEVERITY_TONE = {
   CRITICAL: "border-rose-500/40 bg-rose-500/10",
   HIGH: "border-amber-500/40 bg-amber-500/10",
   MEDIUM: "border-sky-500/40 bg-sky-500/5",
+  LOW: "border-slate-600/40 bg-slate-500/5",
 };
-const SEVERITY_PILL = { CRITICAL: "red", HIGH: "yellow", MEDIUM: "unknown" };
+const SEVERITY_PILL = { CRITICAL: "red", HIGH: "yellow", MEDIUM: "unknown", LOW: "unknown" };
 
 function actFromUrl(url) {
   // "/?action=roll&ticker=NVDA&reason=75%-rule" -> dispatch the in-app intent.

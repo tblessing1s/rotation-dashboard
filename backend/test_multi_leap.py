@@ -37,7 +37,8 @@ def _buy(strike=140.0, contracts=5, price=5000.0, exp="2027-01-15", **over):
 
 def _close(strike=140.0, contracts=5, price=5500.0, exp=None, **over):
     p = {"action": "close_leap", "ticker": "XLK", "strike": strike,
-         "contracts": contracts, "close_price": price, "stock_price": 190.0}
+         "contracts": contracts, "close_price": price, "stock_price": 190.0,
+         "exit_reason": "TARGET_REACHED"}
     if exp:
         p["expiration"] = exp
     p.update(over)

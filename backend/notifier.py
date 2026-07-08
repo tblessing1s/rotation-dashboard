@@ -19,7 +19,7 @@ import requests
 
 logger = logging.getLogger("cfm.alerts")
 
-SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}
+SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
 
 def format_subject(alerts: list[dict]) -> str:
