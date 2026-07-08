@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Light, Loading, fmt, useApi } from "./ui.jsx";
+import { Card, Light, StaleBadge, Loading, fmt, useApi } from "./ui.jsx";
 
 // Data health: last-successful fetch per source + cache staleness, so a silent
 // provider failure is visible instead of quietly serving stale frames.
@@ -406,6 +406,75 @@ function LiveFillVerify() {
   );
 }
 
+// Tiered market-data scheduler: today's API budget per provider, the shed level
+// (Tier 3 -> Tier 2 -> Tier 1 cadence; Tier 0 never), staleness of the live-quote
+// store, and any active escalations. Reads the blocks already on /api/data-health.
+function TieredScheduler({ data }) {
+  const budget = data?.data_budget;
+  const staleness = data?.staleness;
+  const poll = data?.tier_poll;
+  if (!budget && !staleness && !poll) return null;
+
+  const providers = budget?.providers || {};
+  const shed = Object.entries(providers).filter(([, p]) => (p.shed_level || 0) > 0);
+  const staleCount = staleness?.stale_count || 0;
+
+  return (
+    <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <h4 className="text-sm font-semibold text-slate-200">Tiered scheduler</h4>
+        <StaleBadge stale={staleCount > 0} label={`${staleCount} stale`} title="Live-quote records past their tier tolerance" />
+        {poll?.market_escalation_active && (
+          <span className="rounded-full border border-rose-500/40 bg-rose-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-rose-300">
+            Market escalation
+          </span>
+        )}
+      </div>
+
+      {/* Per-provider daily budget + shed */}
+      <ul className="space-y-1 text-sm">
+        {Object.entries(providers).map(([name, p]) => (
+          <li key={name} className="flex items-center gap-2">
+            <Light status={p.usage_pct >= 100 ? "red" : p.usage_pct >= 80 ? "yellow" : "green"} size="h-2.5 w-2.5" />
+            <span className="text-slate-300">{name}</span>
+            <span className="text-xs text-slate-500">
+              {p.used}{p.limit ? ` / ${p.limit}` : ""} calls · {fmt(p.usage_pct, 0)}%
+            </span>
+            {(p.shed_level || 0) > 0 && (
+              <span className="ml-auto text-xs text-amber-300">
+                shedding {p.shed.tier3 ? "T3" : ""}{p.shed.tier2 ? "+T2" : ""}
+                {p.shed.tier1_cadence_mult > 1 ? " · T1 slowed" : ""}
+              </span>
+            )}
+          </li>
+        ))}
+      </ul>
+
+      <p className="mt-2 text-xs text-slate-500">
+        {poll ? (
+          <>
+            {poll.polled_symbols || 0} name(s) polled · kill-switch RS3M {poll.killswitch_runs_today || 0}/{poll.killswitch_target} today
+            {poll.escalated_symbols?.length ? ` · escalated: ${poll.escalated_symbols.join(", ")}` : ""}
+          </>
+        ) : "Scheduler idle"}
+      </p>
+
+      {shed.length > 0 && (
+        <p className="mt-1 text-xs text-amber-400">
+          Budget pressure — shedding cheap tiers first; Tier 0 (open positions) never shed.
+        </p>
+      )}
+      {poll?.recent_alerts?.length > 0 && (
+        <ul className="mt-2 space-y-0.5 text-xs text-amber-300/90">
+          {poll.recent_alerts.slice(-4).map((a, i) => (
+            <li key={i}>⚠ {a.detail}</li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 export default function DataHealth() {
   const { data, error, loading, reload } = useApi(api.dataHealth, [], 120000);
   const [refreshing, setRefreshing] = React.useState(false);
@@ -515,6 +584,7 @@ export default function DataHealth() {
           </div>
         </div>
       )}
+      {!data?.demo && <TieredScheduler data={data} />}
       <ReconcileStatus />
       {!data?.demo && <LiveFillVerify />}
       {!data?.demo && <UniverseCheck />}

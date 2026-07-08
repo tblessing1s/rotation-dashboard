@@ -99,6 +99,35 @@ def _maybe_hot_refresh(now: datetime) -> None:
         logger.warning("hot refresh failed: %s", e)
 
 
+def tier_poll_enabled() -> bool:
+    """Tiered quote polling on by default; CFM_TIER_POLL=0 turns it off (tests,
+    CLI tools, or to fall back to the legacy flat hot-refresh alone)."""
+    return os.environ.get("CFM_TIER_POLL", "1").strip() not in ("0", "false", "no")
+
+
+def _maybe_tier_poll(now: datetime) -> None:
+    """Run one tiered polling cycle: batched Tier 0/1 quotes, defense/market
+    escalation, and the intraday kill-switch RS3M refresh. Its own cadence gates
+    live inside ``tier_poll.run_cycle`` (fetch_due per symbol), so this runs every
+    tick during market hours. Best-effort: logged, never fatal to the tick."""
+    if not tier_poll_enabled() or not _market_hours(now):
+        return
+    try:
+        import tier_poll
+        result = tier_poll.run_cycle(now)
+        if result and result.get("due"):
+            logger.info("tier poll: %d quotes (%s)%s", len(result["due"]),
+                        ", ".join(result["due"][:8]),
+                        f", {len(result['degraded'])} degraded" if result.get("degraded") else "")
+        if result and result.get("escalations"):
+            for detail in result["escalations"]:
+                logger.warning("defense escalation: %s", detail)
+        if result and result.get("market_escalation"):
+            logger.warning("%s", result["market_escalation"])
+    except Exception as e:  # noqa: BLE001 — a poll must never break the tick
+        logger.warning("tier poll failed: %s", e)
+
+
 def due_slots(now: datetime, last_run: dict[str, date] | None = None) -> list[str]:
     """Schedule slots that should run at `now` (ET): time reached, market day,
     not yet run today. Pure so it's unit-testable without threads."""
@@ -138,8 +167,10 @@ def _tick() -> None:
 
     # Keep the live-risk names fresh intraday. Runs every tick (its own cadence
     # gate rate-limits the actual refresh), so it must sit BEFORE the slot-based
-    # early return below.
+    # early return below. The hot refresh keeps daily BARS current (EOD/warm/post-
+    # close); the tiered poll adds batched intraday QUOTES + escalation on top.
     _maybe_hot_refresh(now)
+    _maybe_tier_poll(now)
 
     due = due_slots(now)
     if not due:

@@ -154,19 +154,39 @@ def api_scan_ready():
     try:
         from metrics import scorecard as scorecard_metrics
         import account_gate
+        import data_cache
+        import market_scheduler
+        from datetime import datetime as _dt
+        from zoneinfo import ZoneInfo as _ZI
         sc = scorecard_metrics.scorecard(tickers)
         go_rows = [r for r in sc["results"] if r["verdict"] == "GO"]
         level5 = account_gate.evaluate_many([r["ticker"] for r in go_rows], contracts=contracts)
 
-        ready, near_misses = [], []
+        # HARD_CFM_RULE (STALE_BLOCKS_GO): a GO that the operator would act on must
+        # not be emitted on stale inputs. Only enforced once the tiered scheduler is
+        # actually populating quotes (data_cache.active), and only in a live, open-
+        # market context — a bulk warm scan legitimately has no live quotes and must
+        # behave as before. Blocked names are surfaced separately, never silently.
+        now_et = _dt.now(_ZI("America/New_York"))
+        mkt_open = market_scheduler.is_market_open(now_et)
+        live = mkt_open and not config.demo_enabled() and data_cache.active()
+
+        ready, near_misses, stale_blocked = [], [], []
         for r in go_rows:
             l5 = level5.get(r["ticker"])
+            blocked, stale_inputs = data_cache.stale_blocks_go(
+                r["ticker"], market_scheduler.Tier.T1, market_open=mkt_open, live=live)
             entry = {"ticker": r["ticker"], "sector": r["sector"],
                      "juice_weekly_pct": r.get("juice_weekly_pct"),
-                     "earnings_date": r.get("earnings_date"), "level5": l5}
-            (ready if l5 and l5["pass"] else near_misses).append(entry)
+                     "earnings_date": r.get("earnings_date"), "level5": l5,
+                     "stale": blocked, "stale_inputs": stale_inputs}
+            if blocked:
+                stale_blocked.append(entry)
+            else:
+                (ready if l5 and l5["pass"] else near_misses).append(entry)
         ready.sort(key=lambda r: r.get("juice_weekly_pct") or 0, reverse=True)
-        return jsonify({"as_of": sc["as_of"], "ready": ready, "near_misses": near_misses})
+        return jsonify({"as_of": sc["as_of"], "ready": ready, "near_misses": near_misses,
+                        "stale_blocked": stale_blocked})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
@@ -778,6 +798,16 @@ def api_portfolio_risk():
         return _err(e)
 
 
+def _tier_poll_status():
+    """Tier-poll status for the health panel; degrades to a disabled marker if the
+    runtime isn't importable (e.g. scheduler off)."""
+    try:
+        import tier_poll
+        return {**tier_poll.status(), "recent_alerts": tier_poll.recent_alerts()}
+    except Exception:  # noqa: BLE001
+        return {"available": False}
+
+
 @app.route("/api/data-health")
 def api_data_health():
     """Last-successful-fetch per source + cache staleness, so silent data
@@ -790,6 +820,8 @@ def api_data_health():
         # are the names whose staleness actually matters intraday.
         hot = refresh_policy.hot_tickers(state)
         key_syms = [config.BENCHMARK, config.VIX_SYMBOL] + hot
+        import data_budget
+        import data_cache
         return jsonify({
             "providers": data_handler.health(),
             "ohlcv_cache_age_hours": {s: data_handler.cache_age_hours(s)
@@ -798,8 +830,23 @@ def api_data_health():
             "earnings_cache": earnings.cache_health(),
             "dividends_cache": dividends.cache_health(),
             "schwab_token": schwab_api.token_status(),
+            "data_budget": data_budget.snapshot(),
+            "staleness": data_cache.summary(),
+            "tier_poll": _tier_poll_status(),
             "demo": config.demo_enabled(),
         })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/data-budget")
+def api_data_budget():
+    """Today's provider-call budget per tier, per-provider usage vs configured
+    daily limits, and the current shed level (Tier 3 → Tier 2 → Tier 1-cadence,
+    never Tier 0). Telemetry only — persisted outside state.json."""
+    try:
+        import data_budget
+        return jsonify(data_budget.snapshot())
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
