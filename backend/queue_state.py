@@ -65,8 +65,13 @@ def build_queue_state(state: dict | None = None,
     slot_days = 0.0 if _free_slots(state) > 0 else float("inf")
 
     go = [r for r in rows if r.get("verdict") == "GO" and (r.get("ticker") or "").strip()]
-    # Strongest juice first; missing juice sorts last. Ranks are 1-based and dense.
-    go.sort(key=lambda r: (r.get("juice_weekly_pct") is None, -(r.get("juice_weekly_pct") or 0.0)))
+    # Strongest NET juice first (gross minus LEAP burn — never gross); missing
+    # juice sorts last. Falls back to gross when net is unavailable so a pricing
+    # gap can't drop a name. Ranks are 1-based and dense.
+    def _rank_juice(r):
+        net = r.get("net_juice_weekly_pct")
+        return r.get("juice_weekly_pct") if net is None else net
+    go.sort(key=lambda r: (_rank_juice(r) is None, -(_rank_juice(r) or 0.0)))
     seen: set[str] = set()
     candidates: list[QueueCandidate] = []
     for r in go:

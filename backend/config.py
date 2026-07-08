@@ -539,6 +539,70 @@ DELTA_VELOCITY_DROP = 0.08
 DELTA_VELOCITY_WINDOW = 5
 
 
+# ---- Weekly theta burn & net juice -----------------------------------------
+# The LEAP is held ~8 weeks and exited/rolled around 130-140 DTE — the FLATTEST
+# part of the theta curve. Only the extrinsic consumed during that hold window is
+# a true cost (the rest is recovered when the LEAP is sold, minus slippage). So
+# the burn a position must clear is the extrinsic DIFFERENCE between two model
+# prices — at the current DTE and at the planned exit DTE — NOT the whole entry
+# extrinsic and NOT a straight-line proration of it. Provenance per constant:
+#   HARD_CFM_RULE    — a stated strategy rule; changing it changes the strategy.
+#   PROPOSED_DEFAULT — a placeholder pending calibration once realized-burn data
+#                      accumulates; tune later.
+
+# HARD_CFM_RULE — burn is the difference of two Black-Scholes model prices
+# (extrinsic at current DTE minus extrinsic at planned-exit DTE, same spot & IV),
+# never total_extrinsic x (held_days / total_days). Straight-line proration
+# averages in the steep never-held tail and overstates front-end burn ~3x.
+BURN_IS_MODEL_DIFF = True
+
+# HARD_CFM_RULE — gross juice is never the ranking or portfolio-rollup metric.
+# The headline per-position figure and the entry-queue ranking key are
+# net juice/week = juice collected/week - burn/week (with slippage).
+NET_JUICE_IS_HEADLINE = True
+
+# PROPOSED_DEFAULT — mid of the observed 130-140 DTE exit band. The default
+# per-position planned_exit_dte; all burn math keys off this, not off LEAP
+# expiration. Seeded onto existing positions by the v14 migration.
+PLANNED_EXIT_DTE = 135
+
+# PROPOSED_DEFAULT — mid of the 185-195 DTE entry band. The hypothetical LEAP
+# entry DTE used when ranking entry candidates on net juice (no live position yet).
+LEAP_ENTRY_DTE_DEFAULT = 190
+
+# PROPOSED_DEFAULT — LEAP round-trip exit slippage as a % of the LEAP price, used
+# when no fresh option chain is cached to read a live bid-ask spread from. Half
+# the spread x 2 (round trip) is preferred when a chain is available.
+LEAP_SLIPPAGE_PCT_FALLBACK = 0.5
+
+# PROPOSED_DEFAULT — coverage ratio = juice/week / burn/week (with slippage).
+# healthy >= COVERAGE_HEALTHY; marginal in [COVERAGE_MARGINAL, COVERAGE_HEALTHY);
+# flagged below COVERAGE_MARGINAL.
+COVERAGE_HEALTHY = 3.0
+COVERAGE_MARGINAL = 2.0
+
+# PROPOSED_DEFAULT — when burn is floored near zero (deep-ITM drift after a
+# run-up), a near-zero denominator would make coverage explode; cap the DISPLAYED
+# ratio here and surface the low_extrinsic_flag instead of an absurd number.
+COVERAGE_DISPLAY_CAP = 10.0
+
+# PROPOSED_DEFAULT — model extrinsic per share below which burn is floored at
+# zero and low_extrinsic_flag is set (a deep-ITM LEAP with ~no time value left).
+# Mirrors ASSIGNMENT_EXTRINSIC_FLOOR — a few cents of time value per share.
+BURN_LOW_EXTRINSIC_FLOOR = 0.10
+
+# PROPOSED_DEFAULT — trailing realized-vs-projected burn divergence (%) beyond
+# which a warning badge surfaces. This doubles as a live verification harness for
+# the BS engine + put-IV substitution; persistent divergence is a soft warning,
+# never a hard failure.
+BURN_DIVERGENCE_WARN_PCT = 25
+
+# PROPOSED_DEFAULT — when a position is held past its planned exit without a LEAP
+# roll, extend the projection window in increments of this many weeks and
+# recompute (burn/week rises as the window slides down the curve — the point).
+EXTENSION_STEP_WEEKS = 1
+
+
 # ---- Whipsaw circuit breaker (cumulative defend guard) ---------------------
 # The defend engine's individual roll-downs are each correct, but the WHIPSAW —
 # roll-down after roll-down in a slow grind, each locking a lower strike — is the

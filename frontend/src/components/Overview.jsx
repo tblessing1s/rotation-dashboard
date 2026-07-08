@@ -213,6 +213,8 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
   const cap = capital || {};
   const juice = ov.data?.theta?.totals || {};
   const payback = ov.data?.theta?.extrinsic_payback || {};
+  const rollup = ov.data?.theta?.net_juice_rollup || {};
+  const burnDiv = ov.data?.burn_divergence || {};
 
   return (
     <div className="grid gap-4">
@@ -232,9 +234,22 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
           <div className="mt-1 text-2xl font-semibold text-slate-100">{openPositions.length}</div>
         </Card>
         <Card>
-          <div className="text-xs uppercase tracking-wide text-slate-500">Net juice · week</div>
+          <div className="flex items-center justify-between">
+            <div className="text-xs uppercase tracking-wide text-slate-500">Net juice · week</div>
+            {burnDiv.warn && (
+              <span title={`Realized LEAP burn is diverging from the model by ${fmt(burnDiv.mean_abs_divergence_pct, 0)}% (trailing) — over the ${burnDiv.threshold_pct}% warn threshold.`}
+                    className="cursor-help rounded-full border border-amber-500/50 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-300">
+                DRIFT {fmt(burnDiv.mean_abs_divergence_pct, 0)}%
+              </span>
+            )}
+          </div>
           <div className="mt-1 text-2xl font-semibold text-emerald-300">{money(juice.this_week)}</div>
-          <div className="text-xs text-slate-500">month {money(juice.this_month)}</div>
+          <div className="text-xs text-slate-500">
+            {rollup.net_juice_per_week != null && (
+              <>proj net/wk <span className={rollup.net_juice_per_week >= 0 ? "text-emerald-400" : "text-rose-400"}>{money(rollup.net_juice_per_week)}</span> · </>
+            )}
+            month {money(juice.this_month)}
+          </div>
         </Card>
         <Card>
           <div className="text-xs uppercase tracking-wide text-slate-500">Juice · YTD</div>

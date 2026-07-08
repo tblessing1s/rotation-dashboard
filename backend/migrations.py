@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 13
+CURRENT_VERSION = 14
 
 
 class MigrationAbortedError(RuntimeError):
@@ -196,6 +196,21 @@ def _v12_to_v13(state: dict) -> dict:
     return state
 
 
+def _v13_to_v14(state: dict) -> dict:
+    """v14 (weekly theta burn & net juice): every position gains a
+    ``planned_exit_dte`` — the DTE the LEAP is planned to be exited/rolled at
+    (~130-140 DTE band), off which all burn math keys instead of LEAP expiration.
+    Existing positions get ``config.PLANNED_EXIT_DTE`` (the proposed default);
+    the operator can override per position later. Additive; executions are never
+    rewritten. The realized/projected burn MARK series is telemetry and lives in
+    ``DATA_DIR/burn_marks.json`` (like iv_history), NOT in state.json, so nothing
+    else is migrated here."""
+    import config
+    for p in state.get("positions", []):
+        p.setdefault("planned_exit_dte", config.PLANNED_EXIT_DTE)
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -209,6 +224,7 @@ MIGRATIONS = {
     10: _v10_to_v11,
     11: _v11_to_v12,
     12: _v12_to_v13,
+    13: _v13_to_v14,
 }
 
 

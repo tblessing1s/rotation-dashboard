@@ -57,6 +57,23 @@ def test_juice_estimate_prices_short_and_leap(monkeypatch):
     assert est["leap_cost_per_share"] > S - est["leap_strike"]  # cost > intrinsic
     assert est["weekly_yield_pct"] == pytest.approx(
         est["weekly_extrinsic_per_share"] / est["leap_cost_per_share"] * 100, abs=0.05)
+    # NET juice fields present and strictly below gross (LEAP burn subtracted).
+    assert est["net_weekly_yield_pct"] is not None
+    assert est["net_weekly_yield_pct"] < est["weekly_yield_pct"]
+    assert est["burn_weekly_per_share"] > 0
+
+
+def test_juice_estimate_net_is_gross_minus_burn():
+    """The net figure is gross minus the per-share LEAP burn, exactly — the same
+    burn.candidate_net_juice the queue and position panel use. (The clean
+    equal-gross / higher-IV-ranks-lower ordering is covered deterministically in
+    test_burn.py::test_equal_gross_juice_but_higher_iv_ranks_lower_on_net.)"""
+    est = account_gate.juice_estimate("XYZ", _noisy_frame(sigma=0.02))
+    net_extr = est["net_weekly_extrinsic_per_share"]
+    gross_extr = est["weekly_extrinsic_per_share"]
+    assert net_extr == pytest.approx(gross_extr - est["burn_weekly_per_share"], abs=0.01)
+    assert est["net_weekly_yield_pct"] == pytest.approx(
+        net_extr / est["leap_cost_per_share"] * 100, abs=0.05)
 
 
 def test_juice_estimate_missing_data():

@@ -1,159 +1,151 @@
-# IMPLEMENTATION_NOTES.md — Tiered Market-Data Scheduler
+# IMPLEMENTATION_NOTES.md — Weekly Theta Burn & Net Juice Accounting
 
-Companion to `AUDIT.md` (Phase 0). This records what shipped, the assumptions made,
-which `PROPOSED_DEFAULT` constants most need calibration, and how the audit changed
-the plan. Scope was **data fetching only** — no order/roll/exit path was touched, and
-`state.json`'s schema and role are unchanged.
+Companion to `AUDIT.md` (Phase 0). Records what shipped, the assumptions made,
+which `PROPOSED_DEFAULT` constants most need calibration once realized-burn data
+accumulates, and the Phase 0 / mid-build findings that altered the plan. Scope
+was **accounting and display only** — no order/roll/exit path was touched, no
+second pricer was built, and no external Python dependency was added.
 
 ## Test status
 
-`backend/` suite: **459 passed** (397 pre-existing + 62 new), offline, mocked clock +
-mocked providers throughout — no live API calls, no `time.sleep`, no wall-clock in
-tests. Frontend builds clean (`vite build`). Run: `cd backend && python -m pytest -q`.
+`backend/` suite: **545 passed** (509 pre-existing + 36 new/adjusted), fully
+offline — mocked clock and mocked pricing inputs throughout, no live API calls,
+no `time.sleep`, no wall-clock in tests. Frontend builds clean (`vite build`).
+Run: `cd backend && python -m pytest -q`.
+
+New test files: `test_burn.py` (24 pure-function cases), `test_burn_marks.py`
+(10 telemetry/divergence cases). Adjusted: `test_leap_lifecycle.py` (v14
+migration), `test_exit_reasons.py` (CURRENT_VERSION no longer hard-coded to 13),
+`test_account_gate.py` (net-juice fields).
 
 ---
 
-## What changed (new modules)
+## What changed
 
 | Module | Role | Purity |
 |---|---|---|
-| `backend/market_scheduler.py` | Pure decision layer: `assign_tiers`, `fetch_due`, `max_age_seconds`, `EscalationTracker` (defense + market), `is_market_open`. Tiers as an `IntEnum`. | **Pure** — deterministic given inputs + clock; no I/O. |
-| `backend/queue_state.py` | Adapter: builds `PortfolioState` / `QueueState` from open positions + the cached scorecard + universe. Provider-free. | Impure (reads state), no provider calls. |
-| `backend/data_cache.py` | Staleness store: `fetched_at`+`provider`+tier per datum, `get_with_staleness`, `stale_blocks_go` (the STALE_BLOCKS_GO rule), panel/summary surfacing. | Impure (in-process store), no state.json. |
-| `backend/data_transport.py` | Transport/routing: ONE batched Schwab quote per cycle, per-tier failover (Schwab→AV→cache), 429/`Retry-After` exponential backoff, budget logging, staleness recording, defense-level derivation from bars. | Impure (providers) — the ONLY place tier logic touches a client. |
-| `backend/data_budget.py` | Per-provider/per-tier/day call counter persisted to `DATA_DIR/data_budget.json` (**not** state.json); shed ladder T3→T2→T1-cadence, T0 never; `/api/data-budget` snapshot. | Impure (small JSON file). |
-| `backend/tier_poll.py` | Runtime orchestrator: one polling cycle wiring all of the above; called from the existing daemon tick. | Impure glue; best-effort, never breaks the tick. |
+| `backend/burn.py` (new) | `burn_projection` (two-point model burn), `extension_cost`, `net_juice_per_week`, `coverage`, `candidate_net_juice` (queue metric). | **Pure** — plain values in, deterministic out; no I/O, no clock reads. Built only on `indicators._bs_call_price`. |
+| `backend/burn_marks.py` (new) | Weekly mark telemetry in `DATA_DIR/burn_marks.json`: `record_mark`, `series`, `weekly_due` (cadence gate), `divergence`, `aggregate_divergence`. | Impure (one small JSON file, like `iv_history`); never touches state.json. |
+| `backend/config.py` | New `# Weekly theta burn & net juice` constant block, each tagged `HARD_CFM_RULE` / `PROPOSED_DEFAULT`. | — |
+| `backend/migrations.py` | `_v13_to_v14`: seeds `planned_exit_dte` default onto every position; `CURRENT_VERSION` 13 → 14. | Additive. |
+| `backend/executor.py` | New positions' shell carries `planned_exit_dte`. | — |
+| `backend/leap_policy.py` | `leap_health` now computes the model burn via `burn_projection` (keyed off `planned_exit_dte`, trailing realized vol) and exposes `net_juice_per_week`, `coverage`, `extension_preview`, `model_burn_per_week`, `burn_projection`, `planned_exit_dte`. Legacy `leap_weekly_burn` / `net_weekly_maintenance` kept (coexist). | Impure (reads bars), no state writes. |
+| `backend/account_gate.py` | `juice_estimate` adds `net_weekly_yield_pct` / `burn_weekly_per_share` / `net_weekly_extrinsic_per_share` via `burn.candidate_net_juice`. | — |
+| `backend/metrics/scorecard.py` | Row gains `net_juice_weekly_pct` / `burn_weekly_per_share`. | — |
+| `backend/maintenance.py` | `snapshot_burn_marks`; `nightly_refresh` records a weekly mark when `burn_marks.weekly_due()`. | Impure, best-effort. |
+| `backend/position_manager.py` | `net_juice_rollup` (sums net across open positions). | — |
+| `backend/app.py` | `/api/burn/<ticker>` (panel detail + weekly series); overview payload gains `theta.net_juice_rollup` and `burn_divergence`; `/api/scan/ready` ranks on net. | — |
+| `backend/queue_state.py` | Ranked queue sorts on net juice (falls back to gross when net is unavailable). | Pure adapter. |
+| Frontend | `BurnPanel.jsx` (new: three metric cards + coverage meter + weekly bars + extension readout + stale/drift badges), wired into `PositionTracker`; Overview net-juice rollup + drift badge; `api.burn`. | Reuses existing primitives; no new library. |
 
-**Wiring/edits:** `config.py` (new `# Tiered market-data scheduler` constant block,
-each tagged `HARD_CFM_RULE` / `PROPOSED_DEFAULT`); `alert_scheduler._tick` gains
-`_maybe_tier_poll` (guarded by `CFM_TIER_POLL`, market-hours only, its own per-symbol
-cadence gates inside `run_cycle`); `app.py` adds `/api/data-budget` and extends
-`/api/data-health` with `data_budget` / `staleness` / `tier_poll`; `/api/scan/ready`
-enforces STALE_BLOCKS_GO. Frontend: `StaleBadge` primitive (`ui.jsx`), `api.dataBudget`,
-a "Tiered scheduler" section in `DataHealth.jsx` (budget/shed/staleness/escalations),
-and `stale_blocked` GO candidates surfaced in `ReadyToEnter.jsx`. `.gitignore` ignores
-`backend/data_budget.json`.
+### Single source of truth (spec §6)
 
-**New tests:** `test_market_scheduler.py` (27), `test_data_cache.py` (12),
-`test_data_transport.py` (14), `test_tier_poll.py` (9) — covering all 8 required cases
-plus the XLK regression fixture.
+The queue metric (`account_gate.juice_estimate` → `candidate_net_juice`) and the
+live position view (`leap_policy.leap_health`) both compute net juice as
+`burn.net_juice_per_week(gross, burn.burn_projection(...))`. The formula is not
+forked — `test_burn.py::test_queue_and_position_view_agree_for_identical_inputs`
+asserts identical inputs yield an identical net figure.
 
----
+### Decisions confirmed with the operator before building
 
-## How the design maps to the required test cases
-
-1. **Tier transitions** (`test_market_scheduler`): gates pass T3→T2; slot opens T2→T1;
-   entry →T0; exit →T3.
-2. **`fetch_due` cadence**: per-tier quote intervals, market open vs closed (quotes
-   zero off-hours), EOD bar batch fires exactly once/day.
-3. **Defense escalation**: price crossing the short strike promotes cadence
-   (`POLL_ESCALATED_SECONDS`) + emits an alert event; decays after
-   `ESCALATION_DECAY_MINUTES`; edge-triggered (no per-tick spam).
-4. **Market escalation**: SPY/held-sector move ≥ `ESCALATION_INDEX_MOVE_PCT` sets the
-   global refresh flag (all T0/T1 read escalated).
-5. **Staleness blocks GO** (`test_data_cache`): a stale input blocks the GO emit;
-   staleness flag surfaces in the API + `stale_blocked` list.
-6. **Batching** (`test_data_transport`): N Tier 0/1 symbols → exactly one Schwab request.
-7. **Shed order**: T3 sheds before T2 before T1-cadence; T0 untouched; transitions logged.
-8. **Provider failover**: Schwab failure on a Tier 0 name routes to fallback and sets a
-   `tier0_degraded` flag (logged, never silent).
-+ **XLK regression fixture**: open position, elevated ATR, price at the consolidation
-   low → defense escalation fires.
+- **Coexistence, not removal** — the legacy `extrinsic_payback` meter /
+  `theta_ledger.extrinsic_summary` income-hurdle stays as a secondary
+  capital-recovery view; net juice is layered on as the new headline. Keeps the
+  execution-derived accounting and its tests intact.
+- **Marks live in `DATA_DIR/burn_marks.json`** (telemetry), not in the
+  append-only execution record — mirroring `iv_history`. The `planned_exit_dte`
+  field itself *is* position state and goes in state.json via the v14 migration.
 
 ---
 
-## Assumptions & decisions (confirmed with the operator before building)
+## Findings that altered the plan
 
-1. **No yfinance in this codebase.** Providers are Schwab + Alpha Vantage only; the
-   **parquet daily-bar cache is the "cheap EOD" layer** the spec attributed to
-   yfinance. Tier 2/3 ride that cache (refreshed by the EOD batch via Schwab, AV
-   fallback). Provider routing is per-tier and swappable — a yfinance client could be
-   dropped into `data_transport` later without touching any scheduler code.
-2. **No ranked entry queue exists.** `QueueState` is adapted from `/api/scan/ready`:
-   `rank` = juice-desc order, `gates_passed` = scorecard verdict "GO". Nothing forecasts
-   *when* a position will close, so **`slot_opens_within_days` = 0 when a book slot is
-   free now (`MAX_CFM_POSITIONS − open > 0`), else +inf** — on-deck (Tier 1) activates
-   only when a slot is actually available (the operator chose "free slot = now"). The
-   field is honoured as-is, so real horizon data drops in later with no code change.
-3. **Defense levels derived from bars, not persisted** (operator chose no schema
-   change). `data_transport.defense_levels` computes `trailing_stop = last − mult×ATR`
-   and `consolidation_low = recent swing low` from cached bars each cycle;
-   `short_strike` and the `circuit_breaker` line come from the persisted position. The
-   ATR multiplier defaults to `SHORT_ATR_MULT` (1.5, the CFM default) and is
-   per-symbol-overridable via an optional `config.DEFENSE_ATR_MULT_OVERRIDES` dict
-   (e.g. `{"APP": 1.0}`) — no ticker is hardcoded.
-4. **Chains are not schedule-polled** — the audit refuted the "biggest waste"
-   premise. `fetch_due(CHAIN)` always returns False; chains stay on-demand + the
-   nightly held-name IV snapshot (untouched). The intraday win is replacing the flat
-   15-min *bars* hot-refresh with **batched quotes overlaid on frozen bars**.
-5. **Hot-refresh coexists (for now).** The legacy `refresh_policy` hot-refresh still
-   keeps daily **bars** current (EOD / warm / post-close); the tiered poll adds intraday
-   **quotes** + escalation on top. This is the safe, non-breaking integration. Once the
-   tiered poll is validated live, the flat bars hot-refresh can be retired (its cadence
-   is superseded); `HOT_REFRESH_MINUTES` / `HOT_TICKERS_MAX` remain until then.
-6. **STALE_BLOCKS_GO is gated to the live path.** It only blocks once the scheduler has
-   actually populated the staleness store (`data_cache.active()`) and only in a live,
-   open-market context — a bulk warm scan legitimately lacks live quotes and behaves as
-   before. A record that *exists and is stale* always blocks (live or not). This keeps
-   the 397 existing tests green while honouring "unknown-fresh blocks action" where it
-   matters.
-7. **Single-writer preserved.** Everything runs in the one existing `alert_scheduler`
-   daemon thread; no second scheduler, consistent with the /data single-writer invariant.
-8. **429 detection is by message match** (`"429" in str(exc)`) because the Schwab client
-   folds the status into the error text and does not expose a structured code or the
-   `Retry-After` header. The backoff loop *will* honour a `.retry_after` attribute if a
-   future structured error carries one. **Limitation:** `Retry-After` is not currently
-   readable — see below.
+### 1. Deep-ITM LEAP extrinsic decay is FRONT-loaded — two spec assumptions are inverted
 
----
+Pricing a realistic 0.90-delta LEAP (S=100, K=79, IV=30%) through the app's own
+Black-Scholes engine shows extrinsic decaying **faster early, slower late** — the
+inverse of at-the-money theta:
 
-## PROPOSED_DEFAULT constants that most need calibration
+| DTE | 190 | 135 | 90 | 30 |
+|----|----|----|----|----|
+| extrinsic/sh | 2.72 | 1.78 | 1.05 | 0.27 |
+| decay rate | — | 0.0171/day | 0.0164/day | 0.0130/day |
 
-Ranked by how much a wrong value costs:
+Consequences, confirmed numerically and adjudicated with the operator
+("assert the true invariant; document it"):
 
-1. **`ALPHA_VANTAGE_DAILY_CALL_LIMIT`** (default 500) — the AV free tier is the real
-   budget constraint and varies by key (historically 25/day). Set it to the operator's
-   actual key limit via env, or the shed ladder mis-fires. **Highest priority.**
-2. **`POLL_T0_SECONDS` / `POLL_ESCALATED_SECONDS`** (120 / 30) — Tier 0 freshness vs API
-   spend. 30s escalated is aggressive; confirm against the real Schwab rate budget.
-3. **`ESCALATION_INDEX_MOVE_PCT`** (1.0%) — a 1% SPY move is common; may be too twitchy
-   and keep the book perpetually escalated. Backtest against a few volatile sessions.
-4. **`SCHWAB_DAILY_CALL_LIMIT`** (40000) — a placeholder; Schwab publishes ~120 req/min
-   but no firm daily cap. Only affects the Schwab shed trigger.
-5. **`MAX_AGE_POLL_MULT`** (2.0) — how forgiving staleness is. Too low → spurious GO
-   blocks; too high → acting on stale data. Tune once real polling latency is observed.
-6. **`REFRESH_KILLSWITCH_PER_DAY`** (3) — intraday RS3M recompute count; more = fresher
-   kill-switch inputs at higher bar-fetch cost.
-7. **`BUDGET_SOFT_LIMIT_PCT`** (80) and the Tier-2 midpoint shed curve — when shedding
-   starts and how steeply it escalates.
+- **Spec test case 1 ("model burn < straight-line proration") is false** for a real
+  LEAP. The tests instead assert the *true* invariant, which is the feature's
+  actual value prop: **held-window burn (190→135) ≈ ⅓ of total entry extrinsic**
+  (0.94/sh vs 2.72/sh) — i.e. the weekly hurdle is roughly one-third of what
+  total-extrinsic accounting implied (spec point #1, confirmed). Plus the exact
+  two-point identity `burn == extrinsic_now − extrinsic_at_exit`.
+- **Spec §5 "extending the hold *raises* burn/wk" is inverted.** 135 DTE is
+  genuinely a flat region — model burn/wk barely moves across an 8-week extension
+  and, if anything, eases toward expiry. `extension_cost` reports the honest
+  number; the with-slippage figure falls as the fixed round-trip slippage
+  amortizes over more weeks. The UI shows the actual numbers ("$Y/wk over +N wk
+  vs $X now") rather than claiming a direction the instrument doesn't support.
+  The real anti-zombie risk for a deep-ITM LEAP is delta saturation / the roll
+  floor, already owned by the delta-velocity warning and `LEAP_ROLL_DTE_FLOOR`.
 
-`TIER0_NEVER_SHED` and `STALE_BLOCKS_GO` are `HARD_CFM_RULE` and should not be tuned.
+This same mismatch appears in the existing codebase's prose (e.g. the
+`LEAP_ROLL_DTE_FLOOR` comment "theta steepens under ~90 DTE") — ATM intuition
+applied to a deep-ITM instrument. The **realized-vs-projected divergence harness**
+(`burn_marks`) is precisely the tool to keep this honest against live data.
+
+### 2. No weekly job existed — hooked into the nightly tick with a weekly gate
+
+The audit found only a nightly maintenance run (single in-process writer, one Fly
+volume). The weekly mark job runs inside that tick, gated by
+`burn_marks.weekly_due()` (fires once per ISO week, end-of-week, with a weekend
+catch-up) — it does not spawn a second scheduler.
+
+### 3. IV basis for the LEAP burn = trailing realized vol
+
+`burn_projection` takes IV as a plain value; the callers resolve it. For the LEAP
+leg everywhere (live panel, weekly mark, queue candidate) the basis is the
+ticker's trailing realized vol (`indicators.hist_vol`) — the same offline BS basis
+`juice_estimate` and `roll_cost_estimate` already use, and far more stable than
+implying a deep-ITM call's IV from its own near-intrinsic mark (the reason the
+put-IV substitution exists on the chain path). Using one basis everywhere keeps
+the queue, panel, and marks mutually consistent; the divergence harness is what
+reveals if that basis systematically mis-estimates realized decay.
 
 ---
 
-## Phase 0 findings that altered the plan
+## `PROPOSED_DEFAULT` constants — calibration priority
 
-- **yfinance absent** → Tier 2/3 provider redefined to the parquet cache (§Assumptions 1).
-- **No ranked queue / no close-forecast** → minimal `QueueState` adapter; slot horizon
-  reduces to "free slot now" (§Assumptions 2).
-- **Trailing stop / consolidation low not persisted** → derived from bars, no schema
-  change (§Assumptions 3).
-- **Chains never schedule-polled** → no polling to remove; focus shifted to batched
-  quotes replacing the flat bars refresh (§Assumptions 4).
-- **Earnings/dividends caches already carry `fetched_at`+`source`** → mirrored that
-  provenance shape in `data_cache` rather than inventing a new one.
-- **Schwab has zero retry/backoff and no 429 handling** → added bounded exponential
-  backoff on the Schwab path (the AV path already retries).
+Ranked by how much a wrong value distorts behavior, to be tuned once
+realized-burn marks accumulate:
 
-## Known limitations / follow-ups
+1. **`PLANNED_EXIT_DTE = 135`** — the single biggest lever. Every burn figure,
+   the net-juice headline, and the queue ranking key off it. Calibrate to the
+   book's *actual* median exit DTE from closed cycles.
+2. **`LEAP_ENTRY_DTE_DEFAULT = 190`** — sets the hypothetical entry window for the
+   queue metric; with (1) it fixes the ranking's burn term. Calibrate to actual
+   median entry DTE.
+3. **`LEAP_SLIPPAGE_PCT_FALLBACK = 0.5`** (% of LEAP price) — used whenever no
+   fresh chain spread is cached, which is most of the time in bulk screening. The
+   coverage ratio and net juice both include it. Calibrate from realized LEAP
+   exit fills vs mid.
+4. **`BURN_DIVERGENCE_WARN_PCT = 25`** — needs several weeks of marks before it
+   means anything; expect to widen or tighten once the realized series exists.
+5. **`COVERAGE_HEALTHY = 3.0` / `COVERAGE_MARGINAL = 2.0`** — reasonable starting
+   thresholds; revisit against the distribution of live coverage ratios.
+6. **`BURN_LOW_EXTRINSIC_FLOOR = 0.10`/sh** and **`COVERAGE_DISPLAY_CAP = 10.0`** —
+   guard-rail cosmetics; unlikely to need tuning.
+7. **`EXTENSION_STEP_WEEKS = 1`** — display granularity only.
 
-- **`Retry-After` not honoured structurally** (§Assumptions 8) — a small enhancement to
-  `schwab_api` to raise a typed rate-limit error carrying the header would let the
-  backoff loop obey the server's requested delay instead of pure exponential. Left out
-  to avoid broad changes to the provider client in this data-only task.
-- **Kill-switch RS3M refresh reuses `refresh_policy.refresh_tickers`**, which refetches
-  bars for open names N×/day — heavier than a pure quote overlay, but reuses tested
-  code and stays bounded (`REFRESH_KILLSWITCH_PER_DAY`). A lighter quote-only RS3M
-  recompute is a possible optimization.
-- **Retiring the legacy hot-refresh** once the tiered poll is validated live (§Assumptions 5).
-- Enable/disable the tiered poll independently via `CFM_TIER_POLL` (default on).
+`BURN_IS_MODEL_DIFF` and `NET_JUICE_IS_HEADLINE` are `HARD_CFM_RULE` — not knobs.
+
+---
+
+## Explicitly NOT done (per scope)
+
+- No order/roll/exit path touched; no live-trading code changed.
+- No second options pricer — everything is `indicators._bs_call_price`.
+- No straight-line proration anywhere, including display paths.
+- The legacy `extrinsic_payback` accounting is retained, not removed.
+- No new frontend chart library; the weekly bars reuse the flex-div idiom.
+- No external Python dependency added.

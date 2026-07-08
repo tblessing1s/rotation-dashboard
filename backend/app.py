@@ -178,13 +178,18 @@ def api_scan_ready():
                 r["ticker"], market_scheduler.Tier.T1, market_open=mkt_open, live=live)
             entry = {"ticker": r["ticker"], "sector": r["sector"],
                      "juice_weekly_pct": r.get("juice_weekly_pct"),
+                     "net_juice_weekly_pct": r.get("net_juice_weekly_pct"),
                      "earnings_date": r.get("earnings_date"), "level5": l5,
                      "stale": blocked, "stale_inputs": stale_inputs}
             if blocked:
                 stale_blocked.append(entry)
             else:
                 (ready if l5 and l5["pass"] else near_misses).append(entry)
-        ready.sort(key=lambda r: r.get("juice_weekly_pct") or 0, reverse=True)
+        # Rank on NET juice/week (gross minus LEAP burn) — never gross. Fall back
+        # to gross only when net is unavailable so a pricing gap can't drop a name.
+        ready.sort(key=lambda r: (r.get("net_juice_weekly_pct")
+                                  if r.get("net_juice_weekly_pct") is not None
+                                  else r.get("juice_weekly_pct") or 0), reverse=True)
         return jsonify({"as_of": sc["as_of"], "ready": ready, "near_misses": near_misses,
                         "stale_blocked": stale_blocked})
     except Exception as e:  # noqa: BLE001
@@ -319,6 +324,70 @@ def api_coverage():
         return jsonify(option_chain.coverage(ticker))
     except Exception as e:  # noqa: BLE001
         return _err(e)
+
+
+@app.route("/api/burn/<ticker>")
+def api_burn(ticker):
+    """Per-position theta-burn detail for the Burn panel: the three headline
+    figures (juice/burn/net per week) + coverage + hold-extension ladder from
+    leap_health, the weekly juice-vs-burn series (realized weeks from the mark
+    telemetry, projected weeks forward to the planned exit), and the
+    realized-vs-projected divergence. Read-only; degrades gracefully."""
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        import burn_marks
+        state = log.load_state()
+        pos = log.find_position(state, ticker)
+        if not pos or pos.get("status") == "closed":
+            return jsonify({"ticker": ticker, "error": "no open position"}), 404
+        health = (position_manager.enrich_position(pos).get("leap_health")
+                  or pos.get("leap_health") or {})
+        marks = burn_marks.series(ticker)
+        # Weekly juice-vs-burn: realized weeks (from marks) full-opacity, then the
+        # projected forward weeks (to the planned exit) lighter.
+        ledger_weeks = {(w.get("week"), w.get("ticker")): w.get("net_juice")
+                        for w in (state.get("theta_ledger", {}) or {}).get("weeks", [])}
+        trailing = health.get("trailing_avg_weekly_juice")
+        weekly = []
+        for m in marks:
+            if m.get("realized_burn_week") is None:
+                continue
+            wk = _iso_week_label(m.get("date"))
+            weekly.append({"label": (m.get("date") or "")[5:], "projected": False,
+                           "juice": ledger_weeks.get((wk, ticker), trailing),
+                           "burn": m.get("realized_burn_week")})
+        proj = health.get("burn_projection") or {}
+        model_burn = health.get("model_burn_per_week")
+        weeks_ahead = int(max(1, round(proj.get("weeks_remaining") or 0))) if proj.get("priceable") else 0
+        for i in range(weeks_ahead):
+            weekly.append({"label": f"+{i + 1}", "projected": True,
+                           "juice": trailing, "burn": model_burn})
+        return jsonify({
+            "ticker": ticker,
+            "planned_exit_dte": health.get("planned_exit_dte"),
+            "juice_per_week": trailing,
+            "burn_per_week": model_burn,
+            "net_juice_per_week": health.get("net_juice_per_week"),
+            "coverage": health.get("coverage"),
+            "burn_projection": proj,
+            "extension_preview": health.get("extension_preview"),
+            "weekly": weekly,
+            "divergence": burn_marks.divergence(ticker),
+        })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+def _iso_week_label(date_str) -> str | None:
+    try:
+        from datetime import datetime as _d
+        d = _d.strptime(str(date_str)[:10], "%Y-%m-%d").date()
+        y, w, _ = d.isocalendar()
+        return f"{y}-W{w:02d}"
+    except (TypeError, ValueError):
+        return None
 
 
 @app.route("/api/earnings")
@@ -494,14 +563,21 @@ def api_overview():
     except Exception as e:  # noqa: BLE001
         return _err(e)
     ledger = state.get("theta_ledger", {})
+    positions = section(lambda: position_manager.positions_view(state))
     return jsonify({
         "regime": section(screening.regime),
-        "positions": section(lambda: position_manager.positions_view(state)),
+        "positions": positions,
         "capital": section(lambda: position_manager.capital_summary(state)),
         "theta": {
             "totals": ledger.get("totals", {}),
             "extrinsic_payback": state.get("extrinsic_payback", {}),
+            # Forward NET juice/week rollup (juice - LEAP burn), the headline
+            # income figure; extrinsic_payback stays as the capital-recovery view.
+            "net_juice_rollup": (position_manager.net_juice_rollup(positions)
+                                 if isinstance(positions, list) else {}),
         },
+        # Live BS-engine verification harness: realized-vs-projected burn drift.
+        "burn_divergence": section(lambda: __import__("burn_marks").aggregate_divergence()),
         "kill_switch": section(lambda: kill_switch.evaluate_all(state)),
     })
 

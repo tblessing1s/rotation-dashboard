@@ -1,5 +1,51 @@
 # Changelog
 
+## Weekly theta burn & net-juice accounting
+
+The per-position juice accounting no longer treats the LEAP's **total** entry
+extrinsic as a cost to be paid off. The LEAP is held ~8 weeks and exited/rolled
+around 130–140 DTE, so only the extrinsic **consumed during the hold window** is
+a true cost — the rest is recovered when the LEAP is sold (minus slippage). The
+headline per-position metric is now **net juice/week = juice collected/week −
+theta burn/week**, and the entry queue ranks on it.
+
+### What changed
+
+- **`burn_projection()`** (new `backend/burn.py`) — the burn is the **difference of
+  two Black-Scholes model prices**: the LEAP's model extrinsic at the current DTE
+  minus its model extrinsic at the planned exit DTE (same spot & IV), divided by
+  the weeks in that window. Never a straight-line proration of total extrinsic
+  (`HARD_CFM_RULE BURN_IS_MODEL_DIFF`). Guard rails: auto-extends the window when
+  a position is held past plan; floors burn at zero with a `low_extrinsic_flag`
+  on deep-ITM drift; adds an explicit round-trip **exit-slippage** term.
+- **`planned_exit_dte`** is now per-position state (default `PLANNED_EXIT_DTE = 135`),
+  seeded onto existing positions by a forward-only migration (**schema v13 → v14**).
+  All burn math keys off this, not off LEAP expiration.
+- **Net juice is the headline** (`NET_JUICE_IS_HEADLINE`): `leap_health`, the
+  portfolio income rollup (Overview), and the entry-queue ranking
+  (`/api/scan/ready`, `queue_state`) all use net juice/week via one shared
+  function — the queue and the position view can never disagree. This naturally
+  penalizes high-IV candidates (more extrinsic bought → more burn) with no
+  separate rule. The legacy `extrinsic_payback` meter is kept as a secondary
+  capital-recovery view.
+- **Weekly burn marks + divergence** (`backend/burn_marks.py`, telemetry in
+  `DATA_DIR/burn_marks.json`, recorded by nightly maintenance at end-of-week):
+  realized-vs-projected burn is queryable per position and book-wide — a live
+  verification harness for the pricing model. Persistent divergence past
+  `BURN_DIVERGENCE_WARN_PCT` surfaces a soft warning badge.
+- **Frontend**: a per-position Theta-burn panel (Juice/wk · Burn/wk with a
+  trend arrow · Net/wk), a coverage meter with threshold coloring, a weekly
+  juice-vs-burn bar view (realized full-opacity, projected lighter), a
+  hold-extension readout, and staleness/model-drift badges — all reusing existing
+  Tailwind/flex-div primitives (no new chart library).
+
+**Finding (documented in `IMPLEMENTATION_NOTES.md`):** for a real deep-ITM
+0.90-delta LEAP the Black-Scholes extrinsic decay is **front-loaded**, so the
+spec's "model burn < straight-line proration" and "extending the hold raises
+burn/wk" assumptions (ATM-theta intuition) are inverted. The feature's actual
+value prop — held-window burn ≈ ⅓ of total entry extrinsic — is confirmed and is
+what the tests assert.
+
 ## Atomic spread roll orders (short-call roll)
 
 The weekly short-call roll now completes the spec for **atomic** execution: a

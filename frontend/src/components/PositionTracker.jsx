@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { Card, Meter, Pill, Light, Loading, money, fmt, pct, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
+import BurnPanel from "./BurnPanel.jsx";
 import { useToast } from "./Toast.jsx";
 import { submitOrder } from "../orderFlow.js";
 
@@ -522,6 +523,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
             </div>
 
             <LeapHealth ticker={p.ticker} health={p.leap_health} />
+            <BurnPanel ticker={p.ticker} health={p.leap_health_agg || p.leap_health} />
 
             {p.whipsaw?.tripped && (
               <div className="mt-3 rounded-lg border border-rose-500/50 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
