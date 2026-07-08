@@ -34,6 +34,16 @@ function juiceOf(sc) {
   return { pct: null, captured: null, total: null };
 }
 
+// The other half of an ITM short's premium: intrinsic captured in cash. We sold
+// intrinsic + extrinsic; the extrinsic is the juice above, and this is the
+// intrinsic banked at entry that has since melted back to us as the stock fell
+// toward/under the strike. Signed — a climbing stock hands it back, but that lift
+// shows up as the orange's intrinsic gaining to match, so it's a hedge, not a
+// leak. null when the entry extrinsic wasn't recorded (entry intrinsic unknowable).
+function intrinsicCashOf(sc) {
+  return sc.intrinsic_captured_total != null ? Number(sc.intrinsic_captured_total) : null;
+}
+
 // The all-in verdict for one row: is this position actually making money?
 // Three legs, summed from what the payload already carries:
 //   banked  — realized net juice this LEAP cycle (extrinsic_payback meter's
@@ -310,7 +320,7 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
       .map((p) => ({
         p,
         pulp: pulpOf(p),
-        shorts: (p.short_calls || []).map((sc) => ({ sc, ...juiceOf(sc) })),
+        shorts: (p.short_calls || []).map((sc) => ({ sc, ...juiceOf(sc), intrinsicCash: intrinsicCashOf(sc) })),
       }))
       .filter((r) => r.p.leap || r.shorts.length > 0);
     out.sort((a, b) => (b.pulp.pct ?? -1) - (a.pulp.pct ?? -1));
@@ -331,6 +341,11 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
   const collected = allShorts.reduce((s, x) => s + (x.captured ?? 0), 0);
   const onTable = allShorts.reduce((s, x) => s + (x.total ?? 0), 0);
   const juicePct = onTable > 0 ? (collected / onTable) * 100 : null;
+  // Intrinsic banked in cash on the short side — the ITM half, separate from the
+  // juice. Only surfaced when some short actually sold intrinsic that has moved.
+  const intrinsicCash = allShorts.reduce((s, x) => s + (x.intrinsicCash ?? 0), 0);
+  const hasIntrinsicCash = allShorts.some(
+    (x) => x.intrinsicCash != null && Math.round(x.intrinsicCash) !== 0);
   const backed = rows.reduce((s, r) => s + (r.pulp.intrinsic ?? 0), 0);
   const deployed = rows.reduce((s, r) => s + (r.pulp.basis ?? 0), 0);
   const backedPct = deployed > 0 ? (backed / deployed) * 100 : null;
@@ -343,6 +358,15 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
           {"net "}
           <span className="font-semibold text-emerald-300">{money(collected)}</span>
           {" of "}{money(onTable)} squeezed
+          {hasIntrinsicCash && (
+            <>
+              {" · "}
+              <span className={`font-semibold ${intrinsicCash >= 0 ? "text-orange-300" : "text-rose-300"}`}>
+                {signedMoney(intrinsicCash)}
+              </span>
+              {" intrinsic"}
+            </>
+          )}
         </span>
       }
     >
@@ -358,6 +382,19 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                         caption={`${fmt(backedPct, 0)}% of deployed capital covered by intrinsic
                           — ${money(backed)} on ${money(deployed)}`} />
           )}
+        </div>
+      )}
+
+      {/* The short side's other half: intrinsic banked in cash, separate from the
+          juice. ITM premium we sold that's melted back as the stock fell (or been
+          handed back on a climb — offset by the orange's matching intrinsic gain). */}
+      {hasIntrinsicCash && (
+        <div className="mb-2 text-[11px] text-slate-500">
+          <span className={intrinsicCash >= 0 ? "text-orange-300" : "text-rose-300"}>
+            {signedMoney(intrinsicCash)}
+          </span>{" "}
+          intrinsic captured in cash from shorts — the ITM premium sold, apart from the juice
+          {intrinsicCash < 0 && " (net handed back as stock climbed — offset by the orange's intrinsic gain)"}
         </div>
       )}
 
@@ -471,7 +508,7 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                 </div>
               ) : (
                 <div className="flex max-w-[14.5rem] flex-wrap items-start justify-center gap-x-1 gap-y-2">
-                  {shorts.map(({ sc, pct, captured, total }, i) => {
+                  {shorts.map(({ sc, pct, captured, total, intrinsicCash }, i) => {
                     const flags = [];
                     if (sc.below_strike) flags.push("defend");
                     if (sc.dte != null && sc.dte < 0) flags.push("expired");
@@ -485,6 +522,9 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                         className="group flex flex-col items-center rounded-lg px-1 pb-1 transition hover:bg-slate-800/50"
                         title={`${p.ticker} ${label} — ${pct != null ? `${fmt(pct, 0)}% of juice captured` : "no mark yet"}${
                           captured != null && total != null ? ` (${money(captured)} of ${money(total)})` : ""
+                        }${
+                          intrinsicCash != null && Math.round(intrinsicCash) !== 0
+                            ? ` · intrinsic in cash ${signedMoney(intrinsicCash)}` : ""
                         }${sc.dte != null ? ` · ${sc.dte} DTE` : ""}`}
                       >
                         <Glass uid={`${p.ticker}-${i}`} pct={pct} rollNow={!!sc.roll_now} />
@@ -499,6 +539,11 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                               : "no mark yet"}
                           {sc.dte != null && sc.dte >= 0 ? ` · ${sc.dte}d` : ""}
                         </div>
+                        {intrinsicCash != null && Math.round(intrinsicCash) !== 0 && (
+                          <div className={`text-[10px] ${intrinsicCash >= 0 ? "text-orange-300/80" : "text-rose-300/80"}`}>
+                            {signedMoney(intrinsicCash)} intrinsic
+                          </div>
+                        )}
                         <FlagRow flags={flags} />
                       </button>
                     );
@@ -516,9 +561,12 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
         holding several LEAPs lists each tranche as a mini orange — the big orange is all of
         them together. Glasses = its
         shorts: fill is extrinsic captured since entry; the dashed line is the 75% buyback rule
-        — a glass past the line is ready to roll. Paid back = how much of the LEAP's entry
-        extrinsic this cycle's juice has recovered. All-in = juice banked this cycle + LEAP value
-        change + open shorts marked-to-market: is the row making money, glasses and orange together?
+        — a glass past the line is ready to roll. An ITM short also shows its intrinsic captured in
+        cash — the intrinsic half of the premium sold, melting back as the stock falls (or handed
+        back on a climb, offset by the orange's matching intrinsic gain). Paid back = how much of
+        the LEAP's entry extrinsic this cycle's juice has recovered. All-in = juice banked this
+        cycle + LEAP value change + open shorts marked-to-market: is the row making money, glasses
+        and orange together?
       </div>
     </Card>
   );

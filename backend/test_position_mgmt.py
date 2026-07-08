@@ -84,6 +84,40 @@ def test_enrich_short_extrinsic_capture():
     assert out3["extrinsic_captured_pct"] is None
 
 
+def test_enrich_short_intrinsic_capture():
+    # Sold an ITM call for 3.00 when the stock was ~135 (3.00 intrinsic at strike
+    # 132) plus 0.80 extrinsic -> 3.80 total, so entry intrinsic = 3.80 - 0.80 = 3.00.
+    sc = {"strike": 132, "contracts": 5, "entry_premium_total": 1900.0,
+          "entry_extrinsic_per_share": 0.80, "dte": 4}
+    # Stock fell to 133 -> current intrinsic 1.00, so 2.00/sh of the intrinsic sold
+    # has melted back to us in cash (positive = kept).
+    out = pm.enrich_short(sc, stock_price=133.0, dividend=None, live_mark=1.30)
+    assert out["entry_intrinsic_per_share"] == 3.00
+    assert out["current_intrinsic_per_share"] == 1.00
+    assert out["intrinsic_captured_per_share"] == 2.00
+    assert out["entry_intrinsic_total"] == 1500.0
+    assert out["intrinsic_captured_total"] == 1000.0
+
+    # Stock climbs to 138 -> current intrinsic 6.00 > 3.00 sold: 3.00/sh handed
+    # back (negative), the loss the covering LEAP's intrinsic gain offsets.
+    up = pm.enrich_short(sc, stock_price=138.0, dividend=None, live_mark=6.40)
+    assert up["current_intrinsic_per_share"] == 6.00
+    assert up["intrinsic_captured_per_share"] == -3.00
+    assert up["intrinsic_captured_total"] == -1500.0
+
+    # Stock under the strike -> intrinsic fully melted; full entry intrinsic kept.
+    otm = pm.enrich_short(sc, stock_price=128.0, dividend=None, live_mark=0.15)
+    assert otm["current_intrinsic_per_share"] == 0.0
+    assert otm["intrinsic_captured_per_share"] == 3.00
+    assert otm["intrinsic_captured_total"] == 1500.0
+
+    # No entry extrinsic recorded -> entry intrinsic unknowable, fields stay None.
+    bare = {"strike": 132, "contracts": 5, "current_bid": 1.0, "entry_premium_total": 500.0}
+    out_bare = pm.enrich_short(bare, stock_price=134.0, dividend=None)
+    assert out_bare["entry_intrinsic_per_share"] is None
+    assert out_bare["intrinsic_captured_total"] is None
+
+
 def test_enrich_short_assignment_risk_flag():
     today = date.today()
     sc = {"strike": 132, "contracts": 5, "dte": 4, "current_bid": 0.25,
