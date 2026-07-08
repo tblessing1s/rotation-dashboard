@@ -71,6 +71,49 @@ def _fill_slippage(e: dict) -> dict | None:
             "slippage_pct": round(frac * 100, 3)}
 
 
+def _roll_net_slippage(state: dict) -> list[dict]:
+    """Net slippage per atomic roll (R5): the adverse deviation of the realized
+    NET fill from the reference NET mid captured at ticket time (mid(new short) −
+    mid(old short)). A higher net is always better (more credit / less debit), so
+    adverse = (reference − realized) / |reference|, positive = worse for us. One
+    entry per roll_group (both legs carry the same net fields); live rolls only."""
+    seen: dict[str, dict] = {}
+    for e in state.get("executions", []):
+        gid = e.get("roll_group_id")
+        if not gid or gid in seen:
+            continue
+        if e.get("live_transmitted") is not True:
+            continue
+        ref = e.get("roll_reference_net_mid")
+        net = e.get("roll_net_fill")
+        if ref is None or net is None:
+            continue
+        try:
+            ref = float(ref)
+            net = float(net)
+        except (TypeError, ValueError):
+            continue
+        if abs(ref) < 1e-9:
+            continue
+        adverse = (ref - net) / abs(ref)
+        seen[gid] = {
+            "roll_group_id": gid, "ticker": e.get("ticker"),
+            "reference_net_mid": round(ref, 4), "net_fill": round(net, 4),
+            "net_slippage_pct": round(adverse * 100, 3),
+            "alloc_method": e.get("roll_alloc_method"),
+        }
+    return list(seen.values())
+
+
+def roll_report(state: dict) -> dict:
+    """Net roll-slippage summary — one net crossing per roll, not two per-leg
+    crossings (PAPER_ROLL_HAIRCUT_CROSSINGS=1). Live rolls only."""
+    rolls = _roll_net_slippage(state)
+    n = len(rolls)
+    mean = round(sum(r["net_slippage_pct"] for r in rolls) / n, 3) if n else None
+    return {"live_rolls": n, "mean_net_slippage_pct": mean, "recent_rolls": rolls[-20:]}
+
+
 def report(state: dict) -> dict:
     """Realized-vs-assumed slippage summary for the paper-fill caveat + haircut.
 
@@ -108,4 +151,8 @@ def report(state: dict) -> dict:
         "mid_fill_caveat": not sufficient,
         "by_action": by_action,
         "recent_fills": fills[-20:],
+        # Net roll slippage (one net crossing per atomic roll) is measured
+        # separately from the per-leg figures above — a roll pays ONE net crossing,
+        # not two per-leg crossings (PAPER_ROLL_HAIRCUT_CROSSINGS=1).
+        "roll_net": roll_report(state),
     }

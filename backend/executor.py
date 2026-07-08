@@ -435,6 +435,10 @@ def _commit(payload, ticker, action, contracts, strike, stock_price, price_sourc
         except (TypeError, ValueError):
             qm = None
     execution["quoted_mid_per_share"] = qm
+    # Legged-roll linkage: when a roll is executed as two independent single-leg
+    # orders (the legacy fallback), each leg carries the shared roll linkage in
+    # its payload so the roll ledger treats the pair identically to an atomic roll.
+    _stamp_roll_linkage(execution, payload)
     stored = log.append_execution(execution)
 
     state = log.load_state()
@@ -452,6 +456,22 @@ def _commit(payload, ticker, action, contracts, strike, stock_price, price_sourc
         "captured_price": stock_price,
         "execution": stored,
     }
+
+
+def _stamp_roll_linkage(execution: dict, source: dict) -> None:
+    """Copy a legged roll's shared linkage (roll_group_id / roll_leg / roll_reason)
+    from a payload or pending record onto a leg's execution, so a legged roll and
+    an atomic roll land identical fields in the roll ledger. roll_id (the ledger
+    key) mirrors roll_group_id. No-op when there is no roll linkage present."""
+    gid = source.get("roll_group_id")
+    if gid is None:
+        return
+    execution["roll_group_id"] = gid
+    execution["roll_id"] = gid
+    if source.get("roll_leg") is not None:
+        execution["roll_leg"] = source["roll_leg"]
+    if source.get("roll_reason") is not None:
+        execution["roll_reason"] = source["roll_reason"]
 
 
 def _limit_price(action, payload):
@@ -487,12 +507,17 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
     if not order_id:
         raise schwab_api.SchwabError("Schwab accepted the order but returned no order id")
 
-    log.save_pending_order(order_id, {
+    pending = {
         "payload": payload, "ticker": ticker, "action": action, "contracts": contracts,
         "strike": strike, "stock_price": stock_price, "price_source": price_source,
         "account_hash": account_hash, "option_symbol": option_symbol,
         "limit_price": limit, "placed_at": log.utcnow(),
-    })
+    }
+    # Preserve a legged roll's shared linkage so each leg commits into the roll ledger.
+    for k in ("roll_group_id", "roll_leg", "roll_reason"):
+        if payload.get(k) is not None:
+            pending[k] = payload[k]
+    log.save_pending_order(order_id, pending)
     return {
         "success": True,
         "status": "working",
@@ -520,6 +545,11 @@ def _commit_from_pending(rec: dict, fill_price):
     the right payload field so the logged execution reflects the real fill."""
     payload = dict(rec.get("payload") or {})
     action = rec["action"]
+    # Carry a legged roll's shared linkage from the pending record onto the payload
+    # so _commit stamps it onto the leg's execution (roll-ledger equivalence).
+    for k in ("roll_group_id", "roll_leg", "roll_reason"):
+        if rec.get(k) is not None:
+            payload[k] = rec[k]
     # Reference mid at order time (the placement limit was set at the quoted mid),
     # carried onto the execution so realized slippage = broker fill vs this mid.
     if rec.get("limit_price") is not None:
@@ -537,18 +567,95 @@ def _commit_from_pending(rec: dict, fill_price):
                    rec["strike"], rec["stock_price"], rec.get("price_source", "schwab"), "live")
 
 
-def _commit_roll_from_pending(rec: dict, order: dict):
-    """Commit a filled two-leg roll: overlay the actual per-leg fill prices onto
-    the payload (falling back to the staged estimates) and record both legs."""
+def _commit_roll_from_pending(rec: dict, order: dict, units: int | None = None):
+    """Commit a filled roll (or one whole-spread partial unit-batch): resolve the
+    per-leg fill prices and how they were allocated (R2), then record both legs.
+    ``units`` books only the newly-filled quantity (partial fills, R3)."""
     payload = dict(rec.get("payload") or {})
-    close_px, open_px = _roll_leg_fills(order, rec.get("close_option_symbol", ""),
-                                        rec.get("open_option_symbol", ""))
+    # Reference net mid captured at ticket time (the placement limit) for R5.
+    if rec.get("net_limit") is not None:
+        payload["reference_net_mid"] = round(float(rec["net_limit"]), 4)
+    close_px, open_px, method = _allocate_roll_fills(order, rec)
     if close_px is not None:
         payload["close_price_per_share"] = close_px
     if open_px is not None:
         payload["premium_per_share"] = open_px
-    return _commit_roll(payload, rec["ticker"], int(rec["contracts"]),
-                        rec.get("stock_price"), "live", rec.get("price_source", "schwab"))
+    units = int(units if units is not None else rec["contracts"])
+    return _commit_roll(payload, rec["ticker"], units, rec.get("stock_price"),
+                        "live", rec.get("price_source", "schwab"),
+                        roll_group_id=rec.get("roll_group_id"), alloc_method=method)
+
+
+def _roll_rejection_fallback(rec: dict, order: dict, order_id: str) -> dict:
+    """Schwab rejected the complex roll. Surface the reason and OFFER the legacy
+    legged path — but ONLY behind an explicit operator confirmation (R6). Never
+    auto-fall-back: this just describes the option, it executes nothing."""
+    payload = rec.get("payload") or {}
+    reason = (order.get("statusDescription") or order.get("cancelReason")
+              or "Schwab rejected the complex (multi-leg) roll order")
+    keep = ("from_strike", "to_strike", "contracts", "close_price_per_share",
+            "premium_per_share", "from_expiration", "to_expiration", "from_option_symbol",
+            "to_option_symbol", "to_dte", "roll_reason", "extrinsic_sold")
+    return {
+        "order_id": str(order_id), "status": "rejected", "raw_status": "REJECTED",
+        "reason": reason,
+        "fallback": {
+            "available": True,
+            "action": "roll_short",
+            "confirm_field": "confirm_leg_manually",
+            "prompt": ("Leg this roll manually? This carries legging risk — the two legs "
+                       "can fill apart, briefly leaving the position uncovered or "
+                       "double-covered."),
+            "ticker": rec.get("ticker"),
+            "roll": {k: payload.get(k) for k in keep if payload.get(k) is not None},
+        },
+    }
+
+
+def _roll_order_status(rec: dict, order: dict, order_id: str, raw: str) -> dict:
+    """Lifecycle for an atomic spread roll: whole-unit partial fills, leg-imbalance
+    freeze, full fill, and explicit rejection fallback (R3/R6)."""
+    close_sym = rec.get("close_option_symbol", "") or ""
+    open_sym = rec.get("open_option_symbol", "") or ""
+    total = int(rec.get("contracts") or 0)
+    close_qty, open_qty = _roll_leg_filled_qty(order, close_sym, open_sym)
+
+    # Leg imbalance is only actionable once no further fills can rebalance it (a
+    # terminal state). While WORKING, an unequal snapshot is just a fill in
+    # progress — we book only the whole units filled on BOTH legs.
+    terminal = raw in ("FILLED", "CANCELED", "REJECTED", "EXPIRED")
+    if close_qty != open_qty and terminal:
+        log.pop_pending_order(order_id)
+        return _freeze_for_leg_imbalance(rec["ticker"], order_id, close_qty, open_qty)
+
+    filled_units = min(close_qty, open_qty)
+    if raw == "FILLED" and filled_units == 0:
+        # FILLED but Schwab reported no per-leg quantities — the whole order filled.
+        filled_units = total
+    already = int(rec.get("filled") or 0)
+    new_units = filled_units - already
+
+    if new_units > 0:
+        result = _commit_roll_from_pending(rec, order, units=new_units)
+        rec["filled"] = already + new_units
+        rec["roll_group_id"] = result.get("roll_group_id")
+        _capture_order_receipt(order_id, raw, rec, order, result)
+        if rec["filled"] >= total or raw == "FILLED":
+            log.pop_pending_order(order_id)
+            return {**result, "order_id": order_id, "status": "filled", "raw_status": raw}
+        # Whole units booked; the remainder stays pending until it fills or cancels.
+        log.save_pending_order(order_id, rec)
+        return {**result, "order_id": order_id, "status": "partially_filled", "raw_status": raw,
+                "filled": rec["filled"], "remaining": total - rec["filled"]}
+
+    if raw == "REJECTED":
+        log.pop_pending_order(order_id)
+        return _roll_rejection_fallback(rec, order, order_id)
+    if raw in ("CANCELED", "EXPIRED"):
+        log.pop_pending_order(order_id)
+        return {"order_id": order_id, "status": "canceled", "raw_status": raw}
+    return {"order_id": order_id, "status": "working", "raw_status": raw,
+            "filled": already, "remaining": total - already}
 
 
 def order_status(order_id: str) -> dict:
@@ -561,11 +668,13 @@ def order_status(order_id: str) -> dict:
         return {"order_id": order_id, "status": "unknown"}
     order = data_handler.client().get_order(rec["account_hash"], order_id)
     raw = (order.get("status") or "").upper()
+    # The atomic roll has its own lifecycle (partial whole-unit fills, leg-imbalance
+    # freeze, rejection fallback) — see _roll_order_status.
+    if rec.get("kind") == "roll_short":
+        return _roll_order_status(rec, order, order_id, raw)
     if raw == "FILLED":
         kind = rec.get("kind")
-        if kind == "roll_short":
-            result = _commit_roll_from_pending(rec, order)
-        elif kind == "open":
+        if kind == "open":
             result = _commit_open_from_pending(rec, order)
         elif kind == "exit":
             result = _commit_exit_from_pending(rec, order)
@@ -911,8 +1020,29 @@ def _close_short(payload, ticker, strike, contracts, stock_price):
     }
 
     def apply(position):
-        position["short_calls"] = [sc for sc in position.get("short_calls", [])
-                                   if sc.get("strike") != strike]
+        # Contract-aware close: reduce the matching short leg(s) by the closed
+        # quantity, dropping a leg only when it is fully closed. A full close
+        # (contracts == the leg's contracts) reduces to zero and drops it — the
+        # original behavior — while a partial close (a partially-filled roll)
+        # leaves the remainder open with proportionally-scaled cost fields.
+        remaining = int(contracts or 0)
+        kept = []
+        for sc in position.get("short_calls", []):
+            if remaining <= 0 or sc.get("strike") != strike:
+                kept.append(sc)
+                continue
+            have = int(sc.get("contracts") or 0)
+            if have > remaining:
+                frac = (have - remaining) / have
+                sc["contracts"] = have - remaining
+                for k in ("entry_premium_total", "current_cost"):
+                    if sc.get(k) is not None:
+                        sc[k] = round(float(sc[k]) * frac, 2)
+                remaining = 0
+                kept.append(sc)
+            else:
+                remaining -= have  # leg fully closed -> dropped
+        position["short_calls"] = kept
     return execution, apply
 
 
@@ -943,8 +1073,55 @@ def _roll_short(payload, ticker, contracts, stock_price, mode, price_source):
         raise ValueError("roll_short requires from_strike and to_strike")
     contracts = int(contracts or 0)
     if mode == "live" and schwab_api.configured():
-        return _place_live_roll(payload, ticker, contracts, stock_price, price_source)
+        # Atomic by default (ATOMIC_ROLLS_ENABLED); the legacy legged path is used
+        # only when the flag is off OR the operator explicitly confirmed manual
+        # legging after a rejection (R6/R7). Never a silent fallback.
+        atomic = config.ATOMIC_ROLLS_ENABLED and not payload.get("confirm_leg_manually")
+        if atomic:
+            return _place_live_roll(payload, ticker, contracts, stock_price, price_source)
+        return _place_legged_roll(payload, ticker, contracts, stock_price, price_source)
     return _commit_roll(payload, ticker, contracts, stock_price, mode, price_source)
+
+
+def _place_legged_roll(payload, ticker, contracts, stock_price, price_source):
+    """Legacy legged roll: TWO independent single-leg live orders (buy-to-close the
+    old short, then sell-to-open the new one). This carries legging risk — the legs
+    can fill apart — and is reached only when ATOMIC_ROLLS_ENABLED is off or the
+    operator explicitly confirmed manual legging. Both legs share a roll_group_id so
+    the roll ledger treats the pair identically to an atomic roll."""
+    _assert_transmit_allowed("roll_short")
+    from_strike = payload.get("from_strike", payload.get("strike"))
+    to_strike = payload.get("to_strike")
+    roll_group_id = _next_roll_id(log.load_state())
+    reason = _roll_reason(payload)
+    close_payload = {
+        "action": "close_short", "ticker": ticker, "strike": from_strike, "contracts": contracts,
+        "close_price_per_share": payload.get("close_price_per_share"),
+        "option_symbol": payload.get("from_option_symbol"),
+        "expiration": payload.get("from_expiration"),
+        "extrinsic_sold": payload.get("extrinsic_sold"), "stock_price": stock_price,
+        "roll_group_id": roll_group_id, "roll_leg": "close", "roll_reason": reason,
+    }
+    open_payload = {
+        "action": "sell_short", "ticker": ticker, "strike": to_strike, "contracts": contracts,
+        "premium_per_share": payload.get("premium_per_share"),
+        "option_symbol": payload.get("to_option_symbol"),
+        "expiration": payload.get("to_expiration"),
+        "dte": payload.get("to_dte", payload.get("dte", 5)), "stock_price": stock_price,
+        "roll_group_id": roll_group_id, "roll_leg": "open", "roll_reason": reason,
+    }
+    # Buy-to-close first, then sell-to-open — the historical legged order.
+    close_res = _place_live(close_payload, ticker, "close_short", contracts,
+                            from_strike, stock_price, price_source)
+    open_res = _place_live(open_payload, ticker, "sell_short", contracts,
+                           to_strike, stock_price, price_source)
+    return {
+        "success": True, "status": "working", "mode": "live", "legged": True,
+        "roll_group_id": roll_group_id,
+        "orders": [close_res, open_res],
+        "warning": ("Legged roll: two independent orders — the legs can fill apart "
+                    "(legging risk). Monitor both fills."),
+    }
 
 
 def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
@@ -1017,7 +1194,118 @@ def _roll_leg_fills(order: dict, close_symbol: str, open_symbol: str):
     return close_px, open_px
 
 
-def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source):
+def _roll_leg_filled_qty(order: dict, close_symbol: str, open_symbol: str):
+    """(close_filled, open_filled) cumulative filled CONTRACT counts per leg from
+    a Schwab order's activity, matched by legId -> orderLegCollection symbol.
+
+    A spread fills as whole units, so a healthy fill has equal counts on both
+    legs; unequal counts are a leg imbalance (R3) that must freeze the position,
+    never book a one-legged fill. Returns (0, 0) when no fills are reported yet.
+    NOTE: Schwab's exact partial-fill quantity fields are a LIVE-VERIFY item."""
+    leg_symbol = {}
+    for i, leg in enumerate(order.get("orderLegCollection") or [], start=1):
+        sym = ((leg.get("instrument") or {}).get("symbol") or "").strip()
+        leg_symbol[leg.get("legId") or i] = sym
+    close_qty = open_qty = 0.0
+    try:
+        for act in order.get("orderActivityCollection", []) or []:
+            for leg in act.get("executionLegs", []) or []:
+                qty = leg.get("quantity")
+                if qty is None:
+                    continue
+                sym = leg_symbol.get(leg.get("legId"))
+                if sym == close_symbol.strip():
+                    close_qty += float(qty)
+                elif sym == open_symbol.strip():
+                    open_qty += float(qty)
+    except (TypeError, ValueError):
+        pass
+    return int(round(close_qty)), int(round(open_qty))
+
+
+def _allocate_roll_fills(order: dict, rec: dict):
+    """Resolve the per-leg fill prices for a filled roll and how they were
+    derived (R2). Priority:
+
+      1. Schwab reports both per-leg fill prices  -> use them ("broker_per_leg").
+      2. Per-leg prices absent but a net is known -> split the net across the two
+         legs proportional to the reference mids captured at ticket time
+         ("proportional_to_mid").
+      3. Neither available -> keep the staged mid estimates ("staged_estimate").
+
+    Returns (close_price_per_share, open_price_per_share, method)."""
+    close_sym = rec.get("close_option_symbol", "") or ""
+    open_sym = rec.get("open_option_symbol", "") or ""
+    close_px, open_px = _roll_leg_fills(order, close_sym, open_sym)
+    if close_px is not None and open_px is not None:
+        return close_px, open_px, "broker_per_leg"
+
+    payload = rec.get("payload") or {}
+    ref_close = float(payload.get("close_price_per_share") or 0)
+    ref_open = float(payload.get("premium_per_share") or 0)
+    ref_net = round(ref_open - ref_close, 4)
+    # Best available realized net: the placement limit (a filled DAY limit order
+    # trades at or better than its limit; without per-leg data the limit is the
+    # honest anchor). LIVE-VERIFY: confirm Schwab exposes no net-fill field.
+    net_fill = rec.get("net_limit")
+    net_fill = float(net_fill) if net_fill is not None else ref_net
+    if abs(ref_net) > 1e-9:
+        # Scale both legs by the same factor so open-close == net_fill while
+        # preserving each leg's share of the spread (proportional to its mid).
+        k = net_fill / ref_net
+        return round(ref_close * k, 4), round(ref_open * k, 4), "proportional_to_mid"
+    return (close_px if close_px is not None else ref_close,
+            open_px if open_px is not None else ref_open, "staged_estimate")
+
+
+def _freeze_for_leg_imbalance(ticker: str, order_id: str, close_qty: int, open_qty: int) -> dict:
+    """A spread reported a leg-imbalanced fill (one leg filled, the other did not).
+    Per ROLL_LEG_IMBALANCE_ACTION this NEVER auto-corrects: freeze the position
+    for review and surface it as an alert. NO execution is written — the operator
+    reconciles the true broker state and resolves the freeze. (R3.)"""
+    summary = (f"roll order {order_id}: leg-imbalanced fill — buy-to-close filled "
+               f"{close_qty}, sell-to-open filled {open_qty}. Position frozen; "
+               f"reconcile against the broker before trading it.")
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if position is not None:
+        position["needs_review"] = True
+        review = dict(position.get("review") or {})
+        review["since"] = log.utcnow()
+        review["summary"] = summary
+        classes = set(review.get("classifications") or [])
+        classes.add("ROLL_LEG_IMBALANCE")
+        review["classifications"] = sorted(classes)
+        review["leg_imbalance"] = {
+            "order_id": str(order_id), "close_filled": close_qty,
+            "open_filled": open_qty, "at": log.utcnow(),
+        }
+        position["review"] = review
+        log.save_state(state)
+    log.logger.error("LEG IMBALANCE on roll %s (%s): close=%s open=%s — froze position, "
+                     "no execution written", order_id, ticker, close_qty, open_qty)
+    return {"order_id": str(order_id), "status": "leg_imbalance", "frozen": True,
+            "ticker": ticker, "close_filled": close_qty, "open_filled": open_qty,
+            "summary": summary}
+
+
+def _roll_reference_net_mid(payload, close_ps, open_ps) -> float | None:
+    """The reference NET mid for the roll = mid(new short) − mid(old short),
+    captured at ticket time (R1/R5). Prefer an explicitly-carried value (the
+    live placement limit); else derive from the per-leg mids."""
+    ref = payload.get("reference_net_mid")
+    if ref is not None:
+        try:
+            return round(float(ref), 4)
+        except (TypeError, ValueError):
+            pass
+    if open_ps is None and close_ps is None:
+        return None
+    return round(float(open_ps or 0) - float(close_ps or 0), 4)
+
+
+def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source,
+                 *, roll_group_id=None, alloc_method="mid"):
     from_strike = payload.get("from_strike", payload.get("strike"))
     to_strike = payload.get("to_strike")
     contracts = int(contracts or 0)
@@ -1041,15 +1329,33 @@ def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source):
     }
     sell_exec, sell_apply = _sell_short(sell_payload, ticker, to_strike, contracts, stock_price)
 
-    # Link the pair for the roll ledger (derived in recompute_derived).
-    roll_id = _next_roll_id(log.load_state())
+    # Link the pair for the roll ledger (derived in recompute_derived). The
+    # spec's roll_group_id and the ledger's roll_id are the SAME value — one
+    # logical roll — so partial fills of one order all share it. A live/legged
+    # commit passes it in; a fresh paper roll mints the next one.
+    roll_id = roll_group_id or _next_roll_id(log.load_state())
     reason = _roll_reason(payload)
+    # Net reference mid + realized net for the slippage feedback (R5). The realized
+    # net is computed from the prices actually booked onto each leg.
+    ref_net_mid = _roll_reference_net_mid(
+        payload, payload.get("close_price_per_share"), payload.get("premium_per_share"))
+    net_fill = round(float(close_exec["close_price_per_share"]) * -1
+                     + float(sell_exec["premium_per_share"]), 4)
     for leg_exec, leg in ((close_exec, "close"), (sell_exec, "open")):
         leg_exec["mode"] = mode
         leg_exec["price_source"] = price_source
         leg_exec["roll_leg"] = leg
         leg_exec["roll_id"] = roll_id
+        # roll_group_id is the spec's name for the roll linkage; stamped equal to
+        # roll_id so the API/UI and the ledger agree and never drift.
+        leg_exec["roll_group_id"] = roll_id
         leg_exec["roll_reason"] = reason
+        # How the net fill was split across the legs (R2): "mid" (paper, booked at
+        # the quoted mids), "broker_per_leg" (Schwab's reported per-leg fills), or
+        # "proportional_to_mid" (net split by reference mids when per-leg absent).
+        leg_exec["roll_alloc_method"] = alloc_method
+        leg_exec["roll_reference_net_mid"] = ref_net_mid
+        leg_exec["roll_net_fill"] = net_fill
 
     stored_close = log.append_execution(close_exec)
     stored_sell = log.append_execution(sell_exec)
@@ -1073,6 +1379,8 @@ def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source):
         "mode": mode,
         "captured_price": stock_price,
         "net_credit": round(new_total - close_total, 2),
+        "roll_group_id": roll_id,
+        "alloc_method": alloc_method,
         "executions": [stored_close, stored_sell],
     }
 

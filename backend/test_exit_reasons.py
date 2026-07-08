@@ -151,8 +151,8 @@ def test_legacy_state_migrates_to_null_snapshot_and_legacy_reason(store):
     with open(config.STATE_PATH, "w", encoding="utf-8") as fh:
         json.dump(_legacy_v11_state(), fh)
 
-    state = log.load_state()  # migrates v11 -> v12 + recomputes cycles
-    assert state["schema_version"] == migrations.CURRENT_VERSION == 12
+    state = log.load_state()  # migrates v11 -> v13 + recomputes cycles
+    assert state["schema_version"] == migrations.CURRENT_VERSION == 13
     # Position gained a null snapshot (never fabricated from cached bars).
     assert state["positions"][0]["entry_context"] is None
     # The derived cycle carries LEGACY_UNRECORDED + a null entry_context.

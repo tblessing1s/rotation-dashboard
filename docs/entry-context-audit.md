@@ -151,7 +151,7 @@ only **adds** structure (never rewrites executions), registered in `MIGRATIONS`
 (`:171`); `migrate` (`:185`) snapshots the pre-migration file to `backups/` and
 **aborts** (`MigrationAbortedError`) if the snapshot can't be written; `load_state`
 recomputes derived after any migration (`logging_handler.py:122-126`). New:
-`_v11_to_v12` sets `position.setdefault("entry_context", None)`; legacy cycles
+`_v12_to_v13` sets `position.setdefault("entry_context", None)`; legacy cycles
 get `exit_reason:"LEGACY_UNRECORDED"` from the *derivation* rule (a close_leap
 with no coded reason), triggered by the post-migration recompute. No fabricated
 backfill (R5).
@@ -177,7 +177,7 @@ backfill (R5).
    compact `entry_summary`. Immutability preserved.
 6. **kill_switch.py / circuit_breaker.py** — `exit_reason_code(evaluation)`
    mappers so the trigger names its own code.
-7. **migrations.py** — `_v11_to_v12`, bump `CURRENT_VERSION=12`.
+7. **migrations.py** — `_v12_to_v13`, bump `CURRENT_VERSION=13`.
 8. **calibration.py** — `load_closed_cycles(state)` → `(tuples, skipped)`.
 9. **history.py / app.py** — CSV summary columns + `/api/history` detail exposes
    full `entry_context`.
@@ -188,7 +188,7 @@ backfill (R5).
 
 ---
 
-## Changelog (v2.2.0 — state schema v12)
+## Changelog (v2.2.0 — state schema v13)
 
 **Entry-context snapshots + coded exit reasons.** From this version forward,
 **every closed cycle is calibration-usable**: the opening `buy_leap` freezes an
@@ -211,5 +211,5 @@ optional typed `exit_note` and exit-time counterpart metrics.
 
 **Permanent boundary:** cycles closed **before** v2.2.0 carry
 `entry_context: null` and `exit_reason: "LEGACY_UNRECORDED"` (migration
-`_v11_to_v12`). They are **not** backfilled — reconstructing entry snapshots
+`_v12_to_v13`). They are **not** backfilled — reconstructing entry snapshots
 from cached bars would be fabricated training data, worse than missing data.
