@@ -97,6 +97,7 @@ def test_enrich_short_intrinsic_capture():
     assert out["intrinsic_captured_per_share"] == 2.00
     assert out["entry_intrinsic_total"] == 1500.0
     assert out["intrinsic_captured_total"] == 1000.0
+    assert out["current_intrinsic_total"] == 500.0  # 1.00/sh liability x 5 x 100
 
     # Stock climbs to 138 -> current intrinsic 6.00 > 3.00 sold: 3.00/sh handed
     # back (negative), the loss the covering LEAP's intrinsic gain offsets.

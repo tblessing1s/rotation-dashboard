@@ -139,6 +139,9 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
     out["intrinsic_captured_per_share"] = round(intrinsic_captured, 2) if intrinsic_captured is not None else None
     out["entry_intrinsic_total"] = round(entry_intrinsic * mult, 2) if entry_intrinsic is not None and mult else None
     out["intrinsic_captured_total"] = round(intrinsic_captured * mult, 2) if intrinsic_captured is not None and mult else None
+    # The short's live intrinsic liability — what this leg owes right now, to weigh
+    # against the covering LEAP's intrinsic (the hedge-balance check on the book).
+    out["current_intrinsic_total"] = round(intrinsic_now * mult, 2) if intrinsic_now is not None and mult else None
 
     dte = sc.get("dte")
     out["roll_now"] = bool(decay is not None and decay >= config.BUYBACK_DECAY_PCT
