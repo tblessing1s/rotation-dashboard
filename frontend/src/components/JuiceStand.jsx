@@ -34,6 +34,16 @@ function juiceOf(sc) {
   return { pct: null, captured: null, total: null };
 }
 
+// The other half of an ITM short's premium: intrinsic captured in cash. We sold
+// intrinsic + extrinsic; the extrinsic is the juice above, and this is the
+// intrinsic banked at entry that has since melted back to us as the stock fell
+// toward/under the strike. Signed — a climbing stock hands it back, but that lift
+// shows up as the orange's intrinsic gaining to match, so it's a hedge, not a
+// leak. null when the entry extrinsic wasn't recorded (entry intrinsic unknowable).
+function intrinsicCashOf(sc) {
+  return sc.intrinsic_captured_total != null ? Number(sc.intrinsic_captured_total) : null;
+}
+
 // The all-in verdict for one row: is this position actually making money?
 // Three legs, summed from what the payload already carries:
 //   banked  — realized net juice this LEAP cycle (extrinsic_payback meter's
@@ -80,6 +90,38 @@ function pulpOf(p) {
   const basis = leap.cost_basis != null ? Number(leap.cost_basis) : null;
   const pct = intrinsic != null && basis ? (intrinsic / basis) * 100 : null;
   return { intrinsic, basis, pct };
+}
+
+// The LEAP's live extrinsic (time value) — the burn side of the extrinsic
+// ledger, paired with pulpOf's intrinsic. leap_totals sums the legs; the
+// single-leg field is the fallback for older payloads.
+function leapExtrinsicOf(p) {
+  const t = p.leap_totals;
+  if (t && t.extrinsic != null) return Number(t.extrinsic);
+  const leap = p.leap || {};
+  return leap.extrinsic != null ? Number(leap.extrinsic) : null;
+}
+
+// The PMCC hedge check for one position: does the LEAP's intrinsic (the asset)
+// cover its short calls' intrinsic (the liability)? When it does, a stock move
+// changes both legs together and washes out — so the position's real edge is the
+// extrinsic left over: juice still on the shorts vs the LEAP's time-value burn.
+// Returns null intrinsics when unknown so the caller can skip a position cleanly.
+function balanceOf(p, shorts) {
+  const longIntrinsic = pulpOf(p).intrinsic;
+  const longExtrinsic = leapExtrinsicOf(p);
+  const known = shorts.filter((s) => s.sc.current_intrinsic_total != null);
+  const shortIntrinsic = known.length
+    ? known.reduce((s, x) => s + Number(x.sc.current_intrinsic_total), 0) : null;
+  const shortExtrinsic = shorts.reduce(
+    (s, x) => (x.sc.extrinsic_remaining_total != null
+      ? (s ?? 0) + Number(x.sc.extrinsic_remaining_total) : s), null);
+  const net = longIntrinsic != null && shortIntrinsic != null
+    ? longIntrinsic - shortIntrinsic : null;
+  // Covered until the short's intrinsic outruns the LEAP's (oversold shorts or a
+  // too-shallow LEAP). A small epsilon keeps rounding noise from tripping it.
+  const covered = net == null ? null : net >= -1;
+  return { longIntrinsic, longExtrinsic, shortIntrinsic, shortExtrinsic, net, covered };
 }
 
 // ---------------------------------------------------------------------------
@@ -267,6 +309,7 @@ const FLAG_TONE = {
   "roll now": "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
   burning: "border-rose-500/40 bg-rose-500/15 text-rose-300",
   hollow: "border-rose-500/40 bg-rose-500/15 text-rose-300",
+  uncovered: "border-rose-500/40 bg-rose-500/15 text-rose-300",
   defend: "border-rose-500/40 bg-rose-500/15 text-rose-300",
   review: "border-rose-500/40 bg-rose-500/15 text-rose-300",
   "kill switch": "border-rose-500/40 bg-rose-500/15 text-rose-300",
@@ -310,7 +353,7 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
       .map((p) => ({
         p,
         pulp: pulpOf(p),
-        shorts: (p.short_calls || []).map((sc) => ({ sc, ...juiceOf(sc) })),
+        shorts: (p.short_calls || []).map((sc) => ({ sc, ...juiceOf(sc), intrinsicCash: intrinsicCashOf(sc) })),
       }))
       .filter((r) => r.p.leap || r.shorts.length > 0);
     out.sort((a, b) => (b.pulp.pct ?? -1) - (a.pulp.pct ?? -1));
@@ -331,9 +374,30 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
   const collected = allShorts.reduce((s, x) => s + (x.captured ?? 0), 0);
   const onTable = allShorts.reduce((s, x) => s + (x.total ?? 0), 0);
   const juicePct = onTable > 0 ? (collected / onTable) * 100 : null;
+  // Intrinsic banked in cash on the short side — the ITM half, separate from the
+  // juice. Only surfaced when some short actually sold intrinsic that has moved.
+  const intrinsicCash = allShorts.reduce((s, x) => s + (x.intrinsicCash ?? 0), 0);
+  const hasIntrinsicCash = allShorts.some(
+    (x) => x.intrinsicCash != null && Math.round(x.intrinsicCash) !== 0);
   const backed = rows.reduce((s, r) => s + (r.pulp.intrinsic ?? 0), 0);
   const deployed = rows.reduce((s, r) => s + (r.pulp.basis ?? 0), 0);
   const backedPct = deployed > 0 ? (backed / deployed) * 100 : null;
+
+  // Book-level intrinsic balance: LEAP intrinsic (asset) vs short intrinsic
+  // (liability), and the extrinsic left once they net out — juice on the shorts
+  // against the LEAPs' burn. Summed only over positions that actually report the
+  // pieces, so a partial payload degrades to a smaller-but-honest total.
+  const bals = rows.map((r) => balanceOf(r.p, r.shorts));
+  const longIntrinsic = bals.reduce((s, b) => s + (b.longIntrinsic ?? 0), 0);
+  const shortIntrinsic = bals.reduce((s, b) => s + (b.shortIntrinsic ?? 0), 0);
+  const longExtrinsic = bals.reduce((s, b) => s + (b.longExtrinsic ?? 0), 0);
+  const shortExtrinsic = bals.reduce((s, b) => s + (b.shortExtrinsic ?? 0), 0);
+  const netIntrinsic = longIntrinsic - shortIntrinsic;
+  const intrinsicCovered = shortIntrinsic <= longIntrinsic + 1;
+  const coverPct = longIntrinsic > 0
+    ? (shortIntrinsic / longIntrinsic) * 100
+    : (shortIntrinsic > 0 ? 100 : 0);
+  const hasBalance = bals.some((b) => b.shortIntrinsic != null && (b.longIntrinsic ?? 0) > 0);
 
   return (
     <Card
@@ -343,6 +407,15 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
           {"net "}
           <span className="font-semibold text-emerald-300">{money(collected)}</span>
           {" of "}{money(onTable)} squeezed
+          {hasIntrinsicCash && (
+            <>
+              {" · "}
+              <span className={`font-semibold ${intrinsicCash >= 0 ? "text-orange-300" : "text-rose-300"}`}>
+                {signedMoney(intrinsicCash)}
+              </span>
+              {" intrinsic"}
+            </>
+          )}
         </span>
       }
     >
@@ -358,6 +431,48 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                         caption={`${fmt(backedPct, 0)}% of deployed capital covered by intrinsic
                           — ${money(backed)} on ${money(deployed)}`} />
           )}
+        </div>
+      )}
+
+      {/* The short side's other half: intrinsic banked in cash, separate from the
+          juice. ITM premium we sold that's melted back as the stock fell (or been
+          handed back on a climb — offset by the orange's matching intrinsic gain). */}
+      {hasIntrinsicCash && (
+        <div className="mb-2 text-[11px] text-slate-500">
+          <span className={intrinsicCash >= 0 ? "text-orange-300" : "text-rose-300"}>
+            {signedMoney(intrinsicCash)}
+          </span>{" "}
+          intrinsic captured in cash from shorts — the ITM premium sold, apart from the juice
+          {intrinsicCash < 0 && " (net handed back as stock climbed — offset by the orange's intrinsic gain)"}
+        </div>
+      )}
+
+      {/* Intrinsic balance: does the LEAP intrinsic (asset) cover the short-call
+          intrinsic (liability)? When it does, stock moves wash out and the edge is
+          the leftover extrinsic — juice on the shorts vs the LEAPs' burn. */}
+      {hasBalance && (
+        <div className="mb-2 rounded-lg border border-slate-800/60 bg-slate-900/40 p-2">
+          <div className="mb-1 flex items-baseline justify-between gap-2 text-[11px]">
+            <span className="text-slate-300">Intrinsic balance — LEAPs cover shorts</span>
+            <span className={intrinsicCovered ? "text-emerald-300" : "text-rose-300"}>
+              {intrinsicCovered ? "covered" : "uncovered"} · net {signedMoney(netIntrinsic)}
+            </span>
+          </div>
+          {/* Short intrinsic as a fraction of long intrinsic — full/overflow = the
+              short's intrinsic is catching up to (or outrunning) the LEAP's. */}
+          <div className="h-2.5 w-full overflow-hidden rounded-full bg-slate-800">
+            <div className={`h-full rounded-full ${intrinsicCovered
+                ? "bg-gradient-to-r from-emerald-600 to-emerald-400"
+                : "bg-gradient-to-r from-rose-600 to-rose-400"}`}
+                 style={{ width: `${Math.max(0, Math.min(100, coverPct))}%` }} />
+          </div>
+          <div className="mt-1 text-[11px] text-slate-500">
+            LEAP intrinsic {money(longIntrinsic)} vs short intrinsic {money(shortIntrinsic)}
+            {" — with intrinsic netted out, the edge is extrinsic: "}
+            <span className="text-emerald-300">{money(shortExtrinsic)}</span> juice left on the shorts
+            {" vs "}
+            <span className="text-orange-300">{money(longExtrinsic)}</span> LEAP burn.
+          </div>
         </div>
       )}
 
@@ -378,6 +493,11 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
           // deployed capital is pure time value.
           if (pulp.pct != null && pulp.pct <= 0) orangeFlags.push("hollow");
           else if (lh.maintenance_status === "self_funding") orangeFlags.push("self-funding");
+          const bal = balanceOf(p, shorts);
+          // The short's intrinsic has outrun the LEAP's — the hedge no longer
+          // covers, and a further rally now costs more on the shorts than the
+          // orange makes back (oversold shorts or a too-shallow LEAP).
+          if (bal.covered === false) orangeFlags.push("uncovered");
           if (lh.maintenance_status === "burning") orangeFlags.push("burning");
           if (p.needs_review) orangeFlags.push("review");
           if (ks?.alert) orangeFlags.push("kill switch");
@@ -402,6 +522,12 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                 }${juice != null && burn != null
                   ? ` · juice ${money(juice)}/wk vs burn ${money(burn)}/wk` : ""
                 }${lh.leap_dte != null ? ` · LEAP ${lh.leap_dte} DTE` : ""}${
+                  bal.shortIntrinsic != null && bal.longIntrinsic != null
+                    ? ` · intrinsic ${bal.covered ? "covered" : "UNCOVERED"}: LEAP ${money(bal.longIntrinsic)} vs short ${money(bal.shortIntrinsic)} (net ${signedMoney(bal.net)})`
+                    : ""
+                }${bal.shortExtrinsic != null || bal.longExtrinsic != null
+                    ? ` · extrinsic: ${money(bal.shortExtrinsic)} juice vs ${money(bal.longExtrinsic)} burn` : ""
+                }${
                   rowNet
                     ? ` · all-in ${signedMoney(rowNet.net)} (juice banked ${signedMoney(rowNet.banked)}, LEAP ${signedMoney(rowNet.leapPL)}, open shorts ${signedMoney(rowNet.shortPL)})`
                     : ""
@@ -471,7 +597,7 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                 </div>
               ) : (
                 <div className="flex max-w-[14.5rem] flex-wrap items-start justify-center gap-x-1 gap-y-2">
-                  {shorts.map(({ sc, pct, captured, total }, i) => {
+                  {shorts.map(({ sc, pct, captured, total, intrinsicCash }, i) => {
                     const flags = [];
                     if (sc.below_strike) flags.push("defend");
                     if (sc.dte != null && sc.dte < 0) flags.push("expired");
@@ -485,6 +611,9 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                         className="group flex flex-col items-center rounded-lg px-1 pb-1 transition hover:bg-slate-800/50"
                         title={`${p.ticker} ${label} — ${pct != null ? `${fmt(pct, 0)}% of juice captured` : "no mark yet"}${
                           captured != null && total != null ? ` (${money(captured)} of ${money(total)})` : ""
+                        }${
+                          intrinsicCash != null && Math.round(intrinsicCash) !== 0
+                            ? ` · intrinsic in cash ${signedMoney(intrinsicCash)}` : ""
                         }${sc.dte != null ? ` · ${sc.dte} DTE` : ""}`}
                       >
                         <Glass uid={`${p.ticker}-${i}`} pct={pct} rollNow={!!sc.roll_now} />
@@ -499,6 +628,11 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
                               : "no mark yet"}
                           {sc.dte != null && sc.dte >= 0 ? ` · ${sc.dte}d` : ""}
                         </div>
+                        {intrinsicCash != null && Math.round(intrinsicCash) !== 0 && (
+                          <div className={`text-[10px] ${intrinsicCash >= 0 ? "text-orange-300/80" : "text-rose-300/80"}`}>
+                            {signedMoney(intrinsicCash)} intrinsic
+                          </div>
+                        )}
                         <FlagRow flags={flags} />
                       </button>
                     );
@@ -516,9 +650,15 @@ export default function JuiceStandCard({ positions, payback, killByTicker, nav }
         holding several LEAPs lists each tranche as a mini orange — the big orange is all of
         them together. Glasses = its
         shorts: fill is extrinsic captured since entry; the dashed line is the 75% buyback rule
-        — a glass past the line is ready to roll. Paid back = how much of the LEAP's entry
-        extrinsic this cycle's juice has recovered. All-in = juice banked this cycle + LEAP value
-        change + open shorts marked-to-market: is the row making money, glasses and orange together?
+        — a glass past the line is ready to roll. An ITM short also shows its intrinsic captured in
+        cash — the intrinsic half of the premium sold, melting back as the stock falls (or handed
+        back on a climb, offset by the orange's matching intrinsic gain). Paid back = how much of
+        the LEAP's entry extrinsic this cycle's juice has recovered. All-in = juice banked this
+        cycle + LEAP value change + open shorts marked-to-market: is the row making money, glasses
+        and orange together? Intrinsic balance = the hedge behind it all: the LEAPs' intrinsic must
+        cover the shorts' intrinsic, so stock moves wash out and what's left to play for is the
+        extrinsic — juice on the shorts against the LEAPs' burn. An orange flags "uncovered" when its
+        short intrinsic outruns its LEAP's.
       </div>
     </Card>
   );

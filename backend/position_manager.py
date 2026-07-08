@@ -76,6 +76,10 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
       what's left in the short now, and the % captured so far. An ITM weekly's
       premium is intrinsic (tracks the stock) + extrinsic (the theta we're here
       to collect); isolating the extrinsic is the honest "how much juice left."
+    - intrinsic capture: the other half of an ITM sale — the intrinsic banked at
+      entry (sold - extrinsic) that has since melted back to us as the stock fell
+      toward/under the strike. Signed cash: positive kept, negative handed back
+      (a climb hands it back but lifts the covering LEAP's intrinsic to match).
     - below_strike: the DEFEND trigger (stock closed under the short strike).
     - assignment_risk: extrinsic below the coming dividend before ex-div. The
       short is covered by a LEAP, NOT stock — assignment creates SHORT STOCK
@@ -117,6 +121,27 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
     out["entry_extrinsic_total"] = round(entry_extrinsic * mult, 2) if entry_extrinsic is not None and mult else None
     out["extrinsic_captured_total"] = round(captured * mult, 2) if captured is not None and mult else None
     out["extrinsic_remaining_total"] = round(current_extrinsic * mult, 2) if current_extrinsic is not None and mult else None
+
+    # Intrinsic capture: an ITM short is sold for intrinsic + extrinsic, and the
+    # intrinsic is real cash banked at entry. Unlike extrinsic (theta we're here to
+    # collect), the intrinsic tracks the stock: it melts back to us when the stock
+    # falls toward/under the strike, and is handed back when the stock climbs — but
+    # a climb lifts the covering LEAP's intrinsic to match, so the short-side loss
+    # is a hedge, not a leak. entry intrinsic = what we sold beyond the extrinsic
+    # (sold - entry_extrinsic); captured = entry intrinsic that's no longer owed
+    # (entry - current). SIGNED: positive = cash kept, negative = handed back.
+    entry_intrinsic = (max(sold - entry_extrinsic, 0.0)
+                       if sold is not None and entry_extrinsic is not None else None)
+    intrinsic_captured = (entry_intrinsic - intrinsic_now
+                          if entry_intrinsic is not None and intrinsic_now is not None else None)
+    out["entry_intrinsic_per_share"] = round(entry_intrinsic, 2) if entry_intrinsic is not None else None
+    out["current_intrinsic_per_share"] = round(intrinsic_now, 2) if intrinsic_now is not None else None
+    out["intrinsic_captured_per_share"] = round(intrinsic_captured, 2) if intrinsic_captured is not None else None
+    out["entry_intrinsic_total"] = round(entry_intrinsic * mult, 2) if entry_intrinsic is not None and mult else None
+    out["intrinsic_captured_total"] = round(intrinsic_captured * mult, 2) if intrinsic_captured is not None and mult else None
+    # The short's live intrinsic liability — what this leg owes right now, to weigh
+    # against the covering LEAP's intrinsic (the hedge-balance check on the book).
+    out["current_intrinsic_total"] = round(intrinsic_now * mult, 2) if intrinsic_now is not None and mult else None
 
     dte = sc.get("dte")
     out["roll_now"] = bool(decay is not None and decay >= config.BUYBACK_DECAY_PCT
