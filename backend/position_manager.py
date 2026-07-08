@@ -390,6 +390,18 @@ def capital_summary(state: dict) -> dict:
     operating = cash_info["amount"]
     ytd = float(state.get("theta_ledger", {}).get("totals", {}).get("ytd") or 0)
     monthly = float(state.get("theta_ledger", {}).get("totals", {}).get("this_month") or 0)
+    # Deploy capacity ("dry powder"): the honest headline is how much MORE capital
+    # I can put to work right now, which is the tighter of two ceilings — the
+    # deployed-capital cap and the cash that sits above the defensive reserve.
+    # Both formulas live here (server-side, single source) rather than in the UI,
+    # same principle as the ledger/payback meters. The caps themselves are the
+    # HARD_CFM_RULE / PROPOSED_DEFAULT figures from config.
+    open_positions = sum(1 for p in state.get("positions", [])
+                         if p.get("status") != "closed")
+    capital_headroom = round(max(0.0, config.MAX_DEPLOYED_CAPITAL - deployed), 2)
+    cash_above_reserve = round(max(0.0, operating - reserve), 2)
+    deployable = round(min(capital_headroom, cash_above_reserve), 2)
+    slots_open = max(0, config.MAX_CFM_POSITIONS - open_positions)
     return {
         "capital_deployed": deployed,
         "reserve_required": reserve,
@@ -397,6 +409,13 @@ def capital_summary(state: dict) -> dict:
         "operating_cash_source": cash_info["source"],
         "operating_cash_error": cash_info["error"],
         "reserve_ok": operating >= reserve or reserve == 0,
+        "max_deployed": config.MAX_DEPLOYED_CAPITAL,
+        "max_positions": config.MAX_CFM_POSITIONS,
+        "open_positions": open_positions,
+        "capital_headroom": capital_headroom,
+        "cash_above_reserve": cash_above_reserve,
+        "deployable": deployable,
+        "slots_open": slots_open,
         "milestones": {
             "half_nut": {
                 "target": config.MILESTONE_HALF_NUT,

@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import { Card, Stat, Light, Pill, Meter, Loading, ErrorState, money, fmt, pct, useApi } from "./ui.jsx";
 import JuiceStandCard from "./JuiceStand.jsx";
+import ProcessRibbon from "./ProcessRibbon.jsx";
 
 // The dashboard landing tab: one screen that answers "where does everything
 // stand and what needs me today." It leans entirely on existing endpoints
@@ -218,6 +219,16 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
 
   return (
     <div className="grid gap-4">
+      {/* The illustrated CFM process ribbon — the whole cycle at a glance,
+          above the numeric KPI band and detail cards it summarizes. */}
+      <ProcessRibbon
+        capital={capital}
+        positions={openPositions}
+        killByTicker={killByTicker}
+        theta={ov.data?.theta}
+        nav={nav}
+      />
+
       {/* Top KPI band */}
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card>
