@@ -25,6 +25,23 @@ export function Pill({ status, children }) {
   );
 }
 
+// Staleness badge — surfaces when a panel's data is older than its tier tolerance
+// (the tiered market-data scheduler's freshness contract). Amber "STALE", with an
+// optional tooltip explaining which datum aged out. Renders nothing when fresh, so
+// callers can drop `<StaleBadge stale={...} />` inline without layout churn.
+export function StaleBadge({ stale, title, label = "Stale" }) {
+  if (!stale) return null;
+  return (
+    <span
+      title={title || "Data older than its freshness tolerance"}
+      className="inline-flex items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300"
+    >
+      <span className="inline-block h-1.5 w-1.5 rounded-full bg-amber-400" />
+      {label}
+    </span>
+  );
+}
+
 export function Light({ status, size = "h-3 w-3" }) {
   const c = { green: "bg-emerald-400", yellow: "bg-amber-400", red: "bg-rose-400" }[status] || "bg-slate-500";
   return <span className={`inline-block rounded-full ${size} ${c} shadow`} />;

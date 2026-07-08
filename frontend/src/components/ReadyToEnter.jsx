@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Loading, ErrorState, fmt, useApi } from "./ui.jsx";
+import { Card, Pill, StaleBadge, Loading, ErrorState, fmt, useApi } from "./ui.jsx";
 
 // Ready-to-enter shortlist: tickers that clear the Scorecard's GO verdict
 // (Level 3 beats peers + Level 4 consolidating + the scorecard's own
@@ -30,11 +30,23 @@ export default function ReadyToEnter({ onSelectStock, refreshKey }) {
 
   const ready = data?.ready || [];
   const misses = data?.near_misses || [];
+  // GO candidates refused because an input datum is stale beyond its tier
+  // tolerance (STALE_BLOCKS_GO): unknown-fresh data blocks entry, never permits it.
+  const staleBlocked = data?.stale_blocked || [];
 
   return (
     <Card
       title={`Ready to Enter${ready.length ? ` — ${ready.length}` : ""}`}
-      right={<span className="text-xs text-slate-500">Level 3 + 4 (GO) + Level 5 (Account &amp; Juice)</span>}
+      right={
+        <span className="flex items-center gap-2 text-xs text-slate-500">
+          <StaleBadge
+            stale={staleBlocked.length > 0}
+            label={`${staleBlocked.length} stale-blocked`}
+            title="GO candidates withheld — a data input is stale beyond its tier tolerance"
+          />
+          <span>Level 3 + 4 (GO) + Level 5 (Account &amp; Juice)</span>
+        </span>
+      }
     >
       {ready.length === 0 ? (
         <p className="text-sm text-slate-500">Nothing clears every level right now.</p>
@@ -52,6 +64,25 @@ export default function ReadyToEnter({ onSelectStock, refreshKey }) {
             </button>
           ))}
         </div>
+      )}
+
+      {staleBlocked.length > 0 && (
+        <ul className="mt-3 space-y-1">
+          {staleBlocked.map((r) => (
+            <li key={r.ticker} className="flex items-center gap-2 rounded-lg bg-amber-950/30 px-3 py-1.5 text-sm">
+              <Pill status="wait">{r.ticker}</Pill>
+              <StaleBadge
+                stale
+                title={(r.stale_inputs || [])
+                  .map((s) => `${s.kind}: ${s.reason}${s.age_seconds != null ? ` (${Math.round(s.age_seconds)}s)` : ""}`)
+                  .join(" · ")}
+              />
+              <span className="ml-auto text-xs text-amber-300/80">
+                held — stale {(r.stale_inputs || []).map((s) => s.kind).join(", ")}
+              </span>
+            </li>
+          ))}
+        </ul>
       )}
 
       {misses.length > 0 && (

@@ -195,6 +195,64 @@ HOT_TICKERS_MAX = 40         # cap on the hot set (open positions are never drop
 # candidate pool — so an overnight-stale sweep never drives the intraday picks.
 HOT_CANDIDATE_MAX_AGE = 2 * 3600
 
+# ---- Tiered market-data scheduler ------------------------------------------
+# Replaces the flat HOT_REFRESH_MINUTES cadence above (which re-fetched daily
+# BARS for every hot name every 15 min) with a tier-aware polling budget that
+# concentrates provider calls where data freshness changes a decision. Names are
+# assigned a tier from position state + entry-queue rank (market_scheduler.
+# assign_tiers), and each (tier, data_kind) has its own due-cadence (fetch_due).
+# Intraday freshness now comes from ONE batched Schwab quote per interval overlaid
+# on the frozen daily bars — not from re-fetching bars. See market_scheduler.py.
+#
+# Provenance tags (as elsewhere in this file):
+#   HARD_CFM_RULE    — a stated strategy rule; changing it changes the strategy.
+#   PROPOSED_DEFAULT — a placeholder pending calibration; tune later.
+#
+# NOTE ON PROVIDERS: this codebase has no yfinance (Schwab primary + Alpha
+# Vantage fallback only). The prompt's "yfinance/cache" Tier 2/3 source maps to
+# the existing parquet daily-bar cache, refreshed by the EOD batch via Schwab
+# (AV fallback). Provider routing is per-tier and swappable (data_transport).
+
+POLL_T0_SECONDS = 120            # PROPOSED_DEFAULT — Tier 0 (open positions) quote cadence
+POLL_T1_SECONDS = 900            # PROPOSED_DEFAULT — Tier 1 (on-deck) quote cadence
+POLL_ESCALATED_SECONDS = 30      # PROPOSED_DEFAULT — max freshness under escalation
+QUEUE_ONDECK_COUNT = 5           # PROPOSED_DEFAULT — top-N queue candidates promoted to Tier 1
+SLOT_HORIZON_DAYS = 14           # PROPOSED_DEFAULT — a slot opening within this window makes a name on-deck
+REFRESH_KILLSWITCH_PER_DAY = 3   # PROPOSED_DEFAULT — intraday RS3M (vs SPY / vs Sector) recomputes/day
+ESCALATION_INDEX_MOVE_PCT = 1.0  # PROPOSED_DEFAULT — SPY / held-sector intraday move that triggers a market escalation (%)
+ESCALATION_DECAY_MINUTES = 60    # PROPOSED_DEFAULT — an escalation decays after this long without re-trigger
+EOD_BATCH_TIME_ET = "16:30"      # PROPOSED_DEFAULT — the once-daily EOD bar batch fires after this ET time
+BUDGET_SOFT_LIMIT_PCT = 80       # PROPOSED_DEFAULT — shed when a provider crosses this % of its configured daily limit
+TIER0_NEVER_SHED = True          # HARD_CFM_RULE — open-position monitoring is never sacrificed
+STALE_BLOCKS_GO = True           # HARD_CFM_RULE — no GO verdict on stale inputs
+
+# Max-age per (tier, data_kind) is DERIVED from the poll cadence, not hardcoded
+# independently: a datum is "stale" once it is older than this multiple of the
+# interval that was supposed to refresh it. (PROPOSED_DEFAULT multiplier.)
+MAX_AGE_POLL_MULT = 2.0          # PROPOSED_DEFAULT — stale = older than 2x its poll interval
+# EOD data kinds (bars, and the once-daily chain snapshot) aren't intraday-polled,
+# so their staleness ceiling reuses the existing daily-bar tolerance rather than a
+# poll multiple: cached OHLCV older than this on a market day is a silent failure.
+# Mirrors DATA_STALE_HOURS (defined below in the alerting section); kept as a
+# literal here because that constant hasn't been assigned yet at this point in the
+# module. A guard at the bottom of the file asserts the two stay in sync.
+EOD_MAX_AGE_HOURS = 30.0  # == DATA_STALE_HOURS
+
+# Known/configured provider daily call limits, for budget accounting + the soft-
+# limit shed trigger. Schwab publishes ~120 req/min; there is no hard published
+# daily cap, so the daily figure is a PROPOSED_DEFAULT ceiling for budgeting only.
+# Alpha Vantage free tier is the real constraint (25/day historically; 500 on some
+# keys) — set via env to match the operator's key. Override either via env.
+SCHWAB_DAILY_CALL_LIMIT = int(os.environ.get("SCHWAB_DAILY_CALL_LIMIT") or 40000)      # PROPOSED_DEFAULT
+ALPHA_VANTAGE_DAILY_CALL_LIMIT = int(os.environ.get("ALPHA_VANTAGE_DAILY_CALL_LIMIT") or 500)  # PROPOSED_DEFAULT
+
+# Schwab HTTP 429 / Retry-After exponential backoff (the Schwab path has none
+# today). Base delay doubles per attempt, capped, for at most N attempts before
+# falling through to the per-tier fallback provider. PROPOSED_DEFAULT throughout.
+SCHWAB_BACKOFF_BASE_SECONDS = 1.0
+SCHWAB_BACKOFF_MAX_SECONDS = 16.0
+SCHWAB_MAX_RETRIES = 4
+
 # ---- CFM mechanics ---------------------------------------------------------
 # Default LEAP position size (deep-ITM calls per stock). Pre-fills the entry
 # ticket's quantity and sizes the capital/reserve gate when no quantity is
@@ -575,3 +633,10 @@ RECONCILE_HISTORY_MAX = 30
 # connected and positions are open, reconcile_stale fires. Silence is itself a
 # failure signal (the positions call failing, the scheduler wedged, etc.).
 RECONCILE_STALE_HOURS = 36
+
+# ---- Consistency guards ----------------------------------------------------
+# EOD_MAX_AGE_HOURS is written as a literal up in the tiered-scheduler section
+# (DATA_STALE_HOURS isn't assigned yet at that point); assert they stay in sync so
+# a future edit to one can't silently diverge from the other.
+assert EOD_MAX_AGE_HOURS == DATA_STALE_HOURS, (
+    "EOD_MAX_AGE_HOURS must mirror DATA_STALE_HOURS")

@@ -98,6 +98,7 @@ export const api = {
   history: () => request("/api/history"),
   portfolioRisk: () => request("/api/portfolio-risk"),
   dataHealth: () => request("/api/data-health"),
+  dataBudget: () => request("/api/data-budget"),
   maintenanceRefresh: () => request("/api/maintenance/refresh", { method: "POST" }),
   refreshHot: () => request("/api/refresh/hot", { method: "POST" }),
   // Force-pull a live quote for one name / a whole sector (ETF + constituents),
