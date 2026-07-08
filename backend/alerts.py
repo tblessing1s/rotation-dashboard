@@ -51,6 +51,7 @@ ALERT_TYPES = {
     "DELTA_VELOCITY": ("MEDIUM", "PROPOSED_DEFAULT: LEAP delta bleeding fast while still above the 0.50 floor"),
     "SHORT_STOCK_DETECTED": ("CRITICAL", "HARD_CFM_RULE: assignment created short stock against the LEAP -> buy back the stock, never exercise the LEAP"),
     "RECONCILE_DIRTY": ("HIGH", "HARD_CFM_RULE: state.json diverged from the broker account -> freeze the position, resolve before trading it"),
+    "ROLL_LEG_IMBALANCE": ("CRITICAL", "HARD_CFM_RULE: a spread roll reported a leg-imbalanced fill -> freeze the position, reconcile against the broker; never auto-correct"),
     "RECONCILE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: reconciliation has not run successfully within the expected window -> the safety check is silent"),
 }
 
@@ -69,7 +70,7 @@ _ROLL_ACTIONS = {
 _FOCUS_ACTIONS = {
     "KILL_SWITCH_SECTOR", "KILL_SWITCH_SPY", "CIRCUIT_BREAKER", "SHORT_STOCK_DETECTED",
     "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
-    "WHIPSAW_EXIT", "JUICE_INADEQUATE", "EARNINGS_DATE_STALE",
+    "WHIPSAW_EXIT", "JUICE_INADEQUATE", "EARNINGS_DATE_STALE", "ROLL_LEG_IMBALANCE",
 }
 
 
@@ -706,6 +707,28 @@ def check_book_correlation(state: dict) -> list[dict]:
     return out
 
 
+def check_roll_leg_imbalance(state: dict) -> list[dict]:
+    """A spread roll reported a leg-imbalanced fill (one leg filled, the other
+    did not). The executor froze the position and stamped the incident onto the
+    position's ``review``; surface it as a CRITICAL alert so the operator
+    reconciles against the broker before trading it. Never auto-corrected."""
+    out = []
+    for p in _open_positions(state):
+        review = p.get("review") or {}
+        if "ROLL_LEG_IMBALANCE" not in (review.get("classifications") or []):
+            continue
+        info = review.get("leg_imbalance") or {}
+        t = (p.get("ticker") or "").upper()
+        out.append(_alert(
+            "ROLL_LEG_IMBALANCE", t,
+            f"{t}: {review.get('summary') or 'roll leg-imbalanced fill — position frozen.'}",
+            "Reconcile the position against the broker and resolve the freeze — the "
+            "roll filled one leg without the other; do not trade it until squared.",
+            {"leg_imbalance": info},
+            key=str(info.get("order_id") or "")))
+    return out
+
+
 def check_reconcile_stale(state: dict) -> list[dict]:
     """Reconciliation hasn't run successfully within RECONCILE_STALE_HOURS while
     Schwab is connected and positions are open. Silence is itself a failure
@@ -759,6 +782,7 @@ EVALUATORS = [
     check_short_stock_detected,
     check_reconcile_dirty,
     check_reconcile_stale,
+    check_roll_leg_imbalance,
     check_book_correlation,
 ]
 

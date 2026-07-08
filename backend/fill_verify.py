@@ -129,8 +129,38 @@ def _verify_receipt(receipt: dict, executions_by_id: dict, client) -> dict:
                 f"{execution.get('action')} {execution.get('strike')}: recorded "
                 f"{recorded} vs broker {broker_price} (drift {drift})")
 
+    _attach_roll_net(out, receipt, executions_by_id)
     out["ok"] = status == "FILLED" and bool(out["legs"]) and not out["issues"]
     return out
+
+
+def _attach_roll_net(out: dict, receipt: dict, executions_by_id: dict) -> None:
+    """For a roll receipt, verify the NET fill against the reference NET mid and
+    record net slippage per roll (R5). Informational — a net drift does not fail
+    the per-leg verdict, but it's surfaced for the slippage feedback loop."""
+    execs = [executions_by_id.get(i) for i in (receipt.get("execution_ids") or [])]
+    execs = [e for e in execs if e]
+    close = next((e for e in execs if e.get("roll_leg") == "close"), None)
+    open_ = next((e for e in execs if e.get("roll_leg") == "open"), None)
+    if close is None or open_ is None:
+        return
+    ref = close.get("roll_reference_net_mid")
+    if ref is None:
+        return
+    try:
+        ref = float(ref)
+        net_recorded = round(float(open_.get("premium_per_share") or 0)
+                             - float(close.get("close_price_per_share") or 0), 4)
+    except (TypeError, ValueError):
+        return
+    net_slippage_pct = round((ref - net_recorded) / abs(ref) * 100, 3) if abs(ref) > 1e-9 else None
+    out["net"] = {
+        "roll_group_id": close.get("roll_group_id"),
+        "reference_net_mid": round(ref, 4),
+        "net_recorded": net_recorded,
+        "net_slippage_pct": net_slippage_pct,
+        "alloc_method": close.get("roll_alloc_method"),
+    }
 
 
 def verify_live_fills(limit: int = 20) -> dict:
