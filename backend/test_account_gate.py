@@ -395,6 +395,33 @@ def test_capital_summary_uses_live_balance_when_configured(isolated_state, monke
     assert summary["reserve_ok"] is True
 
 
+def test_capital_summary_reports_deploy_capacity(isolated_state, monkeypatch):
+    # Deploy capacity = the tighter of (deployed-capital headroom, cash above the
+    # reserve). With no deployed capital and cash well above reserve, both slots
+    # are open and deployable is capped by the cash-above-reserve side.
+    import position_manager as pm
+    _seed_state(operating_cash=20000.0, reserve_required=13000.0)
+    summary = pm.capital_summary(log.load_state())
+    assert summary["max_deployed"] == config.MAX_DEPLOYED_CAPITAL
+    assert summary["max_positions"] == config.MAX_CFM_POSITIONS
+    assert summary["open_positions"] == 0
+    assert summary["slots_open"] == config.MAX_CFM_POSITIONS
+    assert summary["capital_headroom"] == float(config.MAX_DEPLOYED_CAPITAL)
+    assert summary["cash_above_reserve"] == 7000.0
+    # min(38000 headroom, 7000 cash) — the cash ceiling binds.
+    assert summary["deployable"] == 7000.0
+
+
+def test_capital_summary_deployable_never_negative(isolated_state, monkeypatch):
+    # Cash under the reserve floor => nothing deployable, but never a negative.
+    import position_manager as pm
+    _seed_state(operating_cash=5000.0, reserve_required=13000.0)
+    summary = pm.capital_summary(log.load_state())
+    assert summary["cash_above_reserve"] == 0.0
+    assert summary["deployable"] == 0.0
+    assert summary["reserve_ok"] is False
+
+
 def test_portfolio_view_uses_live_balance_when_configured(isolated_state, monkeypatch):
     import data_handler
     import portfolio_risk as pr

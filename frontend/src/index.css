@@ -45,10 +45,31 @@ body {
   animation: juice-bubble 2.8s ease-in infinite;
   opacity: 0;
 }
+/* The process ribbon's connectors: sap flowing left→right (and top→bottom when
+   the ribbon stacks on mobile) from one CFM stage into the next. */
+@keyframes sap-flow {
+  to { stroke-dashoffset: -24; }
+}
+.sap-flow {
+  stroke-dasharray: 6 6;
+  animation: sap-flow 1.1s linear infinite;
+}
+/* A slow sheen sweeping the ribbon's stage tiles, so the whole panel feels
+   alive like the juice glasses without pulling focus. */
+@keyframes ribbon-sheen {
+  0%, 100% { opacity: 0.35; }
+  50% { opacity: 0.75; }
+}
+.ribbon-sheen {
+  animation: ribbon-sheen 4s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .juice-rise,
   .juice-wave,
-  .juice-bubble {
+  .juice-bubble,
+  .sap-flow,
+  .ribbon-sheen {
     animation: none;
   }
 }
