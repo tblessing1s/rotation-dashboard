@@ -550,15 +550,13 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
                 "dte": exp_contracts[0]["dte"] if exp_contracts else None,
                 "strikes": indicators.get_nearby_strikes(exp_contracts, suggested_strike, underlying),
             })
-        # The comparison week (>= a full week of DTE) seeds the default selection
-        # and feeds the juice gate; the near/stub week is display-only until the
-        # operator picks it, so clear its `suggested` flag to avoid two defaults.
+        # Each week is a full chain with its own ATR-target `suggested` strike.
+        # The comparison week (>= a full week of DTE) is the one flagged
+        # is_comparison: it seeds the default selection and feeds the Level-5
+        # juice gate, so a 1–2 DTE stub's thin extrinsic can't falsely block.
         comparison = _pick_comparison_weekly(exp_groups)
         for g in exp_groups:
             g["is_comparison"] = g is comparison
-            if g is not comparison:
-                for s in g["strikes"]:
-                    s["suggested"] = False
         strikes = comparison["strikes"] if comparison else []
         sug = next((s for s in strikes if s.get("suggested")), strikes[0] if strikes else None)
         weekly_iv = (sug or {}).get("volatility") or _median([s.get("volatility") for s in strikes])
