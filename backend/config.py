@@ -292,6 +292,13 @@ LEAP_ROLL_DTE = 30           # (legacy, unused) superseded by LEAP_ROLL_DTE_FLOO
                               # in the LEAP capital-preservation section below
 ROLL_MAX_DTE = 45            # short-roll picker offers expirations out to this DTE
 
+# Minimum DTE a weekly short must carry for its extrinsic to be a fair juice
+# comparison. A coming-Friday with only a day or two left is a stub whose thin
+# time value understates the weekly yield and falsely trips the Level-5 juice
+# gate. When the current weekly is below this, the option chain compares against
+# (and suggests) the next week's weekly — which has a full week of premium.
+WEEKLY_MIN_COMPARISON_DTE = 5
+
 # CFM sells a weekly short, so a monthly-only chain can't run the strategy. The
 # scorecard flags names without weeklies; the status is near-static so it's cached
 # for a week (override the TTL via WEEKLIES_TTL; disable via SCORECARD_CHECK_WEEKLIES=0).

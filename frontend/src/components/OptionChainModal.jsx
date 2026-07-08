@@ -33,6 +33,9 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
   const [weeklyStrike, setWeeklyStrike] = React.useState(null);
+  // The short's expiration is selectable now that the chain offers this week's
+  // AND next week's weekly — a strike alone is ambiguous across the two weeks.
+  const [weeklyExp, setWeeklyExp] = React.useState(null);
   const [leapStrike, setLeapStrike] = React.useState(null);
   const [action, setAction] = React.useState(null);
   const [qty, setQty] = React.useState("");
@@ -57,7 +60,13 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       .then((c) => {
         if (!live) return;
         setChain(c);
-        const sug = c.weekly?.strikes?.find((s) => s.suggested) || c.weekly?.strikes?.[0];
+        // Default the short to the comparison week's suggested strike (a full-week
+        // short), falling back to the flat strike list for older chain payloads.
+        const groups = c.weekly?.expirations
+          || (c.weekly ? [{ expiration: c.weekly.expiration, strikes: c.weekly.strikes || [] }] : []);
+        const cmp = groups.find((g) => g.is_comparison) || groups[0];
+        const sug = cmp?.strikes?.find((s) => s.suggested) || cmp?.strikes?.[0];
+        setWeeklyExp(cmp?.expiration ?? null);
         setWeeklyStrike(sug ? sug.strike : null);
         const sugLeap = c.leap?.strikes?.find((s) => s.suggested) || c.leap?.strikes?.[0];
         setLeapStrike(sugLeap ? sugLeap.strike : null);
@@ -94,7 +103,12 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       }
     : ACTION_LABELS;
   const showPayoff = !mgmt && action !== "close_leap";
-  const chosenWeekly = weekly?.strikes?.find((s) => s.strike === weeklyStrike) || null;
+  // Weekly expiration groups: this week's boundary and next week's. Older chain
+  // payloads (no `expirations`) collapse to a single group over weekly.strikes.
+  const weeklyGroups = weekly?.expirations
+    || (weekly ? [{ expiration: weekly.expiration, dte: weekly.dte, is_comparison: true, strikes: weekly.strikes || [] }] : []);
+  const chosenGroup = weeklyGroups.find((g) => g.expiration === weeklyExp) || weeklyGroups[0] || null;
+  const chosenWeekly = chosenGroup?.strikes?.find((s) => s.strike === weeklyStrike) || null;
   const chosenLeap = leap?.strikes?.find((s) => s.strike === leapStrike)
     || leap?.strikes?.find((s) => s.suggested) || null;
   const qtyNum = Number(qty) || 0;
@@ -123,7 +137,8 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       if (overrideReason.trim()) base.override_reason = overrideReason.trim();
       // Weekly short leg (sell to open).
       base.short_strike = chosenWeekly.strike;
-      if (chosenWeekly.expiration || weekly?.expiration) base.short_expiration = chosenWeekly.expiration || weekly.expiration;
+      const shortExp = chosenWeekly.expiration || chosenGroup?.expiration || weekly?.expiration;
+      if (shortExp) base.short_expiration = shortExp;
       if (chosenWeekly.symbol) base.short_option_symbol = chosenWeekly.symbol;
       if (chosenWeekly.mark != null) base.short_premium_per_share = chosenWeekly.mark;
       if (chosenWeekly.dte != null) base.short_dte = chosenWeekly.dte;
@@ -140,7 +155,8 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       if (overrideReason.trim()) base.override_reason = overrideReason.trim();
     } else if (action === "sell_short" && chosenWeekly) {
       base.strike = chosenWeekly.strike;
-      if (chosenWeekly.expiration || weekly?.expiration) base.expiration = chosenWeekly.expiration || weekly.expiration;
+      const sellExp = chosenWeekly.expiration || chosenGroup?.expiration || weekly?.expiration;
+      if (sellExp) base.expiration = sellExp;
       if (chosenWeekly.symbol) base.option_symbol = chosenWeekly.symbol;
       if (chosenWeekly.mark != null) base.premium_per_share = chosenWeekly.mark;
     } else if (action === "close_short" && openShort) {
@@ -467,48 +483,69 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
               </div>
             )}
 
-            {/* Weekly short — ATR-suggested, user-adjustable (entry only) */}
+            {/* Weekly short — this week's boundary AND next week's. The comparison
+                week (full DTE) is the default so the Level-5 juice gate prices
+                against a real week's premium, not a 1–2 DTE stub. */}
             {!mgmt && (
             <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" || action === "open_position_atomic" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">Weekly short call ({weekly?.posture || "…"}-suggested)</h3>
                 {weekly && (
                   <span className="text-xs text-slate-500">
-                    {weekly.expiration ? `exp ${weekly.expiration} · ` : ""}{weekly.dte} DTE ·{" "}
                     {weekly.atr_mult}×ATR {fmt(weekly.atr, 2)}
                     {weekly.itm_pct != null ? ` / ${(weekly.itm_pct * 100).toFixed(0)}% ITM floor` : ""}
                   </span>
                 )}
               </div>
-              {weekly?.strikes?.length ? (
-                <>
-                  <div className="grid grid-cols-[auto_repeat(5,1fr)] gap-2 text-xs uppercase tracking-wide text-slate-500">
-                    <span className="w-6" /><span>Strike</span><span>Delta</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
-                  </div>
-                  {weekly.strikes.map((s) => (
-                    <label
-                      key={s.strike}
-                      className={`grid grid-cols-[auto_repeat(5,1fr)] items-center gap-2 rounded-lg px-1 py-1 ${
-                        s.strike === weeklyStrike ? "bg-emerald-500/10" : "hover:bg-slate-800/50"
-                      }`}
-                    >
-                      <input
-                        type="radio" name="weekly-strike"
-                        checked={s.strike === weeklyStrike}
-                        onChange={() => setWeeklyStrike(s.strike)}
-                        className="accent-emerald-400"
-                      />
-                      <span className="text-sm font-semibold tabular-nums text-slate-100">
-                        {fmt(s.strike, 2)}
-                        {s.suggested && <span className="ml-1 text-[10px] font-normal text-emerald-400">SUGGESTED</span>}
+              {weeklyGroups.some((g) => g.strikes?.length) ? (
+                weeklyGroups.map((g, gi) => (
+                  <div key={g.expiration ?? gi} className="mb-3 last:mb-0">
+                    <div className="mb-1 flex items-center gap-2 text-xs text-slate-400">
+                      <span className="font-semibold text-slate-300">{gi === 0 ? "This week" : "Next week"}</span>
+                      <span className="text-slate-500">
+                        {g.expiration ? `exp ${g.expiration} · ` : ""}{g.dte} DTE
                       </span>
-                      <span className="text-sm tabular-nums text-slate-400">{fmt(s.delta, 2)}</span>
-                      <span className="text-sm tabular-nums text-slate-300">{dollars(s.bid)} / {dollars(s.ask)}</span>
-                      <span className="text-sm tabular-nums text-slate-400">{dollars(s.mark)}</span>
-                      <span className="text-sm tabular-nums text-emerald-300">{dollars(s.extrinsic)}</span>
-                    </label>
-                  ))}
-                </>
+                      {g.is_comparison && (
+                        <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300">
+                          Juice comparison
+                        </span>
+                      )}
+                    </div>
+                    {g.strikes?.length ? (
+                      <>
+                        <div className="grid grid-cols-[auto_repeat(5,1fr)] gap-2 text-xs uppercase tracking-wide text-slate-500">
+                          <span className="w-6" /><span>Strike</span><span>Delta</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
+                        </div>
+                        {g.strikes.map((s) => {
+                          const selected = g.expiration === weeklyExp && s.strike === weeklyStrike;
+                          return (
+                            <label
+                              key={`${g.expiration}-${s.strike}`}
+                              className={`grid grid-cols-[auto_repeat(5,1fr)] items-center gap-2 rounded-lg px-1 py-1 ${
+                                selected ? "bg-emerald-500/10" : "hover:bg-slate-800/50"
+                              }`}
+                            >
+                              <input
+                                type="radio" name="weekly-strike"
+                                checked={selected}
+                                onChange={() => { setWeeklyExp(g.expiration); setWeeklyStrike(s.strike); }}
+                                className="accent-emerald-400"
+                              />
+                              <span className="text-sm font-semibold tabular-nums text-slate-100">
+                                {fmt(s.strike, 2)}
+                                {s.suggested && <span className="ml-1 text-[10px] font-normal text-emerald-400">SUGGESTED</span>}
+                              </span>
+                              <span className="text-sm tabular-nums text-slate-400">{fmt(s.delta, 2)}</span>
+                              <span className="text-sm tabular-nums text-slate-300">{dollars(s.bid)} / {dollars(s.ask)}</span>
+                              <span className="text-sm tabular-nums text-slate-400">{dollars(s.mark)}</span>
+                              <span className="text-sm tabular-nums text-emerald-300">{dollars(s.extrinsic)}</span>
+                            </label>
+                          );
+                        })}
+                      </>
+                    ) : <p className="text-sm text-slate-400">No strikes available.</p>}
+                  </div>
+                ))
               ) : <p className="text-sm text-slate-400">No weekly strikes available.</p>}
             </div>
             )}
