@@ -151,10 +151,12 @@ def test_legacy_state_migrates_to_null_snapshot_and_legacy_reason(store):
     with open(config.STATE_PATH, "w", encoding="utf-8") as fh:
         json.dump(_legacy_v11_state(), fh)
 
-    state = log.load_state()  # migrates v11 -> v13 + recomputes cycles
-    assert state["schema_version"] == migrations.CURRENT_VERSION == 13
+    state = log.load_state()  # migrates v11 -> CURRENT_VERSION + recomputes cycles
+    assert state["schema_version"] == migrations.CURRENT_VERSION
     # Position gained a null snapshot (never fabricated from cached bars).
     assert state["positions"][0]["entry_context"] is None
+    # And the v14 planned_exit_dte default (later migration in the same chain).
+    assert state["positions"][0]["planned_exit_dte"] == config.PLANNED_EXIT_DTE
     # The derived cycle carries LEGACY_UNRECORDED + a null entry_context.
     c = state["cycles"][0]
     assert c["exit_reason"] == ExitReason.LEGACY_UNRECORDED

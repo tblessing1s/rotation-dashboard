@@ -83,6 +83,17 @@ def juice_estimate(ticker: str, df=None) -> dict:
     leap_cost = indicators._bs_call_price(S, k_leap, t_leap, r, sigma)
     if not leap_cost:
         return none
+    # NET juice: subtract the LEAP's model theta burn/week (over a hypothetical
+    # entry at LEAP_ENTRY_DTE_DEFAULT held to PLANNED_EXIT_DTE, with fallback
+    # slippage) from the gross weekly extrinsic. Computed through the SAME
+    # burn.burn_projection the live position view uses, so the queue and the
+    # position panel can never disagree (single source of truth). This is the
+    # ranking key — it naturally penalizes high-IV candidates (more extrinsic
+    # bought => more burn) with no separate rule. hv is annualized vol in percent.
+    import burn
+    net = burn.candidate_net_juice(spot=S, iv=hv, leap_strike=k_leap,
+                                   leap_cost_per_share=leap_cost,
+                                   weekly_extrinsic_per_share=extr_w)
     return {
         "ticker": ticker,
         "stock_price": round(S, 2),
@@ -91,6 +102,9 @@ def juice_estimate(ticker: str, df=None) -> dict:
         "leap_strike": round(k_leap, 1),
         "leap_cost_per_share": round(leap_cost, 2),
         "weekly_yield_pct": round(extr_w / leap_cost * 100, 2),
+        "net_weekly_yield_pct": net["net_juice_weekly_pct"],
+        "burn_weekly_per_share": net["burn_per_week_ps"],
+        "net_weekly_extrinsic_per_share": net["net_juice_per_week_ps"],
         "hist_vol": round(hv, 1),
         "source": "estimate",
     }

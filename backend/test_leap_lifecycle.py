@@ -171,6 +171,33 @@ def test_v5_fixture_migrates_and_seeds_delta_history(store):
     assert json.load(open(snaps[0], encoding="utf-8"))["schema_version"] == 5
 
 
+def test_v13_fixture_gains_planned_exit_dte(store):
+    """v14: existing positions gain planned_exit_dte = config.PLANNED_EXIT_DTE;
+    schema version bumps; the old-state fixture loads cleanly."""
+    v13 = {
+        "schema_version": 13,
+        "metadata": {"last_updated": "2025-01-01T00:00:00Z"},
+        "positions": [
+            {"ticker": "XLK", "status": "active", "planned_exit_dte": 120,
+             "leap": {"strike": 205, "contracts": 1}, "delta_history": []},
+            {"ticker": "NVDA", "status": "active",
+             "leap": {"strike": 80, "contracts": 5}, "delta_history": []},
+        ],
+        "executions": [], "theta_ledger": {"weeks": [], "totals": {}},
+        "extrinsic_payback": {}, "roll_ledger": {"rolls": [], "by_ticker": {}},
+        "cycles": [], "pending_orders": {},
+    }
+    with open(config.STATE_PATH, "w", encoding="utf-8") as fh:
+        json.dump(v13, fh)
+
+    state = log.load_state()
+    assert state["schema_version"] == migrations.CURRENT_VERSION >= 14
+    # Position without the field gets the default; an explicit value is preserved.
+    by_ticker = {p["ticker"]: p for p in state["positions"]}
+    assert by_ticker["NVDA"]["planned_exit_dte"] == config.PLANNED_EXIT_DTE
+    assert by_ticker["XLK"]["planned_exit_dte"] == 120  # setdefault leaves it alone
+
+
 # ---------------------------------------------------------------------------
 # 4. Juice-vs-burn
 # ---------------------------------------------------------------------------

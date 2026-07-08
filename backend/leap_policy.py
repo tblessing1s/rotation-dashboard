@@ -20,6 +20,7 @@ math degrades to None offline/in demo when a leg can't be priced, never raises.
 """
 from __future__ import annotations
 
+import burn
 import config
 import data_handler
 import indicators
@@ -129,6 +130,37 @@ def leap_health(position: dict, df=None, stock_price: float | None = None,
             net_maintenance = round(trailing_juice - weekly_burn, 2)
         leap_delta, _ = indicators.call_greeks(stock_price, strike, dte, mark_ps, q=q)
 
+    # Model theta burn over the HELD window (to planned_exit_dte), the headline
+    # burn: the extrinsic consumed between now and the planned exit, NOT the whole
+    # remaining extrinsic. Priced through burn.burn_projection on the ticker's
+    # trailing realized vol — the same offline BS basis juice_estimate and the
+    # weekly mark job use, so the live panel, the mark series, and the entry queue
+    # all agree. net_juice_per_week and coverage come from the shared helpers.
+    planned_exit = position.get("planned_exit_dte", config.PLANNED_EXIT_DTE)
+    burn_proj = net_juice_week = coverage_block = extension_preview = None
+    model_burn_week = None
+    if leap and contracts and strike is not None and stock_price is not None and dte is not None:
+        if df is None:
+            df = data_handler.get_daily(ticker)
+        hv = indicators.hist_vol(df) if df is not None else None
+        leap_bid = None
+        if leap.get("current_bid") is not None and contracts:
+            leap_bid = float(leap["current_bid"]) / (contracts * 100)  # per-share
+        burn_proj = burn.burn_projection(
+            {"strike": strike, "contracts": contracts, "expiration": leap.get("expiration")},
+            stock_price, hv, dte, planned_exit, q=q)
+        model_burn_week = burn_proj.get("burn_per_week_with_slippage")
+        net_juice_week = burn.net_juice_per_week(trailing_juice, model_burn_week)
+        coverage_block = burn.coverage(trailing_juice, model_burn_week,
+                                       burn_proj.get("low_extrinsic_flag"))
+        # Hold-extension readout (anti-zombie): burn/wk if the hold runs N more
+        # weeks past now — the UI shows the ladder against the current figure.
+        extension_preview = [
+            burn.extension_cost({"strike": strike, "contracts": contracts,
+                                 "expiration": leap.get("expiration")},
+                                stock_price, hv, dte, w, q=q)
+            for w in (1, 2, 4)]
+
     if net_maintenance is None:
         maintenance_status = "unknown"
     elif net_maintenance >= 0:
@@ -161,6 +193,13 @@ def leap_health(position: dict, df=None, stock_price: float | None = None,
         "leap_weekly_burn": weekly_burn,
         "net_weekly_maintenance": net_maintenance,
         "maintenance_status": maintenance_status,
+        # Model-based, held-window burn accounting (the headline metrics).
+        "planned_exit_dte": planned_exit,
+        "burn_projection": burn_proj,
+        "model_burn_per_week": model_burn_week,
+        "net_juice_per_week": net_juice_week,
+        "coverage": coverage_block,
+        "extension_preview": extension_preview,
         "weekly_juice_yield_pct": juice_yield_pct,
         "juice_target_pct": juice_target_pct,
         "juice_adequate": juice_adequate,

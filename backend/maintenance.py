@@ -64,6 +64,52 @@ def snapshot_leap_deltas(today: str | None = None) -> list[dict]:
     return report
 
 
+def snapshot_burn_marks(today: str | None = None) -> list[dict]:
+    """Record one weekly theta-burn mark per open LEAP: the model extrinsic at the
+    live DTE plus the forward burn projection re-run against current spot & IV, so
+    the realized-vs-projected divergence series stays current. IV is the ticker's
+    trailing realized vol (indicators.hist_vol) — the same offline BS basis the
+    juice estimate and roll-cost estimator use; the divergence tracking is exactly
+    what verifies whether that basis (and the put-IV path) holds up. Best-effort
+    per ticker: a pricing gap skips that name, never the sweep. Returns a report."""
+    import burn
+    import burn_marks
+    import data_handler
+    import dividends
+    import indicators
+    import leap_policy
+
+    day = today or log.utcnow()[:10]
+    state = log.load_state()
+    out = []
+    for p in state.get("positions", []):
+        if p.get("status") == "closed" or not (p.get("leap") or {}):
+            continue
+        ticker = p.get("ticker", "")
+        try:
+            df = data_handler.get_daily(ticker)
+            spot = indicators.last(df)
+            hv = indicators.hist_vol(df)  # annualized %
+            leap = p.get("leap") or {}
+            dte = leap_policy._leap_dte(p)
+            planned_exit = p.get("planned_exit_dte", config.PLANNED_EXIT_DTE)
+            q = dividends.yield_for(ticker) or 0.0
+            proj = burn.burn_projection(
+                {"strike": leap.get("strike"), "contracts": leap.get("contracts"),
+                 "expiration": leap.get("expiration")},
+                spot, hv, dte, planned_exit, q=q)
+            mark = burn_marks.record_mark(ticker, proj, spot=spot, iv=hv,
+                                          current_dte=dte, day=day)
+            out.append({"ticker": ticker,
+                        "recorded": mark is not None,
+                        "burn_per_week": (mark or {}).get("projected_burn_per_week"),
+                        "realized_burn_week": (mark or {}).get("realized_burn_week")})
+        except Exception as e:  # noqa: BLE001 — one ticker must not sink the sweep
+            logger.info("burn mark skipped for %s: %s", ticker, e)
+            out.append({"ticker": ticker, "recorded": False, "error": str(e)})
+    return out
+
+
 def snapshot_iv(tickers: list[str]) -> list[dict]:
     """Compute + record today's weekly IV for each ticker via the option-chain
     view (its capture hook writes the point). Best-effort per ticker — a blocked
@@ -127,6 +173,17 @@ def nightly_refresh() -> dict:
         report["iv_snapshots"] = snapshot_iv(tickers)
     except Exception as e:  # noqa: BLE001 — an IV snapshot failure must not sink the sweep
         report["errors"].append(f"iv_snapshot: {e}")
+
+    # Weekly theta-burn mark (end-of-week cadence, once per ISO week): snapshots
+    # each LEAP's model extrinsic + forward burn projection so the
+    # realized-vs-projected divergence harness stays current. Telemetry only
+    # (DATA_DIR/burn_marks.json) — never touches the execution record.
+    try:
+        import burn_marks
+        if burn_marks.weekly_due():
+            report["burn_marks"] = snapshot_burn_marks()
+    except Exception as e:  # noqa: BLE001 — a burn-mark failure must not sink the sweep
+        report["errors"].append(f"burn_marks: {e}")
 
     try:
         import account_gate

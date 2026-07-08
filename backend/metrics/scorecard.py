@@ -409,6 +409,10 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["is_etf"] = sector_data.is_etf(ticker)
     target = account_gate.weekly_yield_target_pct(ticker)
     row["juice_weekly_pct"] = est["weekly_yield_pct"]
+    # NET juice/week (gross minus LEAP model burn, with slippage) — the ranking
+    # key. Kept alongside gross so the panel can show both; ranking sorts on net.
+    row["net_juice_weekly_pct"] = est.get("net_weekly_yield_pct")
+    row["burn_weekly_per_share"] = est.get("burn_weekly_per_share")
     row["juice_target_pct"] = target
     row["juice_ok"] = (None if est["weekly_yield_pct"] is None
                        else bool(est["weekly_yield_pct"] >= target))

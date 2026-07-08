@@ -118,6 +118,7 @@ def _ensure_position(state: dict, ticker: str) -> dict:
         "kill_switch": {},
         "thesis": {"fundamentals": "", "intact": True},
         "delta_history": [],  # nightly {date, leap_delta} snapshots (delta velocity)
+        "planned_exit_dte": config.PLANNED_EXIT_DTE,  # LEAP exit target; burn math keys off this
     }
     state["positions"].append(p)
     return p

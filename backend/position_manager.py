@@ -413,6 +413,38 @@ def capital_summary(state: dict) -> dict:
     }
 
 
+def net_juice_rollup(positions: list[dict]) -> dict:
+    """Portfolio income rollup on NET juice/week (juice collected - LEAP theta
+    burn with slippage), summed across open positions — NEVER gross (spec §6,
+    NET_JUICE_IS_HEADLINE). Reads the already-enriched per-position leap_health
+    (multi-leg positions use the aggregated block). Each component sums only over
+    positions that carry it, so a single unpriceable name never blanks the total."""
+    gross = burn_wk = net = 0.0
+    have_gross = have_burn = have_net = False
+    counted = 0
+    for p in positions or []:
+        if p.get("status") == "closed":
+            continue
+        h = p.get("leap_health_agg") or p.get("leap_health") or {}
+        g = h.get("trailing_avg_weekly_juice")
+        b = h.get("model_burn_per_week")
+        n = h.get("net_juice_per_week")
+        if g is not None:
+            gross += float(g); have_gross = True
+        if b is not None:
+            burn_wk += float(b); have_burn = True
+        if n is not None:
+            net += float(n); have_net = True
+        if g is not None or b is not None or n is not None:
+            counted += 1
+    return {
+        "gross_juice_per_week": round(gross, 2) if have_gross else None,
+        "burn_per_week": round(burn_wk, 2) if have_burn else None,
+        "net_juice_per_week": round(net, 2) if have_net else None,
+        "positions_counted": counted,
+    }
+
+
 def _accumulation_block(ticker: str) -> tuple[bool, str | None]:
     """Kill-switch / RS3M-deterioration guard for share accumulation. Returns
     (blocked, reason). Any non-green kill-switch read blocks: red is an exit in

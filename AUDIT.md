@@ -1,300 +1,336 @@
-# AUDIT.md — Market-Data Fetch Layer (Phase 0)
+# AUDIT.md — Weekly Theta Burn & Net Juice Accounting (Phase 0)
 
-**Task:** Tiered market-data scheduler. **Scope of this document:** map the existing
-fetch layer completely before any code is written, and flag where the codebase
-contradicts the assumptions in the implementation prompt.
+**Task:** replace total-extrinsic juice accounting with model-based theta burn over the
+*held* window, make **net juice/week** the headline, and rank the entry queue on it.
+**Scope of this document:** map every touched surface with `file:line` references and
+flag every place the codebase contradicts the implementation prompt, *before* any code
+is written.
 
-Every reference is `file:line` relative to `backend/` unless noted. This audit was
-produced by reading the code, not from memory.
+Every reference is `backend/<file>:line` unless a `frontend/` prefix is shown. This
+audit was produced by reading the code, not from memory.
 
 ---
 
 ## 0. Executive summary — what's really there
 
-- **There is no ad-hoc *chain* polling to remove.** The prompt's "suspected largest
-  waste — option chains polled on a schedule" is **REFUTED** (§3). Chains are
-  on-demand per HTTP request, plus one nightly IV snapshot for *held* names only.
-- The real intraday cost today is: (a) a **pre-open full-universe warm scan** that
-  fetches ~500 symbols' daily bars, and (b) a **flat 15-minute "hot refresh"** that
-  re-fetches *daily bars* (not quotes) for up to 40 "hot" names during market hours
-  (`refresh_policy.py` + `alert_scheduler.py`). This flat-cadence, bars-based hot
-  refresh **is** the ad-hoc/uniform system the task replaces.
-- **yfinance is not in the codebase at all** (§C1) — a direct contradiction of the
-  prompt. Providers are Schwab (primary) + Alpha Vantage (fallback) only; the
-  **parquet daily-bar cache is the "cheap EOD" layer** the prompt attributes to
-  yfinance.
-- **There is no ranked entry queue** with rank / slot-horizon (§C2) — another
-  contradiction. `/api/scan/ready` computes a flat, juice-sorted candidate list on
-  demand. We drive Tier 1/2 from that behind the minimal `QueueState` interface the
-  prompt allows.
-- **No 429 handling, no Schwab backoff, no API-call counter** exist (§4). Alpha
-  Vantage is the only provider with a retry loop.
-- **Cached daily bars carry no `fetched_at` and no provider tag** — freshness is
-  inferred from parquet file mtime only (§2). By contrast the earnings and dividend
-  caches already carry `fetched_at` + `source`; that is the provenance pattern to
-  mirror for the new staleness cache.
-- Architecture constraint that shapes everything: **single-writer.** state.json
-  lives on one Fly volume attached to one machine, so all scheduling runs inside
-  **one in-process daemon thread** (`alert_scheduler`). The tiered scheduler must
-  hook into that existing tick — **not** spawn a second scheduler.
+- **The wrong accounting the task targets is real and central.** The LEAP's *total
+  entry extrinsic* is explicitly modeled as a cost to be paid off by short-call juice,
+  cycle-scoped, in `logging_handler.recompute_derived` (§1, `logging_handler.py:399-434`).
+  The comment at `:426-427` states it outright: "the net juice is only 'real' income
+  once the LEAP extrinsic is paid off." A second notion — *remaining live* extrinsic as
+  a runway denominator — lives in `leap_policy.py:124-125`. Both denominate against
+  weekly juice; neither keys off a planned exit. **CONFIRMED.**
+- **The BS engine is complete and is the only pricer.** `indicators.py` prices calls at
+  arbitrary `(T, σ)` via `_bs_call_price` and exposes theta via `call_greeks_full`
+  (§2). It takes **DTE in days**, converts `T = dte/365` at the call site, and has **no
+  clock abstraction** — time always arrives as caller-supplied DTE. `burn_projection()`
+  builds directly on `_bs_call_price`; no second pricer is needed or wanted.
+- **`planned_exit_dte` does NOT exist** in the schema (§3). It is a genuine prerequisite
+  — a v14 migration is required. **CONFIRMED as absent.**
+- **An existing burn already exists but is the WRONG method.** `indicators.leap_weekly_burn`
+  (`indicators.py:324`) returns **`−θ_day × 7`** — a *single-point local* theta
+  approximation. The spec's HARD_CFM_RULE requires the **two-point model difference**
+  `extrinsic(current_dte) − extrinsic(planned_exit_dte)`. These are different numbers.
+  `leap_health` already surfaces `net_weekly_maintenance = trailing_juice − leap_weekly_burn`
+  (`leap_policy.py:129`) — the right *shape* (juice − burn) with the wrong *burn* and no
+  slippage. The new work supersedes the burn term, not the shape. **FLAG.**
+- **There is no weekly job.** The only recurring hook is a **nightly** maintenance run
+  (`maintenance.nightly_refresh`, gated by `maintenance_due()` in `alert_scheduler.py:143`).
+  The weekly mark job must be created and hooked into that same single-writer tick with a
+  weekly cadence gate (§5). **FLAG (must create).**
+- **Ranking is gross today.** Both the ready-shortlist (`app.py:187`) and the ranked
+  queue (`queue_state.py:69`) sort descending on `juice_weekly_pct`, produced from
+  `account_gate.juice_estimate` as **gross** `extr_w / leap_cost` (`account_gate.py:93`)
+  — no burn subtracted. Switching to net is a single shared-function change feeding both
+  sites (§6). **CONFIRMED.**
+- **No chart library** (`frontend/package.json` — only react/react-dom). Charts are
+  hand-rolled: flex-div bars (`HistoryTab.jsx:104-139`, already a weekly-juice bar chart)
+  and inline SVG (`JuiceStand.jsx`). The weekly juice-vs-burn view clones the flex-div
+  pattern (§7). **CONFIRMED — do not add a library.**
+
+Nothing in the prompt was found to be factually wrong about the strategy; the two items
+that need a design decision from you before I build are marked **DECISION** in §8.
 
 ---
 
-## 1. Every provider fetch call path
+## 1. Current juice/week calculation & the total-extrinsic hurdle
 
-**Providers:** Schwab Trader API (`schwab_api.py`), Alpha Vantage (`alpha_vantage.py`).
-**yfinance: absent** (no import anywhere; not in `requirements.txt`).
+### 1a. Juice is computed in four places, four denominators
 
-### Low-level primitives
-
-| Primitive | Location | Data | Batched? |
-|---|---|---|---|
-| `SchwabClient.get_daily_bars(symbol, start)` | `schwab_api.py:238` | bars | no |
-| `SchwabClient.get_quotes(symbols) -> dict` | `schwab_api.py:267` | quotes | **YES — multi-symbol, one request** (`params={"symbols": ",".join(...)}` at :274) |
-| `SchwabClient.get_quote(symbol)` | `schwab_api.py:290` | quote | wrapper over `get_quotes([symbol])` |
-| `SchwabClient.get_option_chain(symbol, …)` | `schwab_api.py:296` | chain | no |
-| `SchwabClient.get_instrument_fundamental(symbol)` | `schwab_api.py:325` | div/earnings | no |
-| `alpha_vantage.daily_bars / global_quote / overview / earnings_calendar` | `alpha_vantage.py:66/133/127/114` | fallback bars/quote/fundamentals/earnings | no |
-
-### Call-site inventory (what data, what cadence, what trigger)
-
-**Daily bars** — all route through `data_handler._fetch` (`:140` Schwab → `:147` AV fallback),
-wrapped by `get_daily`/`get_many`/`prefetch`:
-- `screening.warm_scan_cache` (`screening.py:51`) — SPY + all sector ETFs + all
-  constituents. **Scheduled** (warm-scan slots + boot) and on-demand background scan.
-- `refresh_policy.refresh_hot` (`refresh_policy.py:123`) → `prefetch(force=True)` —
-  **scheduled**, 15-min cadence, market hours. *(the flat hot refresh)*
-- `refresh_policy.refresh_tickers` (`:152`) — on-demand (`/api/refresh/ticker`, `/api/refresh/sector`).
-- Scan/scorecard sweeps, `option_chain`, `position_manager`, `/api/diagnostics/vix` — per-request.
-
-**Quotes:**
-- `data_handler.latest_quote` (`:224` Schwab → `:235` AV) — single quote, on-demand
-  (execution price capture, `position_manager._stock_price`, chain spot anchor).
-- `data_handler.live_prices` (`:283` **batched** Schwab → `:298` AV per-symbol) —
-  used by `refresh_policy.refresh_tickers`.
-- `position_manager._live_short_marks` (`position_manager.py:35`) — **batched** quote
-  for all open short-call legs, per Positions/Overview request.
-- `alerts.run` DEFEND leg (`alerts.py:223`, `live_price`) — **scheduled** (alert slots).
-- `screening._compute_regime` VIX (`screening.py:182`) — per-scan.
-
-**Option chains** (§3): `option_chain._fetch_chain` (`option_chain.py:61`, `strike_count=100`),
-5-min TTL, reached only via `/api/option-chain/<t>`, `/api/roll-options`, `/api/coverage`
-(request/modal driven). Tiny 2-strike weeklies-detection chain (`weeklies.py:87`),
-week-cached. Nightly held-name IV snapshot `maintenance.snapshot_iv` → `option_chain()`.
-
-**Fundamentals / earnings / dividends:** `dividends.py:77/161`, `earnings.py:102/77`
-(Schwab primary, AV fallback) — day-cached, lazy + nightly.
-
-### The one scheduler (background timer)
-
-`alert_scheduler` — a single daemon thread started at `app.py:1036`
-(`alert_scheduler.start_once()`), loop `while not _stop.wait(30)` (`alert_scheduler.py:217`).
-Per tick it runs: heartbeat ping; nightly maintenance at `MAINTENANCE_ET`; **intraday
-hot refresh** (`_maybe_hot_refresh`, market hours, `:85`); post-close refresh; morning
-reconcile; the alert evaluation pass at `config.ALERT_SCHEDULE_ET`; and a warm scan.
-No APScheduler, no cron, no other fetch loop. Worker parallelism is bounded pools
-(`data_handler._executor` 8 workers `:53`, `weeklies._pool`), not schedulers.
-
-**Implication:** the tiered scheduler's pure functions get called from *this* tick.
-Tier polling = extend `_tick`; we do not add threads (single-writer invariant).
-
----
-
-## 2. Existing caching + staleness
-
-| Cache | Location | Store | TTL | `fetched_at`? | provider tag? |
-|---|---|---|---|---|---|
-| Daily bars | `data_handler.py:24,82` | parquet + mem dict | 12h (**file mtime**) | **No** | **No** (only global `_last_success`) |
-| Option chain | `option_chain.py:32` | mem dict | 300s | epoch in tuple | No (Schwab-only) |
-| Weeklies | `weeklies.py:44` | mem dict | 7d | epoch in tuple | No |
-| **Earnings** | `earnings.py:30` | JSON disk | 24h | **Yes** | **Yes** (+conflict) |
-| **Dividends** | `dividends.py:27` | JSON disk | 24h | **Yes** | **Yes** |
-| IV history | `iv_history.py:27` | JSON disk | 260-pt ring | date only | No |
-| Accounts | `schwab_api.py:54` | mem tuple | 60s | epoch | No |
-| Scan memo | `screening.py:21` | mem dict | 300s | epoch | No |
-
-**Key facts for the staleness layer:**
-- Bars freshness = parquet mtime vs 12h (`data_handler._is_fresh :87`); cache age is
-  `cache_age_hours` (`:316`). No per-datum timestamp, no provider identity on the frame.
-- Live quotes return a transient `source` field (schwab/alphavantage/cache/demo) but
-  it is **never persisted**.
-- **Earnings/dividends already do it right** (`{... "fetched_at": time.time(), "source": ...}`,
-  `earnings.py:126`, `dividends.py:112`). The new `get_with_staleness` cache should
-  copy this shape.
-- `refresh_policy` is **not** a staleness engine — it's a single-global cadence gate
-  (`_last_refresh`, resets on restart). It force-refreshes *bars*; it never measures
-  per-quote staleness.
-
----
-
-## 3. Are chains polled on a schedule? — **REFUTED (with one bounded exception)**
-
-No fixed-cadence intraday chain polling exists. The interactive chain is on-demand
-per Flask route (5-min TTL). The scheduler's intraday hot refresh fetches **bars only**
-(`refresh_policy.py:117-124`), never chains. The only scheduled chain traffic:
-1. **Nightly** IV snapshot for **held tickers only, once/night** (`maintenance.py:70-80,127`).
-2. Cache-cold weeklies detection during a warm scan (week-cached, so rarely a real fetch).
-
-→ The prompt's premise that chains are the largest waste does not hold. The design's
-"chains on-demand only" rule is already the de-facto behaviour; our job is to make it
-explicit and keep the nightly held-name snapshot as the Tier 0/1 "once-daily" path.
-
----
-
-## 4. Rate-limit / failure handling today
-
-- **429: not handled anywhere.** No `Retry-After`, no status-code branching. Schwab
-  raises `SchwabError` on any non-200 (`schwab_api.py:248,280,321`); only 403+"Access
-  Denied" (Akamai edge) is special-cased.
-- **Schwab: zero retry/backoff.** One attempt → fall through.
-- **Alpha Vantage: the only retry** — 3 attempts, linear 2/4/6s
-  (`alpha_vantage.py:43-63`); AV delivers rate limits as HTTP-200 `Note`/`Information`.
-- **Fallback chain: Schwab → AV → last-good cache**, and it **never raises** — degrades
-  to cached close labelled `source:"cache"` (`data_handler.py:157,186,258`). Consumers
-  degrade too (chain→"unknown", weeklies→None, earnings/div→None).
-- **No call counter / budget / quota** — only `_fallback_events` (int) and
-  `_last_success`/`_last_error`, surfaced via `data_handler.health()` (`:45`).
-- Only implicit throttles: 8-worker pool cap + cache TTLs + AV backoff.
-
-→ We add: 429/`Retry-After`-aware exponential backoff **on the Schwab path**, a
-per-provider/per-tier/per-day call counter (persisted outside state.json), and the
-shed ladder. Tier 0 degradations (Schwab→AV failover, stale-beyond-tolerance) must be
-surfaced, not silent.
-
----
-
-## 5. State, positions, and the drivers of tier assignment
-
-**state.json** is loaded by `logging_handler.load_state` (`:89`); `recompute_derived`
-(`:311`) rebuilds ledgers but **not** per-position risk fields (ATR/stops are computed
-live in the view layer). Position schema created in `executor._ensure_position` (`:104`).
-
-Fields available to drive **defense escalation**:
-
-| Level the prompt asks for | Status | Where / note |
+| Purpose | Location | Formula / denominator |
 |---|---|---|
-| Short-call strike | ✅ persisted | `short_calls[].strike` (`executor.py:806`) |
-| Parent sector ETF | ✅ persisted | `position["sector"]` = `sector_data.sector_for(t)` (`executor.py:110`) |
-| Circuit-breaker "line" | ✅ persisted | `position["circuit_breaker"]["price"]` (`executor.py:733`) |
-| ATR value | ⚠️ not stored | computed live `indicators.atr(df)` (`executor.py:1517`, `account_gate.py:226`); available from cached bars any time |
-| **Trailing stop (1.5×ATR / 1.0×)** | ❌ missing | no `trailing_stop` concept anywhere; nearest is the *static* circuit-breaker line |
-| **Recorded consolidation low** | ❌ missing | only a live boolean `indicators.consolidating(df)` (`indicators.py:181`); no numeric low persisted |
+| Realized per-close (source number) | `executor.py:1011-1019` | `net_juice = extrinsic_sold − extrinsic_paid_back`; `×contracts×100`. No time denominator. |
+| **Trailing avg weekly juice** (operational per-week) | `logging_handler.py:618-624` | `sum(net_juice per week) / len(weeks)`, capped at `config.JUICE_TRAILING_WEEKS`. Denominator = **completed ISO weeks**. |
+| History reporting avg | `history.py:23` | `gross_juice / max(days_held/7, 1)` per closed cycle, averaged. |
+| **Screening / entry estimate** (ranking source) | `account_gate.py:52-96` | weekly short extrinsic priced at `T=5/365`, `weekly_yield_pct = extr_w / leap_cost` (`:93`). **Gross.** |
 
-→ Two defense levels (trailing stop, consolidation low) are **not currently persisted**.
-Both are *derivable from cached daily bars* (ATR → trailing stop = last − mult×ATR;
-consolidation low → recent swing low). Proposed adjustment in §7.
+`trailing_avg_weekly_juice` (stamped per position at `logging_handler.py:623`) is the
+figure `leap_health` and the frontend treat as "juice/wk". It is the correct **juice**
+input to `net_juice_per_week`; only the **burn** term is being replaced.
 
-**Entry queue / watchlist:** no persisted queue. `/api/scan/ready`
-(`app.py:134-171`) computes on demand: full scorecard → keep `verdict=="GO"` → run
-Level-5 `account_gate` → split `ready` (L5 pass) vs `near_misses`, **sorted by
-`juice_weekly_pct` desc** (`app.py:168`). Each entry: `{ticker, sector,
-juice_weekly_pct, earnings_date, level5}`. **No `rank`, no "slot opens within N days",
-no persisted ordering.** Hard gates: Levels 1–4 `screening.entry_gate` (`:357`),
-Level 5 `account_gate.evaluate` (`:189`, blocking: cash reserve, position limit ≤
-`MAX_CFM_POSITIONS`, capital, sector concentration, juice adequacy, earnings-in-cycle).
+### 1b. Total extrinsic as a payback target / income hurdle — CONFIRMED
 
----
+`recompute_derived` builds a per-ticker **payback meter** — `logging_handler.py:399-424`:
+```python
+at_entry  = float(cycle_target.get(ticker, leap.get("extrinsic_at_entry") or 0))
+collected = float(cycle_collected.get(ticker, 0.0))
+remaining = max(at_entry - collected, 0.0)
+payback[ticker] = { "leap_extrinsic_at_entry": ..., "collected_to_date": ...,
+                    "remaining_to_payback": round(remaining, 2),
+                    "pct_complete": round(collected / at_entry * 100, 1) if at_entry else 0 }
+```
+and a **book-wide income hurdle** — `logging_handler.py:426-433`:
+```python
+state["theta_ledger"]["extrinsic_summary"] = {
+    ..., "net_income": round(agg_collected - agg_at_entry, 2),
+    "income_positive": agg_at_entry > 0 and agg_remaining <= 0 }
+```
+Consumed downstream as a hurdle/countdown:
+- `option_chain.py:624-645` — `weeks_to_income_positive = ceil(extrinsic_to_cover / weekly_juice)`,
+  where `extrinsic_to_cover = remaining_to_payback` for a held LEAP (`:628`).
+- `leap_policy.py:124-125` — `leap_extrinsic_weeks_remaining = extrinsic_remaining / trailing_juice`.
+- `alerts.py:517-583` — `check_capital_burn` / `check_juice_inadequate` fire off these.
 
-## 6. Frontend refresh + where badges/budget go
+This is precisely the "total extrinsic ≈ 3× the true cost" error the spec describes:
+the whole entry extrinsic is treated as a cost, when only the extrinsic consumed
+195→~135 DTE is truly spent (the rest is recovered on the LEAP sale, minus slippage).
 
-Polling primitive: `useApi(fn, deps, interval)` (`components/ui.jsx:113`, on-mount
-`load()` + optional `setInterval`). No react-query/SWR.
-
-| Loop | Endpoint | Interval |
-|---|---|---|
-| `App.jsx:46` | `/api/alerts` | 60s |
-| `Overview.jsx:167` | `/api/overview` | 5m |
-| `PositionTracker.jsx:405` | `/api/kill-switch` | 5m |
-| `DataHealth.jsx:410` | `/api/data-health` | 2m |
-| `ScanProgress.jsx:33` | `/api/scan/status` | 2.5s |
-
-**Badge candidates:** Overview, PositionTracker, PortfolioRisk, ReadyToEnter,
-Scorecard, DataHealth.
-
-**Budget/shed home:** extend **`GET /api/data-health`** (`app.py:781-804`). It already
-returns `providers`, `ohlcv_cache_age_hours`, `hot_refresh`, earnings/dividend cache,
-Schwab token — and is already polled every 2m by `DataHealth.jsx`. Add a `data_budget`
-block there (or a sibling `/api/data-budget`) and the panel renders with minimal
-wiring.
+**Scope note (see §8 DECISION-1):** `extrinsic_payback` is derived from immutable
+executions and is asserted by the test suite (`test_cfm.py:518,523,758`). It will **not**
+be ripped out — it stays as a secondary "capital recovery" view. The *headline* and the
+*income-positive framing* move to net-juice/coverage; the two coexist.
 
 ---
 
-## 7. Contradictions with the prompt → proposed adjustments
+## 2. Black-Scholes engine — public interface
 
-**Present before implementing — these change the plan. None are silently improvised.**
+**Module: `indicators.py` (~lines 221-397).** Pure `math` BSM with continuous dividend
+yield `q`. Thin re-export wrapper in `portfolio_risk.py:25-38`.
 
-1. **yfinance does not exist.** *Adjustment:* Tier 2/3 "provider = yfinance/cache"
-   becomes **"parquet daily-bar cache, refreshed by the EOD batch via Schwab (AV
-   fallback)."** The existing parquet cache already *is* the cheap-EOD layer. No new
-   dependency — consistent with "do not add external deps without flagging." I will
-   keep provider routing swappable so a yfinance client could be dropped in later.
+**Pricers (T in YEARS, σ as a decimal):**
+- `_bs_call_price(S, K, T, r, sigma, q=0.0) -> float` — `indicators.py:241`. **The primitive
+  `burn_projection()` builds on.**
+- `_bs_put_price(...)` — `indicators.py:271` (put-IV substitution path).
+- `_d1(...)` — `:229`; `_norm_cdf/_norm_pdf` — `:221/:225`.
 
-2. **No ranked entry queue.** *Adjustment:* define the minimal `QueueState` interface
-   from the prompt (`[{symbol, rank, gates_passed, slot_opens_within_days}]`) and
-   **adapt it from `/api/scan/ready`**: `rank` = index in the existing juice-desc
-   order; `gates_passed` = row is in `ready` (L1–5 pass); `slot_opens_within_days`.
-   Since the codebase has **no forecast of when an open position will close**, an
-   honest "slot opens within N days" reduces to **"is a slot free now"** =
-   `MAX_CFM_POSITIONS − active_positions > 0` → horizon 0 when free, ∞ otherwise. I'll
-   encode that mapping in the adapter and flag it as the single biggest place real
-   queue data would improve Tier 1 targeting. No symbols hardcoded.
+**Public greeks / IV:**
+- `bs_call_delta(S,K,T,r,sigma,q)` — `:233`.
+- `implied_vol_call(price,S,K,T,r,q)` — `:247` (bisection, robust deep-ITM).
+- `implied_vol_put(price,S,K,T,r,q)` — `:277` (recovers skew-aware σ for an ITM call
+  from its same-strike OTM put).
+- `call_greeks_full(S,K,T,r,sigma,q) -> (delta, theta_per_calendar_day, vega)` — `:302`.
+- `call_greeks(S,K,dte,mark,reported_iv=None,r,q) -> (delta, iv_pct)` — `:344`. **Takes
+  DTE in days**, `T=(dte)/365` at `:356`.
+- `leap_weekly_burn(S,K,dte,mark_ps,contracts,q) -> $/week` — `:324`. **`−θ_day×7×contracts×100`.
+  Single-point local theta — NOT the two-point method the spec mandates.** (FLAG.)
 
-3. **Defense levels not all persisted (trailing stop, consolidation low).**
-   *Adjustment:* keep the escalation state machine **pure** — it consumes
-   pre-computed `defense_levels` + a current price and decides crossings/flags. A
-   separate (impure) helper derives those levels from the position + cached daily
-   bars: `short_strike` (persisted), `trailing_stop = last − mult×ATR` (ATR from
-   bars; mult from config, default from `SHORT_ATR_MULT`=1.5), `consolidation_low`
-   (recent swing low from bars), `circuit_breaker.price` (persisted). This needs **no
-   state.json schema change** (rule: don't touch the schema). Optionally I can persist
-   `atr_at_entry`/`consolidation_low` at open time later, but the derive-from-bars
-   path unblocks this task now. Note the prompt's "1.5× for CFM, 1.0× for APP": CFM is
-   the strategy default (1.5, matches `SHORT_ATR_MULT`); I'll make the multiplier
-   config-driven per-symbol-overridable rather than hardcoding "APP".
+**Extrinsic decomposition:**
+- `calculate_extrinsic(bid,ask,strike,underlying) = mid − max(S−K,0)`, clamped ≥0 — `:375`.
+  ⚠️ This is **market** extrinsic (from bid/ask). `burn_projection()` must use **model**
+  extrinsic = `_bs_call_price(...) − max(S−K,0)` so both DTE points share one σ and spot.
+- `_augment(contract, underlying)` attaches `mark/intrinsic/extrinsic` — `:389`.
+- Live LEAP intrinsic/extrinsic split (bid-based) — `leap_policy.py:115-123`, with a
+  `below_intrinsic` flag + floor-at-0 (the `low_extrinsic_flag` precedent).
 
-4. **"Chains are the largest waste" is false (§3).** *Adjustment:* no chain-polling to
-   remove; I preserve on-demand chains + the nightly held-name IV snapshot as the
-   Tier 0/1 "once-daily chain" path, and focus the win on replacing the flat 15-min
-   *bars* hot-refresh with **batched quotes** overlaid on frozen bars (one batched
-   Schwab quote call per interval for all Tier 0/1 names).
+**Put-IV substitution path (ITM calls) — `option_chain.py:330-365` (`_augment_call_greeks`):**
+IV precedence for an ITM call: same-strike **put's reported IV** (`schwab_api.parse_put_iv`,
+`schwab_api.py:583`) → else **σ implied from the put's mark** via `implied_vol_put`
+(`option_chain.py:355`) → else the call's own `volatility`. Dividend `q` from
+`dividends.yield_for(ticker)`. This is the σ that must feed `burn_projection()` — the
+mark job resolves it here and passes the plain value in (keeping the pure function I/O-free).
 
-5. **Intraday freshness today = re-fetching bars, not quotes.** *Adjustment:* the new
-   Tier 0/1 cadence fetches **batched quotes** and overlays them on the frozen daily
-   bars (the pattern `refresh_policy.refresh_tickers` already uses at `:153-156`),
-   including recomputing RS3M-vs-SPY / vs-Sector intraday for kill-switch inputs
-   `REFRESH_KILLSWITCH_PER_DAY` times. Bars stay EOD.
-
-6. **Config constants named for a queue/tier world that's partly absent** are added
-   fresh in `config.py` with provenance tags; existing `HOT_REFRESH_MINUTES`/
-   `HOT_TICKERS_MAX` are superseded by the tier constants (I'll keep them until the
-   new scheduler fully replaces the hot path, then deprecate in `IMPLEMENTATION_NOTES`).
+**Clock:** none inside the engine. DTE is `daysToExpiration` from Schwab
+(`schwab_api.py:570`). `burn_projection()` therefore takes explicit `current_dte` /
+`planned_exit_dte` ints; the `clock` arg in the spec signature is only needed at the
+mark-job boundary to derive `current_dte` from the stored `expiration`. (Minor deviation
+noted in §8.)
 
 ---
 
-## 8. Proposed module layout (for the build phase — not yet built)
+## 3. Position storage schema
 
-- `market_scheduler.py` — **pure**: `assign_tiers`, `fetch_due`, escalation state
-  machine, max-age derivation. No I/O. Mocked-clock tests.
-- `queue_state.py` — the minimal `QueueState` interface + `/api/scan/ready` adapter (§7.2).
-- `data_cache.py` (or extend `data_handler`) — staleness cache: `fetched_at`+`provider`+
-  `max_age`, `get_with_staleness`, `STALE_BLOCKS_GO` enforcement hook.
-- `data_transport.py` — impure: per-tier provider routing, batched quote fetch,
-  429/`Retry-After` backoff + failover, defense-level derivation from bars.
-- `data_budget.py` — per-provider/per-tier/day counter (persisted outside state.json,
-  e.g. `DATA_DIR/data_budget.json`), soft-limit + shed ladder (T3→T2→T1; **T0 never**).
-- Scheduler wiring in `alert_scheduler._tick` (the single daemon); `/api/data-health`
-  extension; `DataHealth.jsx` + panel staleness badges.
+Positions are a plain list under `state["positions"]` (`logging_handler.py:48`), appended
+by `executor._ensure_position` (`executor.py:105-123`). Position shell — `executor.py:109-121`:
+`ticker, sector, entry_date, status, leap, leap_legs, shares, short_calls, kill_switch,
+thesis, delta_history`. Migrations add `circuit_breaker/dividend` (v3), `needs_review/review`
+(v7), `entry_context` (v13).
 
-**Testing fit:** reuse the established pattern — pure functions take an explicit
-`now`/`clock` (as `alert_scheduler.due_slots(now, last_run)` and `_market_hours(now)`
-already do) and providers are monkeypatched to return fixtures. 381 existing tests
-across 30 files; all must stay green.
+**LEAP legs** (multi-tranche since v10; `leap` mirrors `leap_legs[0]`, re-aliased each
+load at `logging_handler.py:74-86`). A leg — `executor.py:888-895`:
+`strike, contracts, cost_basis, current_bid, intrinsic, extrinsic, entry_date,
+dte (entry snapshot, default LEAP_TARGET_DTE=180), expiration, extrinsic_at_entry,
+extrinsic_collected_to_date`.
+
+Field mapping the spec asks for:
+- Entry date → position `entry_date` (`executor.py:900`) + leg `entry_date` (`:892`).
+- LEAP entry price → leg `cost_basis` (`:889`); strike → leg `strike`; expiration → leg
+  `expiration` (`:893`).
+- Live DTE → derived position-level `leap_dte` = `expiration − today`, fallback to entry
+  snapshot, at `logging_handler.py:607-617`.
+
+**`planned_exit_dte` / planned hold length — ABSENT.** A full search
+(`planned|exit_dte|target_dte|hold_length|holding_period|hold_weeks`) found only
+`config.LEAP_TARGET_DTE=180` (a strategy-wide *entry* target, not a per-position exit
+plan) and prose comments (`account_gate.py:299`). **Prerequisite confirmed — v14 migration
+required (§4).**
 
 ---
 
-## 9. Guardrails I will honour
+## 4. Migrations & schema version
 
-No order/roll/exit paths touched · no state.json schema change / no telemetry in it ·
-no fixed-schedule chain polling · tier logic decoupled from provider clients · no new
-deps without flagging · no silent Tier 0 degradation · no invented queue logic beyond
-the `QueueState` interface · all 381 tests still pass.
+All in `migrations.py`. `CURRENT_VERSION = 13` (`:20`). Pattern: `_vN_to_vN+1(state)->state`,
+additive only, registered in `MIGRATIONS` (`:199-212`); `migrate()` snapshots-then-walks,
+bumping `schema_version` per step (`:242-249`); invoked in `load_state`
+(`logging_handler.py:121-125`). New files stamp at `CURRENT_VERSION` (`logging_handler.py:41`).
+
+**Planned migration — `_v13_to_v14` (bump to 14):** for each position (and each
+`leap_leg`, if we key exit off the primary leg — primary leg is sufficient),
+`p.setdefault("planned_exit_dte", config.PLANNED_EXIT_DTE)`. Additive, seeds the default
+onto existing positions — the exact shape of `_v12_to_v13` (`migrations.py:186-196`).
+Old-state fixture must load clean (test §9 in the plan).
+
+---
+
+## 5. Weekly marks / snapshots / derived-data convention
+
+**No weekly / end-of-week / roll-cadence scheduler exists.** The only recurring job is
+**nightly** `maintenance.nightly_refresh` (`maintenance.py:83`), gated once-per-day by
+`maintenance_due()` (`alert_scheduler.py:143-146`) and driven from the single in-process
+daemon tick (`alert_scheduler.py:160-166`). It already appends per-position **`delta_history`**
+snapshots (`maintenance.py:36-64`) and per-ticker IV points — the precedent for a
+periodic per-position mark. Single-writer constraint: state.json is on one Fly volume /
+one machine, so the weekly mark job **hooks into this tick with a weekly gate**, it does
+not spawn a second scheduler.
+
+**Two persistence conventions (hard split):**
+1. **Derived-from-executions → inside state.json, rebuilt by `recompute_derived` every
+   write** (`logging_handler.py:311-625`; called at `:253` and on load `:125`):
+   `theta_ledger`, `extrinsic_payback`, `roll_ledger`, `cycles`, per-position `leap_dte`
+   / `trailing_avg_weekly_juice`. Migrations only seed empty shells (`migrations.py:63-75`).
+2. **Market telemetry / not-recomputable → separate files under `config.DATA_DIR`:**
+   `iv_history.json` ("market data, not a trading record, so it stays out" —
+   `iv_history.py:14,27`), `dividends_cache.json`, `data_budget.json`, parquet OHLCV
+   cache. The offline calibration harness (`calibration.py`) is read-only telemetry that
+   writes only a markdown report.
+
+The nightly `delta_history` series (inside state.json, appended, not recomputable) is the
+lone in-state per-position snapshot precedent.
+
+**→ See §8 DECISION-2 for where the weekly burn marks should live.**
+
+---
+
+## 6. Scorecard / entry-queue juice consumption
+
+**Two ranking sites, both descending on `juice_weekly_pct`:**
+1. Ready shortlist — `app.py:187`: `ready.sort(key=lambda r: r.get("juice_weekly_pct") or 0, reverse=True)`.
+2. Ranked queue — `queue_state.py:69`: `go.sort(key=lambda r: (r.get("juice_weekly_pct") is None, -(r.get("juice_weekly_pct") or 0.0)))`;
+   assigns 1-based `rank` (`:78`), which `market_scheduler.py:145` then inherits.
+
+**Field source:** `metrics/scorecard.py:411` — `row["juice_weekly_pct"] = est["weekly_yield_pct"]`,
+where `est = account_gate.juice_estimate(ticker, df)` (`:407`). Formula = **gross**
+`extr_w / leap_cost * 100` (`account_gate.py:93`); the LEAP weekly burn is **not**
+subtracted. Same gross figure drives the Level-5 juice-adequacy gate (`account_gate.py:272-284`).
+
+**Switch to net (single shared function, two call sites — spec §6):** add a **net** weekly
+figure computed once as a pure function using a *hypothetical entry* (LEAP at
+`LEAP_ENTRY_DTE_DEFAULT`, exit at `PLANNED_EXIT_DTE`) — net = gross juice − model
+burn/week (with slippage). Call it from `juice_estimate`/`scorecard.py` (queue) **and**
+from the position view so both produce identical net values for identical inputs
+(single-source-of-truth test §8 in the plan). Sites to move together so the gate never
+disagrees with the ranking: `account_gate.py:93` (add net field), `metrics/scorecard.py:407-414`,
+`app.py:187`, `queue_state.py:69`, and the gate at `account_gate.py:272-284`. Display
+consumers that then show net automatically: `Scorecard.jsx:24-34`, `ReadyToEnter.jsx:59,63`.
+
+---
+
+## 7. Frontend surfaces
+
+**No chart library** (`frontend/package.json` deps = react/react-dom only). Idioms:
+- **Flex-div bars** — `HistoryTab.jsx:104-139` (`WeeklyJuiceChart`, already "weekly net
+  juice vs target"): maps `weeks[]` to `flex-1` divs, height `Math.abs(net)/max*100`,
+  color per bar. **Clone this for the weekly juice-vs-burn view** (two series: full-opacity
+  realized weeks, lighter projected weeks).
+- **Inline SVG** — `JuiceStand.jsx:130-210/225-304` ("Pure SVG — no chart lib").
+- Bar primitives: `Meter` (`ui.jsx:97-104`), `SqueezeBar` (`JuiceStand.jsx:336-347`).
+
+**Per-position juice today:** `JuiceStand.jsx:507-508` reads
+`lh.trailing_avg_weekly_juice` / `lh.leap_weekly_burn`, renders `juice …/wk · burn …/wk`
+(`:575-579`). `PositionTracker.jsx` `LeapHealth` strip renders juice-yield % vs target
+(`:129-136`) and `net_weekly_maintenance` `+…/wk` (`:144`). **The new three-metric panel
+(Juice/wk · Burn/wk · Net/wk) + coverage meter slots alongside these**, matching the
+`Card`/`Stat` primitives (`ui.jsx:50-75`); grid `sm:grid-cols-3` (cf. `Overview.jsx:136`).
+
+**Portfolio rollup:** Overview KPI band reads server `theta.totals`
+(`Overview.jsx:214,234-244`) — "Net juice · week" = `money(juice.this_week)`. The rollup
+must sum **net** juice (spec §6): add an aggregate net figure server-side and point this
+card at it.
+
+**Staleness badge:** canonical `StaleBadge` (`ui.jsx:32-43`, amber pill, renders `null`
+when fresh). Consumers: `ReadyToEnter.jsx:74-79`, `Scorecard.jsx` refresh amber-vs-emerald
+(`:90-119`), earnings `:19-33`. Backend age flows via `data_cache.stale_blocks_go`
+(`app.py:177-182`). **Burn figures get a `StaleBadge` when the inputs (spot/IV `fetched_at`)
+are stale.**
+
+---
+
+## 8. Contradictions & decisions to confirm before building
+
+**FLAG-1 — an existing `leap_weekly_burn` will be superseded, not reused.** `indicators.py:324`
+returns `−θ×7` (single-point). It is consumed by `leap_health` (`leap_policy.py:126`),
+`JuiceStand.jsx:508`, `PositionTracker.jsx`. I will add `burn_projection()` (two-point
+model diff) and route `leap_health` / the frontend through it. `leap_weekly_burn` stays
+in the module (other call sites / tests) but is no longer the headline burn. Nothing
+contradicts the spec here — just noting the overlap so I don't fork two "burn" concepts.
+
+**FLAG-2 — two legacy "extrinsic-as-cost" notions remain (payback meter + remaining
+runway).** Both are execution-derived and test-asserted. I keep them intact (capital-recovery
+view) and add the corrected net-juice/coverage as the headline. Removing them would break
+`test_cfm.py` (spec: all 330+ must pass).
+
+**DECISION-1 — legacy income-hurdle framing.** The prompt says "net juice is the headline"
+and "portfolio rollup sums net juice, not gross." I will (a) add net-juice everywhere as
+primary, and (b) keep `extrinsic_payback` / `theta_ledger.extrinsic_summary` as a
+secondary "capital returned on LEAP exit" readout rather than deleting them (they're
+derived + tested). **Confirm** you're happy with coexistence rather than a hard removal of
+the old hurdle.
+
+**DECISION-2 — where weekly burn marks live.** Marks capture live spot/IV at a point in
+time, so they are **not** recomputable from executions — they're telemetry. Two precedents:
+`delta_history` (in-state, per-position, appended nightly) vs `iv_history.json` (separate
+`DATA_DIR` file, "market data stays out of state.json"). The divergence-tracking purpose
+(a live BS-engine verification harness) is squarely calibration/telemetry territory. **My
+recommendation: a separate `DATA_DIR/burn_marks.json` store mirroring `iv_history.py`** —
+keeps the append-only execution record clean (spec: "do not pollute…"), matches the
+market-telemetry convention, and decouples weekly telemetry appends from the
+recompute+backup-snapshot cost of a state.json write. The `planned_exit_dte` field itself
+still goes in state.json (it *is* position state, not telemetry) via the v14 migration.
+**Confirm** DATA_DIR store vs a `delta_history`-style in-state series.
+
+**Minor — `burn_projection(clock)` signature.** The pure math needs only explicit DTE
+ints (no clock). I'll keep a `clock`-shaped boundary at the mark job (to derive
+`current_dte` from `expiration`) and can accept an optional `clock` on the function for
+signature fidelity; it won't be consulted when `current_dte` is passed. No behavioral
+impact.
+
+**No external Python deps required** — everything builds on `indicators.py` + stdlib
+`math`. Frontend adds no library.
+
+---
+
+## 9. Implementation order (unchanged from the plan, now grounded)
+
+1. Config block (`config.py`, after the CFM-mechanics section, provenance-tagged).
+2. Pure functions: `burn_projection()`, `extension_cost()`, `net_juice_per_week()` /
+   `coverage_ratio()` — new module (e.g. `burn.py`) + tests, all built on `_bs_call_price`.
+3. v14 migration (`planned_exit_dte`).
+4. Weekly mark job + realized/projected series + divergence (hooked into the nightly tick
+   with a weekly gate; storage per DECISION-2).
+5. Queue/scorecard → net-juice via the shared function (`account_gate.py`,
+   `metrics/scorecard.py`, `app.py:187`, `queue_state.py:69`).
+6. Frontend: three-metric panel + coverage meter + weekly juice-vs-burn bars +
+   hold-extension readout + staleness badge (all reusing existing primitives).
+7. Full offline test pass (existing 330+ green + new cases from the plan's list).
+
+**Stopping here per the spec ("Stop and present the audit before implementing").** Awaiting
+confirmation on DECISION-1 and DECISION-2 before writing code.

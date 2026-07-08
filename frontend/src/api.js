@@ -93,6 +93,7 @@ export const api = {
   orderStatus: (orderId) => request(`/api/order-status?order_id=${encodeURIComponent(orderId)}`),
   cancelOrder: (orderId) => request("/api/order-cancel", { method: "POST", body: JSON.stringify({ order_id: orderId }) }),
   positions: () => request("/api/positions"),
+  burn: (ticker) => request(`/api/burn/${ticker}`),
   thetaLedger: (params = "") => request(`/api/theta-ledger${params}`),
   killSwitch: () => request("/api/kill-switch"),
   history: () => request("/api/history"),
