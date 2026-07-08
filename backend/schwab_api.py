@@ -502,16 +502,21 @@ def build_roll_order(quantity: int, buy_to_close_symbol: str, sell_to_open_symbo
     """A single two-leg NET_CREDIT/NET_DEBIT DAY order for a short-call roll:
     buy-to-close the old short + sell-to-open the new one on ONE ticket, so the
     roll cannot leg out (fill one side, miss the other). `net_price` is per
-    share: positive = credit received, negative = debit paid. CUSTOM covers any
-    strike/expiration combination (vertical or diagonal)."""
+    share: positive = credit received, negative = debit paid.
+
+    `duration` and `complexOrderStrategyType` come from config
+    (ROLL_ORDER_DURATION / ROLL_COMPLEX_STRATEGY_TYPE). CUSTOM is the safe
+    superset covering any strike/expiration combination (vertical or diagonal);
+    the exact enum Schwab's spread approval wants is a LIVE_VERIFY item — see
+    config.py — so it is a constant, not hardcoded here."""
     credit = float(net_price) >= 0
     return {
         "orderType": "NET_CREDIT" if credit else "NET_DEBIT",
         "session": "NORMAL",
         "price": f"{abs(float(net_price)):.2f}",
-        "duration": "DAY",
+        "duration": config.ROLL_ORDER_DURATION,
         "orderStrategyType": "SINGLE",
-        "complexOrderStrategyType": "CUSTOM",
+        "complexOrderStrategyType": config.ROLL_COMPLEX_STRATEGY_TYPE,
         "orderLegCollection": [
             {
                 "instruction": "BUY_TO_CLOSE",

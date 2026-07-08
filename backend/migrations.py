@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 11
+CURRENT_VERSION = 12
 
 
 class MigrationAbortedError(RuntimeError):
@@ -168,6 +168,21 @@ def _v10_to_v11(state: dict) -> dict:
     return state
 
 
+def _v11_to_v12(state: dict) -> dict:
+    """v12 (atomic spread roll): the short-call roll's two legs now carry a
+    ``roll_group_id`` (the spec's name for the roll linkage) in addition to the
+    ledger's ``roll_id``. Backfill roll_group_id = roll_id on historical roll
+    executions so legacy legged rolls and new atomic rolls read identically.
+
+    Additive and idempotent: executions that already carry roll_group_id (or have
+    no roll_id) are untouched. pending_orders is a free-form dict keyed by order
+    id and already represents a two-leg order, so it needs no structural change."""
+    for e in state.get("executions", []):
+        if e.get("roll_group_id") is None and e.get("roll_id") is not None:
+            e["roll_group_id"] = e["roll_id"]
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -179,6 +194,7 @@ MIGRATIONS = {
     8: _v8_to_v9,
     9: _v9_to_v10,
     10: _v10_to_v11,
+    11: _v11_to_v12,
 }
 
 

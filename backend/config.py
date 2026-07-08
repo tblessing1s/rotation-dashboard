@@ -425,6 +425,50 @@ ASSUMED_SLIPPAGE_PCT = 0.05
 # assumed haircut (a handful, so one bad fill doesn't set the calibration).
 SLIPPAGE_MIN_FILLS = 5
 
+# ---- Atomic spread roll (short-call roll as ONE Schwab NET order) -----------
+# The weekly short-call roll goes to Schwab as a single two-leg complex order
+# (buy-to-close old short + sell-to-open new short) at one NET_CREDIT/NET_DEBIT
+# limit, so the pair fills as a unit or not at all — no legging risk, one net
+# crossing instead of two. See backend/executor.py (_roll_short) and
+# backend/schwab_api.py (build_roll_order). Provenance tags are load-bearing:
+# HARD_CFM_RULE constants encode strategy invariants; PROPOSED_DEFAULT ones are
+# tunable; LIVE_VERIFY ones must be confirmed against a real Schwab account
+# before production reliance.
+
+# PROPOSED_DEFAULT — feature flag. When True the live roll transmits ONE atomic
+# NET order; when False it falls back to the legacy legged path (two independent
+# single-leg orders, which carry legging risk). Kept selectable during live
+# verification of the complex-order path.
+ATOMIC_ROLLS_ENABLED = True
+
+# HARD_CFM_RULE — matches the single-leg invariant: an unfilled order is canceled
+# and leaves no execution trace. The roll order is always a DAY order.
+ROLL_ORDER_DURATION = "DAY"
+
+# HARD_CFM_RULE — the net limit defaults to the reference net mid captured at
+# ticket time (mid(new short) − mid(old short)); consistent with fill_verify's
+# reference-mid design. The operator may adjust before submit.
+ROLL_NET_PRICE_SOURCE = "reference_net_mid"
+
+# PROPOSED_DEFAULT / LIVE_VERIFY — complexOrderStrategyType for a same-underlying,
+# different-strike/expiry call pair. CUSTOM is the safe superset Schwab accepts
+# for any strike/expiry combination and is what the atomic open/exit already use;
+# Schwab also documents DIAGONAL (different expiry) / VERTICAL (same expiry).
+# MUST be confirmed against a live Schwab account (spread-approval logic may
+# prefer a specific enum) before production reliance — do NOT assume CUSTOM is
+# universally accepted for approval purposes.
+ROLL_COMPLEX_STRATEGY_TYPE = "CUSTOM"
+
+# HARD_CFM_RULE — if Schwab ever reports a leg-imbalanced fill (one leg filled,
+# the other not), freeze the position and alert; reconciliation NEVER
+# auto-corrects. "freeze" is the only supported value.
+ROLL_LEG_IMBALANCE_ACTION = "freeze"
+
+# PROPOSED_DEFAULT — a paper roll simulates ONE net crossing (net mid ± a single
+# haircut), not two per-leg crossings. Reported by slippage.py; the immutable
+# ledger books at the net mid (paper fills are never haircut on the ledger).
+PAPER_ROLL_HAIRCUT_CROSSINGS = 1
+
 # ---- Durability / backups --------------------------------------------------
 # state.json is the single source of truth on a single Fly volume, so the
 # nightly job keeps rotating local copies AND ships one copy off the machine.
