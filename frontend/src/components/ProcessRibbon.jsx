@@ -135,6 +135,114 @@ function Flow({ vertical, color = "#64748b" }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// The weather over the grove — the market regime. Green is clear skies (good
+// weather to plant), yellow is overcast (tighten up), red is a storm (stand
+// down). It presides over the whole ribbon, the same way regime is market-wide
+// context that governs every entry. Pure SVG, gently animated.
+function Weather({ status }) {
+  if (status === "green") {
+    return (
+      <svg viewBox="0 0 64 48" className="h-14 w-16" role="img" aria-label="clear skies">
+        <circle className="sun-glow" cx="32" cy="24" r="16" fill="#fde68a" opacity="0.6" />
+        <g className="sun-rays" fill="none" stroke="#fbbf24" strokeWidth="2.5" strokeLinecap="round">
+          {Array.from({ length: 8 }).map((_, i) => {
+            const a = (i * Math.PI) / 4;
+            const x = 32 + Math.cos(a), y = 24 + Math.sin(a);
+            return <line key={i} x1={x + Math.cos(a) * 13} y1={y + Math.sin(a) * 13}
+                         x2={x + Math.cos(a) * 20} y2={y + Math.sin(a) * 20} />;
+          })}
+        </g>
+        <circle cx="32" cy="24" r="11" fill="#facc15" stroke="#f59e0b" strokeWidth="1.5" />
+      </svg>
+    );
+  }
+  if (status === "yellow") {
+    return (
+      <svg viewBox="0 0 64 48" className="h-14 w-16" role="img" aria-label="overcast">
+        <circle cx="24" cy="20" r="9" fill="#fcd34d" opacity="0.85" />
+        <g className="cloud-drift">
+          <ellipse cx="34" cy="30" rx="16" ry="10" fill="#94a3b8" />
+          <ellipse cx="24" cy="28" rx="9" ry="8" fill="#cbd5e1" />
+          <ellipse cx="44" cy="28" rx="9" ry="8" fill="#cbd5e1" />
+        </g>
+      </svg>
+    );
+  }
+  if (status === "red") {
+    return (
+      <svg viewBox="0 0 64 48" className="h-14 w-16" role="img" aria-label="storm">
+        <g className="cloud-drift">
+          <ellipse cx="34" cy="20" rx="18" ry="11" fill="#475569" />
+          <ellipse cx="22" cy="18" rx="10" ry="9" fill="#64748b" />
+          <ellipse cx="46" cy="18" rx="10" ry="9" fill="#64748b" />
+        </g>
+        <path className="lightning" d="M32 22 L26 34 L31 34 L27 44 L40 30 L34 30 L38 22 Z"
+              fill="#fbbf24" stroke="#f59e0b" strokeWidth="0.5" />
+        <g stroke="#60a5fa" strokeWidth="2" strokeLinecap="round">
+          {[16, 26, 44, 52].map((x, i) => (
+            <line key={i} className="rain-drop" x1={x} y1="32" x2={x - 2} y2="38"
+                  style={{ animationDelay: `${i * 0.25}s` }} />
+          ))}
+        </g>
+      </svg>
+    );
+  }
+  return (
+    <svg viewBox="0 0 64 48" className="h-14 w-16" role="img" aria-label="sky unreadable">
+      <ellipse className="cloud-drift" cx="32" cy="26" rx="18" ry="10" fill="#475569" opacity="0.6" />
+      <ellipse cx="24" cy="24" rx="9" ry="7" fill="#64748b" opacity="0.5" />
+    </svg>
+  );
+}
+
+const WEATHER = {
+  green: {
+    sky: "from-sky-500/20 via-sky-500/5 to-transparent border-sky-500/30",
+    head: "Clear skies", headTone: "text-sky-200",
+    story: "Good weather to plant — clear to hunt entries.",
+  },
+  yellow: {
+    sky: "from-amber-500/15 via-amber-500/5 to-transparent border-amber-500/30",
+    head: "Overcast", headTone: "text-amber-200",
+    story: "Tighten the criteria — no fresh risk while it's grey.",
+  },
+  red: {
+    sky: "from-slate-600/40 via-rose-900/20 to-transparent border-rose-500/40",
+    head: "Storm overhead", headTone: "text-rose-200",
+    story: "Stand down — tend what you hold, don't plant into the storm.",
+  },
+  unknown: {
+    sky: "from-slate-700/30 to-transparent border-slate-700",
+    head: "Sky unread", headTone: "text-slate-300",
+    story: "Regime unknown — read the tape before you plant.",
+  },
+};
+
+function WeatherBanner({ regime }) {
+  const status = regime?.status || "unknown";
+  const w = WEATHER[status] || WEATHER.unknown;
+  const bits = [];
+  if (regime?.breadth != null) bits.push(`breadth ${fmt(regime.breadth, 0)}%`);
+  if (regime?.vix != null) bits.push(`VIX ${fmt(regime.vix, 1)}`);
+  if (regime?.spy_trend) bits.push(`SPY ${regime.spy_trend}`);
+  return (
+    <div
+      className={`mb-2 flex items-center gap-3 rounded-xl border bg-gradient-to-b ${w.sky} px-3 py-2`}
+      title={bits.length ? `Market regime — ${bits.join(" · ")}` : "Market regime"}
+    >
+      <Weather status={status} />
+      <div className="min-w-0">
+        <div className={`text-sm font-semibold ${w.headTone}`}>{w.head}</div>
+        <div className="text-[12px] italic leading-snug text-slate-300">{w.story}</div>
+      </div>
+      <span className="ml-auto hidden text-[10px] uppercase tracking-wide text-slate-500 sm:inline">
+        weather over the grove
+      </span>
+    </div>
+  );
+}
+
 // The frame every stage shares: an emoji cap, a title, the illustration, one
 // narrative line (the story), and — only where a picture can't spell it — one
 // hero figure. So the four read as one sentence you scan left to right.
@@ -217,7 +325,7 @@ function pulpPctOf(p) {
 const FLOW = { water: "#38bdf8", growth: "#84cc16", juice: "#34d399" };
 
 // ---------------------------------------------------------------------------
-export default function ProcessRibbon({ capital, positions, killByTicker, theta, nav }) {
+export default function ProcessRibbon({ capital, positions, killByTicker, theta, regime, nav }) {
   const ready = useApi(api.scanReady, [], 5 * 60 * 1000);
 
   const capData = capital || {};
@@ -326,6 +434,9 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
         <h3 className="text-sm font-semibold text-slate-200">The Cash Flow Machine — today</h3>
         <span className="hidden text-[11px] text-slate-500 sm:inline">💧 water → 🍊 fruit → 🥤 juice → 💰 cash</span>
       </div>
+
+      {/* The weather over the grove — the market regime presiding over it all. */}
+      <WeatherBanner regime={regime} />
 
       <div className="flex flex-col items-stretch gap-1 sm:flex-row sm:items-stretch">
         {/* 1 — DRY POWDER (the rain barrel) */}

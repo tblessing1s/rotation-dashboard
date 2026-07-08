@@ -226,6 +226,7 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
         positions={openPositions}
         killByTicker={killByTicker}
         theta={ov.data?.theta}
+        regime={regimeData}
         nav={nav}
       />
 
