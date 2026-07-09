@@ -212,17 +212,17 @@ function DefendPanel({ ticker, onStage }) {
 // paid off. It keeps filling over the life of the position until 100% (or the
 // position closes and the card drops away). Reuses the global juice-rise /
 // juice-wave / juice-bubble animations so it reads as family with the stand.
-function PaybackTank({ uid, pct }) {
+function PaybackTank({ uid, pct, mini = false }) {
   const fill = pct == null ? 0 : Math.max(0, Math.min(100, pct));
   const full = pct != null && pct >= 100;
   const innerTop = 15;
   const innerBottom = 110;
   const surfaceY = innerBottom - ((innerBottom - innerTop) * fill) / 100;
-  const bubbles = fill >= 15;
+  const bubbles = fill >= 15 && !mini;
   return (
     <svg
       viewBox="0 0 72 122"
-      className={`h-24 w-[3.4rem] shrink-0 ${full ? "drop-shadow-[0_0_10px_rgba(52,211,153,0.5)]" : ""}`}
+      className={`${mini ? "h-8 w-5" : "h-24 w-[3.4rem]"} shrink-0 ${full ? "drop-shadow-[0_0_8px_rgba(52,211,153,0.55)]" : ""}`}
       role="img"
       aria-label={pct == null ? "payback unknown" : `${fmt(pct, 0)}% of the LEAP extrinsic paid back`}
     >
@@ -259,11 +259,14 @@ function PaybackTank({ uid, pct }) {
       {/* tank outline on top of the liquid */}
       <rect x="6" y="11" width="60" height="103" rx="11" fill="rgba(148,163,184,0.05)"
             stroke={full ? "#34d399" : "#475569"} strokeWidth="2" />
-      {/* direct % label with a dark keyline so it reads on the liquid */}
-      <text x="36" y="67" textAnchor="middle" fontSize="15" fontWeight="700"
-            fill="#f8fafc" stroke="#0f172a" strokeWidth="3" paintOrder="stroke">
-        {pct == null ? "—" : `${fmt(Math.min(pct, 100), 0)}%`}
-      </text>
+      {/* direct % label with a dark keyline so it reads on the liquid (full size
+          only; the mini battery's number lives in the summary text beside it) */}
+      {!mini && (
+        <text x="36" y="67" textAnchor="middle" fontSize="15" fontWeight="700"
+              fill="#f8fafc" stroke="#0f172a" strokeWidth="3" paintOrder="stroke">
+          {pct == null ? "—" : `${fmt(Math.min(pct, 100), 0)}%`}
+        </text>
+      )}
     </svg>
   );
 }
@@ -484,10 +487,12 @@ function ExtrinsicBurnoff({ ticker, payback }) {
 function PositionRow({ p, diffs, payback, focused, setRolling, onOpenTicket, afterResolve }) {
   const shorts = p.short_calls || [];
   const hasAlert = !!(p.needs_review || p.defend || p.whipsaw?.tripped || (diffs && diffs.length));
-  const [open, setOpen] = React.useState(hasAlert);
-  React.useEffect(() => { if (hasAlert) setOpen(true); }, [hasAlert]);
+  // Collapsed by default for a clean, scannable list; a tapped-alert deep link
+  // (focused) opens the row so the operator lands on the thing to act on.
+  const [open, setOpen] = React.useState(false);
   React.useEffect(() => { if (focused) setOpen(true); }, [focused]);
 
+  const pulp = pulpOf(p);
   const bal = balanceOf(p, shorts.map((sc) => ({ sc })));
   const covered = bal.covered;
   const paid = payback?.pct_complete;
@@ -507,15 +512,19 @@ function PositionRow({ p, diffs, payback, focused, setRolling, onOpenTicket, aft
                   className="rounded-full border border-rose-500/50 bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-rose-300">⚠</span>
           )}
         </span>
-        {/* collapsed summary — the three things */}
+        {/* collapsed summary — the three things, each with its tiny visual */}
         <span className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-xs">
-          <span className="flex items-center gap-1">
+          <span className="flex items-center gap-1.5">
+            <Orange uid={`mini-${p.ticker}`} pct={pulp.pct} maintenance="unknown" mini />
             <span className="text-slate-500">intrinsic</span>
             {bal.longIntrinsic == null
               ? <span className="text-slate-500">—</span>
               : <span className={`font-semibold ${covered ? "text-emerald-300" : "text-rose-300"}`}>{covered ? "balanced" : "unbalanced"}</span>}
           </span>
-          <span className="flex items-center gap-1">
+          <span className="flex items-center gap-1.5">
+            {hasPay
+              ? <PaybackTank uid={`mini-${p.ticker}`} pct={paid} mini />
+              : <span className="inline-block w-5" />}
             <span className="text-slate-500">burn off</span>
             <span className={`font-semibold ${hasPay && paid >= 100 ? "text-emerald-300" : "text-slate-200"}`}>{hasPay ? `${fmt(paid, 0)}%` : "—"}</span>
           </span>
