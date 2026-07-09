@@ -468,6 +468,41 @@ def test_coverage_floor_and_cover_checks(monkeypatch):
     assert "exceeds the LEAP" in unc["message"]
 
 
+def test_coverage_multi_short_uses_totals(monkeypatch):
+    # Two short calls against one LEAP: the coverage test and its message must use
+    # the contract-weighted TOTAL short delta, not a single leg's delta. Each short
+    # is under the LEAP's per-contract delta, but their SUM exceeds it -> uncovered.
+    import option_chain as oc
+    import schwab_api
+    import logging_handler as log
+
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {})
+    contracts = [
+        {"strike": 138.0, "expiration": "2027-01-15", "dte": 193, "delta": 0.90},
+        {"strike": 179.0, "expiration": "2026-07-24", "dte": 15, "delta": 0.72},
+        {"strike": 183.0, "expiration": "2026-07-17", "dte": 5, "delta": 0.64},
+    ]
+    monkeypatch.setattr(schwab_api, "parse_call_chain", lambda p: (186.02, contracts))
+    monkeypatch.setattr(oc, "_augment_call_greeks", lambda *a, **k: None)
+    monkeypatch.setattr(log, "load_state", lambda: {})
+    monkeypatch.setattr(log, "find_position", lambda s, t: {
+        "ticker": "XLK", "status": "active",
+        "leap": {"strike": 138.0, "contracts": 1, "expiration": "2027-01-15"},
+        "short_calls": [
+            {"strike": 179.0, "contracts": 1, "expiration": "2026-07-24"},
+            {"strike": 183.0, "contracts": 1, "expiration": "2026-07-17"},
+        ]})
+
+    cov = oc.coverage("XLK")
+    # Neither leg (0.72, 0.64) exceeds the LEAP's 0.90, but 0.72 + 0.64 = 1.36 does.
+    assert cov["status"] == "red" and cov["covered"] is False
+    assert cov["short_total_delta"] == 1.36 and cov["long_total_delta"] == 0.90
+    assert cov["net_delta"] == round(0.90 - 1.36, 4)
+    # The message reports the totals that actually drove the verdict — not "0.72".
+    assert "1.36 vs 0.90" in cov["message"]
+
+
 def test_coverage_unknown_without_schwab(monkeypatch):
     import option_chain as oc
     import schwab_api

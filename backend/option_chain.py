@@ -443,15 +443,20 @@ def coverage(ticker: str) -> dict:
         elif leap_delta < _FLOOR_WATCH and status != "red":
             status = "yellow"
             alerts.append(f"LEAP delta {leap_delta:.2f} is nearing the {LEAP_DELTA_FLOOR:.2f} floor.")
-    # Coverage: long total delta must stay >= short total delta.
+    # Coverage: long total delta must stay >= short total delta. Compare the
+    # contract-weighted TOTALS (not a single leg's delta) so a position with more
+    # than one short reads correctly — the sum of short deltas is what the long has
+    # to cover. The watch buffer scales with long contracts so the single-short /
+    # equal-contract case keeps its original per-contract semantics.
     if leap_delta is not None and max_short_delta is not None:
+        cover_watch = _COVER_WATCH * max(int(leap_contracts or 0), 1)
         if short_total > long_total + 1e-9:
             status, alert = "red", True
-            alerts.append(f"Short delta exceeds the LEAP's ({max_short_delta:.2f} vs {leap_delta:.2f}) — "
+            alerts.append(f"Short delta exceeds the LEAP's ({short_total:.2f} vs {long_total:.2f}) — "
                           "the long isn't covering the short; roll the short up/out.")
-        elif (leap_delta - max_short_delta) < _COVER_WATCH and status != "red":
+        elif (long_total - short_total) < cover_watch and status != "red":
             status = "yellow"
-            alerts.append(f"Short delta {max_short_delta:.2f} is closing on the LEAP's {leap_delta:.2f} "
+            alerts.append(f"Short delta {short_total:.2f} is closing on the LEAP's {long_total:.2f} "
                           "— coverage thinning.")
     elif shorts and leap_delta is None:
         status, alert = "red", True
