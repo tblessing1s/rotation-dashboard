@@ -148,10 +148,54 @@ BREADTH_SYMBOLS = [
 BREADTH_MA_WINDOW = 50
 
 # Regime gate thresholds (Level 1). VIX is the index level, not an ETF proxy.
+# NOTE: these feed the legacy breadth/VIX regime AND the breadth/VIX vetoes of the
+# Genius four-light regime below (they are recomposed as downgrade-only vetoes,
+# not deleted). See regime_genius.py + screening.regime().
 REGIME_BREADTH_GREEN = 60      # % of universe above 50-DMA for a green tape
 REGIME_BREADTH_RED = 40
 VIX_CALM = 18                  # below = calm
 VIX_ELEVATED = 24             # above = risk-off
+
+# ---- Genius four-light market regime (CFM course canon) ---------------------
+# The Cash Flow Machine "Genius System" votes four binary indicator "lights"
+# computed on the market index (SPY daily bars) to a green/yellow/red condition,
+# then holds a YELLOW condition for a minimum dwell to stop it flapping. The
+# course specifies the indicator TYPES and the voting/dwell logic (HARD_CFM_RULE);
+# it does NOT specify parameters (MA lengths, SAR settings, which oscillator), so
+# those are PROPOSED_DEFAULT and calibration-tunable (see calibration.regime_series).
+# Provenance tags are load-bearing (as elsewhere in this file):
+#   HARD_CFM_RULE    — course canon; changing it changes the strategy.
+#   PROPOSED_DEFAULT — a placeholder pending calibration; tune later.
+#
+# The four lights (each GREEN when bullish, RED when bearish):
+#   1. close vs slow MA        — close above slow MA = GREEN
+#   2. fast MA vs slow MA      — fast above slow = GREEN
+#   3. Parabolic SAR vs close  — SAR dots under price = GREEN
+#   4. momentum vs zero        — oscillator above zero = GREEN
+GENIUS_VOTE_GREEN_MIN = 3      # HARD_CFM_RULE — >=3 of 4 GREEN lights -> GREEN; 2/2 -> YELLOW; >=3 RED -> RED
+GENIUS_YELLOW_DWELL_DAYS = 3   # HARD_CFM_RULE — a YELLOW condition cannot change for at least this many TRADING days
+GENIUS_INDEX_SYMBOL = "SPY"    # PROPOSED_DEFAULT — course says "the market"; SPY is the app benchmark
+GENIUS_SLOW_MA = 50            # PROPOSED_DEFAULT — slow MA length (SMA), lights 1 & 2
+GENIUS_FAST_MA = 21            # PROPOSED_DEFAULT — fast MA length (EMA), light 2
+GENIUS_SAR_AF_STEP = 0.02      # PROPOSED_DEFAULT — Parabolic SAR acceleration step (standard Wilder)
+GENIUS_SAR_AF_MAX = 0.20       # PROPOSED_DEFAULT — Parabolic SAR acceleration cap (standard Wilder)
+GENIUS_MOMENTUM_ROC = 10       # PROPOSED_DEFAULT — ROC(n) sign is the zero-line oscillator (light 4).
+                              # Simplest zero-line momentum; MACD-histogram-sign is the documented alternative.
+
+# ---- Regime vetoes (worst-signal-wins) -------------------------------------
+# HARD_CFM_RULE — conflicting signals must never coexist with a GO. The Genius
+# vote is composed with the existing breadth + VIX signals as DOWNGRADE-ONLY
+# vetoes: a veto can turn GREEN -> YELLOW, never the reverse. Applied after the
+# yellow dwell, so they act on the published regime, not the raw vote.
+BREADTH_VETO_ENABLED = True    # HARD_CFM_RULE — breadth is a downgrade-only veto
+# PROPOSED_DEFAULT — breadth at/below this % of the universe above its 50-DMA is a
+# "negative" tape that downgrades a Genius GREEN to YELLOW. Set to the existing
+# green breadth floor so a GREEN vote still needs a confirming (>=60%) breadth.
+BREADTH_VETO_MIN_PCT = REGIME_BREADTH_GREEN
+VIX_VETO_THRESHOLD = 25        # PROPOSED_DEFAULT — VIX above this downgrades GREEN -> YELLOW (no RED veto)
+# Days of daily regime history retained in DATA_DIR/regime_history.json (derived
+# telemetry, recomputable from cached bars — backfilled, never an execution).
+REGIME_HISTORY_DAYS = 400      # PROPOSED_DEFAULT — ~1.5 trading years of daily regime records
 
 # ---- Sector gate (Level 2) -------------------------------------------------
 SECTOR_RS3M_MIN = 10.0         # sector RS3M vs SPY must clear +10%
@@ -288,6 +332,23 @@ STRIKE_TABLE = {
 }
 STRIKE_POSTURES = ("aggressive", "conservative")
 DEFAULT_STRIKE_POSTURE = "conservative"  # PROPOSED_DEFAULT until the operator picks
+
+# HARD_CFM_RULE — Travis's documented short-strike depth policy keyed to the
+# published market regime: 1.5x ATR distance in a GREEN tape, 2.0x ATR in YELLOW,
+# and RED blocks new entries (the Level 1 regime gate, unchanged). These are the
+# canonical multiples the strategy is documented against.
+#
+# SCOPED FOLLOW-UP (not applied here): the live STRIKE_TABLE above encodes a
+# DIFFERENT, internally-consistent scheme (shallower-when-safe -> deeper-when-
+# dangerous: conservative green 0.5x, yellow 1.0x, red 1.5x) that predates this
+# policy and drives the already-open-position defend/roll-down selector across
+# BOTH postures. Reconciling the table to these multiples changes calibrated
+# strategy numbers for aggressive + RED defend rows too, so it is deliberately
+# left for a separate, reviewable change (see CHANGELOG "strike-policy follow-up").
+# The regime plumbing is already correct: strike_policy.suggest_strike() consumes
+# screening.regime()["status"], which is now the dwell-adjusted PUBLISHED regime.
+STRIKE_ATR_MULT_GREEN = 1.5    # HARD_CFM_RULE — documented GREEN short-strike ATR distance
+STRIKE_ATR_MULT_YELLOW = 2.0   # HARD_CFM_RULE — documented YELLOW short-strike ATR distance
 LEAP_ROLL_DTE = 30           # (legacy, unused) superseded by LEAP_ROLL_DTE_FLOOR
                               # in the LEAP capital-preservation section below
 ROLL_MAX_DTE = 45            # short-roll picker offers expirations out to this DTE
@@ -670,7 +731,11 @@ JUICE_RICH_FACTOR = 1.75
 # HARD_CFM_RULE — the snapshot schema is versioned from day one, INDEPENDENT of
 # the state.json schema_version, so the snapshot shape can evolve on its own
 # cadence and old snapshots stay readable by their own version tag.
-SNAPSHOT_SCHEMA_VERSION = 1
+# v2: the regime section carries the full Genius four-light decision trace
+# (lights, raw vote, dwell state, veto inputs/flags, published regime) in
+# ADDITION to the legacy status/breadth/vix/spy fields. Older v1 snapshots stay
+# valid — the new fields are purely additive.
+SNAPSHOT_SCHEMA_VERSION = 2
 
 # HARD_CFM_RULE — a trade must NEVER be blocked or delayed because telemetry
 # capture failed. Snapshot capture is best-effort and wrapped so any failure

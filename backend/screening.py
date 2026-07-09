@@ -6,11 +6,13 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 
 import config
 import data_handler
 import indicators
+import regime_genius
+import regime_history
 import sector_data
 
 # Short-TTL memoization so the expensive full-universe scans run once and are
@@ -188,24 +190,30 @@ def _compute_regime() -> dict:
         vix_source = "daily" if vix is not None else None
     vix_error = None if vix is not None else data_handler.last_error(config.VIX_SYMBOL)
 
-    spy_df = data_handler.get_daily(config.BENCHMARK)
+    spy_df = data_handler.get_daily(config.GENIUS_INDEX_SYMBOL)
     spy_dist = indicators.pct_from_ma(spy_df) if spy_df is not None else None
     spy_trend = "up" if (spy_dist or 0) > 0 else "down" if spy_dist is not None else "unknown"
 
-    status = "yellow"
-    if breadth is not None and vix is not None:
-        green = breadth >= config.REGIME_BREADTH_GREEN and vix < config.VIX_CALM and spy_trend == "up"
-        red = breadth <= config.REGIME_BREADTH_RED or vix > config.VIX_ELEVATED
-        status = "green" if green else "red" if red else "yellow"
-    return {
-        "status": status,
-        "breadth": breadth,
-        "vix": round(vix, 2) if vix is not None else None,
+    # Genius four-light regime + yellow dwell + breadth/VIX vetoes. compute_trace
+    # is pure; the dwell reads the chronological prior PUBLISHED regimes from the
+    # daily history, excluding any record already stored for today (so today's own
+    # nightly-persisted record can't double-count in its own dwell).
+    vix_disp = round(vix, 2) if vix is not None else None
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    prior_published = regime_history.prior_published(before=today)
+    trace = regime_genius.compute_trace(spy_df, breadth, vix_disp, prior_published)
+
+    # Merge the legacy fields the existing UI / entry gate / snapshot already read
+    # (status is the published regime; breadth/vix are also the veto inputs). The
+    # shape stays backward-compatible — the four-light trace is purely additive.
+    trace.update({
+        "vix": vix_disp,
         "vix_source": vix_source,
         "vix_error": vix_error,
         "spy_trend": spy_trend,
         "spy_dist_ma21": spy_dist,
-    }
+    })
+    return trace
 
 
 # ---------------------------------------------------------------------------
@@ -359,17 +367,39 @@ def entry_gate(ticker: str) -> dict:
     sector_etf = sector_data.sector_for(ticker)
     levels = []
 
-    # Level 1 — market regime. Each sub-condition is shown independently so a
-    # fail is never ambiguous about *which* leg missed.
+    # Level 1 — market regime. Now the Genius four-light regime: Level 1 passes iff
+    # the dwell-adjusted, veto-composed PUBLISHED regime is green. The four lights
+    # and the (downgrade-only) breadth/VIX vetoes are shown as informative
+    # sub-checks — note the level does NOT require all four lights green (a green
+    # vote is >=3 of 4), so the level's pass is the published regime itself, not
+    # _all(checks). `detail` carries the full trace for the entry-context snapshot.
     reg = regime()
+    lights = reg.get("lights") or {}
+    vetoes = reg.get("vetoes") or {}
+
+    def _light_check(label: str, key: str) -> dict:
+        sig = (lights.get(key) or {}).get("signal")
+        return _check(label, sig, sig == "green")
+
     l1_checks = [
-        _check(f"Breadth ≥ {config.REGIME_BREADTH_GREEN:g}%", reg.get("breadth"),
-               reg.get("breadth") is not None and reg["breadth"] >= config.REGIME_BREADTH_GREEN),
-        _check(f"VIX < {config.VIX_CALM:g}", reg.get("vix"),
-               reg.get("vix") is not None and reg["vix"] < config.VIX_CALM),
-        _check("SPY trend up", reg.get("spy_trend"), reg.get("spy_trend") == "up"),
+        _light_check(f"Close > {config.GENIUS_SLOW_MA} SMA", "close_vs_ma"),
+        _light_check(f"EMA{config.GENIUS_FAST_MA} > SMA{config.GENIUS_SLOW_MA}", "fast_vs_slow"),
+        _light_check("Parabolic SAR below price", "sar"),
+        _light_check(f"ROC({config.GENIUS_MOMENTUM_ROC}) > 0", "momentum"),
     ]
-    levels.append({"level": 1, "name": "Market regime green", "pass": _all(l1_checks),
+    bveto = vetoes.get("breadth") or {}
+    if bveto.get("input") is not None:
+        l1_checks.append(_check(f"Breadth ≥ {bveto.get('threshold'):g}% (veto)",
+                                bveto.get("input"), not bveto.get("fired")))
+    vveto = vetoes.get("vix") or {}
+    if vveto.get("input") is not None:
+        l1_checks.append(_check(f"VIX ≤ {vveto.get('threshold'):g} (veto)",
+                                vveto.get("input"), not vveto.get("fired")))
+
+    # `published_regime` is the app-facing regime; fall back to the legacy `status`
+    # so callers/tests that stub regime() with just {"status": ...} still gate.
+    regime_green = (reg.get("published_regime") or reg.get("status")) == "green"
+    levels.append({"level": 1, "name": "Market regime green", "pass": regime_green,
                    "checks": l1_checks, "detail": reg})
 
     # Level 2 — sector strong
@@ -389,7 +419,7 @@ def entry_gate(ticker: str) -> dict:
     sector_rs = indicators.rs3m(sector_df, spy) if sector_df is not None else None
     # Pass the regime/sector verdicts so the row's status matches this gate's.
     row = _stock_row(ticker, spy, sector_rs, sector_etf or "",
-                     regime_green=_all(l1_checks), sector_strong=_all(l2_checks))
+                     regime_green=regime_green, sector_strong=_all(l2_checks))
 
     # The two legs are checked separately: "beats SPY" and "beats its sector"
     # are distinct conditions, so the UI can show exactly which one failed. The

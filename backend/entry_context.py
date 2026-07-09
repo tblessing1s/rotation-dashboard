@@ -221,6 +221,9 @@ def _gate_levels(gate: dict | None) -> dict | None:
 
 def _regime_section(gate: dict | None, track, reason: str) -> dict:
     d = _level_detail(gate, 1)
+    # v1 fields (unchanged, still tracked for data-quality) + the full Genius
+    # four-light decision trace added in SNAPSHOT_SCHEMA_VERSION 2. All new fields
+    # are additive: a v1 snapshot simply lacks them and still loads.
     return {
         "status": track("regime.status", d.get("status"), reason),
         "breadth": track("regime.breadth", d.get("breadth"), reason),
@@ -228,6 +231,14 @@ def _regime_section(gate: dict | None, track, reason: str) -> dict:
         "vix_source": d.get("vix_source"),
         "spy_trend": d.get("spy_trend"),
         "spy_dist_ma21": d.get("spy_dist_ma21"),
+        # --- Genius four-light decision trace (v2) ---
+        "published_regime": d.get("published_regime"),
+        "raw_condition": d.get("raw_condition"),
+        "dwell_regime": d.get("dwell_regime"),
+        "lights": d.get("lights"),
+        "vote": d.get("vote"),
+        "dwell": d.get("dwell"),
+        "vetoes": d.get("vetoes"),
     }
 
 

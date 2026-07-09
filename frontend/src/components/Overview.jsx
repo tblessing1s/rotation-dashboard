@@ -110,6 +110,66 @@ function ActionItems({ items }) {
   );
 }
 
+// The four Genius lights, in vote order, with a short label each.
+const LIGHT_ORDER = ["close_vs_ma", "fast_vs_slow", "sar", "momentum"];
+const LIGHT_LABELS = {
+  close_vs_ma: "Close > MA",
+  fast_vs_slow: "Fast > Slow",
+  sar: "SAR",
+  momentum: "Momentum",
+};
+
+// Read-only display of the four lights + the raw vote that produced the regime.
+function FourLights({ lights, rawCondition, greenCount }) {
+  if (!lights) return null;
+  return (
+    <div className="mt-4">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-400">Four lights</span>
+        {rawCondition != null && (
+          <span className="text-xs text-slate-400">
+            raw vote <span className="font-semibold text-slate-200">{rawCondition.toUpperCase()}</span>
+            {greenCount != null ? ` (${greenCount}/4)` : ""}
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-4 gap-2">
+        {LIGHT_ORDER.map((k) => (
+          <div key={k} className="flex flex-col items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-2">
+            <Light status={lights[k]?.signal || "unknown"} size="h-4 w-4" />
+            <span className="text-center text-[10px] leading-tight text-slate-400">{LIGHT_LABELS[k]}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// The dwell hold + downgrade-only veto flags — why the published regime differs
+// from the raw vote. Renders nothing when neither is in play.
+function RegimeDetail({ r }) {
+  const d = r.dwell || {};
+  const v = r.vetoes || {};
+  const dwellText =
+    r.published_regime === "yellow" && d.dwell_min
+      ? `YELLOW — day ${d.dwell_day} of ${d.dwell_min} minimum${
+          d.held_by_dwell ? ` (raw ${(d.raw_condition || "").toUpperCase()} held)` : ""
+        }`
+      : null;
+  const vetoes = [];
+  if (v.breadth?.fired) vetoes.push(`Breadth veto ↓ (${fmt(v.breadth.input, 0)}% < ${v.breadth.threshold}%)`);
+  if (v.vix?.fired) vetoes.push(`VIX veto ↓ (${fmt(v.vix.input, 1)} > ${v.vix.threshold})`);
+  if (!dwellText && vetoes.length === 0) return null;
+  return (
+    <div className="mt-3 space-y-1">
+      {dwellText && <div className="text-xs text-amber-300">⏳ {dwellText}</div>}
+      {vetoes.map((t, i) => (
+        <div key={i} className="text-xs text-sky-300">▼ {t}</div>
+      ))}
+    </div>
+  );
+}
+
 function RegimeHero({ regime }) {
   const r = regime || {};
   return (
@@ -126,6 +186,8 @@ function RegimeHero({ regime }) {
         <Stat label="VIX" value={fmt(r.vix, 1)} tone={r.vix == null ? "text-slate-500" : "text-slate-100"} />
         <Stat label="SPY" value={(r.spy_trend || "—").toUpperCase()} sub={`MA21 ${fmt(r.spy_dist_ma21, 1)}%`} />
       </div>
+      <FourLights lights={r.lights} rawCondition={r.raw_condition} greenCount={r.vote?.green_count} />
+      <RegimeDetail r={r} />
     </Card>
   );
 }
