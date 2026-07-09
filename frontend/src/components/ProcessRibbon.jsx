@@ -280,12 +280,12 @@ function WeatherBanner({ regime, onClick }) {
   const w = WEATHER[status] || WEATHER.unknown;
   const bits = [];
   // Show the raw four-light vote when it differs from the published regime, so the
-  // weather tooltip explains a dwell/veto hold instead of looking inconsistent.
+  // weather tooltip explains a dwell hold instead of looking inconsistent.
   if (regime?.raw_condition && regime.raw_condition !== status) {
     bits.push(`raw vote ${regime.raw_condition}`);
   }
-  // Only a dwell-driven yellow (dwell_day > 0) shows a dwell countdown; a
-  // veto-driven yellow is explained by the regime detail card, not here.
+  // A yellow only ever comes from the vote/dwell now, so dwell_day > 0 whenever
+  // yellow; breadth/VIX below are secondary context, not a cause of the light.
   const d = regime?.dwell;
   if (d?.dwell_day > 0 && d?.dwell_min) bits.push(`dwell day ${d.dwell_day}/${d.dwell_min}`);
   if (regime?.breadth != null) bits.push(`breadth ${fmt(regime.breadth, 0)}%`);

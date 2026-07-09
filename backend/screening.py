@@ -192,20 +192,21 @@ def _compute_regime() -> dict:
 
     spy_df = data_handler.get_daily(config.GENIUS_INDEX_SYMBOL)
 
-    # Genius four-light regime + yellow dwell + breadth/VIX vetoes. compute_trace
-    # is pure; the dwell reads the chronological prior PUBLISHED regimes from the
-    # daily history, excluding any record already stored for today (so today's own
-    # nightly-persisted record can't double-count in its own dwell). The regime is
-    # decided by the four lights + the breadth/VIX vetoes only — SPY's own MA21
-    # trend is no longer a regime input, so it is not computed or surfaced.
+    # Genius four-light regime + yellow dwell. compute_trace is pure; the dwell
+    # reads the chronological prior PUBLISHED regimes from the daily history,
+    # excluding any record already stored for today (so today's own nightly-
+    # persisted record can't double-count in its own dwell). The regime light is
+    # decided by the four lights + the dwell ONLY; breadth + VIX ride along as
+    # secondary informational indicators, and SPY's MA21 trend is not a regime
+    # input at all (not computed or surfaced).
     vix_disp = round(vix, 2) if vix is not None else None
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     prior_published = regime_history.prior_published(before=today)
     trace = regime_genius.compute_trace(spy_df, breadth, vix_disp, prior_published)
 
     # Merge the legacy VIX provenance fields the existing UI / snapshot read
-    # (status is the published regime; breadth/vix are also the veto inputs). The
-    # four-light trace is otherwise additive.
+    # (status is the published regime; breadth/vix are the secondary indicators).
+    # The four-light trace is otherwise additive.
     trace.update({
         "vix": vix_disp,
         "vix_source": vix_source,
@@ -365,15 +366,15 @@ def entry_gate(ticker: str) -> dict:
     sector_etf = sector_data.sector_for(ticker)
     levels = []
 
-    # Level 1 — market regime. Now the Genius four-light regime: Level 1 passes iff
-    # the dwell-adjusted, veto-composed PUBLISHED regime is green. The four lights
-    # and the (downgrade-only) breadth/VIX vetoes are shown as informative
-    # sub-checks — note the level does NOT require all four lights green (a green
-    # vote is >=3 of 4), so the level's pass is the published regime itself, not
-    # _all(checks). `detail` carries the full trace for the entry-context snapshot.
+    # Level 1 — market regime. The Genius four-light regime: Level 1 passes iff the
+    # dwell-adjusted PUBLISHED regime is green. The traffic light is decided by the
+    # four lights + the yellow dwell ONLY; breadth/VIX are secondary informational
+    # indicators (carried in `detail.secondary`), NOT gate conditions. The four
+    # lights are shown as sub-checks — the level does NOT require all four green (a
+    # green vote is >=3 of 4), so the level's pass is the published regime itself,
+    # not _all(checks). `detail` carries the full trace for the snapshot.
     reg = regime()
     lights = reg.get("lights") or {}
-    vetoes = reg.get("vetoes") or {}
 
     def _light_check(label: str, key: str) -> dict:
         sig = (lights.get(key) or {}).get("signal")
@@ -385,14 +386,6 @@ def entry_gate(ticker: str) -> dict:
         _light_check("Parabolic SAR below price", "sar"),
         _light_check(f"ROC({config.GENIUS_MOMENTUM_ROC}) > 0", "momentum"),
     ]
-    bveto = vetoes.get("breadth") or {}
-    if bveto.get("input") is not None:
-        l1_checks.append(_check(f"Breadth ≥ {bveto.get('threshold'):g}% (veto)",
-                                bveto.get("input"), not bveto.get("fired")))
-    vveto = vetoes.get("vix") or {}
-    if vveto.get("input") is not None:
-        l1_checks.append(_check(f"VIX ≤ {vveto.get('threshold'):g} (veto)",
-                                vveto.get("input"), not vveto.get("fired")))
 
     # `published_regime` is the app-facing regime; fall back to the legacy `status`
     # so callers/tests that stub regime() with just {"status": ...} still gate.

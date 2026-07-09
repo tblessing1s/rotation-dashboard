@@ -15,10 +15,10 @@ Dwell (HARD_CFM_RULE): once the *published* regime becomes YELLOW it stays YELLO
 for a minimum of ``GENIUS_YELLOW_DWELL_DAYS`` consecutive TRADING days (the entry
 day counts as day 1), regardless of the raw vote — the course's anti-flap rule.
 
-Vetoes (HARD_CFM_RULE, worst-signal-wins): the Genius (dwell-adjusted) regime is
-composed with the existing breadth + VIX signals as DOWNGRADE-ONLY vetoes. A veto
-can turn GREEN -> YELLOW, never the reverse — conflicting signals must never
-coexist with a GO.
+Secondary indicators: breadth and VIX are SECONDARY, informational confirmation
+signals only. They are reported alongside the regime (whether they confirm or
+diverge from a green tape) for the operator's own read, but they do NOT change
+the traffic light — the four lights and the dwell decide it on their own.
 
 This module does NO I/O and reads NO clock: bars, the prior published series, the
 breadth/VIX scalars, and any timestamp are all passed in. Every indicator
@@ -53,9 +53,8 @@ def default_params() -> dict:
         "roc_window": config.GENIUS_MOMENTUM_ROC,
         "vote_green_min": config.GENIUS_VOTE_GREEN_MIN,
         "dwell_days": config.GENIUS_YELLOW_DWELL_DAYS,
-        "breadth_veto_enabled": config.BREADTH_VETO_ENABLED,
-        "breadth_veto_min_pct": config.BREADTH_VETO_MIN_PCT,
-        "vix_veto_threshold": config.VIX_VETO_THRESHOLD,
+        "breadth_confirm_min": config.BREADTH_CONFIRM_MIN_PCT,
+        "vix_elevated": config.VIX_ELEVATED_THRESHOLD,
     }
 
 
@@ -214,35 +213,29 @@ def apply_dwell(raw_today: str, prior_published: list[str],
 
 
 # ---------------------------------------------------------------------------
-# Vetoes (HARD_CFM_RULE) — breadth + VIX, downgrade-only
+# Secondary indicators (breadth + VIX) — INFORMATIONAL ONLY, never change the light
 # ---------------------------------------------------------------------------
-def apply_vetoes(regime: str, breadth: float | None, vix: float | None,
-                 params: dict | None = None) -> dict:
-    """Compose the (dwell-adjusted) Genius regime with the breadth + VIX signals
-    as DOWNGRADE-ONLY vetoes. A veto only ever acts on a GREEN regime, turning it
-    YELLOW; it can never upgrade. Returns the final regime plus the full veto
-    trace (each veto's input value, threshold, and whether it fired)."""
+def secondary_indicators(breadth: float | None, vix: float | None,
+                         params: dict | None = None) -> dict:
+    """Breadth + VIX as SECONDARY confirmation indicators. These do NOT determine
+    the regime traffic light (only the four lights + the yellow dwell do) — they
+    are reported alongside it for the operator's own read. Each carries its value,
+    its reference level, and whether it is diverging from / confirming a green
+    tape. Purely informational: nothing here changes the published regime."""
     p = _params(params)
-    breadth_fires = bool(
-        p["breadth_veto_enabled"] and regime == GREEN
-        and breadth is not None and breadth < p["breadth_veto_min_pct"])
-    vix_fires = bool(
-        regime == GREEN and vix is not None and vix > p["vix_veto_threshold"])
-
-    final = YELLOW if (regime == GREEN and (breadth_fires or vix_fires)) else regime
+    breadth_diverging = bool(breadth is not None and breadth < p["breadth_confirm_min"])
+    vix_elevated = bool(vix is not None and vix > p["vix_elevated"])
     return {
-        "regime": final,
+        "note": "informational — breadth/VIX do not change the regime light",
         "breadth": {
-            "enabled": bool(p["breadth_veto_enabled"]),
-            "input": breadth,
-            "threshold": p["breadth_veto_min_pct"],
-            "fired": breadth_fires,
+            "value": breadth,
+            "confirm_min": p["breadth_confirm_min"],
+            "diverging": breadth_diverging,
         },
         "vix": {
-            "enabled": True,
-            "input": vix,
-            "threshold": p["vix_veto_threshold"],
-            "fired": vix_fires,
+            "value": vix,
+            "elevated_above": p["vix_elevated"],
+            "elevated": vix_elevated,
         },
     }
 
@@ -253,27 +246,29 @@ def apply_vetoes(regime: str, breadth: float | None, vix: float | None,
 def compute_trace(df, breadth: float | None, vix: float | None,
                   prior_published: list[str], params: dict | None = None) -> dict:
     """The complete, pure regime decision for one day: lights -> raw vote ->
-    dwell -> vetoes -> published regime, with every intermediate recorded so
-    calibration and the entry-context snapshot capture full provenance.
+    dwell -> published regime, with every intermediate recorded so calibration and
+    the entry-context snapshot capture full provenance. Breadth + VIX ride along
+    as SECONDARY informational indicators — they never change the published regime.
 
     ``prior_published`` — chronological prior *published* regimes (oldest first).
-    Returns a dict whose ``published_regime`` is the final app-facing regime and
-    whose ``status`` mirrors it for backward compatibility with existing consumers.
+    Returns a dict whose ``published_regime`` is the app-facing regime (four lights
+    + dwell) and whose ``status`` mirrors it for backward compatibility.
     """
     p = _params(params)
     lights = compute_lights(df, p)
     v = vote(lights, p)
     dwell = apply_dwell(v["raw_condition"], prior_published, p)
-    vetoes = apply_vetoes(dwell["regime"], breadth, vix, p)
+    secondary = secondary_indicators(breadth, vix, p)
+    published = dwell["regime"]                 # the light: four lights + dwell only
     return {
-        "status": vetoes["regime"],            # backward-compat: the app-facing regime
-        "published_regime": vetoes["regime"],  # after dwell + vetoes (final)
-        "dwell_regime": dwell["regime"],       # after dwell, before vetoes
-        "raw_condition": v["raw_condition"],   # today's raw vote
+        "status": published,                    # backward-compat: the app-facing regime
+        "published_regime": published,          # four lights + yellow dwell (the light)
+        "dwell_regime": dwell["regime"],        # == published (kept for compatibility)
+        "raw_condition": v["raw_condition"],    # today's raw vote
         "lights": lights,
         "vote": v,
         "dwell": dwell,
-        "vetoes": vetoes,
+        "secondary": secondary,                 # breadth + VIX (informational only)
         "breadth": breadth,
         "vix": vix,
     }

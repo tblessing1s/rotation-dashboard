@@ -236,7 +236,7 @@ def _regime_section(gate: dict | None, track, reason: str) -> dict:
         "lights": d.get("lights"),
         "vote": d.get("vote"),
         "dwell": d.get("dwell"),
-        "vetoes": d.get("vetoes"),
+        "secondary": d.get("secondary"),   # breadth + VIX (informational only)
     }
 
 

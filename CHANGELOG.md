@@ -1,13 +1,15 @@
 # Changelog
 
-## Genius four-light market regime (dwell + vetoes)
+## Genius four-light market regime (dwell + secondary indicators)
 
 The market regime (**GREEN / YELLOW / RED**, Level 1 of the entry gate) is no
 longer a single breadth + VIX rule. It is now the CFM course's **Genius System**:
-four binary indicator "lights" on SPY daily bars, voted to a condition, held
-against flapping by a **yellow dwell**, and composed with breadth + VIX as
-**downgrade-only vetoes**. The old breadth/VIX computation is not deleted — it is
-recomposed as the vetoes.
+four binary indicator "lights" on SPY daily bars, voted to a condition and held
+against flapping by a **yellow dwell**. The traffic light is decided by the four
+lights + the dwell **only**; breadth and VIX are kept as **secondary,
+informational indicators** shown alongside the regime for the operator's own read
+(they no longer change the light), and SPY's MA21 up/down trend is dropped
+entirely.
 
 ### What changed
 
@@ -16,8 +18,8 @@ recomposed as the vetoes.
   1. close vs slow MA, 2. fast MA vs slow MA, 3. Parabolic SAR vs close,
   4. momentum (ROC) vs zero. **Vote** (`HARD_CFM_RULE`): ≥3 GREEN → GREEN, 2/2 →
   YELLOW, ≥3 RED → RED. Every intermediate is returned as a **decision trace**
-  (each light + its values, the raw vote, the dwell state, each veto's input and
-  fired flag, and the final regime).
+  (each light + its values, the raw vote, the dwell state, the secondary
+  breadth/VIX indicators, and the published regime).
 - **New indicators** (`backend/indicators.py`): `ema`, `roc`, and a from-scratch
   **Wilder `parabolic_sar`** (no TA library) — unit-tested against a
   hand-computed fixture.
@@ -26,11 +28,12 @@ recomposed as the vetoes.
   days (the bar/record sequence, not calendar days) regardless of the raw vote —
   the course's anti-flap rule. Every day records both **`raw_condition`** (today's
   vote) and **`published_regime`** (after the dwell) so calibration sees both.
-- **Vetoes** (worst-signal-wins, `HARD_CFM_RULE`): breadth and VIX are
-  **downgrade-only** — a veto can turn GREEN → YELLOW, never the reverse. Breadth
-  below `BREADTH_VETO_MIN_PCT` (the green breadth floor) or VIX above
-  `VIX_VETO_THRESHOLD = 25` downgrades a GREEN vote. Conflicting signals can never
-  coexist with a GO.
+- **Secondary indicators**: breadth and VIX are **informational only** — they do
+  **not** determine the traffic light. Each is reported with its value, a
+  reference level (`BREADTH_CONFIRM_MIN_PCT`, `VIX_ELEVATED_THRESHOLD = 25`), and
+  a confirming/diverging flag, purely as extra context the operator can weigh.
+  (This replaces the earlier downgrade-only veto design per operator direction —
+  breadth/VIX must not set the light.)
 - **Published vs raw**: the entry gate (Level 1) and the regime-change alert
   consume only the **published** regime; raw four-light flaps never reach them.
 - **Persistence** (`backend/regime_history.py`, `DATA_DIR/regime_history.json`):
@@ -53,13 +56,15 @@ recomposed as the vetoes.
   indicator *types* and the vote/dwell logic (`HARD_CFM_RULE`); the parameters
   (MA lengths 50/21, SAR 0.02/0.20, ROC(10)) are `PROPOSED_DEFAULT`.
 - **Frontend** (read-only): the Overview `RegimeHero` shows the four lights, the
-  raw vote, the dwell status ("YELLOW — day 2 of 3 minimum"), and any fired veto;
-  the ribbon weather tooltip surfaces the raw vote and dwell day when they differ
-  from the published regime.
+  raw vote, the dwell status ("YELLOW — day 2 of 3 minimum"), and — neutrally, as
+  secondary context — any diverging breadth / elevated VIX; the SPY stat is
+  removed. The ribbon weather tooltip surfaces the raw vote and dwell day when
+  they differ from the published regime.
 - **Tests**: per-light units, the hand-computed SAR fixture, all 16 vote
   combinations, the dwell edge cases (hold-through-day-3, day-4 release, re-yellow
-  inside the window, raw-crash held, cold start), the vetoes (never upgrade), and
-  **labeled synthetic parquet regression fixtures** (`backend/fixtures/regime/`):
+  inside the window, raw-crash held, cold start), that breadth/VIX are secondary
+  (never change the light), and **labeled synthetic parquet regression fixtures**
+  (`backend/fixtures/regime/`):
   a sustained confirmed-green hold, a distribution rollover degrading
   GREEN→YELLOW→RED in order, and a boundary whipsaw whose 1-day raw-green blip the
   dwell absorbs.
@@ -79,7 +84,7 @@ The documented multiples are now present as `HARD_CFM_RULE` constants
 `STRIKE_TABLE` to them changes calibrated numbers for **both** postures and the
 RED defend/roll-down rows, so it is deliberately left as a **separate, reviewable
 change** rather than bundled into this regime work. No strike behaviour changed
-here beyond the regime feeding it now being the published (dwell + veto) regime.
+here beyond the regime feeding it now being the published (dwell-adjusted) regime.
 
 ## Weekly theta burn & net-juice accounting
 

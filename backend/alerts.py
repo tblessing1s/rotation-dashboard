@@ -772,11 +772,11 @@ _REGIME_MSG = {
 
 
 def check_regime_change(state: dict) -> list[dict]:
-    """Fire once when the PUBLISHED (dwell-adjusted, veto-composed) market regime
-    transitions vs the last persisted trading day. Reads only the published
-    regime, so raw four-light flaps that the yellow dwell suppresses never fire.
-    Keyed on the transition so each distinct change dedups to a single alert and a
-    later identical transition can fire again once the prior one has resolved."""
+    """Fire once when the PUBLISHED (dwell-adjusted) market regime transitions vs
+    the last persisted trading day. Reads only the published regime, so raw
+    four-light flaps that the yellow dwell suppresses never fire. Keyed on the
+    transition so each distinct change dedups to a single alert and a later
+    identical transition can fire again once the prior one has resolved."""
     try:
         import regime_history
         import screening
@@ -800,8 +800,8 @@ def check_regime_change(state: dict) -> list[dict]:
         "Re-check entry posture on the Overview tab.",
         {"from": prev, "to": cur, "raw_condition": reg.get("raw_condition"),
          "lights": {k: (v or {}).get("signal") for k, v in (reg.get("lights") or {}).items()},
-         "vetoes": {"breadth": (reg.get("vetoes") or {}).get("breadth", {}).get("fired"),
-                    "vix": (reg.get("vetoes") or {}).get("vix", {}).get("fired")}},
+         "secondary": {"breadth_diverging": (reg.get("secondary") or {}).get("breadth", {}).get("diverging"),
+                       "vix_elevated": (reg.get("secondary") or {}).get("vix", {}).get("elevated")}},
         key=f"{prev}->{cur}")]
 
 
