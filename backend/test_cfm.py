@@ -735,7 +735,9 @@ def test_cancel_not_confirmed_keeps_pending_and_reports_pending_cancel(monkeypat
                       "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
                       "expiration": "2026-07-10"})
 
-    # Broker acknowledges the cancel but leaves the order WORKING (async, unconfirmed).
+    # Broker acknowledges every cancel but never actually cancels (order stays
+    # WORKING). We re-assert, but with no terminal confirmation we must NOT claim
+    # it canceled or drop the record.
     ack = []
     def ack_only(account_hash, order_id):
         ack.append((account_hash, order_id))
@@ -746,9 +748,36 @@ def test_cancel_not_confirmed_keeps_pending_and_reports_pending_cancel(monkeypat
 
     out = executor.cancel_order("ORD1")
     assert out["status"] == "pending_cancel"
-    assert ack == [("HASH", "ORD1")]  # we DID ask the broker to cancel
+    assert ack and ack[0] == ("HASH", "ORD1")  # we DID ask the broker to cancel
     state = log.load_state()
     assert "ORD1" in state["pending_orders"]  # record kept — order may still be live
+
+
+def test_cancel_reasserts_until_broker_confirms(monkeypatch, tmp_path):
+    # Schwab can 200-acknowledge a cancel yet silently drop it (order issued while
+    # still activating), leaving it WORKING. cancel_order must re-assert the cancel
+    # and keep verifying until the broker actually reports a terminal state.
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+
+    executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                      "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                      "expiration": "2026-07-10"})
+
+    attempts = []
+    def cancel_takes_on_second_try(account_hash, order_id):
+        attempts.append(order_id)
+        if len(attempts) >= 2:
+            fake._status = "CANCELED"  # the re-asserted cancel finally takes
+        return {"canceled": True}
+    fake.cancel_order = cancel_takes_on_second_try
+    monkeypatch.setattr(executor, "CANCEL_CONFIRM_POLL_S", 0.05)
+
+    out = executor.cancel_order("ORD1")
+    assert out["status"] == "canceled"
+    assert len(attempts) >= 2  # first cancel didn't take — we re-asserted
+    state = log.load_state()
+    assert "ORD1" not in state["pending_orders"]
 
 
 def test_cancel_confirms_a_fill_that_lands_during_confirmation(monkeypatch, tmp_path):

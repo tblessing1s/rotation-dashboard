@@ -767,39 +767,61 @@ def cancel_order(order_id: str) -> dict:
 
     # Still working — ask the broker to cancel. A broker failure propagates so the
     # caller knows the order is still live. On success the DELETE only means the
-    # request was accepted, so confirm the order actually goes terminal.
+    # request was ACCEPTED (HTTP 200/204), not that the order is gone: Schwab
+    # returns 200 even for a cancel it silently drops (e.g. one issued while the
+    # order is still activating/routing). So confirm it actually goes terminal,
+    # re-asserting the cancel until it does.
+    log.logger.info("cancel %s: requesting (status was %s)", order_id, raw or "unknown")
     client.cancel_order(rec["account_hash"], order_id)
     return _confirm_cancel(client, rec, order_id)
 
 
 def _confirm_cancel(client, rec: dict, order_id: str) -> dict:
     """Confirm a just-issued cancel actually took at the broker before dropping
-    the pending record. Schwab cancels asynchronously, so poll the order until it
-    reaches a terminal state, fills (settle it), or the window closes.
+    the pending record. A Schwab cancel is asynchronous and can be silently
+    dropped (200 acknowledged, order still working) when issued before the order
+    is live at the exchange. So we poll the order and, while it is still in a live
+    (non-terminal, non-FILLED) state, RE-ASSERT the cancel until Schwab reports a
+    terminal state or the order fills.
 
-    If it hasn't gone terminal within the window it may be PENDING_CANCEL or still
-    WORKING (and could yet fill) — keep the pending record and report
-    ``pending_cancel`` so the operator is told the order may still be live rather
-    than shown a cancel ToS won't reflect."""
+    On a terminal state the pending record is dropped and we report canceled/
+    rejected; on a fill we settle it. If the window closes with the order still
+    live, keep the pending record and report ``pending_cancel`` so the operator is
+    told the order may still be working rather than shown a cancel ToS won't
+    reflect."""
     deadline = time.monotonic() + CANCEL_CONFIRM_TIMEOUT_S
     raw = ""
     while time.monotonic() < deadline:
         time.sleep(CANCEL_CONFIRM_POLL_S)
         try:
             raw = (client.get_order(rec["account_hash"], order_id).get("status") or "").upper()
-        except Exception:  # noqa: BLE001 — transient; keep polling until the deadline
+        except Exception as e:  # noqa: BLE001 — transient; keep polling until the deadline
+            log.logger.warning("cancel %s: status poll failed: %s", order_id, e)
             continue
         if raw == "FILLED":
             # It filled before the cancel took hold — settle the fill, don't lose it.
+            log.logger.info("cancel %s: order filled during confirmation — settling", order_id)
             return order_status(order_id)
         if raw in _TERMINAL_STATUSES:
             log.pop_pending_order(order_id)
+            log.logger.info("cancel %s: confirmed terminal (%s)", order_id, raw)
             return {"order_id": order_id,
                     "status": "rejected" if raw == "REJECTED" else "canceled",
                     "raw_status": raw}
+        # Still live (WORKING / PENDING_ACTIVATION / QUEUED / AWAITING_*). If Schwab
+        # is already processing the cancel (PENDING_CANCEL) just wait; otherwise the
+        # prior cancel didn't take, so re-assert it.
+        if raw != "PENDING_CANCEL":
+            try:
+                client.cancel_order(rec["account_hash"], order_id)
+                log.logger.info("cancel %s: re-asserted (status was %s)", order_id, raw or "unknown")
+            except Exception as e:  # noqa: BLE001 — re-cancel is best-effort; keep verifying
+                log.logger.warning("cancel %s: re-assert failed: %s", order_id, e)
 
-    # Accepted but not yet terminal — the order may still be working at Schwab.
-    # Keep the pending record (never popped above) and say so plainly.
+    # Window closed with the order still live — do NOT claim it canceled.
+    log.logger.warning(
+        "cancel %s: NOT confirmed terminal after %.1fs (last status %s) — order may still be working",
+        order_id, CANCEL_CONFIRM_TIMEOUT_S, raw or "unknown")
     return {"order_id": order_id, "status": "pending_cancel", "raw_status": raw or "PENDING_CANCEL"}
 
 
