@@ -84,6 +84,13 @@ export default function BurnPanel({ ticker, health }) {
   const net = health.net_juice_per_week;
   const cov = health.coverage || {};
   const proj = health.burn_projection || {};
+  // Take-home over the planned hold: projected juice across the remaining weeks
+  // minus the model extrinsic burn to the exit DTE. All three come off the burn
+  // projection; null when it isn't priceable (Schwab off / off-hours).
+  const weeks = proj.weeks_remaining;
+  const juiceTotal = juice != null && weeks != null ? juice * weeks : null;
+  const burnTotal = proj.projected_burn_total;
+  const takeHome = juiceTotal != null && burnTotal != null ? juiceTotal - burnTotal : null;
   const netTone = net == null ? "text-slate-400" : net >= 0 ? "text-emerald-300" : "text-rose-300";
   const covTone = COV_TONE[cov.status] || COV_TONE.unknown;
   const covPct = cov.ratio != null ? Math.min(100, (cov.ratio / (cov.healthy || 3)) * 100) : 0;
@@ -125,6 +132,33 @@ export default function BurnPanel({ ticker, health }) {
                     tone="text-rose-300" sub={proj.exit_slippage_est != null ? `incl. ${money(proj.exit_slippage_est)} exit slip` : null} />
         <MetricCard label="Net / wk" value={net == null ? "—" : `${net >= 0 ? "+" : ""}${money(net)}`} tone={netTone} />
       </div>
+
+      {takeHome != null && (
+        <div className="mt-3 rounded-lg border border-slate-800 bg-slate-900/40 p-2.5">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[11px] uppercase tracking-wide text-slate-500">
+              Take-home over the hold{proj.planned_exit_dte != null ? ` — to ${proj.planned_exit_dte} DTE` : ""}
+            </span>
+            <span className="text-[11px] text-slate-500">~{fmt(weeks, 0)} wk left</span>
+          </div>
+          <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-sm">
+            <span className="font-semibold text-emerald-300">+{money(juiceTotal)}</span>
+            <span className="text-xs text-slate-500">juice</span>
+            <span className="text-slate-600">−</span>
+            <span className="font-semibold text-rose-300">{money(burnTotal)}</span>
+            <span className="text-xs text-slate-500">burn</span>
+            <span className="text-slate-600">=</span>
+            <span className={`text-base font-semibold ${takeHome >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+              {takeHome >= 0 ? "+" : "−"}{money(Math.abs(takeHome))}
+            </span>
+            <span className="text-xs text-slate-500">take-home</span>
+          </div>
+          <div className="mt-1 text-[10px] text-slate-600">
+            Projected: trailing juice × weeks left, net of the extrinsic burned to exit. The
+            extrinsic still in the LEAP at exit comes back on the sale — it isn't counted here.
+          </div>
+        </div>
+      )}
 
       <div className="mt-3">
         <div className="mb-1 flex items-center justify-between text-xs">
