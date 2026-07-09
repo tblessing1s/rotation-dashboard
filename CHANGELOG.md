@@ -41,7 +41,9 @@ records the withdrawal.
 - **Frontend**: a new **Payouts** tab (`frontend/src/components/PayoutsTab.jsx`)
   with the est-this-month / last-month cards, totals, and a monthly history table
   with inline finalize / mark-paid / undo. App gains a `?tab=…` deep link so the
-  payout push tap lands on the tab.
+  payout push tap lands on the tab. The **Overview** landing shows a compact
+  payout glance — this month's estimated payout + last month's — fed by a new
+  `payouts` section on `/api/overview` (no extra call), linking to the tab.
 - **Migration v15** seeds the additive `payouts` store; net juice stays derived,
   so no income data is copied. Covered end to end by `backend/test_payouts.py`.
 

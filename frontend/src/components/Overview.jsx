@@ -265,6 +265,71 @@ function IncomeDetail({ theta, capital, burnDiv }) {
   );
 }
 
+// Monthly income figures want cents, unlike the whole-dollar `money` helper.
+function cash(n) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
+  return Number(n).toLocaleString(undefined, {
+    style: "currency", currency: "USD",
+    minimumFractionDigits: 2, maximumFractionDigits: 2,
+  });
+}
+
+const PAYOUT_PILL = {
+  in_progress: { status: "caution", label: "In progress" },
+  finalizable: { status: "ready", label: "Ready to finalize" },
+  finalized: { status: "yellow", label: "Finalized · unpaid" },
+  paid: { status: "go", label: "Paid" },
+  none: { status: "unknown", label: "—" },
+};
+
+function payoutSub(m, isCurrent) {
+  if (!m) return undefined;
+  if (m.paid) return "paid out";
+  if (m.finalized) return "finalized · awaiting payout";
+  if (m.finalizable) return "ready to finalize";
+  if (isCurrent) return "still accruing";
+  return "no income";
+}
+
+// The monthly payout at a glance: this month's estimated payout + last month's,
+// on the landing so "what the payout is going to be" is visible without a click.
+// Full finalize/mark-paid controls live on the Payouts tab.
+function PayoutGlance({ payouts, onOpen }) {
+  const cur = payouts?.current;
+  const prev = payouts?.previous;
+  if (!cur) return null;
+  const curPill = PAYOUT_PILL[cur.status] || PAYOUT_PILL.none;
+  return (
+    <Card
+      title="Monthly payout"
+      right={
+        <button onClick={onOpen} className="text-xs text-slate-400 hover:text-slate-200">
+          Open Payouts →
+        </button>
+      }
+    >
+      <div className="grid grid-cols-2 gap-4">
+        <div className="min-w-0">
+          <div className="mb-1 flex items-center gap-2">
+            <span className="text-xs uppercase tracking-wide text-slate-500">
+              {cur.label}{cur.estimated ? " · est." : ""}
+            </span>
+            <Pill status={curPill.status}>{curPill.label}</Pill>
+          </div>
+          <div className="text-2xl font-semibold leading-tight text-emerald-300">
+            {cash(cur.payout_amount)}
+          </div>
+          <div className="text-xs text-slate-500">{payoutSub(cur, true)}</div>
+        </div>
+        {prev && (
+          <Stat label={`${prev.label} (last month)`} value={cash(prev.payout_amount)}
+                sub={payoutSub(prev, false)} />
+        )}
+      </div>
+    </Card>
+  );
+}
+
 export default function Overview({ onNavigate, onSelectStock, onAction, onRegimeStatus }) {
   // One aggregate call (see /api/overview) instead of stitching regime +
   // positions + theta + kill-switch client-side. Sections are best-effort on
@@ -365,6 +430,11 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
         <Card title="Needs attention"><ErrorState error={ov.data.positions.error} onRetry={ov.reload} /></Card>
       ) : (
         <ActionItems items={actionItems} />
+      )}
+
+      {/* This month's estimated payout at a glance → full detail on Payouts. */}
+      {!ov.data?.payouts?.error && (
+        <PayoutGlance payouts={ov.data?.payouts} onOpen={() => nav.tab("Payouts")} />
       )}
 
       {active && (
