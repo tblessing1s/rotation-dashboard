@@ -616,6 +616,9 @@ class _FakeSchwab:
         return out
     def cancel_order(self, account_hash, order_id):
         self.canceled = (account_hash, order_id)
+        # Schwab cancels asynchronously; a normal successful cancel lands the
+        # order in a terminal CANCELED state, which the confirm re-poll then sees.
+        self._status = "CANCELED"
         return {"canceled": True}
 
 
@@ -718,6 +721,59 @@ def test_cancel_failure_keeps_pending_order(monkeypatch, tmp_path):
         executor.cancel_order("ORD1")
     state = log.load_state()
     assert "ORD1" in state["pending_orders"]  # not forgotten while still live
+
+
+def test_cancel_not_confirmed_keeps_pending_and_reports_pending_cancel(monkeypatch, tmp_path):
+    # Schwab's DELETE only ACKNOWLEDGES the cancel — the order can stay WORKING
+    # (PENDING_CANCEL) and still fill. We must NOT claim it canceled or drop the
+    # pending record until the broker actually confirms a terminal state; doing
+    # so is what showed orders "cancelled" in the app while ToS still worked them.
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+
+    executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                      "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                      "expiration": "2026-07-10"})
+
+    # Broker acknowledges the cancel but leaves the order WORKING (async, unconfirmed).
+    ack = []
+    def ack_only(account_hash, order_id):
+        ack.append((account_hash, order_id))
+        return {"canceled": True}
+    fake.cancel_order = ack_only
+    monkeypatch.setattr(executor, "CANCEL_CONFIRM_TIMEOUT_S", 0.3)
+    monkeypatch.setattr(executor, "CANCEL_CONFIRM_POLL_S", 0.1)
+
+    out = executor.cancel_order("ORD1")
+    assert out["status"] == "pending_cancel"
+    assert ack == [("HASH", "ORD1")]  # we DID ask the broker to cancel
+    state = log.load_state()
+    assert "ORD1" in state["pending_orders"]  # record kept — order may still be live
+
+
+def test_cancel_confirms_a_fill_that_lands_during_confirmation(monkeypatch, tmp_path):
+    # The order can fill AFTER we issue the cancel but before it takes hold. The
+    # confirm re-poll must settle that fill rather than report it canceled.
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+
+    executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                      "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                      "expiration": "2026-07-10"})
+
+    def fills_instead(account_hash, order_id):
+        fake.canceled = (account_hash, order_id)
+        fake._status, fake._fill_price = "FILLED", 5.0  # raced us to a fill
+        return {"canceled": True}
+    fake.cancel_order = fills_instead
+    monkeypatch.setattr(executor, "CANCEL_CONFIRM_POLL_S", 0.05)
+
+    out = executor.cancel_order("ORD1")
+    assert out["status"] == "filled"
+    state = log.load_state()
+    assert "ORD1" not in state["pending_orders"]
+    pos = log.find_position(state, "ON")
+    assert len(pos["short_calls"]) == 1 and state["executions"][-1]["premium_per_share"] == 5.0
 
 
 def test_roll_short_closes_old_and_opens_new(monkeypatch, tmp_path):

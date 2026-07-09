@@ -9,6 +9,8 @@ honest paper path. Position state updates identically either way.
 """
 from __future__ import annotations
 
+import time
+
 import config
 import data_handler
 import indicators
@@ -714,21 +716,35 @@ def _capture_order_receipt(order_id, raw_status, rec, order, result) -> None:
         log.logger.error("order receipt capture failed for %s: %s", order_id, e)
 
 
+# Terminal broker states that confirm an order is truly gone (no longer working).
+_TERMINAL_STATUSES = ("CANCELED", "REJECTED", "EXPIRED")
+# Schwab's cancel is asynchronous — after the DELETE we re-poll the order for up
+# to this long to confirm it actually reached a terminal state before claiming it.
+CANCEL_CONFIRM_TIMEOUT_S = 2.5
+CANCEL_CONFIRM_POLL_S = 0.4
+
+
 def cancel_order(order_id: str) -> dict:
     """Cancel a working order at the broker and drop the pending entry.
 
     The local pending record is cleared ONLY once the order is confirmed gone at
-    the broker — either Schwab accepts the cancel or the order is already in a
-    terminal state. A cancel that fails must leave the pending record in place
-    and surface the error: dropping it would make us forget an order that is
-    still working at Schwab, and the operator's next order would then be rejected
-    for colliding with it ("an order is already running").
+    the broker — Schwab reports a terminal state (CANCELED/REJECTED/EXPIRED). A
+    cancel that fails must leave the pending record in place and surface the
+    error: dropping it would make us forget an order that is still working at
+    Schwab, and the operator's next order would then be rejected for colliding
+    with it ("an order is already running").
 
     Two lifecycle races are handled first: the order may have FILLED in the gap
     between the last poll and this cancel (cancelling a filled order fails at the
     broker), in which case it is settled as a fill rather than silently dropped;
     or it may already be canceled/rejected/expired, in which case the stale
-    pending record is simply cleared."""
+    pending record is simply cleared.
+
+    Crucially, the DELETE only ACKNOWLEDGES the cancel request — Schwab cancels
+    asynchronously (WORKING -> PENDING_CANCEL -> CANCELED) and a marketable order
+    can refuse the cancel and still fill. So we must CONFIRM the order reached a
+    terminal state before dropping the record; trusting the 2xx acknowledgment is
+    what previously reported orders "cancelled" that ToS still showed working."""
     rec = log.get_pending_order(order_id)
     if not rec:
         # Already resolved (committed or cleared) — nothing left to cancel.
@@ -743,17 +759,48 @@ def cancel_order(order_id: str) -> dict:
     if raw == "FILLED":
         # It filled before we could pull it — commit the fill instead of losing it.
         return order_status(order_id)
-    if raw in ("CANCELED", "REJECTED", "EXPIRED"):
+    if raw in _TERMINAL_STATUSES:
         log.pop_pending_order(order_id)
         return {"order_id": order_id,
                 "status": "rejected" if raw == "REJECTED" else "canceled",
                 "raw_status": raw}
 
-    # Still working — cancel it. Only drop the pending record if this succeeds;
-    # a broker failure propagates so the caller knows the order is still live.
+    # Still working — ask the broker to cancel. A broker failure propagates so the
+    # caller knows the order is still live. On success the DELETE only means the
+    # request was accepted, so confirm the order actually goes terminal.
     client.cancel_order(rec["account_hash"], order_id)
-    log.pop_pending_order(order_id)
-    return {"order_id": order_id, "status": "canceled"}
+    return _confirm_cancel(client, rec, order_id)
+
+
+def _confirm_cancel(client, rec: dict, order_id: str) -> dict:
+    """Confirm a just-issued cancel actually took at the broker before dropping
+    the pending record. Schwab cancels asynchronously, so poll the order until it
+    reaches a terminal state, fills (settle it), or the window closes.
+
+    If it hasn't gone terminal within the window it may be PENDING_CANCEL or still
+    WORKING (and could yet fill) — keep the pending record and report
+    ``pending_cancel`` so the operator is told the order may still be live rather
+    than shown a cancel ToS won't reflect."""
+    deadline = time.monotonic() + CANCEL_CONFIRM_TIMEOUT_S
+    raw = ""
+    while time.monotonic() < deadline:
+        time.sleep(CANCEL_CONFIRM_POLL_S)
+        try:
+            raw = (client.get_order(rec["account_hash"], order_id).get("status") or "").upper()
+        except Exception:  # noqa: BLE001 — transient; keep polling until the deadline
+            continue
+        if raw == "FILLED":
+            # It filled before the cancel took hold — settle the fill, don't lose it.
+            return order_status(order_id)
+        if raw in _TERMINAL_STATUSES:
+            log.pop_pending_order(order_id)
+            return {"order_id": order_id,
+                    "status": "rejected" if raw == "REJECTED" else "canceled",
+                    "raw_status": raw}
+
+    # Accepted but not yet terminal — the order may still be working at Schwab.
+    # Keep the pending record (never popped above) and say so plainly.
+    return {"order_id": order_id, "status": "pending_cancel", "raw_status": raw or "PENDING_CANCEL"}
 
 
 def _capture_entry_context(ticker: str, payload: dict) -> dict | None:

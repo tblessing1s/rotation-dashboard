@@ -2,8 +2,12 @@
 // its terminal state. The paper/logged path commits immediately and reports
 // status "filled". A live order comes back "working" with an order_id — we then
 // poll the fill for up to 3 seconds and, if it still hasn't filled, auto-cancel
-// it and say so. (The /api/order-status + /api/order-cancel endpoints are wired
-// when live order placement is enabled; until then the backend returns "filled".)
+// it. Because Schwab cancels asynchronously, the backend confirms the order
+// actually went terminal before we claim it cancelled; an unconfirmed cancel
+// ("pending_cancel"/still working) is surfaced as such so the operator knows the
+// order may still be live. (The /api/order-status + /api/order-cancel endpoints
+// are wired when live order placement is enabled; until then the backend returns
+// "filled".)
 
 const ACTION_VERB = {
   open_position_atomic: "Open position",
@@ -82,6 +86,19 @@ export async function submitOrder(api, toast, payload) {
     toast.update(id, `${label} filled & logged.`, { type: "success" });
     return cancelled;
   }
-  toast.update(id, `${label} didn't fill within 3s — order cancelled.`, { type: "error", duration: 8000 });
-  return { ...res, status: "canceled" };
+  // Only claim it was cancelled once the backend confirmed a terminal state at
+  // Schwab. Schwab's cancel is async — the request can be accepted while the
+  // order stays working (and can still fill), reported here as "pending_cancel".
+  // Don't tell the operator it's gone when the broker hasn't confirmed it.
+  if (cancelled.status !== "canceled" && cancelled.status !== "rejected") {
+    toast.update(
+      id,
+      `${label} didn't fill within 3s and the cancel is NOT confirmed — the order ` +
+        `may still be working. Check it in your broker before placing another.`,
+      { type: "error", duration: 0 },
+    );
+    return { ...res, status: "working" };
+  }
+  toast.update(id, `${label} didn't fill within 3s — order ${cancelled.status}.`, { type: "error", duration: 8000 });
+  return { ...res, status: cancelled.status };
 }
