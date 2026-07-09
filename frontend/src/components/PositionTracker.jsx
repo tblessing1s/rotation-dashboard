@@ -477,6 +477,68 @@ const VERDICT_TONE = {
 // shorts' intrinsic, so a stock move washes out. EXTRINSIC PAID BACK (right): how
 // much of the LEAP's entry extrinsic the collected juice has recovered — the burn
 // being earned back. The verdict badge sits above as the one-line roll-up.
+// The extrinsic-payback "juice battery": the LEAP's burned time-value being earned
+// back. Fills green from the bottom as collected juice recovers it — waves at the
+// surface, bubbles rising — and the whole cell glows once the extrinsic is fully
+// paid off. It keeps filling over the life of the position until 100% (or the
+// position closes and the card drops away). Reuses the global juice-rise /
+// juice-wave / juice-bubble animations so it reads as family with the stand.
+function PaybackTank({ uid, pct }) {
+  const fill = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+  const full = pct != null && pct >= 100;
+  const innerTop = 15;
+  const innerBottom = 110;
+  const surfaceY = innerBottom - ((innerBottom - innerTop) * fill) / 100;
+  const bubbles = fill >= 15;
+  return (
+    <svg
+      viewBox="0 0 72 122"
+      className={`h-24 w-[3.4rem] shrink-0 ${full ? "drop-shadow-[0_0_10px_rgba(52,211,153,0.5)]" : ""}`}
+      role="img"
+      aria-label={pct == null ? "payback unknown" : `${fmt(pct, 0)}% of the LEAP extrinsic paid back`}
+    >
+      <defs>
+        <linearGradient id={`pb-${uid}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#34d399" />
+          <stop offset="1" stopColor="#059669" />
+        </linearGradient>
+        <clipPath id={`pbc-${uid}`}><rect x="10" y="15" width="52" height="95" rx="8" /></clipPath>
+        <clipPath id={`pbl-${uid}`}><rect x="8" y={surfaceY} width="56" height={innerBottom - surfaceY} /></clipPath>
+      </defs>
+      {/* terminal cap — reads as a battery/tank */}
+      <rect x="27" y="2" width="18" height="7" rx="2" fill="#475569" />
+      {/* liquid: gradient body + animated wave crest + rising bubbles, clipped */}
+      <g clipPath={`url(#pbc-${uid})`}>
+        <g className="juice-rise">
+          <rect x="8" y={surfaceY + 2} width="56" height={Math.max(0, innerBottom - surfaceY - 2) + 3} fill={`url(#pb-${uid})`} />
+          {fill > 0 && (
+            <g transform={`translate(0 ${surfaceY})`}>
+              <path className="juice-wave"
+                    d="M-40 0 Q-30 -4 -20 0 T0 0 T20 0 T40 0 T60 0 T80 0 T100 0 T120 0 V8 H-40 Z"
+                    fill="#6ee7b7" />
+            </g>
+          )}
+          {bubbles && (
+            <g clipPath={`url(#pbl-${uid})`} fill="#a7f3d0" opacity="0.8">
+              <circle className="juice-bubble" cx="26" cy={innerBottom - 6} r="1.7" />
+              <circle className="juice-bubble" cx="38" cy={innerBottom - 4} r="2.2" style={{ animationDelay: "0.9s" }} />
+              <circle className="juice-bubble" cx="48" cy={innerBottom - 8} r="1.4" style={{ animationDelay: "1.8s" }} />
+            </g>
+          )}
+        </g>
+      </g>
+      {/* tank outline on top of the liquid */}
+      <rect x="6" y="11" width="60" height="103" rx="11" fill="rgba(148,163,184,0.05)"
+            stroke={full ? "#34d399" : "#475569"} strokeWidth="2" />
+      {/* direct % label with a dark keyline so it reads on the liquid */}
+      <text x="36" y="67" textAnchor="middle" fontSize="15" fontWeight="700"
+            fill="#f8fafc" stroke="#0f172a" strokeWidth="3" paintOrder="stroke">
+        {pct == null ? "—" : `${fmt(Math.min(pct, 100), 0)}%`}
+      </text>
+    </svg>
+  );
+}
+
 function BalanceHero({ p, verdict, health, payback }) {
   const t = VERDICT_TONE[verdict.level];
   const pulp = pulpOf(p);
@@ -539,26 +601,30 @@ function BalanceHero({ p, verdict, health, payback }) {
           </div>
         </div>
 
-        {/* Extrinsic paid back — the LEAP's entry extrinsic (the burn) recovered by juice. */}
-        <div className="sm:border-l sm:border-slate-800 sm:pl-4">
-          <div className="mb-1 flex items-center justify-between">
-            <span className="text-[10px] uppercase tracking-wide text-slate-500">Extrinsic burn — paid back</span>
-            {hasPayback && (
-              <span className={`text-sm font-semibold ${done ? "text-emerald-300" : "text-slate-100"}`}>{fmt(paidPct, 0)}%</span>
+        {/* Extrinsic paid back — the LEAP's entry extrinsic (the burn) recovered by
+            juice, as a filling juice battery. */}
+        <div className="flex items-center gap-3 sm:border-l sm:border-slate-800 sm:pl-4">
+          {hasPayback && <PaybackTank uid={p.ticker} pct={paidPct} />}
+          <div className="min-w-0">
+            <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">Extrinsic burn — paid back</div>
+            {hasPayback ? (
+              <>
+                <div className={`text-2xl font-semibold leading-none ${done ? "text-emerald-300" : "text-slate-100"}`}>
+                  {fmt(paidPct, 0)}%
+                </div>
+                <div className="mt-1.5 text-xs text-slate-500">
+                  {money(pb.collected_to_date)} of {money(pb.leap_extrinsic_at_entry)} recovered
+                </div>
+                <div className="text-xs">
+                  {done
+                    ? <span className="text-emerald-300">fully paid back — the rest is gravy</span>
+                    : <span className="text-slate-500">{money(pb.remaining_to_payback)} still to earn back</span>}
+                </div>
+              </>
+            ) : (
+              <div className="text-xs text-slate-500">No entry extrinsic recorded — nothing to pay back.</div>
             )}
           </div>
-          {hasPayback ? (
-            <>
-              <Meter pct={paidPct} tone={done ? "bg-emerald-400" : "bg-sky-500"} />
-              <div className="mt-1 text-xs text-slate-500">
-                {money(pb.collected_to_date)} of {money(pb.leap_extrinsic_at_entry)} recovered
-                {pb.remaining_to_payback > 0 && <span> · {money(pb.remaining_to_payback)} to go</span>}
-                {done && <span className="text-emerald-300"> · fully paid back</span>}
-              </div>
-            </>
-          ) : (
-            <div className="text-xs text-slate-500">No entry extrinsic recorded — nothing to pay back.</div>
-          )}
         </div>
       </div>
     </div>
