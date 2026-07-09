@@ -148,9 +148,11 @@ BREADTH_SYMBOLS = [
 BREADTH_MA_WINDOW = 50
 
 # Regime gate thresholds (Level 1). VIX is the index level, not an ETF proxy.
-# NOTE: these feed the legacy breadth/VIX regime AND the breadth/VIX vetoes of the
-# Genius four-light regime below (they are recomposed as downgrade-only vetoes,
-# not deleted). See regime_genius.py + screening.regime().
+# NOTE: these feed the legacy breadth/VIX regime AND the SECONDARY breadth/VIX
+# confirmation indicators of the Genius four-light regime below. Breadth and VIX
+# do NOT determine the regime traffic light (only the four lights + the yellow
+# dwell do) — they are shown alongside it for the operator's own read. See
+# regime_genius.py + screening.regime().
 REGIME_BREADTH_GREEN = 60      # % of universe above 50-DMA for a green tape
 REGIME_BREADTH_RED = 40
 VIX_CALM = 18                  # below = calm
@@ -182,17 +184,16 @@ GENIUS_SAR_AF_MAX = 0.20       # PROPOSED_DEFAULT — Parabolic SAR acceleration
 GENIUS_MOMENTUM_ROC = 10       # PROPOSED_DEFAULT — ROC(n) sign is the zero-line oscillator (light 4).
                               # Simplest zero-line momentum; MACD-histogram-sign is the documented alternative.
 
-# ---- Regime vetoes (worst-signal-wins) -------------------------------------
-# HARD_CFM_RULE — conflicting signals must never coexist with a GO. The Genius
-# vote is composed with the existing breadth + VIX signals as DOWNGRADE-ONLY
-# vetoes: a veto can turn GREEN -> YELLOW, never the reverse. Applied after the
-# yellow dwell, so they act on the published regime, not the raw vote.
-BREADTH_VETO_ENABLED = True    # HARD_CFM_RULE — breadth is a downgrade-only veto
-# PROPOSED_DEFAULT — breadth at/below this % of the universe above its 50-DMA is a
-# "negative" tape that downgrades a Genius GREEN to YELLOW. Set to the existing
-# green breadth floor so a GREEN vote still needs a confirming (>=60%) breadth.
-BREADTH_VETO_MIN_PCT = REGIME_BREADTH_GREEN
-VIX_VETO_THRESHOLD = 25        # PROPOSED_DEFAULT — VIX above this downgrades GREEN -> YELLOW (no RED veto)
+# ---- Secondary regime indicators (breadth + VIX) ---------------------------
+# Breadth and VIX are SECONDARY, informational confirmation indicators only —
+# they are shown ALONGSIDE the regime for the operator's own read but do NOT
+# determine the traffic light. The light is set purely by the four Genius lights
+# and the yellow dwell (regime_genius.compute_trace). These reference levels only
+# flag whether breadth/VIX are confirming or diverging from a green tape.
+# PROPOSED_DEFAULT — breadth below this % of the universe above its 50-DMA is
+# "diverging" (a non-confirming tape). Anchored to the green breadth floor.
+BREADTH_CONFIRM_MIN_PCT = REGIME_BREADTH_GREEN
+VIX_ELEVATED_THRESHOLD = 25    # PROPOSED_DEFAULT — VIX above this is flagged "elevated" (informational)
 # Days of daily regime history retained in DATA_DIR/regime_history.json (derived
 # telemetry, recomputable from cached bars — backfilled, never an execution).
 REGIME_HISTORY_DAYS = 400      # PROPOSED_DEFAULT — ~1.5 trading years of daily regime records
@@ -732,9 +733,9 @@ JUICE_RICH_FACTOR = 1.75
 # the state.json schema_version, so the snapshot shape can evolve on its own
 # cadence and old snapshots stay readable by their own version tag.
 # v2: the regime section carries the full Genius four-light decision trace
-# (lights, raw vote, dwell state, veto inputs/flags, published regime) in
-# ADDITION to the legacy status/breadth/vix/spy fields. Older v1 snapshots stay
-# valid — the new fields are purely additive.
+# (lights, raw vote, dwell state, secondary breadth/VIX indicators, published
+# regime) in ADDITION to the legacy status/breadth/vix fields. Older v1 snapshots
+# stay valid — the new fields are purely additive.
 SNAPSHOT_SCHEMA_VERSION = 2
 
 # HARD_CFM_RULE — a trade must NEVER be blocked or delayed because telemetry

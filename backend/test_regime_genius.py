@@ -177,36 +177,37 @@ def test_dwell_does_not_apply_to_green_or_red_episodes():
 
 
 # ---------------------------------------------------------------------------
-# Vetoes — downgrade-only, never upgrade
+# Secondary indicators (breadth + VIX) — informational only, never change the light
 # ---------------------------------------------------------------------------
-def test_breadth_veto_downgrades_green_to_yellow():
-    v = rg.apply_vetoes("green", breadth=40.0, vix=15.0)       # weak breadth
-    assert v["regime"] == "yellow" and v["breadth"]["fired"] is True
+def test_secondary_indicators_flag_divergence_without_changing_regime():
+    s = rg.secondary_indicators(breadth=40.0, vix=30.0)        # weak breadth + VIX spike
+    assert s["breadth"]["diverging"] is True
+    assert s["vix"]["elevated"] is True
+    # It reports the values + reference levels but carries NO regime field — it
+    # cannot change the light.
+    assert "regime" not in s
 
 
-def test_vix_veto_downgrades_green_to_yellow():
-    v = rg.apply_vetoes("green", breadth=80.0, vix=30.0)       # VIX spike
-    assert v["regime"] == "yellow" and v["vix"]["fired"] is True
+def test_secondary_indicators_confirming_tape():
+    s = rg.secondary_indicators(breadth=80.0, vix=15.0)
+    assert s["breadth"]["diverging"] is False
+    assert s["vix"]["elevated"] is False
 
 
-def test_vetoes_never_upgrade():
-    # A red regime with pristine breadth + calm VIX must stay red.
-    v = rg.apply_vetoes("red", breadth=95.0, vix=10.0)
-    assert v["regime"] == "red"
-    assert v["breadth"]["fired"] is False and v["vix"]["fired"] is False
-    # A yellow regime is never upgraded to green either.
-    assert rg.apply_vetoes("yellow", breadth=95.0, vix=10.0)["regime"] == "yellow"
+def test_secondary_indicators_missing_inputs_are_not_flagged():
+    s = rg.secondary_indicators(breadth=None, vix=None)
+    assert s["breadth"]["diverging"] is False
+    assert s["vix"]["elevated"] is False
 
 
-def test_green_survives_confirming_signals():
-    v = rg.apply_vetoes("green", breadth=80.0, vix=15.0)
-    assert v["regime"] == "green"
-
-
-def test_missing_veto_inputs_do_not_fire():
-    v = rg.apply_vetoes("green", breadth=None, vix=None)
-    assert v["regime"] == "green"
-    assert v["breadth"]["fired"] is False and v["vix"]["fired"] is False
+def test_breadth_and_vix_do_not_change_the_light():
+    # A green four-light vote stays GREEN even with weak breadth and an elevated
+    # VIX — breadth/VIX are secondary and never downgrade the traffic light.
+    df = _df(list(np.linspace(100, 160, 120)))
+    tr = rg.compute_trace(df, breadth=35.0, vix=40.0, prior_published=[])
+    assert tr["published_regime"] == "green"
+    assert tr["secondary"]["breadth"]["diverging"] is True
+    assert tr["secondary"]["vix"]["elevated"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -221,12 +222,12 @@ def test_compute_trace_rising_is_green():
     assert set(tr["lights"]) == {"close_vs_ma", "fast_vs_slow", "sar", "momentum"}
 
 
-def test_compute_trace_green_vote_but_weak_breadth_publishes_yellow():
+def test_compute_trace_green_vote_with_weak_breadth_stays_green():
     df = _df(list(np.linspace(100, 160, 120)))
     tr = rg.compute_trace(df, breadth=35.0, vix=15.0, prior_published=[])
     assert tr["dwell_regime"] == "green"                       # vote + dwell said green
-    assert tr["published_regime"] == "yellow"                  # breadth veto downgraded it
-    assert tr["vetoes"]["breadth"]["fired"] is True
+    assert tr["published_regime"] == "green"                   # breadth is secondary — no downgrade
+    assert tr["secondary"]["breadth"]["diverging"] is True     # but the divergence is reported
 
 
 def test_compute_trace_falling_is_red():

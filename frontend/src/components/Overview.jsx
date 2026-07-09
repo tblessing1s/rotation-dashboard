@@ -145,27 +145,32 @@ function FourLights({ lights, rawCondition, greenCount }) {
   );
 }
 
-// The dwell hold + downgrade-only veto flags — why the published regime differs
-// from the raw vote. Renders nothing when neither is in play.
+// The dwell countdown (why a yellow is being held) plus SECONDARY breadth/VIX
+// context. Breadth/VIX do NOT set the light — they are shown here, neutrally, as
+// extra confirmation the operator can weigh. Renders nothing when there's nothing
+// noteworthy.
 function RegimeDetail({ r }) {
   const d = r.dwell || {};
-  const v = r.vetoes || {};
+  const s = r.secondary || {};
   const dwellText =
-    r.published_regime === "yellow" && d.dwell_min
+    d.dwell_day > 0 && d.dwell_min
       ? `YELLOW — day ${d.dwell_day} of ${d.dwell_min} minimum${
           d.held_by_dwell ? ` (raw ${(d.raw_condition || "").toUpperCase()} held)` : ""
         }`
       : null;
-  const vetoes = [];
-  if (v.breadth?.fired) vetoes.push(`Breadth veto ↓ (${fmt(v.breadth.input, 0)}% < ${v.breadth.threshold}%)`);
-  if (v.vix?.fired) vetoes.push(`VIX veto ↓ (${fmt(v.vix.input, 1)} > ${v.vix.threshold})`);
-  if (!dwellText && vetoes.length === 0) return null;
+  const notes = [];
+  if (s.breadth?.diverging)
+    notes.push(`breadth ${fmt(s.breadth.value, 0)}% below ${s.breadth.confirm_min}% (not confirming)`);
+  if (s.vix?.elevated) notes.push(`VIX ${fmt(s.vix.value, 1)} elevated (> ${s.vix.elevated_above})`);
+  if (!dwellText && notes.length === 0) return null;
   return (
     <div className="mt-3 space-y-1">
       {dwellText && <div className="text-xs text-amber-300">⏳ {dwellText}</div>}
-      {vetoes.map((t, i) => (
-        <div key={i} className="text-xs text-sky-300">▼ {t}</div>
-      ))}
+      {notes.length > 0 && (
+        <div className="text-xs text-slate-400">
+          <span className="uppercase tracking-wide text-slate-500">secondary</span> · {notes.join(" · ")}
+        </div>
+      )}
     </div>
   );
 }
@@ -181,10 +186,9 @@ function RegimeHero({ regime }) {
           <div className="text-xs text-slate-400">{REGIME_COPY[r.status] || ""}</div>
         </div>
       </div>
-      <div className="mt-4 grid grid-cols-3 gap-3">
+      <div className="mt-4 grid grid-cols-2 gap-3">
         <Stat label="Breadth" value={r.breadth != null ? `${fmt(r.breadth, 0)}%` : "—"} />
         <Stat label="VIX" value={fmt(r.vix, 1)} tone={r.vix == null ? "text-slate-500" : "text-slate-100"} />
-        <Stat label="SPY" value={(r.spy_trend || "—").toUpperCase()} sub={`MA21 ${fmt(r.spy_dist_ma21, 1)}%`} />
       </div>
       <FourLights lights={r.lights} rawCondition={r.raw_condition} greenCount={r.vote?.green_count} />
       <RegimeDetail r={r} />

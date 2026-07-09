@@ -122,19 +122,19 @@ def load_closed_cycles(state: dict) -> tuple[list[tuple], int]:
 # persistence (unlike regime_history.backfill, which writes the live store under
 # the config defaults). Offline — reads the parquet cache, never a provider.
 # ---------------------------------------------------------------------------
-def regime_series(params: dict | None = None, step: int = 1,
-                  with_breadth_veto: bool = True) -> list[dict]:
+def regime_series(params: dict | None = None, step: int = 1) -> list[dict]:
     """Daily {date, raw_condition, published_regime, green_count} replayed from
     cached SPY bars under the Genius parameter set ``params`` (defaults = config).
     The dwell is accumulated on EVERY trading day (path-dependent); ``step`` only
-    thins the returned sample. Recomputes the formula directly from cached bars
-    rather than calling ``screening.regime()`` so it stays offline/parquet-only."""
+    thins the returned sample. The published regime is the four lights + dwell —
+    breadth/VIX are secondary and don't affect it — so this needs only SPY bars.
+    Recomputes the formula directly from cached bars rather than calling
+    ``screening.regime()`` so it stays offline/parquet-only."""
     import regime_genius
     import regime_history
     spy = data_handler.get_daily(config.GENIUS_INDEX_SYMBOL)
     if spy is None or spy.empty:
         raise RuntimeError(f"no cached data for {config.GENIUS_INDEX_SYMBOL} — warm the cache first")
-    frames = data_handler.get_many(config.BREADTH_SYMBOLS) if with_breadth_veto else {}
     slow = (params or {}).get("slow_ma", config.GENIUS_SLOW_MA)
     published: list[str] = []
     rows: list[dict] = []
@@ -144,8 +144,7 @@ def regime_series(params: dict | None = None, step: int = 1,
         if (i + 1) < slow:
             continue
         sub = spy.iloc[: i + 1]
-        breadth = regime_history._breadth_asof(frames, ts) if frames else None
-        tr = regime_genius.compute_trace(sub, breadth, None, published, params)
+        tr = regime_genius.compute_trace(sub, None, None, published, params)
         published.append(tr["published_regime"])
         if (i % step) == 0 or i == last:
             rows.append({"date": regime_history._fmt_day(ts),

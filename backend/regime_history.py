@@ -8,8 +8,8 @@ store under ``DATA_DIR``, exactly like ``iv_history.py`` / ``burn_marks.py``:
 market data, not a trading record, kept out of state.json.
 
 Each record is the full decision trace from ``regime_genius.compute_trace`` (the
-four lights, the raw vote, the dwell state, each veto's input/flag, and the
-published regime) stamped with its trading date. The store is:
+four lights, the raw vote, the dwell state, the secondary breadth/VIX indicators,
+and the published regime) stamped with its trading date. The store is:
   * idempotent per day — the last write of a day replaces that day's record;
   * capped to ``config.REGIME_HISTORY_DAYS`` newest records;
   * backfillable from cached parquet bars (legitimate here — it's derived data,
@@ -161,10 +161,10 @@ def backfill(force: bool = False) -> dict:
     """Bootstrap the regime history from cached SPY bars as far back as the slow
     MA can be formed. This is DERIVED data (recomputable from OHLCV), so a full
     replay is legitimate — unlike entry-context snapshots. No-ops when history is
-    already present unless ``force``. VIX is not reliably cached historically, so
-    backfilled records carry a null VIX veto input (downgrade-only, so it simply
-    never fires on history); breadth is recomputed per-day from cached frames.
-    Returns a summary. Best-effort per module policy — never raises."""
+    already present unless ``force``. The published regime is the four lights +
+    dwell only, so VIX (not reliably cached historically) is left null on
+    backfilled records; breadth is recomputed per-day from cached frames purely as
+    the secondary indicator. Returns a summary. Best-effort — never raises."""
     try:
         import data_handler
         import regime_genius

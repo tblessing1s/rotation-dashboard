@@ -229,8 +229,6 @@ def _regime_section(gate: dict | None, track, reason: str) -> dict:
         "breadth": track("regime.breadth", d.get("breadth"), reason),
         "vix": track("regime.vix", d.get("vix"), reason),
         "vix_source": d.get("vix_source"),
-        "spy_trend": d.get("spy_trend"),
-        "spy_dist_ma21": d.get("spy_dist_ma21"),
         # --- Genius four-light decision trace (v2) ---
         "published_regime": d.get("published_regime"),
         "raw_condition": d.get("raw_condition"),
@@ -238,7 +236,7 @@ def _regime_section(gate: dict | None, track, reason: str) -> dict:
         "lights": d.get("lights"),
         "vote": d.get("vote"),
         "dwell": d.get("dwell"),
-        "vetoes": d.get("vetoes"),
+        "secondary": d.get("secondary"),   # breadth + VIX (informational only)
     }
 
 
