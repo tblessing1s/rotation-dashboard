@@ -480,6 +480,88 @@ function ExtrinsicBurnoff({ ticker, payback }) {
   );
 }
 
+// Plain-language "where do I stand" for the whole book, at the top of the page:
+// how the positions net out (balanced, paid-back, captured, needing attention)
+// woven together with the book-level decision (market lean, engine, can-I-add)
+// from the portfolio-risk payload. A narrative, not a dashboard — the tiles below
+// carry the numbers.
+function BookSummary({ positions, diffsByTicker, payback, risk }) {
+  const n = positions.length;
+  let balanced = 0;
+  const unbalanced = [];
+  let collected = 0, atEntry = 0, captured = 0, entry = 0, attention = 0;
+  for (const p of positions) {
+    const bal = balanceOf(p, (p.short_calls || []).map((sc) => ({ sc })));
+    if (bal.covered === true) balanced++;
+    else if (bal.covered === false) unbalanced.push(p.ticker);
+    const pb = payback?.[p.ticker];
+    if (pb?.leap_extrinsic_at_entry) { collected += pb.collected_to_date || 0; atEntry += pb.leap_extrinsic_at_entry; }
+    for (const sc of p.short_calls || []) {
+      if (sc.entry_extrinsic_total != null) { entry += Number(sc.entry_extrinsic_total); captured += Number(sc.extrinsic_captured_total || 0); }
+    }
+    if (p.needs_review || p.defend || p.whipsaw?.tripped || (diffsByTicker[p.ticker]?.length)) attention++;
+  }
+  const burnOff = atEntry > 0 ? (collected / atEntry) * 100 : null;
+  const shortCap = entry > 0 ? (captured / entry) * 100 : null;
+
+  const t = risk?.totals || {};
+  const cap = risk?.capital || {};
+  const conc = risk?.concentration || {};
+  const overCap = cap.deployed != null && cap.cap != null && cap.deployed > cap.cap;
+  const reserveShort = cap.reserve_ok === false;
+  const concentrated = !!conc.warn;
+  const canAdd = risk ? (!overCap && !reserveShort && !concentrated) : null;
+  const blockReason = overCap ? `fully deployed (${fmt(cap.pct_of_cap, 0)}% of cap)`
+    : reserveShort ? "short on defensive reserve"
+    : concentrated ? "too concentrated to add safely" : null;
+  const thetaPos = t.theta_per_day != null && t.theta_per_day >= 0;
+  const lean = t.delta_dollars_spy_adj != null && cap.deployed ? t.delta_dollars_spy_adj / cap.deployed : null;
+  const expoLabel = lean == null ? null : Math.abs(lean) < 0.5 ? "market-neutral" : lean > 0 ? "leaning long the market" : "leaning short the market";
+
+  const sentences = [];
+  sentences.push(
+    `You hold ${n} position${n === 1 ? "" : "s"}` +
+    (unbalanced.length
+      ? ` — ${balanced} intrinsically balanced, ${unbalanced.join(", ")} unbalanced (the short's intrinsic has outrun the LEAP)`
+      : ", all intrinsically balanced (each LEAP still covers its shorts)") + ".");
+  if (burnOff != null || shortCap != null) {
+    const a = burnOff != null ? `earned back ${fmt(burnOff, 0)}% of your LEAP extrinsic` : "";
+    const b = shortCap != null ? `captured ${fmt(shortCap, 0)}% of this cycle's short premium` : "";
+    sentences.push(`Across the book you've ${[a, b].filter(Boolean).join(" and ")}.`);
+  }
+  if (expoLabel || t.theta_per_day != null) {
+    const parts = [];
+    if (expoLabel) parts.push(`the book is ${expoLabel}`);
+    if (t.theta_per_day != null) parts.push(`the engine is ${thetaPos ? `collecting ${money(t.theta_per_day)}/day` : `bleeding ${money(Math.abs(t.theta_per_day))}/day`}`);
+    sentences.push(parts.join(" and ").replace(/^\w/, (c) => c.toUpperCase()) + ".");
+  }
+  if (canAdd === true) sentences.push("You have room to open another position.");
+  else if (canAdd === false) sentences.push(`You're ${blockReason} — manage what you have rather than adding.`);
+
+  const attn = attention > 0
+    ? `${attention} position${attention === 1 ? "" : "s"} need${attention === 1 ? "s" : ""} your attention`
+    : "Nothing needs immediate attention";
+
+  return (
+    <Card title="Your book right now">
+      <p className="text-sm leading-relaxed text-slate-300">{sentences.join(" ")}</p>
+      <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-slate-800 pt-3 text-xs">
+        <span><span className="text-slate-500">positions </span><span className="font-semibold text-slate-100">{n}</span></span>
+        <span><span className="text-slate-500">balanced </span><span className={`font-semibold ${unbalanced.length ? "text-amber-300" : "text-emerald-300"}`}>{balanced}/{n}</span></span>
+        {burnOff != null && <span><span className="text-slate-500">burn off </span><span className="font-semibold text-slate-100">{fmt(burnOff, 0)}%</span></span>}
+        {shortCap != null && <span><span className="text-slate-500">short capture </span><span className="font-semibold text-slate-100">{fmt(shortCap, 0)}%</span></span>}
+        <span className={attention > 0 ? "text-rose-300" : "text-slate-500"}>{attention > 0 && "⚠ "}{attn}</span>
+        {canAdd != null && (
+          <span className={`ml-auto rounded-full border px-2 py-0.5 font-semibold uppercase tracking-wide ${
+            canAdd ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300" : "border-rose-500/40 bg-rose-500/15 text-rose-300"}`}>
+            {canAdd ? "room to add" : "manage only"}
+          </span>
+        )}
+      </div>
+    </Card>
+  );
+}
+
 // One ticker, collapsible. Collapsed: a summary of the three things that matter —
 // intrinsic balance, extrinsic burn-off, short-call capture. Expanded: those three
 // in full (orange, juice-battery, short list), plus any active safety alert
@@ -576,6 +658,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
   const toast = useToast();
   const { data, error, loading, reload } = useApi(api.positions, [], null);
   const { data: recon, reload: reloadRecon } = useApi(api.reconcile, [], null);
+  const { data: risk } = useApi(api.portfolioRisk, [], null);
   const [rolling, setRolling] = React.useState(null); // {ticker, reason}
   const [focusedTicker, setFocusedTicker] = React.useState(null);
   const handledIntentId = React.useRef(null);
@@ -630,7 +713,11 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
 
   return (
     <div className="grid gap-3">
-      <PortfolioRisk />
+      {positions.length > 0 && (
+        <BookSummary positions={positions} diffsByTicker={openDiffsByTicker}
+                     payback={data?.extrinsic_payback} risk={risk} />
+      )}
+      <PortfolioRisk data={risk} />
 
       {positions.length === 0 && <Card>No open positions.</Card>}
       {positions.map((p) => (
