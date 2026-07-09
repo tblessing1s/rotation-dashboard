@@ -49,8 +49,14 @@ function TiltGauge({ lean }) {
 // can-I-add-a-position answer, then each risk as a plain-language, visual tile.
 // The sector split and per-position greeks table are analytics, tucked behind
 // "Details".
-export default function PortfolioRisk() {
-  const { data, error, loading } = useApi(api.portfolioRisk, [], null);
+export default function PortfolioRisk({ data: dataProp } = {}) {
+  // When a parent shares the payload (Positions page), resolve it without a second
+  // network hit; otherwise fetch our own (standalone use).
+  const external = dataProp !== undefined;
+  const fetchFn = React.useCallback(
+    () => (external ? Promise.resolve(dataProp) : api.portfolioRisk()),
+    [external, dataProp]);
+  const { data, error, loading } = useApi(fetchFn, [dataProp], null);
   const [open, setOpen] = React.useState(false);
   if (loading && !data) return <Card title="Portfolio risk"><Loading /></Card>;
   if (error) return <Card title="Portfolio risk"><p className="text-sm text-rose-400">{error}</p></Card>;
