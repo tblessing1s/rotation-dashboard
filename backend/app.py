@@ -7,6 +7,7 @@ that contacts a provider live is the Schwab account/quote path used at execution
 """
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 
@@ -171,6 +172,26 @@ def api_scan_ready():
         mkt_open = market_scheduler.is_market_open(now_et)
         live = mkt_open and not config.demo_enabled() and data_cache.active()
 
+        # On-demand quote fetch: the tiered poller only quotes open positions,
+        # on-deck queue names, and held sector ETFs, so a fresh GO that isn't
+        # queued for a slot has no live quote and would be perpetually
+        # stale-blocked below. When live, pull a live quote for exactly the GO
+        # names that lack a fresh one, so this shortlist reflects what the
+        # operator could actually enter — not just what happens to be on-deck.
+        if live and go_rows:
+            import data_transport
+            from market_scheduler import QUOTE as _QUOTE
+            need = [r["ticker"] for r in go_rows
+                    if data_cache.get_with_staleness(
+                        r["ticker"], _QUOTE, tier=market_scheduler.Tier.T1)[2]]
+            if need:
+                try:
+                    data_transport.fetch_quotes_batched(
+                        {s: market_scheduler.Tier.T1 for s in need})
+                except Exception as fe:  # noqa: BLE001 — scan still returns on a miss
+                    logging.getLogger("cfm.app").warning(
+                        "scan_ready on-demand quote fetch failed: %s", fe)
+
         ready, near_misses, stale_blocked = [], [], []
         for r in go_rows:
             l5 = level5.get(r["ticker"])
@@ -192,6 +213,47 @@ def api_scan_ready():
                                   else r.get("juice_weekly_pct") or 0), reverse=True)
         return jsonify({"as_of": sc["as_of"], "ready": ready, "near_misses": near_misses,
                         "stale_blocked": stale_blocked})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/scan/refresh-quote", methods=["POST"])
+def api_scan_refresh_quote():
+    """Force a live data pull for SPECIFIC Ready-to-Enter names — the per-row
+    'live scan this stale name' action.
+
+    The tiered poller only quotes on-deck/held/sector-ETF names, so a stale-tagged
+    GO in the shortlist may have an absent or aged quote. This force-refreshes the
+    named tickers' daily bars AND pulls a live quote through the transport layer
+    (which, unlike data_handler.live_prices, records genuine Schwab/Alpha Vantage
+    quotes into the staleness store) so both STALE_BLOCKS_GO inputs go fresh and
+    the name can clear on the next scan. Returns each ticker's post-pull quote
+    source and remaining staleness so the UI can show what actually went live —
+    a provider miss that only yields a cached close stays visibly stale."""
+    body = request.get_json(silent=True) or {}
+    raw = body.get("tickers") if body.get("tickers") is not None else body.get("ticker")
+    if isinstance(raw, str):
+        raw = [raw]
+    tickers = [t.strip().upper() for t in (raw or []) if t and str(t).strip()]
+    if not tickers:
+        return jsonify({"error": "tickers is required"}), 400
+    try:
+        import data_cache
+        import data_transport
+        import market_scheduler
+        # Bars first (parquet mtime -> bars leg fresh), then a live quote batch that
+        # records into the staleness store. Both are best-effort per the transport.
+        data_handler.prefetch(tickers, force=True)
+        fetched = data_transport.fetch_quotes_batched(
+            {t: market_scheduler.Tier.T1 for t in tickers})
+        results = {}
+        for t in tickers:
+            blocked, stale_inputs = data_cache.stale_blocks_go(
+                t, market_scheduler.Tier.T1, market_open=True, live=True)
+            results[t] = {"stale": blocked, "stale_inputs": stale_inputs,
+                          "quote_source": (fetched["quotes"].get(t) or {}).get("source")}
+        return jsonify({"tickers": tickers, "results": results,
+                        "degraded": fetched.get("degraded", [])})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

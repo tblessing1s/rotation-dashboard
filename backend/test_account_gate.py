@@ -537,6 +537,86 @@ def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state
     assert [r["ticker"] for r in body["ready"]] == ["HIGH", "LOW"]
 
 
+def test_scan_ready_fetches_live_quote_on_demand_so_go_clears(isolated_state, monkeypatch):
+    # A GO name that the tiered poller never quoted (not on-deck) must get a live
+    # quote fetched on demand during the scan, so it clears instead of being held
+    # forever on "stale quote". Regression for the Ready-to-Enter quote gap.
+    import time
+    import data_cache
+    import data_transport
+    import market_scheduler
+    from metrics import scorecard as scorecard_metrics
+    import app as app_module
+    from market_scheduler import BARS, QUOTE, Tier
+
+    data_cache.reset()
+    # Fresh bars for AAA (so only the quote leg is in question), and a record for
+    # some other name so data_cache.active() is True (live gate).
+    data_cache.put("AAA", BARS, "df", "schwab", Tier.T1, fetched_at=time.time() - 60)
+    data_cache.put("SPY", QUOTE, 1.0, "schwab", Tier.T1, fetched_at=time.time() - 5)
+
+    rows = [{"ticker": "AAA", "sector": "XLK", "verdict": "GO",
+             "juice_weekly_pct": 1.0, "earnings_date": None}]
+    monkeypatch.setattr(scorecard_metrics, "scorecard",
+                        lambda tickers=None: {"as_of": "x", "results": rows})
+    monkeypatch.setattr(account_gate, "evaluate_many", lambda tickers, contracts=None: {
+        t: {"pass": True, "blocking_failures": []} for t in tickers})
+    monkeypatch.setattr(market_scheduler, "is_market_open", lambda now: True)
+
+    calls = []
+    def _fake_fetch(symbols_by_tier, **kw):
+        calls.append(dict(symbols_by_tier))
+        for s in symbols_by_tier:  # simulate a live Schwab quote landing in the cache
+            data_cache.put(s, QUOTE, 123.0, "schwab", Tier.T1)
+        return {"quotes": {}, "degraded": [], "requested": len(symbols_by_tier), "resolved": 0}
+    monkeypatch.setattr(data_transport, "fetch_quotes_batched", _fake_fetch)
+
+    body = app_module.app.test_client().get("/api/scan/ready").get_json()
+    assert calls == [{"AAA": Tier.T1}]          # only the quote-less GO name was fetched
+    assert [r["ticker"] for r in body["ready"]] == ["AAA"]
+    assert body["stale_blocked"] == []
+    data_cache.reset()
+
+
+def test_scan_refresh_quote_pulls_live_quote_and_reports_source(isolated_state, monkeypatch):
+    # The per-row "live scan" action force-pulls a quote through the transport
+    # layer (which records into the staleness store) so a stale name can clear.
+    import data_cache
+    import data_handler
+    import data_transport
+    import app as app_module
+    from market_scheduler import BARS, QUOTE, Tier
+
+    data_cache.reset()
+    data_cache.put("IWM", BARS, "df", "schwab", Tier.T1, fetched_at=__import__("time").time() - 60)
+
+    prefetched = []
+    monkeypatch.setattr(data_handler, "prefetch",
+                        lambda syms, force=False: prefetched.append((list(syms), force)))
+
+    def _fake_fetch(symbols_by_tier, **kw):
+        for s in symbols_by_tier:
+            data_cache.put(s, QUOTE, 210.0, "schwab", Tier.T1)  # live quote lands in the store
+        return {"quotes": {s: {"price": 210.0, "source": "schwab", "tier": 1}
+                           for s in symbols_by_tier}, "degraded": []}
+    monkeypatch.setattr(data_transport, "fetch_quotes_batched", _fake_fetch)
+
+    resp = app_module.app.test_client().post("/api/scan/refresh-quote", json={"tickers": ["iwm"]})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["tickers"] == ["IWM"]
+    assert body["results"]["IWM"]["quote_source"] == "schwab"
+    assert body["results"]["IWM"]["stale"] is False       # quote + bars now both fresh
+    assert prefetched and prefetched[0] == (["IWM"], True)  # bars force-refreshed
+    data_cache.reset()
+
+
+def test_scan_refresh_quote_requires_tickers(isolated_state):
+    import app as app_module
+    resp = app_module.app.test_client().post("/api/scan/refresh-quote", json={"tickers": []})
+    assert resp.status_code == 400
+
+
 def test_earnings_beyond_the_cycle_does_not_block(isolated_state, monkeypatch):
     import data_handler
     import earnings

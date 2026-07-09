@@ -60,6 +60,10 @@ export const api = {
   // and poll its status. The refresh POST returns immediately.
   scanRefresh: () => request("/api/scan/refresh", { method: "POST" }),
   scanStatus: () => request("/api/scan/status"),
+  // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
+  // they can clear the STALE_BLOCKS_GO gate on the next scan.
+  refreshReadyQuote: (tickers) =>
+    request("/api/scan/refresh-quote", { method: "POST", body: JSON.stringify({ tickers }) }),
   entryGate: (ticker) => request(`/api/entry-gate?ticker=${ticker}`),
   accountGate: (ticker, params = {}) => {
     const q = Object.entries(params)
