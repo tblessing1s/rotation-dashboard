@@ -15,7 +15,10 @@ const ACTION_VERB = {
 };
 
 const FILL_TIMEOUT_MS = 3000;
-const POLL_MS = 400;
+// Space the fill polls out: Schwab's trader endpoints throttle bursts, and every
+// poll is a get_order that spends the same rate-limit budget the auto-cancel
+// needs. Fewer polls in the window keeps the cancel from drawing a 429.
+const POLL_MS = 750;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 

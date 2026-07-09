@@ -54,6 +54,28 @@ _ACCOUNTS_TTL = 60  # seconds
 _accounts_cache: tuple[float, list] | None = None
 _accounts_lock = threading.Lock()
 
+# Schwab's trading endpoints throttle bursts. The live fill-poll loop fires
+# several get_order calls in the 3s before an auto-cancel, so the cancel DELETE
+# is exactly the request most likely to draw an HTTP 429. A cancel is safety-
+# critical — a transient rate-limit must NOT read as "could not cancel" and leave
+# a working order orphaned at the broker — so it retries a few times with a short
+# exponential backoff, honoring any Retry-After the server sends.
+_RATE_LIMIT_STATUS = 429
+_CANCEL_RETRIES = 4
+_CANCEL_BACKOFF_BASE = 0.5  # seconds: 0.5, 1.0, 2.0 between attempts
+
+
+def _retry_after_seconds(resp, attempt: int, base: float) -> float:
+    """Backoff before the next retry: honor a numeric Retry-After header if the
+    server sent one, else exponential base * 2**attempt."""
+    hdr = (resp.headers or {}).get("Retry-After")
+    if hdr:
+        try:
+            return max(0.0, float(hdr))
+        except (TypeError, ValueError):
+            pass
+    return base * (2 ** attempt)
+
 
 class SchwabError(RuntimeError):
     pass
@@ -408,15 +430,20 @@ class SchwabClient:
         return self._get_json(f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}") or {}
 
     def cancel_order(self, account_hash: str, order_id: str) -> dict:
-        """Cancel a working order. Schwab returns 200/201 or an empty 204."""
-        resp = requests.delete(
-            f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}",
-            headers=self._auth_headers(), timeout=30,
-        )
-        if resp.status_code in (200, 201, 204):
-            return {"orderId": order_id, "canceled": True}
-        hint = self._ACCT_HINT if resp.status_code in (401, 403) else ""
-        raise SchwabError(f"schwab cancel order: HTTP {resp.status_code} {resp.text[:200]}{hint}")
+        """Cancel a working order. Schwab returns 200/201 or an empty 204.
+
+        Retries on a 429 rate-limit (see _CANCEL_RETRIES) so a transient throttle
+        from the fill-poll burst doesn't abandon a working order at the broker."""
+        url = f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}"
+        for attempt in range(_CANCEL_RETRIES):
+            resp = requests.delete(url, headers=self._auth_headers(), timeout=30)
+            if resp.status_code in (200, 201, 204):
+                return {"orderId": order_id, "canceled": True}
+            if resp.status_code == _RATE_LIMIT_STATUS and attempt < _CANCEL_RETRIES - 1:
+                time.sleep(_retry_after_seconds(resp, attempt, _CANCEL_BACKOFF_BASE))
+                continue
+            hint = self._ACCT_HINT if resp.status_code in (401, 403) else ""
+            raise SchwabError(f"schwab cancel order: HTTP {resp.status_code} {resp.text[:200]}{hint}")
 
 
 # ---------------------------------------------------------------------------

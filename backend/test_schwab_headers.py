@@ -54,3 +54,47 @@ def test_option_chain_akamai_403_gives_clean_message(monkeypatch):
     monkeypatch.setattr(schwab_api.requests, "get", lambda *a, **k: _Resp(403, text=body))
     with pytest.raises(schwab_api.SchwabError, match="Akamai edge"):
         _client(monkeypatch).get_option_chain("XLK")
+
+
+def test_cancel_retries_past_a_transient_429(monkeypatch):
+    # A cancel is safety-critical: a 429 from the fill-poll burst must not abandon
+    # a working order. It should back off and retry until the DELETE lands.
+    calls = {"n": 0}
+    sleeps = []
+
+    def fake_delete(url, headers=None, timeout=None):
+        calls["n"] += 1
+        return _Resp(429) if calls["n"] < 3 else _Resp(204)
+
+    monkeypatch.setattr(schwab_api.requests, "delete", fake_delete)
+    monkeypatch.setattr(schwab_api.time, "sleep", lambda s: sleeps.append(s))
+
+    out = _client(monkeypatch).cancel_order("acct", "OID")
+    assert out == {"orderId": "OID", "canceled": True}
+    assert calls["n"] == 3            # two 429s, then a 204 success
+    assert sleeps == [0.5, 1.0]       # exponential backoff between the retries
+
+
+def test_cancel_honors_retry_after_header(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_delete(url, headers=None, timeout=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            r = _Resp(429)
+            r.headers = {"Retry-After": "2"}
+            return r
+        return _Resp(204)
+
+    seen = []
+    monkeypatch.setattr(schwab_api.requests, "delete", fake_delete)
+    monkeypatch.setattr(schwab_api.time, "sleep", lambda s: seen.append(s))
+    _client(monkeypatch).cancel_order("acct", "OID")
+    assert seen == [2.0]  # server-supplied Retry-After wins over the exponential default
+
+
+def test_cancel_surfaces_error_after_exhausting_retries(monkeypatch):
+    monkeypatch.setattr(schwab_api.requests, "delete", lambda *a, **k: _Resp(429, text="Too many requests"))
+    monkeypatch.setattr(schwab_api.time, "sleep", lambda s: None)
+    with pytest.raises(schwab_api.SchwabError, match="HTTP 429"):
+        _client(monkeypatch).cancel_order("acct", "OID")
