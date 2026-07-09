@@ -1,5 +1,50 @@
 # Changelog
 
+## Monthly payout tracking
+
+Income is booked as **net juice** (premium sold − buyback) on every short close,
+but the dashboard had no month-by-month view of it and no notion of the operator
+*paying themselves out* each month. A new **Payouts** tab tracks that: the
+current month's estimated payout, the previous month's payout, the full monthly
+history, and a per-month finalize → paid record — plus a push alert the moment a
+month's payout can be finalized so it doesn't get forgotten.
+
+A month moves through **in progress → finalizable → finalized → paid**. It
+becomes *finalizable* — the point its income is locked in — the moment its **last
+short of the month closes** (no open short leg still expires in it, so rolling the
+final weekly into a next-month expiry flips it immediately), or when the calendar
+month ends, whichever comes first. Finalizing snapshots the amount; marking paid
+records the withdrawal.
+
+### What changed
+
+- **`backend/payouts.py`** (new). Net juice per calendar month is **derived**
+  from the immutable `close_short` executions (same figure the theta ledger keys
+  off) — never stored. The only thing persisted is the operator's payout
+  bookkeeping: finalized/paid flags, timestamps, the **amounts snapshotted** at
+  each step (frozen against later execution corrections), and an optional note.
+  The finalizable signal reads the open `short_calls`' expirations (with an
+  open_date+dte fallback for paper legs). `view()` returns the current-month
+  estimate, the last month's payout, the month-by-month history, and roll-up
+  totals (YTD / all-time / paid out / awaiting payout).
+- **`PAYOUT_READY` alert** (`backend/alerts.py`). Fires once a month's payout can
+  be finalized — its last short of the month has closed, or the month ended —
+  with net income earned and not yet finalized: "July 2026 payout ready: $110.00
+  net income — its last short of the month has closed." Scoped to the current +
+  previous month so it reminds without spamming the back-history, auto-resolves
+  when finalized, rides the existing notifier channels (Web Push / ntfy / email),
+  and deep-links to the Payouts tab.
+- **API**: `GET /api/payouts`, `POST /api/payouts/finalize`,
+  `POST /api/payouts/unfinalize`, `POST /api/payouts/mark-paid`
+  (`{month, amount?, note?}`; finalize/pay refuse a month still earning juice),
+  `POST /api/payouts/unmark-paid`.
+- **Frontend**: a new **Payouts** tab (`frontend/src/components/PayoutsTab.jsx`)
+  with the est-this-month / last-month cards, totals, and a monthly history table
+  with inline finalize / mark-paid / undo. App gains a `?tab=…` deep link so the
+  payout push tap lands on the tab.
+- **Migration v15** seeds the additive `payouts` store; net juice stays derived,
+  so no income data is copied. Covered end to end by `backend/test_payouts.py`.
+
 ## Genius four-light market regime (dwell + secondary indicators)
 
 The market regime (**GREEN / YELLOW / RED**, Level 1 of the entry gate) is no

@@ -55,6 +55,7 @@ ALERT_TYPES = {
     "RECONCILE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: reconciliation has not run successfully within the expected window -> the safety check is silent"),
     "SNAPSHOT_DATA_QUALITY": ("LOW", "PROPOSED_DEFAULT: >25% of an entry-context snapshot's tracked fields came back null (stale/unavailable) -> the entry telemetry for calibration is thin, not a trade blocker"),
     "REGIME_CHANGE": ("MEDIUM", "HARD_CFM_RULE: the published (dwell-adjusted) market regime transitioned -> re-check entry posture; raw four-light flaps are suppressed by the yellow dwell"),
+    "PAYOUT_READY": ("MEDIUM", "PROPOSED_DEFAULT: the last short of the month has closed (or the calendar month ended) with net income earned -> the monthly payout can be finalized and withdrawn"),
 }
 
 
@@ -86,6 +87,12 @@ def _action_url(type_: str, ticker: str | None) -> str | None:
     if type_ in _FOCUS_ACTIONS:
         return f"/?action=focus&ticker={t}"
     return None
+
+
+def _payout_action_url() -> str:
+    """Payout alerts carry no ticker — they deep-link to the Payouts page so the
+    tap lands on the finalize/mark-paid card, not the app root."""
+    return "/?tab=Payouts"
 
 
 def _alert(type_: str, ticker: str | None, message: str, action: str,
@@ -821,6 +828,31 @@ def check_regime_change(state: dict) -> list[dict]:
         key=f"{prev}->{cur}")]
 
 
+def check_payout_ready(state: dict) -> list[dict]:
+    """A month's payout can be finalized — its last short of the month has closed
+    (no open short still expires in it) or the calendar month has ended — and it
+    hasn't been finalized yet. Fires once per month (keyed on the month) and
+    auto-resolves the moment it's finalized. Scoped to the current + previous
+    month so it reminds without spamming the whole back-history."""
+    import payouts
+    pending = payouts.pending_finalization(state)
+    if not pending:
+        return []
+    trigger = ("its last short of the month has closed"
+               if pending["reason"] == "last_short_closed"
+               else "the month has closed")
+    a = _alert(
+        "PAYOUT_READY", None,
+        (f"{pending['label']} payout ready: ${pending['net_juice']:,.2f} net "
+         f"income — {trigger}. Finalize it and withdraw."),
+        "Open Payouts to finalize this month and mark it paid.",
+        {"month": pending["month"], "net_juice": pending["net_juice"],
+         "reason": pending["reason"]},
+        key=pending["month"])
+    a["action_url"] = _payout_action_url()
+    return [a]
+
+
 EVALUATORS = [
     check_kill_switch,
     check_circuit_breaker,
@@ -844,6 +876,7 @@ EVALUATORS = [
     check_roll_leg_imbalance,
     check_book_correlation,
     check_regime_change,
+    check_payout_ready,
 ]
 
 

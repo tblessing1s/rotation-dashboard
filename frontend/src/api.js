@@ -100,6 +100,22 @@ export const api = {
   burn: (ticker) => request(`/api/burn/${ticker}`),
   thetaLedger: (params = "") => request(`/api/theta-ledger${params}`),
   killSwitch: () => request("/api/kill-switch"),
+  // Monthly payout tracker: current-month estimate + past months + finalize/paid.
+  payouts: () => request("/api/payouts"),
+  finalizePayout: (month, amount, note) =>
+    request("/api/payouts/finalize", {
+      method: "POST",
+      body: JSON.stringify({ month, amount, note }),
+    }),
+  unfinalizePayout: (month) =>
+    request("/api/payouts/unfinalize", { method: "POST", body: JSON.stringify({ month }) }),
+  markPayoutPaid: (month, note, amount) =>
+    request("/api/payouts/mark-paid", {
+      method: "POST",
+      body: JSON.stringify({ month, note, amount }),
+    }),
+  unmarkPayoutPaid: (month) =>
+    request("/api/payouts/unmark-paid", { method: "POST", body: JSON.stringify({ month }) }),
   history: () => request("/api/history"),
   portfolioRisk: () => request("/api/portfolio-risk"),
   dataHealth: () => request("/api/data-health"),

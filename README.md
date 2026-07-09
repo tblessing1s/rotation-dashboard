@@ -95,6 +95,10 @@ maxes out.
   `PortfolioRisk` collapsed to headlines) — manage the book.
 - **History** (`HistoryTab` incl. the theta ledger + per-week closes) — review
   results.
+- **Payouts** (`PayoutsTab`) — the monthly income-withdrawal view: this month's
+  estimated payout, last month's payout, month-by-month history, and a per-month
+  finalize → paid record. A payout becomes finalizable the moment its last short
+  of the month closes (or the month ends); a `PAYOUT_READY` push fires then.
 - **Settings** (`SettingsTab`: demo/posture toggles, `LiveTradingSwitch`,
   `AlertsPanel`, `DataHealth`) — low-frequency controls and admin.
 
@@ -123,6 +127,9 @@ ticker" button, with a ← Back button to return.
 | `GET /api/positions` | Positions (LEAP/share/cap), capital summary, milestones. |
 | `GET /api/coverage?ticker=ON` | Delta-coverage guardrail: LEAP vs short deltas, the 0.50 LEAP floor, and whether the long still covers the short. |
 | `GET /api/theta-ledger` | Net juice (week/month/YTD) + extrinsic payback per position. |
+| `GET /api/payouts` | Monthly payout tracker: current-month estimate + last-month payout + month-by-month history (net juice derived from short closes) + totals (YTD/all-time/paid/awaiting). Each month is in progress → finalizable (last short closed / month ended) → finalized → paid. |
+| `POST /api/payouts/finalize` · `POST /api/payouts/unfinalize` | Lock in / undo a month's payout once finalizable (`{month, amount?, note?}`; snapshots the amount, refuses a month still earning juice). |
+| `POST /api/payouts/mark-paid` · `POST /api/payouts/unmark-paid` | Record/undo a month's payout as withdrawn (finalizes first if needed). |
 | `GET /api/kill-switch` | Per-position RS3M vs SPY/Sector + exit signals. |
 | `GET/POST /api/state` | Read the full state; POST updates metadata (operator escape hatch, no UI). |
 | `POST /api/refresh/hot` | Force-refresh the hot set (open positions + live entry/earnings candidates) now; the scheduler also runs it every `HOT_REFRESH_MINUTES` in market hours. `/api/data-health` reports the set + last run. |

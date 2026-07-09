@@ -558,6 +558,73 @@ def api_theta_ledger():
         return _err(e)
 
 
+@app.route("/api/payouts")
+def api_payouts():
+    """Monthly payout tracker: current-month estimate, last-month final payout,
+    the month-by-month income history, and roll-up totals. Income per month is
+    derived from the close_short executions; only paid-status bookkeeping is
+    persisted (see payouts.py)."""
+    try:
+        import payouts
+        return jsonify(payouts.view(log.load_state()))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/payouts/finalize", methods=["POST"])
+def api_payouts_finalize():
+    """Lock in a month's payout once it's finalizable — its last short of the
+    month has closed or the calendar month has ended. Snapshots the net juice."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        import payouts
+        return jsonify(payouts.finalize(
+            payload.get("month"), amount=payload.get("amount"),
+            note=payload.get("note")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/payouts/unfinalize", methods=["POST"])
+def api_payouts_unfinalize():
+    """Undo a finalize (also clears paid state on that month)."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        import payouts
+        return jsonify(payouts.unfinalize(payload.get("month")))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/payouts/mark-paid", methods=["POST"])
+def api_payouts_mark_paid():
+    """Record that a month's payout has been withdrawn (finalizes it first if
+    needed). Snapshots the amount (or an explicit override)."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        import payouts
+        return jsonify(payouts.mark_paid(
+            payload.get("month"), note=payload.get("note"),
+            amount=payload.get("amount")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/payouts/unmark-paid", methods=["POST"])
+def api_payouts_unmark_paid():
+    """Undo a mark-paid (fat-finger recovery)."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        import payouts
+        return jsonify(payouts.unmark_paid(payload.get("month")))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/slippage")
 def api_slippage():
     """Realized paper-fill slippage vs the quoted mid (mid-fill caveat + haircut)."""
