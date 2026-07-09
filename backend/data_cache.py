@@ -109,14 +109,21 @@ def stale_blocks_go(symbol: str, tier: Tier | int | None = None, *,
     stale beyond its tier tolerance.
 
     Returns ``(blocked, stale_inputs)``. A datum blocks when:
-      * we have a record for it and it is stale beyond max_age; or
-      * we have NO record for it AND we're live with the market open — i.e. we
+      * we can derive its age (an explicit record, OR a cache fallback such as the
+        parquet-mtime freshness for bars) and it is stale beyond max_age; or
+      * we can derive NO age at all AND we're live with the market open — i.e. we
         *should* have fresh data and its absence is unknown-fresh.
 
-    Offline/demo (``live`` false or market closed) does not block on merely-absent
-    records, so warm scans and the test suite behave normally; a record that
-    exists and is stale always blocks, live or not. When ``STALE_BLOCKS_GO`` is off
-    the rule is disabled entirely (never blocks)."""
+    Bars are never written to the staleness store (only quotes are), so a missing
+    bars *record* is normal — we fall back to the parquet-mtime freshness that
+    ``get_with_staleness`` computes rather than treating every bars input as
+    unknown-fresh, which would otherwise block the entire Ready-to-Enter list on
+    every live, open-market scan. This mirrors ``entry_context._bars_stale``.
+
+    Offline/demo (``live`` false or market closed) does not block on a datum whose
+    age is genuinely unknown, so warm scans and the test suite behave normally; a
+    datum that is derivably stale always blocks, live or not. When
+    ``STALE_BLOCKS_GO`` is off the rule is disabled entirely (never blocks)."""
     if not config.STALE_BLOCKS_GO:
         return False, []
     now = time.time() if now is None else now
@@ -124,16 +131,17 @@ def stale_blocks_go(symbol: str, tier: Tier | int | None = None, *,
     for kind in required_kinds:
         rec = record(symbol, kind)
         _, age, is_stale = get_with_staleness(symbol, kind, tier=tier, now=now)
-        if rec is None:
-            # unknown datum: only blocking in a live, open-market context
+        if age is None:
+            # age genuinely unknown (no record and no cache fallback): only
+            # blocking in a live, open-market context.
             if live and market_open:
                 stale.append({"kind": kind, "reason": "no fresh data",
                               "age_seconds": None, "provider": None})
             continue
         if is_stale:
             stale.append({"kind": kind, "reason": "stale",
-                          "age_seconds": round(age, 1) if age is not None else None,
-                          "provider": rec.get("provider")})
+                          "age_seconds": round(age, 1),
+                          "provider": (rec or {}).get("provider")})
     return (len(stale) > 0), stale
 
 

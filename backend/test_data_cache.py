@@ -97,6 +97,33 @@ def test_stale_record_blocks_even_offline():
     assert blocked is True and any(s["kind"] == BARS for s in stale)
 
 
+def test_go_not_blocked_when_bars_have_no_record_but_fresh_parquet(monkeypatch):
+    # Bars are never written to the staleness store in production — a missing bars
+    # RECORD is normal. With a fresh parquet cache the GO must NOT be blocked, even
+    # live + open. (Regression: previously every GO was held on "no fresh data" bars.)
+    import data_handler
+    monkeypatch.setattr(data_handler, "cache_age_hours", lambda s: 2.0)  # fresh parquet
+    now = 1_000_000.0
+    data_cache.put("AAPL", QUOTE, 200.0, "schwab", Tier.T1, fetched_at=now - 10)
+    blocked, stale = data_cache.stale_blocks_go("AAPL", Tier.T1, now=now,
+                                                market_open=True, live=True)
+    assert blocked is False and stale == []
+
+
+def test_go_blocked_when_bars_parquet_stale(monkeypatch):
+    # No bars record, but the parquet cache is older than the EOD tolerance -> the
+    # parquet-derived staleness blocks (and is labelled with its real age).
+    import data_handler
+    monkeypatch.setattr(data_handler, "cache_age_hours", lambda s: 40.0)  # > 30h
+    now = 1_000_000.0
+    data_cache.put("AAPL", QUOTE, 200.0, "schwab", Tier.T1, fetched_at=now - 10)
+    blocked, stale = data_cache.stale_blocks_go("AAPL", Tier.T1, now=now,
+                                                market_open=True, live=True)
+    assert blocked is True
+    bars = [s for s in stale if s["kind"] == BARS]
+    assert bars and bars[0]["reason"] == "stale" and bars[0]["age_seconds"] == 40.0 * 3600.0
+
+
 def test_rule_disabled_never_blocks(monkeypatch):
     monkeypatch.setattr(config, "STALE_BLOCKS_GO", False)
     blocked, stale = data_cache.stale_blocks_go("AAPL", Tier.T1, now=1.0,
