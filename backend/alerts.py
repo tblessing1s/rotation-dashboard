@@ -150,33 +150,49 @@ def check_kill_switch(state: dict) -> list[dict]:
 def check_delta_uncovered(state: dict) -> list[dict]:
     out = []
     for p in _open_positions(state):
-        t, leap = p.get("ticker", ""), p.get("leap") or {}
-        contracts = int(leap.get("contracts") or 0)
-        if not leap or not contracts:
-            continue
+        t = p.get("ticker", "")
         price = _last_close(t)
-        leap_mark = (float(leap["current_bid"]) / (contracts * 100)
-                     if leap.get("current_bid") is not None else None)
-        leap_delta, _ = indicators.call_greeks(price, leap.get("strike"), leap.get("dte"), leap_mark)
-        if leap_delta is None:
-            continue
-        if leap_delta < config.LEAP_DELTA_FLOOR:
+        # Long side: sum delta across EVERY LEAP leg (contract-weighted). A
+        # multi-tranche position holds more than one long, and p["leap"] is only
+        # leg 0 — reading it alone under-counts coverage and can fire a false
+        # "uncovered" alert (this mirrors option_chain.coverage()).
+        long_total, long_contracts, min_leg_delta = 0.0, 0, None
+        for leg in log.leap_legs(p):
+            n = int(leg.get("contracts") or 0)
+            if not n:
+                continue
+            leg_mark = (float(leg["current_bid"]) / (n * 100)
+                        if leg.get("current_bid") is not None else None)
+            d, _ = indicators.call_greeks(price, leg.get("strike"), leg.get("dte"), leg_mark)
+            if d is None:
+                continue
+            long_total += d * n
+            long_contracts += n
+            min_leg_delta = d if min_leg_delta is None else min(min_leg_delta, d)
+        if min_leg_delta is None:
+            continue  # no priceable long leg — can't assess coverage
+        # Floor: the weakest leg dropping below the stock-proxy line (per contract).
+        if min_leg_delta < config.LEAP_DELTA_FLOOR:
             out.append(_alert(
                 "DELTA_UNCOVERED", t,
-                f"{t} LEAP delta {leap_delta:.2f} is below the {config.LEAP_DELTA_FLOOR:.2f} floor.",
+                f"{t} LEAP delta {min_leg_delta:.2f} is below the {config.LEAP_DELTA_FLOOR:.2f} floor.",
                 "The LEAP no longer tracks the stock — roll it down/out or exit the position.",
-                {"leap_delta": leap_delta}, key="floor"))
+                {"leap_delta": min_leg_delta}, key="floor"))
+        # Coverage: the shorts' total delta must not outrun the longs' total delta.
+        short_total = 0.0
         for sc in p.get("short_calls", []):
-            short_delta, _ = indicators.call_greeks(price, sc.get("strike"), sc.get("dte"),
-                                                    sc.get("current_bid"))
-            if short_delta is not None and leap_delta < short_delta:
-                out.append(_alert(
-                    "DELTA_UNCOVERED", t,
-                    f"{t} long delta {leap_delta:.2f} < short delta {short_delta:.2f} "
-                    f"(short {sc.get('strike')}).",
-                    "The diagonal is net-short deltas — roll the short up/out or deepen the LEAP.",
-                    {"leap_delta": leap_delta, "short_delta": short_delta,
-                     "short_strike": sc.get("strike")}, key=f"inverted:{sc.get('strike')}"))
+            sd, _ = indicators.call_greeks(price, sc.get("strike"), sc.get("dte"),
+                                           sc.get("current_bid"))
+            if sd is not None:
+                short_total += sd * int(sc.get("contracts") or 0)
+        if p.get("short_calls") and short_total > long_total + 1e-9:
+            out.append(_alert(
+                "DELTA_UNCOVERED", t,
+                f"{t} short delta {short_total:.2f} exceeds long delta {long_total:.2f} "
+                f"(across {long_contracts} long contract(s)).",
+                "The diagonal is net-short deltas — roll the short up/out or deepen the LEAP.",
+                {"long_delta": round(long_total, 4), "short_delta": round(short_total, 4)},
+                key="inverted"))
     return out
 
 
