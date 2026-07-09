@@ -4,6 +4,7 @@ import { Card, Meter, Pill, Light, Loading, money, fmt, pct, useApi } from "./ui
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import BurnPanel from "./BurnPanel.jsx";
+import { Glass, Orange, pulpOf, juiceOf } from "./JuiceStand.jsx";
 import { useToast } from "./Toast.jsx";
 import { submitOrder } from "../orderFlow.js";
 
@@ -480,41 +481,71 @@ const VERDICT_TONE = {
   green: { stripe: "border-l-emerald-500", badge: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40", reason: "text-slate-400" },
 };
 
-// The card hero: the two things the page exists to answer, side by side —
-// the health verdict (left) and this position's income (right).
-function CardHero({ verdict, health }) {
+// The card hero: the two things the page exists to answer, told in the dashboard's
+// own visual language. HEALTH (left) is the LEAP orange — pulp is intrinsic vs cost
+// basis, the leaf stands green when self-funding — beside the synthesized verdict.
+// INCOME (right) is the net/wk + hold take-home with this position's juice glasses,
+// one per open short, filling as its extrinsic decays into our pocket.
+function CardHero({ p, verdict, health }) {
   const t = VERDICT_TONE[verdict.level];
   const net = health?.net_juice_per_week;
   const th = holdTakeHome(health);
   const netTone = net == null ? "text-slate-400" : net >= 0 ? "text-emerald-300" : "text-rose-300";
+  const pulp = pulpOf(p);
+  const maintenance = health?.maintenance_status || "unknown";
+  const shorts = (p.short_calls || []).map((sc) => ({ sc, ...juiceOf(sc) }));
+
   return (
-    <div className={`mt-4 flex flex-wrap items-center justify-between gap-x-6 gap-y-3 rounded-lg border border-slate-800 border-l-2 bg-slate-900/40 p-3 ${t.stripe}`}>
-      <div className="min-w-0">
-        <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide ${t.badge}`}
-              title={verdict.all.length > 1 ? verdict.all.join(" · ") : undefined}>
-          {verdict.label}
-        </span>
-        <span className={`ml-2 text-sm ${t.reason}`}>{verdict.reason}</span>
-        {verdict.all.length > 1 && (
-          <span className="ml-1 text-xs text-slate-500">+{verdict.all.length - 1} more</span>
-        )}
+    <div className={`mt-4 grid gap-4 rounded-xl border border-slate-800 border-l-2 bg-slate-900/40 p-4 sm:grid-cols-2 ${t.stripe}`}>
+      {/* HEALTH — the LEAP engine + the verdict it rolls up to. */}
+      <div className="flex items-center gap-3">
+        <Orange uid={`hero-${p.ticker}`} pct={pulp.pct} maintenance={maintenance}
+                maintained={pulp.pct != null && pulp.pct >= 100} />
+        <div className="min-w-0">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">Health</div>
+          <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide ${t.badge}`}
+                title={verdict.all.length > 1 ? verdict.all.join(" · ") : undefined}>
+            {verdict.label}
+          </span>
+          <p className={`mt-1 text-sm ${t.reason}`}>
+            {verdict.reason}
+            {verdict.all.length > 1 && (
+              <span className="ml-1 text-xs text-slate-500">+{verdict.all.length - 1} more</span>
+            )}
+          </p>
+        </div>
       </div>
-      <div className="text-right">
-        <div className="text-[10px] uppercase tracking-wide text-slate-500">Income</div>
-        <div className="text-sm">
-          <span className="text-slate-500">net </span>
-          <span className={`font-semibold ${netTone}`}>{net == null ? "—" : `${net >= 0 ? "+" : ""}${money(net)}/wk`}</span>
+
+      {/* INCOME — the take-home numbers and the juice glasses. */}
+      <div className="flex items-center justify-between gap-3 sm:justify-end sm:gap-5 sm:border-l sm:border-slate-800 sm:pl-5">
+        <div className="sm:text-right">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">Income</div>
+          <div className="text-xl font-semibold leading-tight">
+            <span className={netTone}>{net == null ? "—" : `${net >= 0 ? "+" : ""}${money(net)}`}</span>
+            <span className="text-xs font-normal text-slate-500">/wk</span>
+          </div>
           {th && (
-            <>
-              <span className="text-slate-600"> · </span>
-              <span className="text-slate-500">take-home </span>
+            <div className="text-xs text-slate-500">
+              take-home{" "}
               <span className={`font-semibold ${th.value >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
                 {th.value >= 0 ? "+" : "−"}{money(Math.abs(th.value))}
               </span>
-              <span className="text-slate-500">/{fmt(th.weeks, 0)}wk</span>
-            </>
+              /{fmt(th.weeks, 0)}wk
+            </div>
           )}
         </div>
+        {shorts.length > 0 ? (
+          <div className="flex items-start gap-1">
+            {shorts.map(({ sc, pct }, i) => (
+              <div key={i} className="flex flex-col items-center">
+                <Glass uid={`hero-${p.ticker}-${i}`} pct={pct} rollNow={!!sc.roll_now} />
+                <span className="text-[9px] text-slate-500">{fmt(sc.strike, 0)}C</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <span className="max-w-[5rem] text-center text-[11px] italic leading-snug text-slate-500">no short — not being squeezed</span>
+        )}
       </div>
     </div>
   );
@@ -712,7 +743,7 @@ function PositionCard({ p, ks, diffs, focused, setRolling, onOpenTicket, afterRe
       )}
 
       {/* HERO: health verdict + income. */}
-      <CardHero verdict={verdict} health={health} />
+      <CardHero p={p} verdict={verdict} health={health} />
 
       {/* Income detail — juice vs burn, coverage, weekly bars, hold take-home. */}
       <BurnPanel ticker={p.ticker} health={health} />
