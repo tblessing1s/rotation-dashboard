@@ -55,6 +55,9 @@ function DeltaCoverage({ ticker }) {
     : data.status === "yellow" ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
     : "border-rose-500/40 bg-rose-500/15 text-rose-300";
   const shorts = data.shorts || [];
+  const leaps = data.leaps || (data.leap ? [data.leap] : []);
+  const multiLeg = leaps.length > 1;
+  const multiShort = shorts.length > 1;
   return (
     <div className="mt-4 border-t border-slate-800 pt-3">
       <div className="mb-1 flex items-center justify-between">
@@ -63,17 +66,34 @@ function DeltaCoverage({ ticker }) {
           {data.covered ? "covered" : "uncovered"}
         </span>
       </div>
+      {/* Contract-weighted totals — the honest apples-to-apples for coverage. The
+          per-leg deltas sit underneath so a multi-tranche long still reads clearly. */}
       <div className="text-sm text-slate-300">
-        LEAP Δ <span className="font-semibold text-slate-100">{fmt(data.leap?.delta, 2)}</span>
+        long Δ <span className="font-semibold text-slate-100">{fmt(data.long_total_delta, 2)}</span>
+        {multiLeg && <span className="text-slate-500"> ({leaps.length} legs)</span>}
         {shorts.length > 0 && (
-          <> · short Δ {shorts.map((s, i) => (
-            <span key={i} className="font-semibold text-slate-100">
-              {fmt(s.delta, 2)}{i < shorts.length - 1 ? ", " : ""}
-            </span>
-          ))}</>
+          <> · short Δ <span className="font-semibold text-slate-100">{fmt(data.short_total_delta, 2)}</span></>
         )}
-        {" · net Δ "}<span className="font-semibold text-slate-100">{fmt(data.net_delta, 2)}</span>
+        {" · net Δ "}
+        <span className={`font-semibold ${data.net_delta < 0 ? "text-rose-300" : "text-slate-100"}`}>
+          {fmt(data.net_delta, 2)}
+        </span>
       </div>
+      {(multiLeg || multiShort) && (
+        <div className="mt-0.5 text-xs text-slate-500">
+          {multiLeg && (
+            <>long {leaps.map((l, i) => (
+              <span key={i}>{fmt(l.delta, 2)}×{l.contracts}{i < leaps.length - 1 ? " + " : ""}</span>
+            ))}</>
+          )}
+          {multiLeg && multiShort && " · "}
+          {multiShort && (
+            <>short {shorts.map((s, i) => (
+              <span key={i}>{fmt(s.delta, 2)}×{s.contracts}{i < shorts.length - 1 ? " + " : ""}</span>
+            ))}</>
+          )}
+        </div>
+      )}
       <div className={`mt-1 text-xs ${tone}`}>{data.message}</div>
     </div>
   );
