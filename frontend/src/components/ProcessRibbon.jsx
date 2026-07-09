@@ -10,7 +10,7 @@ import { Card, money, fmt, useApi } from "./ui.jsx";
 // can't spell out remain (dollars to deploy, this week's pour). The substance
 // literally flows between stages: water → growth → juice → cash.
 //
-//   💧 Dry Powder  →  🌱 Ready to Plant  →  🍊 The Grove  →  🫙 The Harvest
+//   💧 Dry Powder  →  🌱 Ready to Plant  →  🍊 The Grove  →  🥤 Weekly Juice
 //     (blue water)     (green growth)        (orange fruit)    (emerald juice)
 //
 // Every number is derived on the server (capital_summary carries the deploy
@@ -465,7 +465,7 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
       : `${cap1(words(attention))} ${attention === 1 ? "tree wants" : "trees want"} tending.`;
   const groveToneText = hasCritical ? "text-rose-300" : attention ? "text-amber-300" : grove.length ? "text-emerald-300" : "text-slate-400";
 
-  // ---- 4. The Harvest — this week's juice, a detailed glass filling to pace.
+  // ---- 4. Weekly Juice — this week's juice, a detailed glass filling to pace.
   // Fill is this week against the 2%/week stretch (a full glass); the dashed
   // pace line sits at the 1% "on-pace" target, so juice past it is a good week.
   const weekJuice = totals.this_week;
@@ -594,9 +594,9 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
         <Flow color={FLOW.juice} />
         <div className="sm:hidden"><Flow vertical color={FLOW.juice} /></div>
 
-        {/* 4 — THE HARVEST (this week's juice glass) */}
+        {/* 4 — WEEKLY JUICE (this week's juice glass) */}
         <Stage
-          emoji="🥤" title="The Harvest" tone={harvestTone}
+          emoji="🥤" title="Weekly Juice" tone={harvestTone}
           hero={<span className={draining ? "text-rose-300" : "text-emerald-300"}>{money(weekJuice)}</span>}
           story={<span className={draining ? "text-rose-300" : ""}>{harvestStory}</span>}
           onClick={() => nav?.tab?.("History")}
