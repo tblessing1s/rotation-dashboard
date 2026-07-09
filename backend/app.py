@@ -7,6 +7,7 @@ that contacts a provider live is the Schwab account/quote path used at execution
 """
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 
@@ -170,6 +171,26 @@ def api_scan_ready():
         now_et = _dt.now(_ZI("America/New_York"))
         mkt_open = market_scheduler.is_market_open(now_et)
         live = mkt_open and not config.demo_enabled() and data_cache.active()
+
+        # On-demand quote fetch: the tiered poller only quotes open positions,
+        # on-deck queue names, and held sector ETFs, so a fresh GO that isn't
+        # queued for a slot has no live quote and would be perpetually
+        # stale-blocked below. When live, pull a live quote for exactly the GO
+        # names that lack a fresh one, so this shortlist reflects what the
+        # operator could actually enter — not just what happens to be on-deck.
+        if live and go_rows:
+            import data_transport
+            from market_scheduler import QUOTE as _QUOTE
+            need = [r["ticker"] for r in go_rows
+                    if data_cache.get_with_staleness(
+                        r["ticker"], _QUOTE, tier=market_scheduler.Tier.T1)[2]]
+            if need:
+                try:
+                    data_transport.fetch_quotes_batched(
+                        {s: market_scheduler.Tier.T1 for s in need})
+                except Exception as fe:  # noqa: BLE001 — scan still returns on a miss
+                    logging.getLogger("cfm.app").warning(
+                        "scan_ready on-demand quote fetch failed: %s", fe)
 
         ready, near_misses, stale_blocked = [], [], []
         for r in go_rows:
