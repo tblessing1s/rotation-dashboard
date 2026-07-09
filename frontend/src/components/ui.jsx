@@ -163,6 +163,34 @@ export function useApi(fn, deps = [], interval = null, retries = 2) {
   return { data, error, loading, reload: load };
 }
 
+// A lightweight centered modal: dim backdrop, click-outside / Esc to close, and
+// a floating ✕. The caller passes the content (typically a Card), so the same
+// detail card that used to sit inline can now pop over on click. Matches the
+// OptionChainModal/RollModal overlay convention (fixed inset-0 z-50 bg-black/70).
+export function Modal({ onClose, children, maxWidth = "max-w-2xl" }) {
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose?.(); };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/70 p-4 sm:items-center"
+      role="dialog" aria-modal="true" onClick={onClose}
+    >
+      <div className={`relative my-6 w-full ${maxWidth}`} onClick={(e) => e.stopPropagation()}>
+        <button
+          onClick={onClose} aria-label="Close"
+          className="absolute -right-2 -top-2 z-10 rounded-full border border-slate-700 bg-slate-900 px-2.5 py-1 text-slate-300 shadow-lg hover:bg-slate-800 hover:text-slate-100"
+        >
+          ✕
+        </button>
+        {children}
+      </div>
+    </div>
+  );
+}
+
 // Inline error with a Retry button — for a panel whose fetch failed, so the
 // operator can re-try in place instead of reloading the whole dashboard.
 export function ErrorState({ error, onRetry, className = "" }) {

@@ -275,16 +275,20 @@ const WEATHER = {
   },
 };
 
-function WeatherBanner({ regime }) {
+function WeatherBanner({ regime, onClick }) {
   const status = regime?.status || "unknown";
   const w = WEATHER[status] || WEATHER.unknown;
   const bits = [];
   if (regime?.breadth != null) bits.push(`breadth ${fmt(regime.breadth, 0)}%`);
   if (regime?.vix != null) bits.push(`VIX ${fmt(regime.vix, 1)}`);
   if (regime?.spy_trend) bits.push(`SPY ${regime.spy_trend}`);
+  const Wrap = onClick ? "button" : "div";
   return (
-    <div
-      className={`mb-2 flex items-center gap-3 rounded-xl border bg-gradient-to-b ${w.sky} px-3 py-2`}
+    <Wrap
+      onClick={onClick}
+      className={`mb-2 flex w-full items-center gap-3 rounded-xl border bg-gradient-to-b ${w.sky} px-3 py-2 text-left ${
+        onClick ? "transition hover:brightness-125" : ""
+      }`}
       title={bits.length ? `Market regime — ${bits.join(" · ")}` : "Market regime"}
     >
       <Weather status={status} />
@@ -293,9 +297,9 @@ function WeatherBanner({ regime }) {
         <div className="text-[12px] italic leading-snug text-slate-300">{w.story}</div>
       </div>
       <span className="ml-auto hidden text-[10px] uppercase tracking-wide text-slate-500 sm:inline">
-        weather over the grove
+        weather over the grove{onClick ? " · tap for detail" : ""}
       </span>
-    </div>
+    </Wrap>
   );
 }
 
@@ -502,7 +506,7 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
       </div>
 
       {/* The weather over the grove — the market regime presiding over it all. */}
-      <WeatherBanner regime={regime} />
+      <WeatherBanner regime={regime} onClick={() => nav?.detail?.("regime")} />
 
       <div className="flex flex-col items-stretch gap-1 sm:flex-row sm:items-stretch">
         {/* 1 — DRY POWDER (the rain barrel) */}
@@ -510,7 +514,7 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
           emoji="💧" title="Dry Powder" tone={powderTone}
           hero={deployable != null ? money(deployable) : "—"}
           story={<span className={reserveOk ? "" : "text-rose-300"}>{powderStory}</span>}
-          onClick={() => nav?.tab?.("Positions")}
+          onClick={() => nav?.detail?.("book")}
         >
           <div className="flex flex-col items-center">
             <Vessel
@@ -531,7 +535,7 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
           emoji="🌱" title="Ready to Plant" tone={readyTone}
           badge={readyLoading ? "…" : readyList.length || 0}
           story={<span className={readyList.length && canPlant ? "text-emerald-200" : ""}>{plantStory}</span>}
-          onClick={() => nav?.tab?.("Scan")}
+          onClick={() => nav?.detail?.("ready")}
         >
           {readyLoading ? (
             <div className="text-[11px] italic text-slate-500">walking the rows…</div>
@@ -570,7 +574,7 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
           emoji="🍊" title="The Grove" tone={groveTone}
           badge={grove.length || 0}
           story={<span className={groveToneText}>{groveStory}</span>}
-          onClick={() => nav?.tab?.("Positions")}
+          onClick={() => nav?.detail?.("grove")}
         >
           {grove.length ? (
             <div className="flex max-w-[12rem] flex-wrap items-end justify-center gap-1">
@@ -599,7 +603,7 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
           emoji="🥤" title="Weekly Juice" tone={harvestTone}
           hero={<span className={draining ? "text-rose-300" : "text-emerald-300"}>{money(weekJuice)}</span>}
           story={<span className={draining ? "text-rose-300" : ""}>{harvestStory}</span>}
-          onClick={() => nav?.tab?.("History")}
+          onClick={() => nav?.detail?.("juice")}
         >
           <WeeklyGlass pct={weekPct} paceFrac={paceFrac} glow={aboveTarget} />
         </Stage>
