@@ -4,7 +4,7 @@ import { Card, Meter, Pill, Light, Loading, money, fmt, pct, useApi } from "./ui
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import BurnPanel from "./BurnPanel.jsx";
-import { Glass, Orange, pulpOf, juiceOf } from "./JuiceStand.jsx";
+import { Orange, pulpOf, balanceOf } from "./JuiceStand.jsx";
 import { useToast } from "./Toast.jsx";
 import { submitOrder } from "../orderFlow.js";
 
@@ -439,17 +439,6 @@ function Expander({ title, children, defaultOpen = false }) {
   );
 }
 
-// The take-home over the planned hold: projected juice across the remaining weeks
-// minus the model extrinsic burn to the exit DTE. Every input is already on the
-// leap_health payload (burn_projection) — this just nets them. Null when the burn
-// projection isn't priceable (Schwab off / off-hours).
-function holdTakeHome(health) {
-  const bp = health?.burn_projection;
-  const juice = health?.trailing_avg_weekly_juice;
-  if (!bp || bp.projected_burn_total == null || bp.weeks_remaining == null || juice == null) return null;
-  return { weeks: bp.weeks_remaining, value: juice * bp.weeks_remaining - bp.projected_burn_total };
-}
-
 // Synthesize ONE health verdict per position from every guardrail already on the
 // card. Worst-severity wins; the top reason becomes the headline, the rest a
 // tooltip. This is the "is the position healthy?" answer the page leads with.
@@ -481,71 +470,96 @@ const VERDICT_TONE = {
   green: { stripe: "border-l-emerald-500", badge: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40", reason: "text-slate-400" },
 };
 
-// The card hero: the two things the page exists to answer, told in the dashboard's
-// own visual language. HEALTH (left) is the LEAP orange — pulp is intrinsic vs cost
-// basis, the leaf stands green when self-funding — beside the synthesized verdict.
-// INCOME (right) is the net/wk + hold take-home with this position's juice glasses,
-// one per open short, filling as its extrinsic decays into our pocket.
-function CardHero({ p, verdict, health }) {
+// The card hero — the position's BALANCE, the thing the page is for now that
+// income tracking lives on its own page: is the initial investment staying whole?
+// Two halves tell it. INTRINSIC (left): the LEAP orange (pulp = intrinsic vs cost
+// basis, leaf = self-funding) beside whether the LEAP's intrinsic still covers the
+// shorts' intrinsic, so a stock move washes out. EXTRINSIC PAID BACK (right): how
+// much of the LEAP's entry extrinsic the collected juice has recovered — the burn
+// being earned back. The verdict badge sits above as the one-line roll-up.
+function BalanceHero({ p, verdict, health, payback }) {
   const t = VERDICT_TONE[verdict.level];
-  const net = health?.net_juice_per_week;
-  const th = holdTakeHome(health);
-  const netTone = net == null ? "text-slate-400" : net >= 0 ? "text-emerald-300" : "text-rose-300";
   const pulp = pulpOf(p);
   const maintenance = health?.maintenance_status || "unknown";
-  const shorts = (p.short_calls || []).map((sc) => ({ sc, ...juiceOf(sc) }));
+  // balanceOf expects the juice-stand's {sc, ...} row shape, not raw short_calls.
+  const bal = balanceOf(p, (p.short_calls || []).map((sc) => ({ sc })));
+  const hasBal = bal.longIntrinsic != null;
+  const covered = bal.covered;
+  const balBadge = covered
+    ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
+    : "border-rose-500/40 bg-rose-500/15 text-rose-300";
+
+  const pb = payback || {};
+  const paidPct = pb.pct_complete;
+  const hasPayback = pb.leap_extrinsic_at_entry != null && pb.leap_extrinsic_at_entry > 0;
+  const done = hasPayback && paidPct >= 100;
 
   return (
-    <div className={`mt-4 grid gap-4 rounded-xl border border-slate-800 border-l-2 bg-slate-900/40 p-4 sm:grid-cols-2 ${t.stripe}`}>
-      {/* HEALTH — the LEAP engine + the verdict it rolls up to. */}
-      <div className="flex items-center gap-3">
-        <Orange uid={`hero-${p.ticker}`} pct={pulp.pct} maintenance={maintenance}
-                maintained={pulp.pct != null && pulp.pct >= 100} />
-        <div className="min-w-0">
-          <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">Health</div>
-          <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide ${t.badge}`}
-                title={verdict.all.length > 1 ? verdict.all.join(" · ") : undefined}>
-            {verdict.label}
-          </span>
-          <p className={`mt-1 text-sm ${t.reason}`}>
-            {verdict.reason}
-            {verdict.all.length > 1 && (
-              <span className="ml-1 text-xs text-slate-500">+{verdict.all.length - 1} more</span>
-            )}
-          </p>
-        </div>
+    <div className={`mt-4 rounded-xl border border-slate-800 border-l-2 bg-slate-900/40 p-4 ${t.stripe}`}>
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide ${t.badge}`}
+              title={verdict.all.length > 1 ? verdict.all.join(" · ") : undefined}>
+          {verdict.label}
+        </span>
+        <span className={`text-sm ${t.reason}`}>
+          {verdict.reason}
+          {verdict.all.length > 1 && <span className="ml-1 text-xs text-slate-500">+{verdict.all.length - 1} more</span>}
+        </span>
       </div>
 
-      {/* INCOME — the take-home numbers and the juice glasses. */}
-      <div className="flex items-center justify-between gap-3 sm:justify-end sm:gap-5 sm:border-l sm:border-slate-800 sm:pl-5">
-        <div className="sm:text-right">
-          <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">Income</div>
-          <div className="text-xl font-semibold leading-tight">
-            <span className={netTone}>{net == null ? "—" : `${net >= 0 ? "+" : ""}${money(net)}`}</span>
-            <span className="text-xs font-normal text-slate-500">/wk</span>
-          </div>
-          {th && (
-            <div className="text-xs text-slate-500">
-              take-home{" "}
-              <span className={`font-semibold ${th.value >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
-                {th.value >= 0 ? "+" : "−"}{money(Math.abs(th.value))}
-              </span>
-              /{fmt(th.weeks, 0)}wk
+      <div className="grid gap-4 sm:grid-cols-2">
+        {/* Intrinsic balance — the LEAP's intrinsic (asset) vs the shorts' (liability). */}
+        <div className="flex items-center gap-3">
+          <Orange uid={`bal-${p.ticker}`} pct={pulp.pct} maintenance={maintenance}
+                  maintained={pulp.pct != null && pulp.pct >= 100} />
+          <div className="min-w-0">
+            <div className="mb-1 flex items-center gap-1.5">
+              <span className="text-[10px] uppercase tracking-wide text-slate-500">Intrinsic balance</span>
+              {hasBal && (
+                <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase ${balBadge}`}>
+                  {covered ? "balanced" : "unbalanced"}
+                </span>
+              )}
             </div>
+            {hasBal ? (
+              <>
+                <div className="text-sm text-slate-300">
+                  LEAP <span className="font-semibold text-slate-100">{money(bal.longIntrinsic)}</span>
+                  {" vs short "}<span className="font-semibold text-slate-100">{money(bal.shortIntrinsic)}</span>
+                </div>
+                <div className="text-xs text-slate-500">
+                  {covered
+                    ? `${money(bal.net)} cushion — a stock move washes out`
+                    : `short intrinsic outruns the LEAP by ${money(-bal.net)}`}
+                </div>
+              </>
+            ) : (
+              <div className="text-xs text-slate-500">No mark yet — intrinsic balance pending.</div>
+            )}
+          </div>
+        </div>
+
+        {/* Extrinsic paid back — the LEAP's entry extrinsic (the burn) recovered by juice. */}
+        <div className="sm:border-l sm:border-slate-800 sm:pl-4">
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-[10px] uppercase tracking-wide text-slate-500">Extrinsic burn — paid back</span>
+            {hasPayback && (
+              <span className={`text-sm font-semibold ${done ? "text-emerald-300" : "text-slate-100"}`}>{fmt(paidPct, 0)}%</span>
+            )}
+          </div>
+          {hasPayback ? (
+            <>
+              <Meter pct={paidPct} tone={done ? "bg-emerald-400" : "bg-sky-500"} />
+              <div className="mt-1 text-xs text-slate-500">
+                {money(pb.collected_to_date)} of {money(pb.leap_extrinsic_at_entry)} recovered
+                {pb.remaining_to_payback > 0 && <span> · {money(pb.remaining_to_payback)} to go</span>}
+                {done && <span className="text-emerald-300"> · fully paid back</span>}
+              </div>
+            </>
+          ) : (
+            <div className="text-xs text-slate-500">No entry extrinsic recorded — nothing to pay back.</div>
           )}
         </div>
-        {shorts.length > 0 ? (
-          <div className="flex items-start gap-1">
-            {shorts.map(({ sc, pct }, i) => (
-              <div key={i} className="flex flex-col items-center">
-                <Glass uid={`hero-${p.ticker}-${i}`} pct={pct} rollNow={!!sc.roll_now} />
-                <span className="text-[9px] text-slate-500">{fmt(sc.strike, 0)}C</span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <span className="max-w-[5rem] text-center text-[11px] italic leading-snug text-slate-500">no short — not being squeezed</span>
-        )}
       </div>
     </div>
   );
@@ -706,7 +720,7 @@ function ShortCalls({ p, shorts, setRolling, onOpenTicket }) {
 // healthy, and how much income is it making. Verdict + income lead; long-leg
 // internals, structure, deltas and relative strength are one tap away. Active
 // alerts (reconciliation, defend, whipsaw, a tripped kill switch) never hide.
-function PositionCard({ p, ks, diffs, focused, setRolling, onOpenTicket, afterResolve }) {
+function PositionCard({ p, ks, diffs, payback, focused, setRolling, onOpenTicket, afterResolve }) {
   const { data: coverage } = useApi(React.useCallback(() => api.coverage(p.ticker), [p.ticker]), [p.ticker], null);
   const leap = p.leap || {};
   const sh = p.shares || {};
@@ -742,11 +756,8 @@ function PositionCard({ p, ks, diffs, focused, setRolling, onOpenTicket, afterRe
         </p>
       )}
 
-      {/* HERO: health verdict + income. */}
-      <CardHero p={p} verdict={verdict} health={health} />
-
-      {/* Income detail — juice vs burn, coverage, weekly bars, hold take-home. */}
-      <BurnPanel ticker={p.ticker} health={health} />
+      {/* HERO: is the position staying balanced — intrinsic covered + burn paid back. */}
+      <BalanceHero p={p} verdict={verdict} health={health} payback={payback} />
 
       {p.whipsaw?.tripped && (
         <div className="mt-3 rounded-lg border border-rose-500/50 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
@@ -768,6 +779,13 @@ function PositionCard({ p, ks, diffs, focused, setRolling, onOpenTicket, afterRe
       {ks?.alert && <KillSwitchStrip ks={ks} />}
 
       {/* Supporting detail — one tap away. */}
+      {/* Income economics — juice vs burn, take-home, weekly bars. Demoted here;
+          this moves to its own Income page. Kept accessible until it does. */}
+      {health && (
+        <Expander title="Income economics">
+          <BurnPanel ticker={p.ticker} health={health} />
+        </Expander>
+      )}
       <Expander title="Position structure">
         <PositionFacts leap={leap} sh={sh} stockPrice={p.stock_price} shortCount={shorts.length} />
       </Expander>
@@ -860,6 +878,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
             p={p}
             ks={killByTicker[p.ticker]}
             diffs={openDiffsByTicker[p.ticker]}
+            payback={data?.extrinsic_payback?.[p.ticker]}
             focused={focusedTicker === p.ticker}
             setRolling={setRolling}
             onOpenTicket={onOpenTicket}
