@@ -9,18 +9,31 @@ This module adds exactly that, WITHOUT duplicating the source of truth:
 
 * Net juice per calendar month is **derived** from the immutable executions
   (never stored) — recompute is idempotent, same as the theta ledger.
-* The only thing persisted is the operator's *payout bookkeeping*: which months
-  have been marked paid, when, the amount snapshotted at that moment, and an
-  optional note. Snapshotting the amount freezes what was actually withdrawn even
-  if a later reconciliation adjusts historical executions.
+* The only thing persisted is the operator's *payout bookkeeping*: whether a
+  month has been finalized and/or marked paid, when, the amount snapshotted at
+  each step, and an optional note. Snapshotting freezes what was actually
+  finalized/withdrawn even if a later reconciliation adjusts historical
+  executions.
 
-The "current month" figure is an **estimate** (the month is still accruing); a
-completed month is **final**. The ``PAYOUT_READY`` alert (see alerts.py) fires
-once a month rolls over so the just-finalized payout can be withdrawn and marked.
+A month moves through three states:
+
+  in_progress → finalizable → finalized → paid
+
+* **in_progress** — the current month, still accruing juice.
+* **finalizable** — the month's short income is done, so the payout can be
+  finalized: the last short *of that month* has closed (no open short leg still
+  expires in it), OR the calendar month has ended. This is the trigger for the
+  ``PAYOUT_READY`` notification.
+* **finalized** — the operator locked the amount in (snapshotted).
+* **paid** — the operator recorded the cash as withdrawn.
+
+Rolling the last weekly short of a month into a short that expires *next* month
+flips the current month to finalizable immediately — that's the "last short of
+the month is closed" moment, not the calendar rollover.
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import logging_handler as log
@@ -33,7 +46,7 @@ _MONTH_NAMES = ["", "January", "February", "March", "April", "May", "June",
 
 
 def _month_key(date_str: str) -> str | None:
-    """The 'YYYY-MM' bucket for an execution date, or None if unparseable."""
+    """The 'YYYY-MM' bucket for a date string, or None if unparseable."""
     s = str(date_str or "")[:7]
     if len(s) == 7 and s[4] == "-":
         return s
@@ -82,31 +95,108 @@ def monthly_net_juice(state: dict) -> dict[str, dict]:
     return buckets
 
 
+def _short_expiry_month(sc: dict) -> str | None:
+    """The 'YYYY-MM' a short leg expires in. Uses the stored expiration; falls
+    back to open_date + dte (weeklies default to 5) when the expiration wasn't
+    captured (paper/demo legs), so a leg with income still to come this month is
+    never mistaken for done."""
+    exp = _month_key(sc.get("expiration"))
+    if exp:
+        return exp
+    open_date = str(sc.get("open_date") or "")[:10]
+    if open_date:
+        try:
+            d = datetime.strptime(open_date, "%Y-%m-%d").date() + \
+                timedelta(days=int(sc.get("dte") or 5))
+            return d.strftime("%Y-%m")
+        except (ValueError, TypeError):
+            return _month_key(open_date)
+    return None
+
+
+def has_open_short_expiring_in(state: dict, month: str) -> bool:
+    """True if any OPEN short leg still expires within ``month`` — i.e. this
+    month can still earn juice, so it isn't done yet. The last short of the month
+    closing (or rolling into a next-month expiry) flips this to False."""
+    for p in state.get("positions", []):
+        if p.get("status") == "closed":
+            continue
+        for sc in p.get("short_calls") or []:
+            if _short_expiry_month(sc) == month:
+                return True
+    return False
+
+
+def is_finalizable(state: dict, month: str, net_by_month: dict,
+                   cur: str | None = None) -> bool:
+    """Can this month's payout be finalized now?
+
+    A month with net income is finalizable once its short income is done: for a
+    past (calendar-ended) month always; for the current month once no open short
+    still expires in it (the last short of the month has closed). A future month,
+    or a month with no positive income, is never finalizable.
+    """
+    cur = cur or _cur_month()
+    if float((net_by_month.get(month) or {}).get("net_juice") or 0) <= 0:
+        return False
+    if month > cur:
+        return False
+    if month < cur:
+        return True
+    return not has_open_short_expiring_in(state, month)
+
+
 def _records(state: dict) -> dict[str, dict]:
     return (state.get("payouts") or {}).get("records") or {}
 
 
+def _payout_amount(entry_net: float, record: dict) -> float:
+    """The figure to show for a month: the paid amount if paid, else the finalized
+    amount if finalized, else the live/derived net juice."""
+    if record.get("paid") and record.get("paid_amount") is not None:
+        return float(record["paid_amount"])
+    if record.get("finalized") and record.get("finalized_amount") is not None:
+        return float(record["finalized_amount"])
+    return round(float(entry_net), 2)
+
+
+def _status(month: str, net: float, record: dict, finalizable: bool,
+            cur: str) -> str:
+    if record.get("paid"):
+        return "paid"
+    if record.get("finalized"):
+        return "finalized"
+    if finalizable:
+        return "finalizable"
+    if month == cur:
+        return "in_progress"
+    return "none"  # a past month that never earned income
+
+
 def _month_entry(month: str, net: dict | None, record: dict | None,
-                 cur_month: str) -> dict:
+                 state: dict, cur: str) -> dict:
     """One month's row for the view: derived income merged with paid bookkeeping."""
     net = net or {"net_juice": 0.0, "closes": 0}
     record = record or {}
-    is_current = month == cur_month
-    paid = bool(record.get("paid"))
+    net_juice = round(float(net.get("net_juice") or 0), 2)
+    finalizable = is_finalizable(state, month, {month: net}, cur)
     return {
         "month": month,
         "label": month_label(month),
-        "net_juice": round(float(net.get("net_juice") or 0), 2),
+        "net_juice": net_juice,
         "closes": int(net.get("closes") or 0),
-        # A month still in progress is an ESTIMATE; a completed month is FINAL.
-        "estimated": is_current,
-        "status": "in_progress" if is_current else ("paid" if paid else "unpaid"),
-        "paid": paid,
+        # A month still in progress shows an ESTIMATE; finalized months are locked.
+        "estimated": month == cur and not record.get("finalized"),
+        "status": _status(month, net_juice, record, finalizable, cur),
+        "finalizable": finalizable,
+        "finalized": bool(record.get("finalized")),
+        "finalized_at": record.get("finalized_at"),
+        "finalized_amount": record.get("finalized_amount"),
+        "paid": bool(record.get("paid")),
         "paid_at": record.get("paid_at"),
-        # The amount snapshotted when marked paid — what was actually withdrawn,
-        # which can differ from a later-recomputed net_juice. Falls back to the
-        # live figure for display when unpaid.
         "paid_amount": record.get("paid_amount"),
+        # The single figure the UI headlines for this month.
+        "payout_amount": _payout_amount(net_juice, record),
         "note": record.get("note"),
     }
 
@@ -122,19 +212,21 @@ def view(state: dict | None = None) -> dict:
 
     # Union of every month that has income OR a payout record, newest first.
     months = sorted(set(net_by_month) | set(records) | {cur, prev}, reverse=True)
-    history = [_month_entry(m, net_by_month.get(m), records.get(m), cur) for m in months]
+    history = [_month_entry(m, net_by_month.get(m), records.get(m), state, cur)
+               for m in months]
+    by_month = {h["month"]: h for h in history}
 
-    current = _month_entry(cur, net_by_month.get(cur), records.get(cur), cur)
-    previous = _month_entry(prev, net_by_month.get(prev), records.get(prev), cur)
+    current = by_month[cur]
+    previous = by_month[prev]
 
     year = cur[:4]
     ytd = round(sum(r["net_juice"] for m, r in net_by_month.items() if m[:4] == year), 2)
     all_time = round(sum(r["net_juice"] for r in net_by_month.values()), 2)
-    paid_out = round(sum(float(rec.get("paid_amount") or 0)
-                         for rec in records.values() if rec.get("paid")), 2)
-    # Income from FINALIZED (past) months that hasn't been marked paid yet.
-    unpaid = round(sum(r["net_juice"] for r in history
-                       if r["status"] == "unpaid" and r["net_juice"] > 0), 2)
+    paid_out = round(sum(h["payout_amount"] for h in history if h["paid"]), 2)
+    # Income that's yours but not withdrawn yet: finalized-unpaid + income sitting
+    # in months that could be finalized (last short closed / month ended) now.
+    awaiting = round(sum(h["payout_amount"] for h in history
+                         if not h["paid"] and (h["finalized"] or h["finalizable"])), 2)
 
     return {
         "current": current,
@@ -144,38 +236,41 @@ def view(state: dict | None = None) -> dict:
             "ytd": ytd,
             "all_time": all_time,
             "paid_out": paid_out,
-            "unpaid": unpaid,
+            "awaiting": awaiting,
             "year": year,
         },
     }
 
 
-def mark_paid(month: str, note: str | None = None,
-              amount: float | None = None) -> dict:
-    """Record that a month's payout has been withdrawn.
-
-    Snapshots the month's net juice as ``paid_amount`` (unless an explicit amount
-    is given) so the record is immutable against later execution corrections.
-    Refuses to mark the still-accruing current month (its figure isn't final).
-    Returns the refreshed view.
-    """
+def _validate_month(month: str) -> str:
     month = str(month or "").strip()
     if not (len(month) == 7 and month[4] == "-"):
         raise ValueError(f"invalid month '{month}' — expected YYYY-MM")
-    if month >= _cur_month():
-        raise ValueError("can't finalize the current (or a future) month — its "
-                         "payout is still accruing")
+    return month
+
+
+def finalize(month: str, amount: float | None = None,
+             note: str | None = None) -> dict:
+    """Lock in a month's payout. Only allowed once the month is finalizable (its
+    last short has closed, or the calendar month has ended). Snapshots the net
+    juice as the finalized amount so the record survives later execution
+    corrections. Returns the refreshed view."""
+    month = _validate_month(month)
     state = log.load_state()
-    net = monthly_net_juice(state).get(month, {"net_juice": 0.0, "closes": 0})
-    snapshot = float(amount) if amount is not None else float(net["net_juice"])
+    net_by_month = monthly_net_juice(state)
+    if not is_finalizable(state, month, net_by_month):
+        raise ValueError(
+            f"{month_label(month)} can't be finalized yet — it's still earning "
+            f"juice (an open short still expires this month).")
+    net = float((net_by_month.get(month) or {}).get("net_juice") or 0)
+    snapshot = float(amount) if amount is not None else net
     payouts = state.setdefault("payouts", {"records": {}})
-    records = payouts.setdefault("records", {})
-    rec = records.setdefault(month, {"month": month})
+    rec = payouts.setdefault("records", {}).setdefault(month, {"month": month})
     rec.update({
-        "paid": True,
-        "paid_at": log.utcnow(),
-        "paid_amount": round(snapshot, 2),
-        "net_juice_at_finalize": round(float(net["net_juice"]), 2),
+        "finalized": True,
+        "finalized_at": log.utcnow(),
+        "finalized_amount": round(snapshot, 2),
+        "net_juice_at_finalize": round(net, 2),
     })
     if note is not None:
         rec["note"] = str(note)[:500]
@@ -183,12 +278,57 @@ def mark_paid(month: str, note: str | None = None,
     return view(state)
 
 
-def unmark_paid(month: str) -> dict:
-    """Undo a mark-paid (fat-finger recovery). Keeps any note. Returns the view."""
-    month = str(month or "").strip()
+def unfinalize(month: str) -> dict:
+    """Undo a finalize (recovery). Also clears any paid state on that month,
+    since an un-finalized month can't be paid. Returns the view."""
+    month = _validate_month(month)
     state = log.load_state()
-    records = (state.get("payouts") or {}).get("records") or {}
-    rec = records.get(month)
+    rec = _records(state).get(month)
+    if rec:
+        for k in ("finalized", "finalized_at", "finalized_amount",
+                  "net_juice_at_finalize", "paid", "paid_at", "paid_amount"):
+            rec.pop(k, None)
+        log.save_state(state)
+    return view(state)
+
+
+def mark_paid(month: str, note: str | None = None,
+              amount: float | None = None) -> dict:
+    """Record that a month's payout has been withdrawn. Finalizes the month first
+    if it hasn't been (a mark-paid implies the amount is locked), snapshotting the
+    net juice unless an explicit amount is given. Refuses a month that isn't
+    finalizable yet (still earning juice). Returns the refreshed view."""
+    month = _validate_month(month)
+    state = log.load_state()
+    net_by_month = monthly_net_juice(state)
+    rec = _records(state).get(month) or {}
+    if not rec.get("finalized") and not is_finalizable(state, month, net_by_month):
+        raise ValueError(
+            f"{month_label(month)} can't be paid yet — finalize it once its last "
+            f"short of the month has closed.")
+    net = float((net_by_month.get(month) or {}).get("net_juice") or 0)
+    payouts = state.setdefault("payouts", {"records": {}})
+    rec = payouts.setdefault("records", {}).setdefault(month, {"month": month})
+    now = log.utcnow()
+    if not rec.get("finalized"):
+        rec.update({"finalized": True, "finalized_at": now,
+                    "finalized_amount": round(net, 2),
+                    "net_juice_at_finalize": round(net, 2)})
+    snapshot = (float(amount) if amount is not None
+                else float(rec.get("finalized_amount") or net))
+    rec.update({"paid": True, "paid_at": now, "paid_amount": round(snapshot, 2)})
+    if note is not None:
+        rec["note"] = str(note)[:500]
+    log.save_state(state)
+    return view(state)
+
+
+def unmark_paid(month: str) -> dict:
+    """Undo a mark-paid (fat-finger recovery). Leaves the month finalized and any
+    note intact. Returns the view."""
+    month = _validate_month(month)
+    state = log.load_state()
+    rec = _records(state).get(month)
     if rec:
         rec["paid"] = False
         rec.pop("paid_at", None)
@@ -197,14 +337,19 @@ def unmark_paid(month: str) -> dict:
     return view(state)
 
 
-def pending_payout(state: dict) -> dict | None:
-    """The just-finalized previous month IF it earned income and hasn't been
-    marked paid — the trigger for the PAYOUT_READY alert. None otherwise."""
+def pending_finalization(state: dict) -> dict | None:
+    """The most recent month that can be finalized now but hasn't been — the
+    trigger for the PAYOUT_READY notification. Checks the current month first (its
+    last short just closed), then the previous month (calendar rollover fallback).
+    None when nothing is waiting. Reports ``reason`` so the alert can say why."""
     cur = _cur_month()
-    prev = _prev_month(cur)
-    net = monthly_net_juice(state).get(prev)
-    if not net or net["net_juice"] <= 0:
-        return None
-    if _records(state).get(prev, {}).get("paid"):
-        return None
-    return {"month": prev, "label": month_label(prev), "net_juice": net["net_juice"]}
+    net_by_month = monthly_net_juice(state)
+    records = _records(state)
+    for month, reason in ((cur, "last_short_closed"), (_prev_month(cur), "month_ended")):
+        if records.get(month, {}).get("finalized"):
+            continue
+        if is_finalizable(state, month, net_by_month, cur):
+            net = float(net_by_month[month]["net_juice"])
+            return {"month": month, "label": month_label(month),
+                    "net_juice": net, "reason": reason}
+    return None

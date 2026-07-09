@@ -571,10 +571,37 @@ def api_payouts():
         return _err(e)
 
 
+@app.route("/api/payouts/finalize", methods=["POST"])
+def api_payouts_finalize():
+    """Lock in a month's payout once it's finalizable — its last short of the
+    month has closed or the calendar month has ended. Snapshots the net juice."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        import payouts
+        return jsonify(payouts.finalize(
+            payload.get("month"), amount=payload.get("amount"),
+            note=payload.get("note")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/payouts/unfinalize", methods=["POST"])
+def api_payouts_unfinalize():
+    """Undo a finalize (also clears paid state on that month)."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        import payouts
+        return jsonify(payouts.unfinalize(payload.get("month")))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/payouts/mark-paid", methods=["POST"])
 def api_payouts_mark_paid():
-    """Record that a finalized month's payout has been withdrawn. Snapshots the
-    month's net juice as the paid amount (or an explicit override)."""
+    """Record that a month's payout has been withdrawn (finalizes it first if
+    needed). Snapshots the amount (or an explicit override)."""
     payload = request.get_json(silent=True) or {}
     try:
         import payouts
