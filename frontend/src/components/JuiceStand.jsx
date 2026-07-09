@@ -15,7 +15,7 @@ import { Card, money, fmt } from "./ui.jsx";
 // Per-short juice: prefer the honest extrinsic-capture numbers (intrinsic
 // tracks the stock and isn't ours to collect); fall back to whole-premium
 // decay when the entry extrinsic wasn't recorded, so old positions still pour.
-function juiceOf(sc) {
+export function juiceOf(sc) {
   if (sc.extrinsic_captured_pct != null) {
     return {
       pct: sc.extrinsic_captured_pct,
@@ -78,7 +78,7 @@ function signedMoney(n) {
 // Per-position pulp: total LEAP intrinsic across every leg vs the total cost
 // basis the orange must cover to be full. leap_totals aggregates the legs
 // server-side; the single-leg fallbacks keep older payloads rendering.
-function pulpOf(p) {
+export function pulpOf(p) {
   const t = p.leap_totals;
   if (t) {
     const pct = t.intrinsic != null && t.cost_basis ? (t.intrinsic / t.cost_basis) * 100 : null;
@@ -127,7 +127,7 @@ function balanceOf(p, shorts) {
 // ---------------------------------------------------------------------------
 // One tapered tumbler in an 80×112 viewBox. Inner (clip) region: y 13→101,
 // so liquid height maps pct onto those 88 units. Pure SVG — no chart lib.
-function Glass({ uid, pct, rollNow }) {
+export function Glass({ uid, pct, rollNow }) {
   const fill = pct == null ? 0 : Math.max(0, Math.min(100, pct));
   const innerTop = 13;
   const innerBottom = 101;
@@ -222,7 +222,7 @@ const LEAF = {
 // (same pour/wave idiom as the glasses, in fruit hues); seeds drift in the
 // pulp instead of bubbles. ``mini`` renders a thumbnail (per-leg rows of a
 // multi-tranche engine): no leaf/seeds/label — the row text carries those.
-function Orange({ uid, pct, maintenance, maintained, mini = false }) {
+export function Orange({ uid, pct, maintenance, maintained, mini = false }) {
   const fill = pct == null ? 0 : Math.max(0, Math.min(100, pct));
   const innerTop = 31;
   const innerBottom = 85;
