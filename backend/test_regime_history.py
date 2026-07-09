@@ -32,7 +32,7 @@ def rh(tmp_path, monkeypatch):
 def _trace(published, raw=None):
     return {"status": published, "published_regime": published,
             "raw_condition": raw or published, "dwell_regime": published,
-            "lights": {}, "vote": {"green_count": 0}, "dwell": {}, "vetoes": {}}
+            "lights": {}, "vote": {"green_count": 0}, "dwell": {}, "secondary": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -137,7 +137,7 @@ def test_regime_change_alert_fires_on_published_transition(monkeypatch):
     import screening
     monkeypatch.setattr(screening, "regime",
                         lambda: {"published_regime": "red", "raw_condition": "red",
-                                 "lights": {}, "vetoes": {}})
+                                 "lights": {}, "secondary": {}})
     monkeypatch.setattr(regime_history, "latest",
                         lambda before=None: {"date": "2024-03-01", "published_regime": "green"})
     out = alerts.check_regime_change({})
@@ -154,7 +154,7 @@ def test_regime_change_alert_silent_when_unchanged(monkeypatch):
     import screening
     monkeypatch.setattr(screening, "regime",
                         lambda: {"published_regime": "green", "raw_condition": "green",
-                                 "lights": {}, "vetoes": {}})
+                                 "lights": {}, "secondary": {}})
     monkeypatch.setattr(regime_history, "latest",
                         lambda before=None: {"date": "2024-03-01", "published_regime": "green"})
     assert alerts.check_regime_change({}) == []
@@ -168,7 +168,7 @@ def test_regime_change_alert_ignores_raw_flap(monkeypatch):
     # no published transition -> no alert (raw flaps must not fire).
     monkeypatch.setattr(screening, "regime",
                         lambda: {"published_regime": "green", "raw_condition": "yellow",
-                                 "lights": {}, "vetoes": {}})
+                                 "lights": {}, "secondary": {}})
     monkeypatch.setattr(regime_history, "latest",
                         lambda before=None: {"date": "2024-03-01", "published_regime": "green"})
     assert alerts.check_regime_change({}) == []
@@ -180,7 +180,7 @@ def test_regime_change_alert_cold_start_silent(monkeypatch):
     import screening
     monkeypatch.setattr(screening, "regime",
                         lambda: {"published_regime": "green", "raw_condition": "green",
-                                 "lights": {}, "vetoes": {}})
+                                 "lights": {}, "secondary": {}})
     monkeypatch.setattr(regime_history, "latest", lambda before=None: None)
     assert alerts.check_regime_change({}) == []
 

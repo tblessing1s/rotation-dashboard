@@ -175,8 +175,9 @@ def nightly_refresh() -> dict:
         report["errors"].append(f"iv_snapshot: {e}")
 
     # Persist today's market-regime decision trace (the Genius four-light vote,
-    # yellow-dwell state, and breadth/VIX vetoes) so the dwell has a trading-day
-    # sequence to count against and calibration has full regime provenance. This
+    # yellow-dwell state, and the secondary breadth/VIX indicators) so the dwell
+    # has a trading-day sequence to count against and calibration has full regime
+    # provenance. This
     # is DERIVED telemetry (DATA_DIR/regime_history.json), recomputable from cached
     # SPY bars — never touches the execution record. Runs after the post-close
     # refresh has cached the official close.
