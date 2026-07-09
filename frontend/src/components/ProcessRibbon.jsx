@@ -121,6 +121,62 @@ function GroveOrange({ uid, pct, tone }) {
   );
 }
 
+// This week's juice — the detailed tumbler from the juice stand, brought up to
+// the ribbon: a straw, a poured-in wave crest, rising bubbles, and a dashed
+// "pace" line at the 1%/week target so a glass filled past it is a week on
+// pace. Fill is this week's juice against the 2% stretch (a full glass), so the
+// picture reads the whole story and the dollar figure sits below it.
+function WeeklyGlass({ pct, paceFrac, glow }) {
+  const fill = pct == null ? 0 : Math.max(0, Math.min(100, pct));
+  const innerTop = 13, innerBottom = 101;
+  const surfaceY = innerBottom - ((innerBottom - innerTop) * fill) / 100;
+  const paceY = innerBottom - (innerBottom - innerTop) * (paceFrac ?? 0.5);
+  const bubbles = fill >= 18;
+  return (
+    <svg viewBox="0 0 80 112" className={`h-24 w-[4.3rem] ${glow ? "drop-shadow-[0_0_12px_rgba(52,211,153,0.55)]" : ""}`}
+         role="img" aria-label={pct == null ? "this week's juice unknown" : `this week's juice, glass ${fmt(fill, 0)} percent to target`}>
+      <defs>
+        <linearGradient id="wjg" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#34d399" />
+          <stop offset="1" stopColor="#059669" />
+        </linearGradient>
+        <clipPath id="wjc"><path d="M17 13 L63 13 L56.5 97 Q56 101 51 101 L29 101 Q24 101 23.5 97 Z" /></clipPath>
+        <clipPath id="wjb"><rect x="14" y={surfaceY} width="52" height={innerBottom - surfaceY} /></clipPath>
+      </defs>
+      {/* Straw, behind the rim. */}
+      <g transform="rotate(16 53 12)">
+        <rect x="50.5" y="-6" width="5" height="46" rx="2.5" fill="#cbd5e1" opacity="0.9" />
+        <rect x="50.5" y="0" width="5" height="4" fill="#fb7185" opacity="0.85" />
+        <rect x="50.5" y="10" width="5" height="4" fill="#fb7185" opacity="0.85" />
+        <rect x="50.5" y="20" width="5" height="4" fill="#fb7185" opacity="0.85" />
+      </g>
+      {/* Liquid: gradient body + wave crest + bubbles, clipped to the glass. */}
+      <g clipPath="url(#wjc)">
+        <g className="juice-rise">
+          <rect x="14" y={surfaceY + 3} width="52" height={Math.max(0, innerBottom - surfaceY - 3) + 2} fill="url(#wjg)" />
+          {fill > 0 && (
+            <g transform={`translate(0 ${surfaceY})`}>
+              <path className="juice-wave"
+                    d="M-40 0 Q-30 -4 -20 0 T0 0 T20 0 T40 0 T60 0 T80 0 T100 0 T120 0 V8 H-40 Z" fill="#6ee7b7" />
+            </g>
+          )}
+          {bubbles && (
+            <g clipPath="url(#wjb)" fill="#a7f3d0" opacity="0.8">
+              <circle className="juice-bubble" cx="31" cy={innerBottom - 6} r="1.7" />
+              <circle className="juice-bubble" cx="42" cy={innerBottom - 4} r="2.3" style={{ animationDelay: "0.9s" }} />
+              <circle className="juice-bubble" cx="52" cy={innerBottom - 8} r="1.4" style={{ animationDelay: "1.8s" }} />
+            </g>
+          )}
+        </g>
+      </g>
+      {/* The week's pace line — juice above it is a week on target. */}
+      <line x1="18" y1={paceY} x2="62" y2={paceY} stroke="#64748b" strokeWidth="1" strokeDasharray="3 2.5" />
+      <path d="M14 10 L66 10 L59 98 Q58 104 52 104 L28 104 Q21 104 21 98 Z"
+            fill="rgba(148,163,184,0.06)" stroke={glow ? "#34d399" : "#475569"} strokeWidth="2" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 // The connector between two stages: the substance of the stage it leaves flows
 // on to the next — water out of the barrel, sap up the rows, juice into the jar.
 function Flow({ vertical, color = "#64748b" }) {
@@ -409,24 +465,34 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
       : `${cap1(words(attention))} ${attention === 1 ? "tree wants" : "trees want"} tending.`;
   const groveToneText = hasCritical ? "text-rose-300" : attention ? "text-amber-300" : grove.length ? "text-emerald-300" : "text-slate-400";
 
-  // ---- 4. The Harvest — this week's juice into the jar, climbing to the nut.
+  // ---- 4. The Harvest — this week's juice, a detailed glass filling to pace.
+  // Fill is this week against the 2%/week stretch (a full glass); the dashed
+  // pace line sits at the 1% "on-pace" target, so juice past it is a good week.
   const weekJuice = totals.this_week;
   const netWk = rollup.net_juice_per_week;
-  const milestone = (ms.half_nut?.target ? ms.half_nut : ms.quit_safe?.target ? ms.quit_safe : null);
-  const jarPct = milestone?.pct != null
-    ? milestone.pct
-    : (totals.this_month != null && ms.half_nut?.target ? (totals.this_month / ms.half_nut.target) * 100 : null);
-  const nutLabel = milestone && milestone === ms.quit_safe ? "quit-safe" : "½-nut";
+  const wt = theta?.weekly_target || {};
+  const targetLow = wt.target_low;
+  const targetHigh = wt.target_high;
+  const weekPct = weekJuice != null && targetHigh
+    ? (weekJuice / targetHigh) * 100
+    : (weekJuice > 0 ? 100 : 0);
+  const paceFrac = targetHigh ? Math.min(0.9, Math.max(0.15, (targetLow || 0) / targetHigh)) : 0.5;
+  const onPace = targetLow != null && weekJuice != null && weekJuice >= targetLow;
+  const aboveTarget = targetHigh != null && weekJuice != null && weekJuice >= targetHigh;
   const draining = netWk != null && netWk < 0;
-  let harvestStory = !weekJuice
-    ? "A quiet week — the trees still drip."
-    : jarPct != null && jarPct >= 100
-      ? "Jar's brimming — a month's nut in hand."
-      : jarPct != null && jarPct >= 75
-        ? `A sip from the month's ${nutLabel}.`
-        : "Filling, drop by drop.";
-  if (draining) harvestStory += " But it's draining faster than it fills.";
-  const harvestTone = draining ? "border-rose-500/40 bg-rose-500/5" : "border-emerald-500/40 bg-emerald-500/5";
+  let harvestStory = !weekJuice || weekJuice <= 0
+    ? "Nothing poured yet this week."
+    : aboveTarget
+      ? "Glass overflowing — juice above target."
+      : onPace
+        ? "A solid pour — juice on pace this week."
+        : "A slow trickle — under this week's pace.";
+  if (draining) harvestStory += " The burn's outrunning the juice.";
+  const harvestTone = draining
+    ? "border-rose-500/40 bg-rose-500/5"
+    : aboveTarget
+      ? "border-emerald-400/50 bg-emerald-500/10"
+      : "border-emerald-500/40 bg-emerald-500/5";
 
   return (
     <Card className="overflow-hidden">
@@ -528,20 +594,14 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
         <Flow color={FLOW.juice} />
         <div className="sm:hidden"><Flow vertical color={FLOW.juice} /></div>
 
-        {/* 4 — THE HARVEST (the jar) */}
+        {/* 4 — THE HARVEST (this week's juice glass) */}
         <Stage
-          emoji="🫙" title="The Harvest" tone={harvestTone}
+          emoji="🥤" title="The Harvest" tone={harvestTone}
           hero={<span className={draining ? "text-rose-300" : "text-emerald-300"}>{money(weekJuice)}</span>}
           story={<span className={draining ? "text-rose-300" : ""}>{harvestStory}</span>}
           onClick={() => nav?.tab?.("History")}
         >
-          <Vessel
-            uid="jar" pct={jarPct} top={22} bottom={80}
-            from="#34d399" to="#059669" wave="#6ee7b7" glow={jarPct != null && jarPct >= 100}
-            capLabel={milestone?.target ? nutLabel : undefined}
-            clip="M20 24 H60 V72 Q60 78 54 78 H26 Q20 78 20 72 Z"
-            outline="M22 14 H58 M18 20 H62 V72 Q62 80 54 80 H26 Q18 80 18 72 Z"
-          />
+          <WeeklyGlass pct={weekPct} paceFrac={paceFrac} glow={aboveTarget} />
         </Stage>
       </div>
     </Card>
