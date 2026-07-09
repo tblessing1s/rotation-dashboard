@@ -1,8 +1,9 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Stat, Light, Pill, Meter, Loading, ErrorState, money, fmt, pct, useApi } from "./ui.jsx";
+import { Card, Stat, Light, Pill, Meter, Modal, Loading, ErrorState, money, fmt, pct, useApi } from "./ui.jsx";
 import JuiceStandCard from "./JuiceStand.jsx";
 import ProcessRibbon from "./ProcessRibbon.jsx";
+import ReadyToEnter from "./ReadyToEnter.jsx";
 
 // The dashboard landing tab: one screen that answers "where does everything
 // stand and what needs me today." It leans entirely on existing endpoints
@@ -129,19 +130,56 @@ function RegimeHero({ regime }) {
   );
 }
 
+// The Dry Powder detail — deployment capacity behind the barrel illustration.
 function BookSummary({ capital }) {
   const cap = capital || {};
-  const ms = cap.milestones || {};
   return (
-    <Card title="The book">
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-        <Stat label="Deployed" value={money(cap.capital_deployed)} />
+    <Card title="The book — capital">
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <Stat label="Deployable now" value={money(cap.deployable)} tone="text-sky-300"
+              sub={cap.slots_open != null ? `${cap.slots_open} slot${cap.slots_open === 1 ? "" : "s"} open` : undefined} />
+        <Stat label="Deployed" value={money(cap.capital_deployed)}
+              sub={cap.max_deployed != null ? `of ${money(cap.max_deployed)} cap` : undefined} />
         <Stat label="Operating cash" value={money(cap.operating_cash)}
               sub={cap.operating_cash_source === "schwab" ? "live from Schwab" : undefined} />
         <Stat label="Reserve req." value={money(cap.reserve_required)}
               tone={cap.reserve_ok ? "text-slate-100" : "text-rose-300"}
               sub={cap.reserve_ok ? "funded" : "underfunded"} />
       </div>
+    </Card>
+  );
+}
+
+// The Weekly Juice detail — income behind the glass illustration: the raw
+// week/month/YTD figures, the net-per-week projection, the weekly target band,
+// and the monthly milestones (all the numbers the ribbon deliberately hides).
+function IncomeDetail({ theta, capital, burnDiv }) {
+  const t = theta?.totals || {};
+  const rollup = theta?.net_juice_rollup || {};
+  const wt = theta?.weekly_target || {};
+  const ms = (capital || {}).milestones || {};
+  return (
+    <Card title="Weekly juice & income">
+      <div className="grid grid-cols-3 gap-4">
+        <Stat label="This week" value={money(t.this_week)} tone="text-emerald-300" />
+        <Stat label="This month" value={money(t.this_month)} />
+        <Stat label="Juice · YTD" value={money(t.ytd)} />
+      </div>
+      <div className="mt-4 grid grid-cols-2 gap-4">
+        <Stat label="Proj net / wk" value={money(rollup.net_juice_per_week)}
+              tone={rollup.net_juice_per_week == null ? "text-slate-500"
+                : rollup.net_juice_per_week >= 0 ? "text-emerald-300" : "text-rose-300"}
+              sub="juice minus LEAP burn" />
+        <Stat label="Weekly target"
+              value={wt.target_low != null ? `${money(wt.target_low)}–${money(wt.target_high)}` : "—"}
+              sub="1–2% of deployed / wk" />
+      </div>
+      {burnDiv?.warn && (
+        <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+          LEAP burn is drifting {fmt(burnDiv.mean_abs_divergence_pct, 0)}% from the model (trailing) —
+          over the {burnDiv.threshold_pct}% warn threshold; the net figures may be off.
+        </div>
+      )}
       {(ms.half_nut || ms.quit_safe) && (
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           {["half_nut", "quit_safe"].map((k) => (
@@ -168,12 +206,17 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
   const ov = useApi(api.overview, [], 5 * 60 * 1000);
   const regimeData = ov.data?.regime?.error ? null : ov.data?.regime;
 
+  // Which detail card is popped open over the ribbon (null = none). The ribbon's
+  // illustrations carry the high-level read; the rich card is one click away.
+  const [detail, setDetail] = React.useState(null);
+
   // Routing helpers passed down to every clickable signal.
   const nav = React.useMemo(() => ({
     tab: (t) => onNavigate?.(t),
     focus: (ticker) => onAction?.("focus", ticker),
     roll: (ticker, reason) => onAction?.("roll", ticker, reason),
     enter: (ticker) => onSelectStock?.(ticker),
+    detail: (key) => setDetail(key),
   }), [onNavigate, onAction, onSelectStock]);
 
   // Feed the navbar's regime light (Overview is the landing tab, so the light
@@ -212,15 +255,36 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
   }
 
   const cap = capital || {};
-  const juice = ov.data?.theta?.totals || {};
   const payback = ov.data?.theta?.extrinsic_payback || {};
-  const rollup = ov.data?.theta?.net_juice_rollup || {};
   const burnDiv = ov.data?.burn_divergence || {};
+
+  // Close the modal, then run an action (navigate / focus / enter) — so a link
+  // inside a detail card takes you to the full tab without leaving it open.
+  const closeThen = (fn) => (...args) => { setDetail(null); fn?.(...args); };
+
+  // Each ribbon illustration opens its rich card here. `tab` adds an
+  // "Open <tab> →" link at the foot of the modal for the full view.
+  const DETAIL = {
+    regime: { node: <RegimeHero regime={regimeData} /> },
+    book: { node: <BookSummary capital={cap} />, tab: "Positions" },
+    ready: {
+      node: <ReadyToEnter onSelectStock={closeThen(nav.enter)} />, tab: "Scan",
+    },
+    grove: {
+      node: <JuiceStandCard positions={openPositions} payback={payback}
+                            killByTicker={killByTicker}
+                            nav={{ ...nav, focus: closeThen(nav.focus) }} />,
+      tab: "Positions",
+    },
+    juice: { node: <IncomeDetail theta={ov.data?.theta} capital={cap} burnDiv={burnDiv} />, tab: "History" },
+  };
+  const active = detail ? DETAIL[detail] : null;
 
   return (
     <div className="grid gap-4">
-      {/* The illustrated CFM process ribbon — the whole cycle at a glance,
-          above the numeric KPI band and detail cards it summarizes. */}
+      {/* The illustrated CFM process ribbon carries the high-level read; each
+          stage opens its detailed card in a modal (weather → regime, barrel →
+          capital, grove → juice stand, glass → income). */}
       <ProcessRibbon
         capital={capital}
         positions={openPositions}
@@ -230,61 +294,28 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
         nav={nav}
       />
 
-      {/* Top KPI band */}
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Card>
-          <div className="flex items-center justify-between">
-            <div className="text-xs uppercase tracking-wide text-slate-500">Regime</div>
-            <Light status={regimeData?.status} />
-          </div>
-          <div className="mt-1 text-2xl font-semibold text-slate-100">
-            {(regimeData?.status || "—").toUpperCase()}
-          </div>
-        </Card>
-        <Card>
-          <div className="text-xs uppercase tracking-wide text-slate-500">Open positions</div>
-          <div className="mt-1 text-2xl font-semibold text-slate-100">{openPositions.length}</div>
-        </Card>
-        <Card>
-          <div className="flex items-center justify-between">
-            <div className="text-xs uppercase tracking-wide text-slate-500">Net juice · week</div>
-            {burnDiv.warn && (
-              <span title={`Realized LEAP burn is diverging from the model by ${fmt(burnDiv.mean_abs_divergence_pct, 0)}% (trailing) — over the ${burnDiv.threshold_pct}% warn threshold.`}
-                    className="cursor-help rounded-full border border-amber-500/50 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-amber-300">
-                DRIFT {fmt(burnDiv.mean_abs_divergence_pct, 0)}%
-              </span>
-            )}
-          </div>
-          <div className="mt-1 text-2xl font-semibold text-emerald-300">{money(juice.this_week)}</div>
-          <div className="text-xs text-slate-500">
-            {rollup.net_juice_per_week != null && (
-              <>proj net/wk <span className={rollup.net_juice_per_week >= 0 ? "text-emerald-400" : "text-rose-400"}>{money(rollup.net_juice_per_week)}</span> · </>
-            )}
-            month {money(juice.this_month)}
-          </div>
-        </Card>
-        <Card>
-          <div className="text-xs uppercase tracking-wide text-slate-500">Juice · YTD</div>
-          <div className="mt-1 text-2xl font-semibold text-slate-100">
-            {money(cap.juice_ytd ?? juice.ytd)}
-          </div>
-        </Card>
-      </div>
-
+      {/* What needs me today — the one list the illustrations can't replace. */}
       {ov.data?.positions?.error ? (
         <Card title="Needs attention"><ErrorState error={ov.data.positions.error} onRetry={ov.reload} /></Card>
       ) : (
-        <>
-          <ActionItems items={actionItems} />
-          <JuiceStandCard positions={openPositions} payback={payback}
-                          killByTicker={killByTicker} nav={nav} />
-        </>
+        <ActionItems items={actionItems} />
       )}
 
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="lg:col-span-2"><BookSummary capital={cap} /></div>
-        <RegimeHero regime={regimeData} />
-      </div>
+      {active && (
+        <Modal onClose={() => setDetail(null)} maxWidth={detail === "grove" ? "max-w-4xl" : "max-w-2xl"}>
+          {active.node}
+          {active.tab && (
+            <div className="mt-3 flex justify-end">
+              <button
+                onClick={() => { const t = active.tab; setDetail(null); nav.tab(t); }}
+                className="rounded-lg border border-slate-700 bg-slate-900/80 px-3 py-1.5 text-sm text-slate-200 hover:bg-slate-800"
+              >
+                Open {active.tab} →
+              </button>
+            </div>
+          )}
+        </Modal>
+      )}
     </div>
   );
 }

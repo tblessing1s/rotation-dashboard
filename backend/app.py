@@ -575,6 +575,15 @@ def api_overview():
             # income figure; extrinsic_payback stays as the capital-recovery view.
             "net_juice_rollup": (position_manager.net_juice_rollup(positions)
                                  if isinstance(positions, list) else {}),
+            # The 1-2%/week-of-deployed target band (HARD_CFM_RULE), so the
+            # Overview can show this week's juice against pace without a second
+            # call — same formula the History weekly chart uses.
+            "weekly_target": section(lambda: {
+                "target_low": round(position_manager.deployed_capital(state)
+                                    * config.WEEKLY_JUICE_TARGET_PCT_MIN / 100, 2),
+                "target_high": round(position_manager.deployed_capital(state)
+                                     * config.WEEKLY_JUICE_TARGET_PCT_MAX / 100, 2),
+            }),
         },
         # Live BS-engine verification harness: realized-vs-projected burn drift.
         "burn_divergence": section(lambda: __import__("burn_marks").aggregate_divergence()),
