@@ -1395,20 +1395,20 @@ def _next_open_id(state) -> str:
 
 
 def _open_position_atomic(payload, ticker, contracts, stock_price, mode, price_source):
-    """Open a full position on ONE ticket: buy-to-open the deep-ITM LEAP +
+    """Open a position on ONE ticket: buy-to-open the deep-ITM LEAP +
     sell-to-open this week's short (a diagonal), a single net debit, pending ->
-    poll -> commit/auto-cancel. The long and its first cover go on together — no
+    poll -> commit/auto-cancel. The long and its cover go on together — no
     legging risk, and the juice starts the day the position is opened. Paper mode
-    books both legs immediately."""
+    books both legs immediately.
+
+    Works for a fresh entry AND as a one-ticket add-on to a ticker that already
+    holds a LEAP: the buy leg reuses _buy_leap's apply, which scales in when the
+    strike/expiration matches an existing leg ("merge") or stacks a new tranche
+    beside it ("add"). The short is sold against the enlarged long the same way."""
     leap_strike = payload.get("strike")
     short_strike = payload.get("short_strike")
     if leap_strike is None or short_strike is None:
         raise ValueError("open_position_atomic requires the LEAP strike and short_strike")
-    pos = log.find_position(log.load_state(), ticker)
-    if pos and (pos.get("leap") or {}):
-        raise ValueError(
-            f"{ticker} already holds a LEAP — use sell_short to add a cover, or roll. "
-            "open_position_atomic is for establishing a fresh position.")
     if mode == "live" and schwab_api.configured():
         return _place_live_open(payload, ticker, contracts, stock_price, price_source)
     return _commit_open(payload, ticker, contracts, stock_price, mode, price_source)

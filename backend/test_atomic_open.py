@@ -57,10 +57,35 @@ def test_paper_open_books_both_legs(store):
     assert res["net_debit"] == pytest.approx(4785.0)
 
 
-def test_open_rejected_when_leap_already_held(store):
+def test_open_add_on_new_tranche_when_leap_already_held(store):
+    # First open establishes the position; a second atomic open at a DIFFERENT
+    # LEAP strike stacks a new tranche beside it (an "add") and sells another
+    # short — the whole add-on on one ticket, no separate sell_short step.
     executor.execute(_open_payload())
-    with pytest.raises(ValueError, match="already holds a LEAP"):
-        executor.execute(_open_payload())
+    res = executor.execute(_open_payload(strike=140.0, option_symbol="XLK_LEAP2"))
+    assert res["status"] == "filled"
+
+    pos = log.find_position(log.load_state(), "XLK")
+    legs = log.leap_legs(pos)
+    assert {leg["strike"] for leg in legs} == {137.5, 140.0}  # two tranches now
+    assert len(pos["short_calls"]) == 2  # a cover was sold for each open
+    leap_add = next(e for e in res["executions"] if e.get("open_leg") == "leap")
+    assert leap_add["leap_add"] == "add"
+
+
+def test_open_scale_in_merges_identical_leap(store):
+    # A second atomic open at the SAME LEAP strike/expiration scales the existing
+    # tranche in (a "merge") rather than stacking a new leg.
+    executor.execute(_open_payload())
+    res = executor.execute(_open_payload())
+    assert res["status"] == "filled"
+
+    pos = log.find_position(log.load_state(), "XLK")
+    legs = log.leap_legs(pos)
+    assert len(legs) == 1 and legs[0]["contracts"] == 2  # scaled in
+    assert len(pos["short_calls"]) == 2
+    leap_add = next(e for e in res["executions"] if e.get("open_leg") == "leap")
+    assert leap_add["leap_add"] == "merge"
 
 
 class _FakeClient:
