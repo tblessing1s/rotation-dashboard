@@ -1,5 +1,86 @@
 # Changelog
 
+## Genius four-light market regime (dwell + vetoes)
+
+The market regime (**GREEN / YELLOW / RED**, Level 1 of the entry gate) is no
+longer a single breadth + VIX rule. It is now the CFM course's **Genius System**:
+four binary indicator "lights" on SPY daily bars, voted to a condition, held
+against flapping by a **yellow dwell**, and composed with breadth + VIX as
+**downgrade-only vetoes**. The old breadth/VIX computation is not deleted — it is
+recomposed as the vetoes.
+
+### What changed
+
+- **`backend/regime_genius.py`** (new, pure — no I/O, no clock; bars/timestamp/
+  prior-series passed in). The four lights (each GREEN when bullish):
+  1. close vs slow MA, 2. fast MA vs slow MA, 3. Parabolic SAR vs close,
+  4. momentum (ROC) vs zero. **Vote** (`HARD_CFM_RULE`): ≥3 GREEN → GREEN, 2/2 →
+  YELLOW, ≥3 RED → RED. Every intermediate is returned as a **decision trace**
+  (each light + its values, the raw vote, the dwell state, each veto's input and
+  fired flag, and the final regime).
+- **New indicators** (`backend/indicators.py`): `ema`, `roc`, and a from-scratch
+  **Wilder `parabolic_sar`** (no TA library) — unit-tested against a
+  hand-computed fixture.
+- **Yellow dwell** (`HARD_CFM_RULE`, `GENIUS_YELLOW_DWELL_DAYS = 3`): once the
+  published regime turns YELLOW it holds YELLOW for a minimum of 3 **trading**
+  days (the bar/record sequence, not calendar days) regardless of the raw vote —
+  the course's anti-flap rule. Every day records both **`raw_condition`** (today's
+  vote) and **`published_regime`** (after the dwell) so calibration sees both.
+- **Vetoes** (worst-signal-wins, `HARD_CFM_RULE`): breadth and VIX are
+  **downgrade-only** — a veto can turn GREEN → YELLOW, never the reverse. Breadth
+  below `BREADTH_VETO_MIN_PCT` (the green breadth floor) or VIX above
+  `VIX_VETO_THRESHOLD = 25` downgrades a GREEN vote. Conflicting signals can never
+  coexist with a GO.
+- **Published vs raw**: the entry gate (Level 1) and the regime-change alert
+  consume only the **published** regime; raw four-light flaps never reach them.
+- **Persistence** (`backend/regime_history.py`, `DATA_DIR/regime_history.json`):
+  one full decision trace per trading day. This is **derived** telemetry
+  (recomputable from cached SPY bars, like `iv_history.json`), so it is **not** an
+  immutable execution and is **not** rebuilt by `recompute_derived`. Appended once
+  per day by nightly maintenance and **backfillable** from cached parquet bars.
+- **Entry-context snapshot** (`SNAPSHOT_SCHEMA_VERSION 1 → 2`): the regime section
+  now carries the full four-light decision trace. **Additive** — older v1
+  snapshots stay valid and still load.
+- **Alerts**: a new deduped **`REGIME_CHANGE`** alert fires once per *published*
+  transition (keyed on the from→to pair), never on raw flaps.
+- **Calibration** (`backend/calibration.py`): `regime_series` /
+  `regime_param_compare` / `regime_vs_cycles` recompute the historical raw-vote /
+  published series under **alternative parameter sets** from cached bars, for
+  offline comparison against realized cycle outcomes. Comparison-only — **no
+  auto-tuning**.
+- **Parameters are calibration-tunable defaults**: all four indicator parameter
+  sets read from provenance-tagged `config.GENIUS_*`. The course fixes the
+  indicator *types* and the vote/dwell logic (`HARD_CFM_RULE`); the parameters
+  (MA lengths 50/21, SAR 0.02/0.20, ROC(10)) are `PROPOSED_DEFAULT`.
+- **Frontend** (read-only): the Overview `RegimeHero` shows the four lights, the
+  raw vote, the dwell status ("YELLOW — day 2 of 3 minimum"), and any fired veto;
+  the ribbon weather tooltip surfaces the raw vote and dwell day when they differ
+  from the published regime.
+- **Tests**: per-light units, the hand-computed SAR fixture, all 16 vote
+  combinations, the dwell edge cases (hold-through-day-3, day-4 release, re-yellow
+  inside the window, raw-crash held, cold start), the vetoes (never upgrade), and
+  **labeled synthetic parquet regression fixtures** (`backend/fixtures/regime/`):
+  a sustained confirmed-green hold, a distribution rollover degrading
+  GREEN→YELLOW→RED in order, and a boundary whipsaw whose 1-day raw-green blip the
+  dwell absorbs.
+
+### Strike-policy regime wiring — audit finding (scoped follow-up)
+
+The live roll ticket showing "**1×ATR, conservative**" in a YELLOW tape was **not**
+a broken wiring: `strike_policy.suggest_strike()` already consumes the regime
+status (now the dwell-adjusted **published** regime) and looks it up in
+`config.STRIKE_TABLE`. The `1.0×ATR` figure is the literal `yellow`/`conservative`
+cell. That table encodes a *shallower-when-safe → deeper-when-dangerous* scheme
+(conservative green 0.5×, yellow 1.0×, red 1.5×) that predates — and contradicts —
+the documented policy of **1.5× ATR in GREEN, 2.0× in YELLOW** (RED blocks entry).
+
+The documented multiples are now present as `HARD_CFM_RULE` constants
+(`STRIKE_ATR_MULT_GREEN = 1.5`, `STRIKE_ATR_MULT_YELLOW = 2.0`). Reconciling the
+`STRIKE_TABLE` to them changes calibrated numbers for **both** postures and the
+RED defend/roll-down rows, so it is deliberately left as a **separate, reviewable
+change** rather than bundled into this regime work. No strike behaviour changed
+here beyond the regime feeding it now being the published (dwell + veto) regime.
+
 ## Weekly theta burn & net-juice accounting
 
 The per-position juice accounting no longer treats the LEAP's **total** entry

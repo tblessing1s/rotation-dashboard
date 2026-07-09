@@ -115,6 +115,110 @@ def load_closed_cycles(state: dict) -> tuple[list[tuple], int]:
     return tuples, skipped
 
 
+# ---------------------------------------------------------------------------
+# Genius regime calibration — recompute the raw-vote / published-regime series
+# from cached SPY bars under ALTERNATIVE parameter sets, for offline comparison
+# against realized cycle outcomes. Comparison-only: no auto-tuning, no
+# persistence (unlike regime_history.backfill, which writes the live store under
+# the config defaults). Offline — reads the parquet cache, never a provider.
+# ---------------------------------------------------------------------------
+def regime_series(params: dict | None = None, step: int = 1,
+                  with_breadth_veto: bool = True) -> list[dict]:
+    """Daily {date, raw_condition, published_regime, green_count} replayed from
+    cached SPY bars under the Genius parameter set ``params`` (defaults = config).
+    The dwell is accumulated on EVERY trading day (path-dependent); ``step`` only
+    thins the returned sample. Recomputes the formula directly from cached bars
+    rather than calling ``screening.regime()`` so it stays offline/parquet-only."""
+    import regime_genius
+    import regime_history
+    spy = data_handler.get_daily(config.GENIUS_INDEX_SYMBOL)
+    if spy is None or spy.empty:
+        raise RuntimeError(f"no cached data for {config.GENIUS_INDEX_SYMBOL} — warm the cache first")
+    frames = data_handler.get_many(config.BREADTH_SYMBOLS) if with_breadth_veto else {}
+    slow = (params or {}).get("slow_ma", config.GENIUS_SLOW_MA)
+    published: list[str] = []
+    rows: list[dict] = []
+    index = list(spy.index)
+    last = len(index) - 1
+    for i, ts in enumerate(index):
+        if (i + 1) < slow:
+            continue
+        sub = spy.iloc[: i + 1]
+        breadth = regime_history._breadth_asof(frames, ts) if frames else None
+        tr = regime_genius.compute_trace(sub, breadth, None, published, params)
+        published.append(tr["published_regime"])
+        if (i % step) == 0 or i == last:
+            rows.append({"date": regime_history._fmt_day(ts),
+                         "raw_condition": tr["raw_condition"],
+                         "published_regime": tr["published_regime"],
+                         "green_count": tr["vote"]["green_count"]})
+    return rows
+
+
+def _regime_daymap(params: dict | None) -> dict[str, str]:
+    """date -> published_regime for every trading day (step=1), for as-of lookup."""
+    return {r["date"]: r["published_regime"] for r in regime_series(params, step=1)}
+
+
+def _transitions(rows: list[dict], field: str = "published_regime") -> int:
+    """Number of day-over-day changes in ``field`` — a flap gauge (lower = steadier)."""
+    n = 0
+    prev = None
+    for r in rows:
+        cur = r[field]
+        if prev is not None and cur != prev:
+            n += 1
+        prev = cur
+    return n
+
+
+def regime_param_compare(param_sets: dict[str, dict] | None = None) -> dict:
+    """Per parameter set: day-count in each published regime plus the raw-vote and
+    published transition counts. Comparison-only — shows how much steadier the
+    dwell makes the published series vs the raw vote, and how alternative params
+    shift the regime distribution. ``param_sets`` maps a label -> params override
+    (``None`` label uses the config defaults)."""
+    sets = param_sets or {"defaults": {}}
+    out: dict[str, dict] = {}
+    for label, params in sets.items():
+        rows = regime_series(params, step=1)
+        counts = {"green": 0, "yellow": 0, "red": 0}
+        for r in rows:
+            counts[r["published_regime"]] = counts.get(r["published_regime"], 0) + 1
+        out[label] = {
+            "days": len(rows),
+            "published_days": counts,
+            "raw_transitions": _transitions(rows, "raw_condition"),
+            "published_transitions": _transitions(rows, "published_regime"),
+        }
+    return out
+
+
+def regime_vs_cycles(state: dict, param_sets: dict[str, dict] | None = None) -> dict:
+    """For each parameter set, bucket every closed cycle's realized outcome by the
+    PUBLISHED regime as-of that cycle's entry date. Answers "did entries taken in a
+    green tape actually outperform ones taken in yellow?" under alternative regime
+    parameters. Comparison-only; never mutates state or the regime store."""
+    cycles = [c for c in state.get("cycles", []) if c.get("entry_date")]
+    sets = param_sets or {"defaults": {}}
+    out: dict[str, dict] = {}
+    for label, params in sets.items():
+        daymap = _regime_daymap(params)
+        buckets: dict[str, list[float]] = {"green": [], "yellow": [], "red": [], "unknown": []}
+        for c in cycles:
+            day = str(c.get("entry_date"))[:10]
+            reg = daymap.get(day, "unknown")
+            ret = c.get("net_return_pct")
+            if ret is not None:
+                buckets[reg].append(float(ret))
+        out[label] = {
+            reg: {"n": len(v),
+                  "mean_net_return_pct": round(sum(v) / len(v), 2) if v else None}
+            for reg, v in buckets.items()
+        }
+    return out
+
+
 def _bucket(rows: list[dict], key) -> dict[str, dict]:
     """Aggregate forward returns per bucket label produced by key(row)."""
     buckets: dict[str, list[dict]] = {}

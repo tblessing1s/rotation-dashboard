@@ -178,6 +178,105 @@ def breadth(frames: dict[str, pd.DataFrame], window: int = config.BREADTH_MA_WIN
     return round(sum(flags) / len(flags) * 100, 1)
 
 
+# ---------------------------------------------------------------------------
+# Genius four-light regime indicators (regime_genius.py). Pure, deterministic,
+# no I/O — same contract as the rest of this module. EMA + ROC are thin wrappers;
+# Parabolic SAR is implemented from scratch (standard Wilder), NOT from a TA
+# library, and unit-tested against a hand-computed fixture.
+# ---------------------------------------------------------------------------
+def ema(df: pd.DataFrame | None, window: int) -> float | None:
+    """Latest exponential moving average of close over `window` bars.
+
+    Recursive EMA (adjust=False) seeded at the first close — deterministic and
+    causal (the value at any bar depends only on bars up to it). Returns None
+    when there is less than `window` bars of history."""
+    if df is None or df.empty:
+        return None
+    c = _close(df)
+    if len(c) < window:
+        return None
+    return float(c.ewm(span=window, adjust=False).mean().iloc[-1])
+
+
+def roc(df: pd.DataFrame | None, window: int) -> float | None:
+    """Rate of change of close over `window` bars, as a percent:
+    (close_now / close_{-window} - 1) * 100. The zero-line momentum oscillator
+    for the Genius light 4 (MACD-histogram-sign is the documented alternative).
+    Returns None with insufficient history or a zero base."""
+    if df is None or df.empty:
+        return None
+    c = _close(df)
+    if len(c) < window + 1:
+        return None
+    now = float(c.iloc[-1])
+    then = float(c.iloc[-1 - window])
+    if then == 0:
+        return None
+    return round((now / then - 1) * 100, 4)
+
+
+def parabolic_sar(df: pd.DataFrame | None, af_step: float = 0.02,
+                  af_max: float = 0.20) -> list[float | None] | None:
+    """Wilder's Parabolic SAR for every bar, aligned to `df` (index 0 has no SAR
+    yet and is None). Standard formulation:
+
+        SAR_next = SAR + AF * (EP - SAR)
+
+    where EP is the extreme point of the current trend and AF ramps from
+    `af_step` to `af_max` by `af_step` each time a new EP prints. In an uptrend
+    SAR is clamped below the prior two lows (mirror for a downtrend); a bar that
+    penetrates SAR flips the trend, resets AF, and seeds the new SAR at the prior
+    EP. Causal (bar i depends only on bars <= i), so slicing history and taking
+    the last value equals indexing a full-history run — which is what makes the
+    regime backfill consistent. Returns None when there are fewer than 2 bars."""
+    if df is None or len(df) < 2:
+        return None
+    high = df["High"].astype(float).tolist()
+    low = df["Low"].astype(float).tolist()
+    n = len(high)
+
+    # Seed the trend from the first two bars: a higher second-bar high starts long.
+    up = high[1] >= high[0]
+    af = af_step
+    ep = high[1] if up else low[1]           # extreme point of the initial trend
+    sar = low[0] if up else high[0]          # SAR for bar 1 = opposite extreme of bar 0
+    out: list[float | None] = [None, sar]
+
+    for i in range(2, n):
+        sar = sar + af * (ep - sar)
+        if up:
+            # SAR may not rise above either of the prior two lows.
+            sar = min(sar, low[i - 1], low[i - 2])
+            if low[i] < sar:                 # long stop hit -> flip short
+                up = False
+                sar = ep                     # new SAR seeds at the prior extreme
+                ep = low[i]
+                af = af_step
+            elif high[i] > ep:               # new high -> extend EP, accelerate
+                ep = high[i]
+                af = min(af + af_step, af_max)
+        else:
+            # SAR may not fall below either of the prior two highs.
+            sar = max(sar, high[i - 1], high[i - 2])
+            if high[i] > sar:                # short stop hit -> flip long
+                up = True
+                sar = ep
+                ep = high[i]
+                af = af_step
+            elif low[i] < ep:                # new low -> extend EP, accelerate
+                ep = low[i]
+                af = min(af + af_step, af_max)
+        out.append(sar)
+    return out
+
+
+def parabolic_sar_last(df: pd.DataFrame | None, af_step: float = 0.02,
+                       af_max: float = 0.20) -> float | None:
+    """The latest Parabolic SAR level (convenience over ``parabolic_sar``)."""
+    series = parabolic_sar(df, af_step, af_max)
+    return series[-1] if series else None
+
+
 def consolidating(df: pd.DataFrame) -> bool | None:
     """Low ATR% and price near MA21 = consolidating (not breaking out)."""
     a = atr_pct(df)

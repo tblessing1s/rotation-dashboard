@@ -174,6 +174,20 @@ def nightly_refresh() -> dict:
     except Exception as e:  # noqa: BLE001 — an IV snapshot failure must not sink the sweep
         report["errors"].append(f"iv_snapshot: {e}")
 
+    # Persist today's market-regime decision trace (the Genius four-light vote,
+    # yellow-dwell state, and breadth/VIX vetoes) so the dwell has a trading-day
+    # sequence to count against and calibration has full regime provenance. This
+    # is DERIVED telemetry (DATA_DIR/regime_history.json), recomputable from cached
+    # SPY bars — never touches the execution record. Runs after the post-close
+    # refresh has cached the official close.
+    try:
+        import regime_history
+        rec = regime_history.record_today()
+        report["regime"] = {"published": (rec or {}).get("published_regime"),
+                            "raw": (rec or {}).get("raw_condition")} if rec else None
+    except Exception as e:  # noqa: BLE001 — a regime snapshot failure must not sink the sweep
+        report["errors"].append(f"regime_snapshot: {e}")
+
     # Weekly theta-burn mark (end-of-week cadence, once per ISO week): snapshots
     # each LEAP's model extrinsic + forward burn projection so the
     # realized-vs-projected divergence harness stays current. Telemetry only

@@ -54,6 +54,7 @@ ALERT_TYPES = {
     "ROLL_LEG_IMBALANCE": ("CRITICAL", "HARD_CFM_RULE: a spread roll reported a leg-imbalanced fill -> freeze the position, reconcile against the broker; never auto-correct"),
     "RECONCILE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: reconciliation has not run successfully within the expected window -> the safety check is silent"),
     "SNAPSHOT_DATA_QUALITY": ("LOW", "PROPOSED_DEFAULT: >25% of an entry-context snapshot's tracked fields came back null (stale/unavailable) -> the entry telemetry for calibration is thin, not a trade blocker"),
+    "REGIME_CHANGE": ("MEDIUM", "HARD_CFM_RULE: the published (dwell-adjusted) market regime transitioned -> re-check entry posture; raw four-light flaps are suppressed by the yellow dwell"),
 }
 
 
@@ -763,6 +764,47 @@ def check_reconcile_stale(state: dict) -> list[dict]:
         key="stale")]
 
 
+_REGIME_MSG = {
+    "green": "entries re-enabled — the tape is confirmed green.",
+    "yellow": "caution — chop/transition; verdicts are a ranking, not entry signals.",
+    "red": "new entries are BLOCKED — manage open positions only.",
+}
+
+
+def check_regime_change(state: dict) -> list[dict]:
+    """Fire once when the PUBLISHED (dwell-adjusted, veto-composed) market regime
+    transitions vs the last persisted trading day. Reads only the published
+    regime, so raw four-light flaps that the yellow dwell suppresses never fire.
+    Keyed on the transition so each distinct change dedups to a single alert and a
+    later identical transition can fire again once the prior one has resolved."""
+    try:
+        import regime_history
+        import screening
+    except Exception:  # noqa: BLE001 — regime modules unavailable -> nothing to check
+        return []
+    reg = screening.regime() or {}
+    cur = reg.get("published_regime")
+    if cur is None:
+        return []
+    today = datetime.now(ET).date().isoformat()
+    prev_rec = regime_history.latest(before=today)
+    if not prev_rec:  # cold start — no prior day to transition from
+        return []
+    prev = prev_rec.get("published_regime")
+    if not prev or prev == cur:
+        return []
+    tail = _REGIME_MSG.get(cur, "")
+    return [_alert(
+        "REGIME_CHANGE", None,
+        f"Market regime {prev.upper()} → {cur.upper()}: {tail}",
+        "Re-check entry posture on the Overview tab.",
+        {"from": prev, "to": cur, "raw_condition": reg.get("raw_condition"),
+         "lights": {k: (v or {}).get("signal") for k, v in (reg.get("lights") or {}).items()},
+         "vetoes": {"breadth": (reg.get("vetoes") or {}).get("breadth", {}).get("fired"),
+                    "vix": (reg.get("vetoes") or {}).get("vix", {}).get("fired")}},
+        key=f"{prev}->{cur}")]
+
+
 EVALUATORS = [
     check_kill_switch,
     check_circuit_breaker,
@@ -785,6 +827,7 @@ EVALUATORS = [
     check_reconcile_stale,
     check_roll_leg_imbalance,
     check_book_correlation,
+    check_regime_change,
 ]
 
 
