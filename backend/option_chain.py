@@ -401,7 +401,6 @@ def coverage(ticker: str) -> dict:
     if not pos or pos.get("status") == "closed":
         return {"ticker": ticker, "status": "none", "message": "No open position."}
 
-    leap = pos.get("leap") or None
     shorts = [sc for sc in (pos.get("short_calls") or []) if sc]
     if not schwab_api.configured():
         return {"ticker": ticker, "status": "unknown",
@@ -416,11 +415,26 @@ def coverage(ticker: str) -> dict:
     except Exception as e:  # noqa: BLE001 — never let a monitor crash the page
         return {"ticker": ticker, "status": "unknown", "message": str(e)}
 
-    leap_delta = leap_contracts = None
-    if leap:
-        leap_contracts = int(leap.get("contracts") or 0)
-        leap_delta, _ = _match_delta(contracts, leap.get("strike"), leap.get("expiration"), prefer_far=True)
-    leap_view = {"strike": (leap or {}).get("strike"), "contracts": leap_contracts, "delta": leap_delta}
+    # Long side: sum delta across EVERY LEAP leg. A multi-tranche position holds
+    # more than one long (leap_legs), and pos["leap"] is only leg 0 — coverage has
+    # to weigh them all or it under-counts the long and falsely reads "uncovered".
+    legs = log.leap_legs(pos)
+    leap_views, long_total, leap_contracts, min_leg_delta = [], 0.0, 0, None
+    for leg in legs:
+        n = int(leg.get("contracts") or 0)
+        d, _ = _match_delta(contracts, leg.get("strike"), leg.get("expiration"), prefer_far=True)
+        leap_views.append({"strike": leg.get("strike"), "contracts": n,
+                           "expiration": leg.get("expiration"), "delta": d})
+        leap_contracts += n
+        if d is not None:
+            long_total += d * n
+            min_leg_delta = d if min_leg_delta is None else min(min_leg_delta, d)
+    has_long = any(v["delta"] is not None for v in leap_views)
+    # The 0.50 floor is a per-contract "is each long still a stock proxy" check —
+    # apply it to the weakest leg (the one that would need rolling first).
+    leap_delta = min_leg_delta
+    # Back-compat single-leg view (frontends read data.leap); data.leaps carries all.
+    leap_view = leap_views[0] if leap_views else {"strike": None, "contracts": 0, "delta": None}
 
     short_views, short_total, max_short_delta = [], 0.0, None
     for sc in shorts:
@@ -431,7 +445,6 @@ def coverage(ticker: str) -> dict:
         if d is not None:
             short_total += d * n
             max_short_delta = d if max_short_delta is None else max(max_short_delta, d)
-    long_total = (leap_delta or 0) * (leap_contracts or 0)
 
     alerts, status, alert = [], "green", False
     # LEAP delta floor (long leg only).
@@ -448,7 +461,7 @@ def coverage(ticker: str) -> dict:
     # than one short reads correctly — the sum of short deltas is what the long has
     # to cover. The watch buffer scales with long contracts so the single-short /
     # equal-contract case keeps its original per-contract semantics.
-    if leap_delta is not None and max_short_delta is not None:
+    if has_long and max_short_delta is not None:
         cover_watch = _COVER_WATCH * max(int(leap_contracts or 0), 1)
         if short_total > long_total + 1e-9:
             status, alert = "red", True
@@ -458,7 +471,7 @@ def coverage(ticker: str) -> dict:
             status = "yellow"
             alerts.append(f"Short delta {short_total:.2f} is closing on the LEAP's {long_total:.2f} "
                           "— coverage thinning.")
-    elif shorts and leap_delta is None:
+    elif shorts and not has_long:
         status, alert = "red", True
         alerts.append("Short open with no LEAP delta — the short is uncovered.")
 
@@ -467,12 +480,13 @@ def coverage(ticker: str) -> dict:
         "status": status,
         "alert": alert,
         "leap": leap_view,
+        "leaps": leap_views,
         "shorts": short_views,
         "long_total_delta": round(long_total, 4),
         "short_total_delta": round(short_total, 4),
         "net_delta": round(long_total - short_total, 4),
         "floor": LEAP_DELTA_FLOOR,
-        "covered": (leap_delta is not None and max_short_delta is not None and short_total <= long_total + 1e-9),
+        "covered": (has_long and max_short_delta is not None and short_total <= long_total + 1e-9),
         "message": " ".join(alerts) or "Covered — LEAP delta ≥ floor and ≥ short delta.",
     }
 
