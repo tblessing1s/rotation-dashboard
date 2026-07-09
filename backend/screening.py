@@ -191,27 +191,25 @@ def _compute_regime() -> dict:
     vix_error = None if vix is not None else data_handler.last_error(config.VIX_SYMBOL)
 
     spy_df = data_handler.get_daily(config.GENIUS_INDEX_SYMBOL)
-    spy_dist = indicators.pct_from_ma(spy_df) if spy_df is not None else None
-    spy_trend = "up" if (spy_dist or 0) > 0 else "down" if spy_dist is not None else "unknown"
 
     # Genius four-light regime + yellow dwell + breadth/VIX vetoes. compute_trace
     # is pure; the dwell reads the chronological prior PUBLISHED regimes from the
     # daily history, excluding any record already stored for today (so today's own
-    # nightly-persisted record can't double-count in its own dwell).
+    # nightly-persisted record can't double-count in its own dwell). The regime is
+    # decided by the four lights + the breadth/VIX vetoes only — SPY's own MA21
+    # trend is no longer a regime input, so it is not computed or surfaced.
     vix_disp = round(vix, 2) if vix is not None else None
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     prior_published = regime_history.prior_published(before=today)
     trace = regime_genius.compute_trace(spy_df, breadth, vix_disp, prior_published)
 
-    # Merge the legacy fields the existing UI / entry gate / snapshot already read
+    # Merge the legacy VIX provenance fields the existing UI / snapshot read
     # (status is the published regime; breadth/vix are also the veto inputs). The
-    # shape stays backward-compatible — the four-light trace is purely additive.
+    # four-light trace is otherwise additive.
     trace.update({
         "vix": vix_disp,
         "vix_source": vix_source,
         "vix_error": vix_error,
-        "spy_trend": spy_trend,
-        "spy_dist_ma21": spy_dist,
     })
     return trace
 

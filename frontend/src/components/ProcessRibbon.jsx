@@ -284,11 +284,12 @@ function WeatherBanner({ regime, onClick }) {
   if (regime?.raw_condition && regime.raw_condition !== status) {
     bits.push(`raw vote ${regime.raw_condition}`);
   }
+  // Only a dwell-driven yellow (dwell_day > 0) shows a dwell countdown; a
+  // veto-driven yellow is explained by the regime detail card, not here.
   const d = regime?.dwell;
-  if (status === "yellow" && d?.dwell_min) bits.push(`dwell day ${d.dwell_day}/${d.dwell_min}`);
+  if (d?.dwell_day > 0 && d?.dwell_min) bits.push(`dwell day ${d.dwell_day}/${d.dwell_min}`);
   if (regime?.breadth != null) bits.push(`breadth ${fmt(regime.breadth, 0)}%`);
   if (regime?.vix != null) bits.push(`VIX ${fmt(regime.vix, 1)}`);
-  if (regime?.spy_trend) bits.push(`SPY ${regime.spy_trend}`);
   const Wrap = onClick ? "button" : "div";
   return (
     <Wrap

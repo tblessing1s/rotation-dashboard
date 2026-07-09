@@ -150,8 +150,11 @@ function FourLights({ lights, rawCondition, greenCount }) {
 function RegimeDetail({ r }) {
   const d = r.dwell || {};
   const v = r.vetoes || {};
+  // Only a dwell-DRIVEN yellow shows the dwell countdown (dwell_day > 0). A yellow
+  // caused by a downgrade veto (dwell_day 0) is explained by the veto line below,
+  // not the dwell.
   const dwellText =
-    r.published_regime === "yellow" && d.dwell_min
+    d.dwell_day > 0 && d.dwell_min
       ? `YELLOW — day ${d.dwell_day} of ${d.dwell_min} minimum${
           d.held_by_dwell ? ` (raw ${(d.raw_condition || "").toUpperCase()} held)` : ""
         }`
@@ -181,10 +184,9 @@ function RegimeHero({ regime }) {
           <div className="text-xs text-slate-400">{REGIME_COPY[r.status] || ""}</div>
         </div>
       </div>
-      <div className="mt-4 grid grid-cols-3 gap-3">
+      <div className="mt-4 grid grid-cols-2 gap-3">
         <Stat label="Breadth" value={r.breadth != null ? `${fmt(r.breadth, 0)}%` : "—"} />
         <Stat label="VIX" value={fmt(r.vix, 1)} tone={r.vix == null ? "text-slate-500" : "text-slate-100"} />
-        <Stat label="SPY" value={(r.spy_trend || "—").toUpperCase()} sub={`MA21 ${fmt(r.spy_dist_ma21, 1)}%`} />
       </div>
       <FourLights lights={r.lights} rawCondition={r.raw_condition} greenCount={r.vote?.green_count} />
       <RegimeDetail r={r} />
