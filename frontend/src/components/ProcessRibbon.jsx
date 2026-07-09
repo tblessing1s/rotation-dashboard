@@ -121,6 +121,50 @@ function GroveOrange({ uid, pct, tone }) {
   );
 }
 
+// A position's juice cup for the grove — the short-call capture the JuiceStand
+// glasses show, shrunk to the ribbon so the per-short juice reads on the
+// dashboard without opening the stand. Fill = extrinsic captured across the
+// position's open shorts, with the percent drawn on the glass. Grey and empty
+// when no short is working (nothing being squeezed).
+function GroveCup({ uid, pct }) {
+  const has = pct != null;
+  const fill = has ? Math.max(0, Math.min(100, pct)) : 0;
+  const top = 10, bottom = 74;
+  const surfaceY = bottom - ((bottom - top) * fill) / 100;
+  return (
+    <svg viewBox="0 0 60 84" className="h-11 w-8 shrink-0" role="img"
+         aria-label={has ? `${fmt(fill, 0)} percent of juice captured` : "no short working"}>
+      <defs>
+        <linearGradient id={`gcup-${uid}`} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#34d399" />
+          <stop offset="1" stopColor="#059669" />
+        </linearGradient>
+        <clipPath id={`gcupc-${uid}`}>
+          <path d="M12 10 L48 10 L43 70 Q42.5 74 38 74 L22 74 Q17.5 74 17 70 Z" />
+        </clipPath>
+      </defs>
+      <g clipPath={`url(#gcupc-${uid})`}>
+        <g className="juice-rise">
+          <rect x="10" y={surfaceY + 2} width="40" height={Math.max(0, bottom - surfaceY - 2) + 4}
+                fill={`url(#gcup-${uid})`} />
+          {fill > 0 && (
+            <g transform={`translate(0 ${surfaceY})`}>
+              <path className="juice-wave"
+                    d="M-40 0 Q-30 -4 -20 0 T0 0 T20 0 T40 0 T60 0 T80 0 V8 H-40 Z" fill="#6ee7b7" />
+            </g>
+          )}
+        </g>
+      </g>
+      <path d="M10 8 L50 8 L44.5 71 Q44 76 39 76 L21 76 Q16 76 15.5 71 Z"
+            fill="rgba(148,163,184,0.06)" stroke="#475569" strokeWidth="2" strokeLinejoin="round" />
+      <text x="30" y="48" textAnchor="middle" fontSize="16" fontWeight="700"
+            fill="#f8fafc" stroke="#0f172a" strokeWidth="3" paintOrder="stroke">
+        {has ? `${fmt(fill, 0)}%` : "—"}
+      </text>
+    </svg>
+  );
+}
+
 // This week's juice — the detailed tumbler from the juice stand, brought up to
 // the ribbon: a straw, a poured-in wave crest, rising bubbles, and a dashed
 // "pace" line at the 1%/week target so a glass filled past it is a week on
@@ -389,6 +433,29 @@ function pulpPctOf(p) {
   return intrinsic != null && basis ? (intrinsic / basis) * 100 : null;
 }
 
+// The position's short-side juice capture, weighted across its open shorts:
+// extrinsic captured vs the extrinsic sold at entry, falling back to
+// whole-premium decay when entry extrinsic wasn't recorded (mirrors the
+// JuiceStand's juiceOf so the cup reads the same on the ribbon). Null when no
+// short is working or none reports enough to place a level.
+function juicePctOf(p) {
+  let captured = 0, total = 0, any = false;
+  for (const sc of p.short_calls || []) {
+    if (sc.extrinsic_captured_total != null && sc.entry_extrinsic_total != null) {
+      captured += Number(sc.extrinsic_captured_total);
+      total += Number(sc.entry_extrinsic_total);
+      any = true;
+    } else if (sc.decay_pct != null && sc.entry_premium_total != null) {
+      const prem = Number(sc.entry_premium_total);
+      captured += (prem * sc.decay_pct) / 100;
+      total += prem;
+      any = true;
+    }
+  }
+  if (!any || total <= 0) return null;
+  return (captured / total) * 100;
+}
+
 // Segment colors — the substance flowing on: water, growth, juice.
 const FLOW = { water: "#38bdf8", growth: "#84cc16", juice: "#34d399" };
 
@@ -454,6 +521,7 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
     () => open.map((p) => ({
       p,
       pulp: pulpPctOf(p),
+      juice: juicePctOf(p),
       health: healthOf(p, killByTicker?.[p.ticker]),
     })).sort((a, b) => {
       const rank = { critical: 0, warn: 1, good: 2, unknown: 3 };
@@ -585,15 +653,18 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
           onClick={() => nav?.detail?.("grove")}
         >
           {grove.length ? (
-            <div className="flex max-w-[12rem] flex-wrap items-end justify-center gap-1">
-              {grove.map(({ p, pulp, health }) => (
+            <div className="flex max-w-[15rem] flex-wrap items-end justify-center gap-1">
+              {grove.map(({ p, pulp, juice, health }) => (
                 <button
                   key={p.ticker}
                   onClick={(e) => { e.stopPropagation(); nav?.focus?.(p.ticker); }}
                   className="flex flex-col items-center rounded-md px-0.5 hover:bg-slate-800/50"
-                  title={`${p.ticker} — ${HEALTH[health].label}${pulp != null ? ` · ${fmt(pulp, 0)}% intrinsic-backed` : ""}`}
+                  title={`${p.ticker} — ${HEALTH[health].label}${pulp != null ? ` · ${fmt(pulp, 0)}% intrinsic-backed` : ""}${juice != null ? ` · ${fmt(juice, 0)}% of juice captured` : " · no short working"}`}
                 >
-                  <GroveOrange uid={p.ticker} pct={pulp} tone={HEALTH[health]} />
+                  <div className="flex items-end gap-0.5">
+                    <GroveOrange uid={p.ticker} pct={pulp} tone={HEALTH[health]} />
+                    <GroveCup uid={p.ticker} pct={juice} />
+                  </div>
                   <span className="text-[10px] font-semibold text-slate-300">{p.ticker}</span>
                 </button>
               ))}
