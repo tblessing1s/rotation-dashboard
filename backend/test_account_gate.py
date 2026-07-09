@@ -537,6 +537,47 @@ def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state
     assert [r["ticker"] for r in body["ready"]] == ["HIGH", "LOW"]
 
 
+def test_scan_ready_fetches_live_quote_on_demand_so_go_clears(isolated_state, monkeypatch):
+    # A GO name that the tiered poller never quoted (not on-deck) must get a live
+    # quote fetched on demand during the scan, so it clears instead of being held
+    # forever on "stale quote". Regression for the Ready-to-Enter quote gap.
+    import time
+    import data_cache
+    import data_transport
+    import market_scheduler
+    from metrics import scorecard as scorecard_metrics
+    import app as app_module
+    from market_scheduler import BARS, QUOTE, Tier
+
+    data_cache.reset()
+    # Fresh bars for AAA (so only the quote leg is in question), and a record for
+    # some other name so data_cache.active() is True (live gate).
+    data_cache.put("AAA", BARS, "df", "schwab", Tier.T1, fetched_at=time.time() - 60)
+    data_cache.put("SPY", QUOTE, 1.0, "schwab", Tier.T1, fetched_at=time.time() - 5)
+
+    rows = [{"ticker": "AAA", "sector": "XLK", "verdict": "GO",
+             "juice_weekly_pct": 1.0, "earnings_date": None}]
+    monkeypatch.setattr(scorecard_metrics, "scorecard",
+                        lambda tickers=None: {"as_of": "x", "results": rows})
+    monkeypatch.setattr(account_gate, "evaluate_many", lambda tickers, contracts=None: {
+        t: {"pass": True, "blocking_failures": []} for t in tickers})
+    monkeypatch.setattr(market_scheduler, "is_market_open", lambda now: True)
+
+    calls = []
+    def _fake_fetch(symbols_by_tier, **kw):
+        calls.append(dict(symbols_by_tier))
+        for s in symbols_by_tier:  # simulate a live Schwab quote landing in the cache
+            data_cache.put(s, QUOTE, 123.0, "schwab", Tier.T1)
+        return {"quotes": {}, "degraded": [], "requested": len(symbols_by_tier), "resolved": 0}
+    monkeypatch.setattr(data_transport, "fetch_quotes_batched", _fake_fetch)
+
+    body = app_module.app.test_client().get("/api/scan/ready").get_json()
+    assert calls == [{"AAA": Tier.T1}]          # only the quote-less GO name was fetched
+    assert [r["ticker"] for r in body["ready"]] == ["AAA"]
+    assert body["stale_blocked"] == []
+    data_cache.reset()
+
+
 def test_earnings_beyond_the_cycle_does_not_block(isolated_state, monkeypatch):
     import data_handler
     import earnings
