@@ -1,198 +1,11 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Meter, Pill, Light, Loading, money, fmt, pct, useApi } from "./ui.jsx";
+import { Card, Meter, Loading, money, fmt, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
-import BurnPanel from "./BurnPanel.jsx";
 import { Orange, pulpOf, balanceOf } from "./JuiceStand.jsx";
 import { useToast } from "./Toast.jsx";
 import { submitOrder } from "../orderFlow.js";
-
-// Next-earnings chip. Amber when inside the warning window (roll deep-ITM or
-// exit before the report); muted otherwise; nothing when the date is unknown.
-function EarningsBadge({ earnings }) {
-  if (!earnings || !earnings.date) {
-    return <span className="text-xs text-slate-600">earnings —</span>;
-  }
-  const warn = earnings.warning;
-  const suspect = earnings.conflict || earnings.stale;
-  const d = earnings.days_until;
-  const when = d == null ? "" : d < 0 ? ` (${Math.abs(d)}d ago)` : ` (${d}d)`;
-  const title = earnings.conflict
-    ? `Providers disagree — Alpha Vantage ${earnings.av_date} vs Schwab ${earnings.schwab_date}. Confirm the real report date before the cycle spans it.`
-    : earnings.stale
-    ? `Earnings date last refreshed ${earnings.fetched_at || "never"} — it may be out of date; a wrong date silently disarms the guardrail.`
-    : warn ? "Earnings approaching — roll the short deep-ITM or exit" : "Next earnings report";
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-xs font-medium ${
-        warn || suspect ? "border-amber-500/40 bg-amber-500/15 text-amber-300" : "border-slate-700 bg-slate-800/40 text-slate-400"
-      }`}
-      title={title}
-    >
-      ⚠ earnings {earnings.date}{when}
-      {suspect && <span className="text-rose-300">· {earnings.conflict ? "sources differ" : "stale"}</span>}
-    </span>
-  );
-}
-
-// Delta-coverage guardrail for the PMCC diagonal. The coverage payload is fetched
-// once at the card level (useCoverage) and passed in, so the health verdict and
-// this detail panel share a single chain hit. `bare` drops the section chrome for
-// rendering inside an expander. Degrades to a muted note when live deltas aren't
-// available (Schwab off / off-hours).
-function DeltaCoverage({ data, bare = false }) {
-  if (!data || data.status === "none") return null;
-  const wrapCls = bare ? "" : "mt-4 border-t border-slate-800 pt-3";
-
-  if (data.status === "unknown") {
-    return (
-      <div className={wrapCls}>
-        {!bare && <div className="mb-1 text-xs uppercase tracking-wide text-slate-500">Delta coverage</div>}
-        <div className="text-xs text-slate-400">{data.message || "Live deltas unavailable."}</div>
-      </div>
-    );
-  }
-
-  const tone = { red: "text-rose-300", yellow: "text-amber-300", green: "text-emerald-300" }[data.status] || "text-slate-300";
-  const badge = data.status === "green" ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
-    : data.status === "yellow" ? "border-amber-500/40 bg-amber-500/15 text-amber-300"
-    : "border-rose-500/40 bg-rose-500/15 text-rose-300";
-  const shorts = data.shorts || [];
-  const leaps = data.leaps || (data.leap ? [data.leap] : []);
-  const multiLeg = leaps.length > 1;
-  const multiShort = shorts.length > 1;
-  return (
-    <div className={wrapCls}>
-      <div className="mb-1 flex items-center justify-between">
-        <span className="text-xs uppercase tracking-wide text-slate-500">{bare ? "Deltas" : "Delta coverage"}</span>
-        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${badge}`}>
-          {data.covered ? "covered" : "uncovered"}
-        </span>
-      </div>
-      {/* Contract-weighted totals — the honest apples-to-apples for coverage. The
-          per-leg deltas sit underneath so a multi-tranche long still reads clearly. */}
-      <div className="text-sm text-slate-300">
-        long Δ <span className="font-semibold text-slate-100">{fmt(data.long_total_delta, 2)}</span>
-        {multiLeg && <span className="text-slate-500"> ({leaps.length} legs)</span>}
-        {shorts.length > 0 && (
-          <> · short Δ <span className="font-semibold text-slate-100">{fmt(data.short_total_delta, 2)}</span></>
-        )}
-        {" · net Δ "}
-        <span className={`font-semibold ${data.net_delta < 0 ? "text-rose-300" : "text-slate-100"}`}>
-          {fmt(data.net_delta, 2)}
-        </span>
-      </div>
-      {(multiLeg || multiShort) && (
-        <div className="mt-0.5 text-xs text-slate-500">
-          {multiLeg && (
-            <>long {leaps.map((l, i) => (
-              <span key={i}>{fmt(l.delta, 2)}×{l.contracts}{i < leaps.length - 1 ? " + " : ""}</span>
-            ))}</>
-          )}
-          {multiLeg && multiShort && " · "}
-          {multiShort && (
-            <>short {shorts.map((s, i) => (
-              <span key={i}>{fmt(s.delta, 2)}×{s.contracts}{i < shorts.length - 1 ? " + " : ""}</span>
-            ))}</>
-          )}
-        </div>
-      )}
-      <div className={`mt-1 text-xs ${tone}`}>{data.message}</div>
-    </div>
-  );
-}
-
-// Compact LEAP long-leg health strip: DTE, extrinsic remaining (+ weeks-of-juice
-// runway), net weekly maintenance (self-funding green / burning red), delta with
-// a velocity trend arrow, and a ROLL LEAP DUE badge (mirrors the ROLL NOW badge).
-// Tapping the badge fetches the roll-cost estimate + reserve check inline.
-function LeapHealth({ ticker, health, bare = false }) {
-  const [est, setEst] = React.useState(null);
-  const [open, setOpen] = React.useState(false);
-  if (!health) return null;
-
-  const m = health.net_weekly_maintenance;
-  const mTone = m == null ? "text-slate-400" : m >= 0 ? "text-emerald-300" : "text-rose-300";
-  const drop = health.delta_velocity?.drop;
-  const arrow = drop == null ? "" : drop > 0.0001 ? " ▼" : drop < -0.0001 ? " ▲" : "";
-  const arrowTone = drop > 0.0001 ? "text-rose-300" : drop < -0.0001 ? "text-emerald-300" : "text-slate-400";
-
-  const showEstimate = async () => {
-    setOpen((v) => !v);
-    if (!est) {
-      try { setEst(await api.leapRollEstimate(ticker)); } catch (e) { setEst({ error: String(e.message || e) }); }
-    }
-  };
-
-  return (
-    <div className={bare ? "" : "mt-4 border-t border-slate-800 pt-3"}>
-      <div className="mb-1 flex items-center justify-between">
-        <span className="text-xs uppercase tracking-wide text-slate-500">{bare ? "Long leg" : "LEAP health"}</span>
-        <span className="flex items-center gap-1.5">
-          {health.juice_adequate === false && (
-            <span
-              title={`Trailing weekly juice ${fmt(health.weekly_juice_yield_pct, 2)}% of LEAP capital is below the ${fmt(health.juice_target_pct, 2)}% income target — this position no longer clears the strategy's income bar. Roll to a better strike/week or redeploy the capital.`}
-              className="cursor-help rounded-full border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300"
-            >
-              JUICE LOW
-            </span>
-          )}
-          {health.roll_due && (
-            <button
-              onClick={showEstimate}
-              title={(health.roll_reasons || []).join("; ") || "LEAP roll recommended"}
-              className="rounded-full border border-amber-500/50 bg-amber-500/15 px-2 py-0.5 text-[10px] font-semibold text-amber-300 hover:bg-amber-500/25"
-            >
-              ROLL LEAP DUE
-            </button>
-          )}
-        </span>
-      </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-300">
-        <span>DTE <span className="font-semibold text-slate-100">{health.leap_dte ?? "—"}</span></span>
-        {health.weekly_juice_yield_pct != null && (
-          <span title={`Trailing weekly juice as a % of LEAP capital vs the ${fmt(health.juice_target_pct, 2)}% income target`}>
-            juice <span className={`font-semibold ${health.juice_adequate === false ? "text-amber-300" : "text-slate-100"}`}>
-              {fmt(health.weekly_juice_yield_pct, 2)}%
-            </span>
-            <span className="text-slate-500"> / {fmt(health.juice_target_pct, 2)}% tgt</span>
-          </span>
-        )}
-        <span title={health.leap_extrinsic_below_intrinsic ? "Mark quoted below intrinsic — a liquidity signal, not real negative extrinsic" : ""}>
-          extrinsic <span className="font-semibold text-slate-100">{money(health.leap_extrinsic_remaining)}</span>
-          {health.leap_extrinsic_weeks_remaining != null && (
-            <span className="text-slate-500"> (~{fmt(health.leap_extrinsic_weeks_remaining, 1)} wk juice)</span>
-          )}
-          {health.leap_extrinsic_below_intrinsic && <span className="text-amber-400"> ⚠</span>}
-        </span>
-        <span>maint. <span className={`font-semibold ${mTone}`}>{m == null ? "—" : `${m >= 0 ? "+" : ""}${money(m)}/wk`}</span></span>
-        <span>Δ <span className="font-semibold text-slate-100">{fmt(health.leap_delta, 2)}</span>
-          {arrow && <span className={arrowTone}>{arrow}</span>}
-        </span>
-      </div>
-      {open && (
-        <div className="mt-2 rounded-lg border border-amber-800 bg-amber-500/10 p-3 text-xs text-slate-300">
-          {!est ? (
-            <span className="text-slate-500">Estimating roll cost…</span>
-          ) : est.error || est.new_leap == null ? (
-            <span className="text-slate-500">{est.error || "Roll estimate unavailable."}</span>
-          ) : (
-            <>
-              Roll into <span className="font-semibold text-slate-100">{fmt(est.new_leap?.strike, 1)}C</span> ~{est.new_leap?.target_dte} DTE ·
-              {" "}est. net {est.net_debit >= 0 ? "debit" : "credit"}{" "}
-              <span className={est.net_debit >= 0 ? "text-rose-300" : "text-emerald-300"}>{money(Math.abs(est.net_debit))}</span>
-              {" · "}reserve{" "}
-              <span className={est.reserve_ok ? "text-emerald-300" : "text-rose-300"}>{est.reserve_ok ? "OK" : "BREACH"}</span>
-              {" "}(free after {money(est.free_cash_after)} vs {money(est.reserve_required)})
-              <div className="mt-1 text-slate-500">Estimated from trailing vol; the staged roll re-prices from the live chain. The operator transmits.</div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
 
 // Reconciliation review panel — shown when the position has open diffs against
 // the broker (state.json vs Schwab). A frozen position (needs_review) blocks new
@@ -340,43 +153,6 @@ function DiffRow({ ticker, diff, toast, onDone }) {
   );
 }
 
-// Kill-switch verdict for one position (RS3M vs SPY / vs Sector), inlined on the
-// card — this absorbed the old Kill Switch tab. Quiet single line when green;
-// a toned banner with the suggested action when the switch has tripped.
-function KillSwitchStrip({ ks, bare = false }) {
-  if (!ks) return null;
-  if (!ks.alert) {
-    return (
-      <div className={bare ? "" : "mt-4 border-t border-slate-800 pt-3"}>
-        <div className="flex items-center justify-between text-xs">
-          <span className="flex items-center gap-2 uppercase tracking-wide text-slate-500">
-            Kill switch <Light status={ks.status} size="h-2.5 w-2.5" />
-          </span>
-          <span className="text-slate-500">
-            RS3M vs SPY <span className={ks.rs3m_vs_spy < 0 ? "text-rose-400" : "text-slate-300"}>{pct(ks.rs3m_vs_spy)}</span>
-            {" · "}vs Sector <span className={ks.rs3m_vs_sector < 0 ? "text-rose-400" : "text-slate-300"}>{pct(ks.rs3m_vs_sector)}</span>
-          </span>
-        </div>
-      </div>
-    );
-  }
-  const red = ks.status === "red";
-  return (
-    <div className={`mt-4 rounded-lg border p-3 text-sm ${
-      red ? "border-rose-800 bg-rose-500/10" : "border-amber-800 bg-amber-500/10"}`}>
-      <div className="flex items-center justify-between">
-        <span className={`text-xs font-semibold uppercase tracking-wide ${red ? "text-rose-300" : "text-amber-300"}`}>
-          Kill switch — {ks.status}
-        </span>
-        <span className="text-xs text-slate-400">
-          vs SPY {pct(ks.rs3m_vs_spy)} · vs Sector {pct(ks.rs3m_vs_sector)}
-        </span>
-      </div>
-      <p className={`mt-1 ${red ? "text-rose-200" : "text-amber-200"}`}>{ks.suggested_action}</p>
-    </div>
-  );
-}
-
 // Defensive roll-down recommendation, shown when a short strike is breached.
 function DefendPanel({ ticker, onStage }) {
   const { data } = useApi(React.useCallback(() => api.defend(ticker), [ticker]), [ticker], null);
@@ -422,53 +198,6 @@ function DefendPanel({ ticker, onStage }) {
     </div>
   );
 }
-
-// A collapsed detail section. The two things the page is FOR — health and income —
-// stay expanded up top; supporting detail (structure, long-leg internals, deltas,
-// relative strength) tucks in here. `defaultOpen` forces it open when it carries
-// an active alert (a tripped kill switch) so nothing important hides.
-function Expander({ title, children, defaultOpen = false }) {
-  return (
-    <details open={defaultOpen} className="group mt-3 border-t border-slate-800 pt-3">
-      <summary className="flex cursor-pointer list-none items-center justify-between text-xs uppercase tracking-wide text-slate-500 hover:text-slate-300">
-        <span>{title}</span>
-        <span className="text-slate-600 transition-transform group-open:rotate-90">▸</span>
-      </summary>
-      <div className="mt-2">{children}</div>
-    </details>
-  );
-}
-
-// Synthesize ONE health verdict per position from every guardrail already on the
-// card. Worst-severity wins; the top reason becomes the headline, the rest a
-// tooltip. This is the "is the position healthy?" answer the page leads with.
-function positionHealth(p, coverage, ks, health) {
-  const red = [];
-  const amber = [];
-  if (p.needs_review) red.push("State unverified vs the broker — resolve before trading");
-  if (p.whipsaw?.tripped) red.push("Whipsaw — exit, don't defend again");
-  if (p.circuit_breaker_status?.tripped) red.push("Circuit breaker — the exit line was hit");
-  if (ks?.status === "red") red.push("Kill switch red — exit the position");
-  if (p.defend) red.push("Stock is below the short strike — defend");
-  if (coverage?.status === "red") red.push(coverage.message || "Delta uncovered — the long isn't covering the short");
-  if (health?.leap_extrinsic_below_intrinsic) amber.push("LEAP marked below intrinsic (thin liquidity)");
-  if (ks?.status === "yellow") amber.push("Kill switch watch — relative strength slipping");
-  if (coverage?.status === "yellow") amber.push("Delta coverage thinning");
-  if (health?.net_juice_per_week != null && health.net_juice_per_week < 0) amber.push("Burn is outpacing juice this week");
-  else if (health?.coverage?.status === "flagged") amber.push("Juice is barely covering burn");
-  if (health?.juice_adequate === false) amber.push("Juice below the income target");
-  if (health?.roll_due) amber.push("LEAP roll due");
-  if (p.earnings?.warning) amber.push("Earnings approaching — roll deep-ITM or exit");
-  if (red.length) return { level: "red", label: "At risk", reason: red[0], all: red };
-  if (amber.length) return { level: "amber", label: "Watch", reason: amber[0], all: amber };
-  return { level: "green", label: "Healthy", reason: "Covered · juice ≥ burn · delta above the floor", all: [] };
-}
-
-const VERDICT_TONE = {
-  red: { stripe: "border-l-rose-500", badge: "bg-rose-500/15 text-rose-300 border-rose-500/40", reason: "text-rose-200/90" },
-  amber: { stripe: "border-l-amber-500", badge: "bg-amber-500/15 text-amber-300 border-amber-500/40", reason: "text-amber-200/90" },
-  green: { stripe: "border-l-emerald-500", badge: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40", reason: "text-slate-400" },
-};
 
 // The card hero — the position's BALANCE, the thing the page is for now that
 // income tracking lives on its own page: is the initial investment staying whole?
@@ -536,122 +265,6 @@ function PaybackTank({ uid, pct }) {
         {pct == null ? "—" : `${fmt(Math.min(pct, 100), 0)}%`}
       </text>
     </svg>
-  );
-}
-
-function BalanceHero({ p, verdict, health, payback }) {
-  const t = VERDICT_TONE[verdict.level];
-  const pulp = pulpOf(p);
-  const maintenance = health?.maintenance_status || "unknown";
-  // balanceOf expects the juice-stand's {sc, ...} row shape, not raw short_calls.
-  const bal = balanceOf(p, (p.short_calls || []).map((sc) => ({ sc })));
-  const hasBal = bal.longIntrinsic != null;
-  const covered = bal.covered;
-  const balBadge = covered
-    ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"
-    : "border-rose-500/40 bg-rose-500/15 text-rose-300";
-
-  const pb = payback || {};
-  const paidPct = pb.pct_complete;
-  const hasPayback = pb.leap_extrinsic_at_entry != null && pb.leap_extrinsic_at_entry > 0;
-  const done = hasPayback && paidPct >= 100;
-
-  return (
-    <div className={`mt-4 rounded-xl border border-slate-800 border-l-2 bg-slate-900/40 p-4 ${t.stripe}`}>
-      <div className="mb-3 flex flex-wrap items-center gap-2">
-        <span className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide ${t.badge}`}
-              title={verdict.all.length > 1 ? verdict.all.join(" · ") : undefined}>
-          {verdict.label}
-        </span>
-        <span className={`text-sm ${t.reason}`}>
-          {verdict.reason}
-          {verdict.all.length > 1 && <span className="ml-1 text-xs text-slate-500">+{verdict.all.length - 1} more</span>}
-        </span>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2">
-        {/* Intrinsic balance — the LEAP's intrinsic (asset) vs the shorts' (liability). */}
-        <div className="flex items-center gap-3">
-          <Orange uid={`bal-${p.ticker}`} pct={pulp.pct} maintenance={maintenance}
-                  maintained={pulp.pct != null && pulp.pct >= 100} />
-          <div className="min-w-0">
-            <div className="mb-1 flex items-center gap-1.5">
-              <span className="text-[10px] uppercase tracking-wide text-slate-500">Intrinsic balance</span>
-              {hasBal && (
-                <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase ${balBadge}`}>
-                  {covered ? "balanced" : "unbalanced"}
-                </span>
-              )}
-            </div>
-            {hasBal ? (
-              <>
-                <div className="text-sm text-slate-300">
-                  LEAP <span className="font-semibold text-slate-100">{money(bal.longIntrinsic)}</span>
-                  {" vs short "}<span className="font-semibold text-slate-100">{money(bal.shortIntrinsic)}</span>
-                </div>
-                <div className="text-xs text-slate-500">
-                  {covered
-                    ? `${money(bal.net)} cushion — a stock move washes out`
-                    : `short intrinsic outruns the LEAP by ${money(-bal.net)}`}
-                </div>
-              </>
-            ) : (
-              <div className="text-xs text-slate-500">No mark yet — intrinsic balance pending.</div>
-            )}
-          </div>
-        </div>
-
-        {/* Extrinsic paid back — the LEAP's entry extrinsic (the burn) recovered by
-            juice, as a filling juice battery. */}
-        <div className="flex items-center gap-3 sm:border-l sm:border-slate-800 sm:pl-4">
-          {hasPayback && <PaybackTank uid={p.ticker} pct={paidPct} />}
-          <div className="min-w-0">
-            <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">Extrinsic burn — paid back</div>
-            {hasPayback ? (
-              <>
-                <div className={`text-2xl font-semibold leading-none ${done ? "text-emerald-300" : "text-slate-100"}`}>
-                  {fmt(paidPct, 0)}%
-                </div>
-                <div className="mt-1.5 text-xs text-slate-500">
-                  {money(pb.collected_to_date)} of {money(pb.leap_extrinsic_at_entry)} recovered
-                </div>
-                <div className="text-xs">
-                  {done
-                    ? <span className="text-emerald-300">fully paid back — the rest is gravy</span>
-                    : <span className="text-slate-500">{money(pb.remaining_to_payback)} still to earn back</span>}
-                </div>
-              </>
-            ) : (
-              <div className="text-xs text-slate-500">No entry extrinsic recorded — nothing to pay back.</div>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// LEAP / shares / stock structure — the position's makeup. Demoted into an
-// expander: it's reference, not a moment-to-moment decision.
-function PositionFacts({ leap, sh, stockPrice, shortCount }) {
-  return (
-    <div className="grid gap-4 sm:grid-cols-3">
-      <div>
-        <div className="text-xs uppercase tracking-wide text-slate-500">LEAP</div>
-        <div className="text-sm text-slate-200">{leap.contracts || 0} × {fmt(leap.strike, 0)}C · {leap.dte ?? "—"} DTE</div>
-        <div className="text-xs text-slate-500">intrinsic {money(leap.intrinsic)} · extrinsic {money(leap.extrinsic)}</div>
-      </div>
-      <div>
-        <div className="text-xs uppercase tracking-wide text-slate-500">Shares ({sh.count || 0}/{sh.cap || 500})</div>
-        <Meter pct={sh.pct_to_cap} tone={sh.locked ? "bg-amber-500" : "bg-sky-500"} />
-        <div className="mt-1 text-xs text-slate-500">{sh.locked ? "Cap reached — rotate to a new stock." : `${fmt(sh.pct_to_cap, 0)}% to cap`}</div>
-      </div>
-      <div>
-        <div className="text-xs uppercase tracking-wide text-slate-500">Stock</div>
-        <div className="text-sm text-slate-200">{fmt(stockPrice, 2)}</div>
-        <div className="text-xs text-slate-500">{shortCount} open short(s)</div>
-      </div>
-    </div>
   );
 }
 
@@ -786,91 +399,167 @@ function ShortCalls({ p, shorts, setRolling, onOpenTicket }) {
 // healthy, and how much income is it making. Verdict + income lead; long-leg
 // internals, structure, deltas and relative strength are one tap away. Active
 // alerts (reconciliation, defend, whipsaw, a tripped kill switch) never hide.
-function PositionCard({ p, ks, diffs, payback, focused, setRolling, onOpenTicket, afterResolve }) {
-  const { data: coverage } = useApi(React.useCallback(() => api.coverage(p.ticker), [p.ticker]), [p.ticker], null);
-  const leap = p.leap || {};
-  const sh = p.shares || {};
-  const shorts = p.short_calls || [];
-  const health = p.leap_health_agg || p.leap_health;
-  const verdict = positionHealth(p, coverage, ks, health);
+// Aggregate short-call capture: how much of the extrinsic sold across every open
+// short has decayed into our pocket. Null when no short carries entry extrinsic.
+function shortCapturePct(shorts) {
+  let captured = 0, entry = 0, any = false;
+  for (const sc of shorts || []) {
+    if (sc.entry_extrinsic_total != null) {
+      entry += Number(sc.entry_extrinsic_total);
+      captured += Number(sc.extrinsic_captured_total || 0);
+      any = true;
+    }
+  }
+  if (!any) return null;
+  return entry > 0 ? (captured / entry) * 100 : 0;
+}
 
+// (1) Intrinsic balance — the LEAP orange beside whether the LEAP's intrinsic
+// (asset) still covers the shorts' intrinsic (liability), so a stock move washes out.
+function IntrinsicBalance({ p }) {
+  const pulp = pulpOf(p);
+  const bal = balanceOf(p, (p.short_calls || []).map((sc) => ({ sc })));
+  const hasBal = bal.longIntrinsic != null;
+  const covered = bal.covered;
   return (
-    <Card
-      className={focused ? "ring-2 ring-emerald-400/70 transition" : "transition"}
-      title={`${p.ticker} · ${p.sector || ""}`}
-      right={
-        <div className="flex items-center gap-2">
-          {p.wash_sale_flag && (
-            <span
-              title={p.wash_sale_flag.note}
-              className="cursor-help rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-xs font-medium text-amber-300"
-            >
-              wash-sale window
+    <div className="flex items-center gap-3">
+      <Orange uid={`bal-${p.ticker}`} pct={pulp.pct} maintenance={p.leap_health?.maintenance_status || "unknown"}
+              maintained={pulp.pct != null && pulp.pct >= 100} />
+      <div className="min-w-0">
+        <div className="mb-1 flex items-center gap-1.5">
+          <span className="text-[10px] uppercase tracking-wide text-slate-500">Intrinsic balance</span>
+          {hasBal && (
+            <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
+              covered ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300" : "border-rose-500/40 bg-rose-500/15 text-rose-300"}`}>
+              {covered ? "balanced" : "unbalanced"}
             </span>
           )}
-          <EarningsBadge earnings={p.earnings} />
-          <Pill status={p.status === "active" ? "green" : "unknown"}>{p.status}</Pill>
         </div>
-      }
-    >
-      {/* Active alerts — always visible, never behind an expander. */}
-      <ReviewPanel ticker={p.ticker} diffs={diffs} onDone={afterResolve} />
-      {p.needs_review && (
-        <p className="mt-3 text-xs italic text-rose-400/80">
-          State unverified against the broker — the metrics below are computed off
-          state.json and may not reflect the account until this position is resolved.
-        </p>
-      )}
+        {hasBal ? (
+          <>
+            <div className="text-sm text-slate-300">
+              LEAP <span className="font-semibold text-slate-100">{money(bal.longIntrinsic)}</span>
+              {" vs short "}<span className="font-semibold text-slate-100">{money(bal.shortIntrinsic)}</span>
+            </div>
+            <div className="text-xs text-slate-500">
+              {covered ? `${money(bal.net)} cushion — a stock move washes out`
+                       : `short intrinsic outruns the LEAP by ${money(-bal.net)}`}
+            </div>
+          </>
+        ) : <div className="text-xs text-slate-500">No mark yet — intrinsic balance pending.</div>}
+      </div>
+    </div>
+  );
+}
 
-      {/* HERO: is the position staying balanced — intrinsic covered + burn paid back. */}
-      <BalanceHero p={p} verdict={verdict} health={health} payback={payback} />
+// (2) Extrinsic burn-off — the filling juice-battery + the recovery numbers.
+function ExtrinsicBurnoff({ ticker, payback }) {
+  const pb = payback || {};
+  const has = pb.leap_extrinsic_at_entry != null && pb.leap_extrinsic_at_entry > 0;
+  const done = has && pb.pct_complete >= 100;
+  return (
+    <div className="flex items-center gap-3">
+      {has && <PaybackTank uid={ticker} pct={pb.pct_complete} />}
+      <div className="min-w-0">
+        <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">Extrinsic burn — paid back</div>
+        {has ? (
+          <>
+            <div className={`text-2xl font-semibold leading-none ${done ? "text-emerald-300" : "text-slate-100"}`}>{fmt(pb.pct_complete, 0)}%</div>
+            <div className="mt-1.5 text-xs text-slate-500">{money(pb.collected_to_date)} of {money(pb.leap_extrinsic_at_entry)} recovered</div>
+            <div className="text-xs">
+              {done ? <span className="text-emerald-300">fully paid back — the rest is gravy</span>
+                    : <span className="text-slate-500">{money(pb.remaining_to_payback)} still to earn back</span>}
+            </div>
+          </>
+        ) : <div className="text-xs text-slate-500">No entry extrinsic recorded — nothing to pay back.</div>}
+      </div>
+    </div>
+  );
+}
 
-      {p.whipsaw?.tripped && (
-        <div className="mt-3 rounded-lg border border-rose-500/50 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
-          <span className="font-semibold text-rose-300">⚠ Whipsaw — exit, don't defend again.</span>{" "}
-          {(p.whipsaw.reasons || []).join("; ")}. The roll-down spiral is bleeding this
-          position while the kill switch and circuit breaker stay quiet — another roll-down
-          just locks a lower strike.
+// One ticker, collapsible. Collapsed: a summary of the three things that matter —
+// intrinsic balance, extrinsic burn-off, short-call capture. Expanded: those three
+// in full (orange, juice-battery, short list), plus any active safety alert
+// (reconciliation, defend, whipsaw) which also auto-opens the row.
+function PositionRow({ p, diffs, payback, focused, setRolling, onOpenTicket, afterResolve }) {
+  const shorts = p.short_calls || [];
+  const hasAlert = !!(p.needs_review || p.defend || p.whipsaw?.tripped || (diffs && diffs.length));
+  const [open, setOpen] = React.useState(hasAlert);
+  React.useEffect(() => { if (hasAlert) setOpen(true); }, [hasAlert]);
+  React.useEffect(() => { if (focused) setOpen(true); }, [focused]);
+
+  const bal = balanceOf(p, shorts.map((sc) => ({ sc })));
+  const covered = bal.covered;
+  const paid = payback?.pct_complete;
+  const hasPay = payback?.leap_extrinsic_at_entry != null && payback.leap_extrinsic_at_entry > 0;
+  const shortPct = shortCapturePct(shorts);
+
+  return (
+    <div className={`min-w-0 rounded-xl border bg-slate-900/60 transition ${focused ? "border-emerald-400/70 ring-1 ring-emerald-400/40" : "border-slate-800"}`}>
+      <button onClick={() => setOpen((v) => !v)} aria-expanded={open}
+              className="flex w-full items-center justify-between gap-3 p-4 text-left hover:bg-slate-900/40">
+        <span className="flex min-w-0 items-center gap-2">
+          <span className={`text-slate-500 transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
+          <span className="text-sm font-semibold text-slate-100">{p.ticker}</span>
+          <span className="truncate text-xs text-slate-500">{p.sector}</span>
+          {hasAlert && (
+            <span title="Needs attention — expand to resolve"
+                  className="rounded-full border border-rose-500/50 bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-rose-300">⚠</span>
+          )}
+        </span>
+        {/* collapsed summary — the three things */}
+        <span className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-xs">
+          <span className="flex items-center gap-1">
+            <span className="text-slate-500">intrinsic</span>
+            {bal.longIntrinsic == null
+              ? <span className="text-slate-500">—</span>
+              : <span className={`font-semibold ${covered ? "text-emerald-300" : "text-rose-300"}`}>{covered ? "balanced" : "unbalanced"}</span>}
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="text-slate-500">burn off</span>
+            <span className={`font-semibold ${hasPay && paid >= 100 ? "text-emerald-300" : "text-slate-200"}`}>{hasPay ? `${fmt(paid, 0)}%` : "—"}</span>
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="text-slate-500">short</span>
+            <span className="font-semibold text-slate-200">{shortPct == null ? "none" : `${fmt(shortPct, 0)}% cap`}</span>
+          </span>
+        </span>
+      </button>
+
+      {open && (
+        <div className="border-t border-slate-800 p-4">
+          {/* Active safety alerts — surfaced, never hidden. */}
+          <ReviewPanel ticker={p.ticker} diffs={diffs} onDone={afterResolve} />
+          {p.needs_review && (
+            <p className="mb-1 text-xs italic text-rose-400/80">
+              State unverified against the broker — the numbers below are computed off state.json
+              and may not reflect the account until this position is resolved.
+            </p>
+          )}
+          {p.whipsaw?.tripped && (
+            <div className="mb-3 rounded-lg border border-rose-500/50 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
+              <span className="font-semibold text-rose-300">⚠ Whipsaw — exit, don't defend again.</span>{" "}
+              {(p.whipsaw.reasons || []).join("; ")}.
+            </div>
+          )}
+
+          {/* (1) intrinsic balance + (2) extrinsic burn-off */}
+          <div className="grid gap-4 rounded-xl border border-slate-800 bg-slate-900/40 p-4 sm:grid-cols-2">
+            <IntrinsicBalance p={p} />
+            <div className="sm:border-l sm:border-slate-800 sm:pl-4">
+              <ExtrinsicBurnoff ticker={p.ticker} payback={payback} />
+            </div>
+          </div>
+
+          {/* (3) short-call capture */}
+          <ShortCalls p={p} shorts={shorts} setRolling={setRolling} onOpenTicket={onOpenTicket} />
+
+          {p.defend && (
+            <DefendPanel ticker={p.ticker} onStage={() => setRolling({ ticker: p.ticker, reason: "defend" })} />
+          )}
         </div>
       )}
-
-      {/* Income engine — the open shorts and the juice each is capturing. */}
-      <ShortCalls p={p} shorts={shorts} setRolling={setRolling} onOpenTicket={onOpenTicket} />
-
-      {p.defend && (
-        <DefendPanel ticker={p.ticker} onStage={() => setRolling({ ticker: p.ticker, reason: "defend" })} />
-      )}
-
-      {/* A tripped kill switch is an active alert — surface its banner, don't tuck it. */}
-      {ks?.alert && <KillSwitchStrip ks={ks} />}
-
-      {/* Supporting detail — one tap away. */}
-      {/* Income economics — juice vs burn, take-home, weekly bars. Demoted here;
-          this moves to its own Income page. Kept accessible until it does. */}
-      {health && (
-        <Expander title="Income economics">
-          <BurnPanel ticker={p.ticker} health={health} />
-        </Expander>
-      )}
-      <Expander title="Position structure">
-        <PositionFacts leap={leap} sh={sh} stockPrice={p.stock_price} shortCount={shorts.length} />
-      </Expander>
-      {health && (
-        <Expander title="LEAP long-leg health">
-          <LeapHealth ticker={p.ticker} health={health} bare />
-        </Expander>
-      )}
-      {coverage && coverage.status !== "none" && (
-        <Expander title="Delta coverage" defaultOpen={coverage.status === "red"}>
-          <DeltaCoverage data={coverage} bare />
-        </Expander>
-      )}
-      {ks && !ks.alert && (
-        <Expander title="Relative strength (kill switch)">
-          <KillSwitchStrip ks={ks} bare />
-        </Expander>
-      )}
-    </Card>
+    </div>
   );
 }
 
@@ -878,7 +567,6 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
   const toast = useToast();
   const { data, error, loading, reload } = useApi(api.positions, [], null);
   const { data: recon, reload: reloadRecon } = useApi(api.reconcile, [], null);
-  const { data: kill } = useApi(api.killSwitch, [], 5 * 60 * 1000);
   const [rolling, setRolling] = React.useState(null); // {ticker, reason}
   const [focusedTicker, setFocusedTicker] = React.useState(null);
   const handledIntentId = React.useRef(null);
@@ -930,19 +618,16 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
   // Closed positions live on the History tab as cycle records; the capital /
   // milestones summary is on Overview (its one home).
   const positions = (data?.positions || []).filter((p) => p.status !== "closed");
-  const killByTicker = {};
-  for (const k of kill?.positions || []) killByTicker[k.ticker] = k;
 
   return (
-    <div className="grid gap-4">
+    <div className="grid gap-3">
       <PortfolioRisk />
 
       {positions.length === 0 && <Card>No open positions.</Card>}
       {positions.map((p) => (
         <div key={p.ticker} id={`pos-${p.ticker}`} className="scroll-mt-20">
-          <PositionCard
+          <PositionRow
             p={p}
-            ks={killByTicker[p.ticker]}
             diffs={openDiffsByTicker[p.ticker]}
             payback={data?.extrinsic_payback?.[p.ticker]}
             focused={focusedTicker === p.ticker}
