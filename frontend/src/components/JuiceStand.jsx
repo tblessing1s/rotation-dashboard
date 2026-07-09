@@ -107,7 +107,7 @@ function leapExtrinsicOf(p) {
 // changes both legs together and washes out — so the position's real edge is the
 // extrinsic left over: juice still on the shorts vs the LEAP's time-value burn.
 // Returns null intrinsics when unknown so the caller can skip a position cleanly.
-function balanceOf(p, shorts) {
+export function balanceOf(p, shorts) {
   const longIntrinsic = pulpOf(p).intrinsic;
   const longExtrinsic = leapExtrinsicOf(p);
   const known = shorts.filter((s) => s.sc.current_intrinsic_total != null);
