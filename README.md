@@ -95,6 +95,9 @@ maxes out.
   `PortfolioRisk` collapsed to headlines) — manage the book.
 - **History** (`HistoryTab` incl. the theta ledger + per-week closes) — review
   results.
+- **Payouts** (`PayoutsTab`) — the monthly income-withdrawal view: this month's
+  estimated payout, last month's finalized payout, month-by-month history, and a
+  per-month mark-as-paid record. A `PAYOUT_READY` push fires when a month closes.
 - **Settings** (`SettingsTab`: demo/posture toggles, `LiveTradingSwitch`,
   `AlertsPanel`, `DataHealth`) — low-frequency controls and admin.
 
@@ -123,6 +126,8 @@ ticker" button, with a ← Back button to return.
 | `GET /api/positions` | Positions (LEAP/share/cap), capital summary, milestones. |
 | `GET /api/coverage?ticker=ON` | Delta-coverage guardrail: LEAP vs short deltas, the 0.50 LEAP floor, and whether the long still covers the short. |
 | `GET /api/theta-ledger` | Net juice (week/month/YTD) + extrinsic payback per position. |
+| `GET /api/payouts` | Monthly payout tracker: current-month estimate + last-month final payout + month-by-month history (net juice derived from short closes) + totals (YTD/all-time/paid/unpaid). |
+| `POST /api/payouts/mark-paid` · `POST /api/payouts/unmark-paid` | Record/undo a month's payout as withdrawn (`{month, amount?, note?}`; snapshots the amount, refuses the still-accruing current month). |
 | `GET /api/kill-switch` | Per-position RS3M vs SPY/Sector + exit signals. |
 | `GET/POST /api/state` | Read the full state; POST updates metadata (operator escape hatch, no UI). |
 | `POST /api/refresh/hot` | Force-refresh the hot set (open positions + live entry/earnings candidates) now; the scheduler also runs it every `HOT_REFRESH_MINUTES` in market hours. `/api/data-health` reports the set + last run. |

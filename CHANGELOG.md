@@ -1,5 +1,40 @@
 # Changelog
 
+## Monthly payout tracking
+
+Income is booked as **net juice** (premium sold − buyback) on every short close,
+but the dashboard had no month-by-month view of it and no notion of the operator
+*paying themselves out* each month. A new **Payouts** tab tracks that: the
+current month's estimated payout, the previous month's finalized payout, the full
+monthly history, and a per-month **mark-as-paid** record — plus a push alert when
+a month closes so a finalized payout doesn't get forgotten.
+
+### What changed
+
+- **`backend/payouts.py`** (new). Net juice per calendar month is **derived**
+  from the immutable `close_short` executions (same figure the theta ledger keys
+  off) — never stored. The only thing persisted is the operator's withdrawal
+  bookkeeping: which months are marked paid, when, the **amount snapshotted** at
+  that moment (frozen against later execution corrections), and an optional note.
+  `view()` returns the current-month estimate, the last completed month's final
+  payout, the month-by-month history, and roll-up totals (YTD / all-time / paid
+  out / awaiting payout).
+- **`PAYOUT_READY` alert** (`backend/alerts.py`). Fires once a calendar month
+  closes with net income earned and unpaid — "June 2026 payout finalized:
+  $510.00 net income" — scoped to the immediately-preceding month so it reminds
+  without spamming the back-history, and auto-resolves the moment it's marked
+  paid. It rides the existing notifier channels (Web Push / ntfy / email) and
+  deep-links to the Payouts tab.
+- **API**: `GET /api/payouts`, `POST /api/payouts/mark-paid`
+  (`{month, amount?, note?}` — refuses the still-accruing current month),
+  `POST /api/payouts/unmark-paid`.
+- **Frontend**: a new **Payouts** tab (`frontend/src/components/PayoutsTab.jsx`)
+  with the est-this-month / last-month cards, totals, and a monthly history table
+  with inline mark-paid/undo. App gains a `?tab=…` deep link so the payout push
+  tap lands on the tab.
+- **Migration v15** seeds the additive `payouts` store; net juice stays derived,
+  so no income data is copied. Covered end to end by `backend/test_payouts.py`.
+
 ## Genius four-light market regime (dwell + secondary indicators)
 
 The market regime (**GREEN / YELLOW / RED**, Level 1 of the entry gate) is no

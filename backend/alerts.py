@@ -55,6 +55,7 @@ ALERT_TYPES = {
     "RECONCILE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: reconciliation has not run successfully within the expected window -> the safety check is silent"),
     "SNAPSHOT_DATA_QUALITY": ("LOW", "PROPOSED_DEFAULT: >25% of an entry-context snapshot's tracked fields came back null (stale/unavailable) -> the entry telemetry for calibration is thin, not a trade blocker"),
     "REGIME_CHANGE": ("MEDIUM", "HARD_CFM_RULE: the published (dwell-adjusted) market regime transitioned -> re-check entry posture; raw four-light flaps are suppressed by the yellow dwell"),
+    "PAYOUT_READY": ("MEDIUM", "PROPOSED_DEFAULT: a calendar month closed with net income earned -> the monthly payout is finalized; withdraw it and mark it paid"),
 }
 
 
@@ -86,6 +87,12 @@ def _action_url(type_: str, ticker: str | None) -> str | None:
     if type_ in _FOCUS_ACTIONS:
         return f"/?action=focus&ticker={t}"
     return None
+
+
+def _payout_action_url() -> str:
+    """Payout alerts carry no ticker — they deep-link to the Payouts page so the
+    tap lands on the finalize/mark-paid card, not the app root."""
+    return "/?tab=Payouts"
 
 
 def _alert(type_: str, ticker: str | None, message: str, action: str,
@@ -821,6 +828,27 @@ def check_regime_change(state: dict) -> list[dict]:
         key=f"{prev}->{cur}")]
 
 
+def check_payout_ready(state: dict) -> list[dict]:
+    """The previous calendar month has finalized with net income earned and hasn't
+    been marked paid yet -> the monthly payout is ready to withdraw. Fires once per
+    month (keyed on the month) and auto-resolves the moment it's marked paid.
+    Scoped to the immediately-preceding month only, so it reminds without spamming
+    the whole back-history of unpaid months."""
+    import payouts
+    pending = payouts.pending_payout(state)
+    if not pending:
+        return []
+    a = _alert(
+        "PAYOUT_READY", None,
+        (f"{pending['label']} payout finalized: ${pending['net_juice']:,.2f} "
+         f"net income. Withdraw it and mark it paid."),
+        "Open Payouts to review and mark this month paid.",
+        {"month": pending["month"], "net_juice": pending["net_juice"]},
+        key=pending["month"])
+    a["action_url"] = _payout_action_url()
+    return [a]
+
+
 EVALUATORS = [
     check_kill_switch,
     check_circuit_breaker,
@@ -844,6 +872,7 @@ EVALUATORS = [
     check_roll_leg_imbalance,
     check_book_correlation,
     check_regime_change,
+    check_payout_ready,
 ]
 
 

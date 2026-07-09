@@ -11,8 +11,9 @@ import ReadyToEnter from "./components/ReadyToEnter.jsx";
 import ScanProgress from "./components/ScanProgress.jsx";
 import Overview from "./components/Overview.jsx";
 import SettingsTab from "./components/SettingsTab.jsx";
+import PayoutsTab from "./components/PayoutsTab.jsx";
 
-const TABS = ["Overview", "Scan", "Positions", "History", "Settings"];
+const TABS = ["Overview", "Scan", "Positions", "History", "Payouts", "Settings"];
 
 export default function App() {
   const [tab, setTab] = React.useState("Overview");
@@ -91,6 +92,16 @@ export default function App() {
     if (action && ticker) {
       goToAction(action, ticker, params.get("reason") || undefined);
       params.delete("action"); params.delete("ticker"); params.delete("reason");
+      const qs = params.toString();
+      window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+    }
+    // A ?tab=… deep link (e.g. the monthly-payout push targets /?tab=Payouts):
+    // land on that tab, then strip the query so a refresh doesn't re-force it.
+    const target = params.get("tab");
+    if (target && TABS.includes(target)) {
+      setTab(target);
+      setExecute(null);
+      params.delete("tab");
       const qs = params.toString();
       window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
     }
@@ -208,6 +219,7 @@ export default function App() {
                                onOpenTicket={openTicket} />
             )}
             {tab === "History" && <HistoryTab key={execNonce} />}
+            {tab === "Payouts" && <PayoutsTab key={execNonce} />}
             {tab === "Settings" && (
               <SettingsTab demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo}
                            posture={posture} postureBusy={postureBusy}

@@ -51,6 +51,10 @@ def _default_state() -> dict:
         "extrinsic_payback": {},
         "roll_ledger": {"rolls": [], "by_ticker": {}},
         "cycles": [],
+        # Monthly payout bookkeeping: month ('YYYY-MM') -> {paid, paid_at,
+        # paid_amount, note}. Income per month is DERIVED from executions
+        # (payouts.py); only the operator's withdrawal record lives here.
+        "payouts": {"records": {}},
         # Live orders placed at the broker but not yet filled. Keyed by Schwab
         # order id; an entry is removed when the order fills (then committed as an
         # execution) or is cancelled/rejected.

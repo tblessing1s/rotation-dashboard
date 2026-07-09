@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 14
+CURRENT_VERSION = 15
 
 
 class MigrationAbortedError(RuntimeError):
@@ -211,6 +211,17 @@ def _v13_to_v14(state: dict) -> dict:
     return state
 
 
+def _v14_to_v15(state: dict) -> dict:
+    """v15 (monthly payout tracking): a ``payouts`` store keyed by month
+    ('YYYY-MM') holding only the operator's withdrawal bookkeeping — which months
+    were marked paid, when, the amount snapshotted at that moment, and an optional
+    note. Net juice per month stays DERIVED from the immutable executions
+    (payouts.monthly_net_juice); nothing about income is copied here. Additive —
+    seed the empty store so readers never key-error."""
+    state.setdefault("payouts", {"records": {}})
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -225,6 +236,7 @@ MIGRATIONS = {
     11: _v11_to_v12,
     12: _v12_to_v13,
     13: _v13_to_v14,
+    14: _v14_to_v15,
 }
 
 
