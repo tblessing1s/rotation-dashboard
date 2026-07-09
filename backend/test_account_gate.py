@@ -578,6 +578,45 @@ def test_scan_ready_fetches_live_quote_on_demand_so_go_clears(isolated_state, mo
     data_cache.reset()
 
 
+def test_scan_refresh_quote_pulls_live_quote_and_reports_source(isolated_state, monkeypatch):
+    # The per-row "live scan" action force-pulls a quote through the transport
+    # layer (which records into the staleness store) so a stale name can clear.
+    import data_cache
+    import data_handler
+    import data_transport
+    import app as app_module
+    from market_scheduler import BARS, QUOTE, Tier
+
+    data_cache.reset()
+    data_cache.put("IWM", BARS, "df", "schwab", Tier.T1, fetched_at=__import__("time").time() - 60)
+
+    prefetched = []
+    monkeypatch.setattr(data_handler, "prefetch",
+                        lambda syms, force=False: prefetched.append((list(syms), force)))
+
+    def _fake_fetch(symbols_by_tier, **kw):
+        for s in symbols_by_tier:
+            data_cache.put(s, QUOTE, 210.0, "schwab", Tier.T1)  # live quote lands in the store
+        return {"quotes": {s: {"price": 210.0, "source": "schwab", "tier": 1}
+                           for s in symbols_by_tier}, "degraded": []}
+    monkeypatch.setattr(data_transport, "fetch_quotes_batched", _fake_fetch)
+
+    resp = app_module.app.test_client().post("/api/scan/refresh-quote", json={"tickers": ["iwm"]})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["tickers"] == ["IWM"]
+    assert body["results"]["IWM"]["quote_source"] == "schwab"
+    assert body["results"]["IWM"]["stale"] is False       # quote + bars now both fresh
+    assert prefetched and prefetched[0] == (["IWM"], True)  # bars force-refreshed
+    data_cache.reset()
+
+
+def test_scan_refresh_quote_requires_tickers(isolated_state):
+    import app as app_module
+    resp = app_module.app.test_client().post("/api/scan/refresh-quote", json={"tickers": []})
+    assert resp.status_code == 400
+
+
 def test_earnings_beyond_the_cycle_does_not_block(isolated_state, monkeypatch):
     import data_handler
     import earnings
