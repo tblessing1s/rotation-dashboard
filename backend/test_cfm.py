@@ -503,6 +503,46 @@ def test_coverage_multi_short_uses_totals(monkeypatch):
     assert "1.36 vs 0.90" in cov["message"]
 
 
+def test_coverage_sums_all_leap_legs(monkeypatch):
+    # Multi-tranche long: two LEAP legs cover two short calls. Coverage must sum
+    # delta across EVERY long leg (leap_legs), not just leg 0 — otherwise it
+    # under-counts the long and falsely reads "uncovered". This is the two-longs-
+    # vs-two-shorts case: 0.90 + 0.88 = 1.78 long vs 0.72 + 0.64 = 1.36 short.
+    import option_chain as oc
+    import schwab_api
+    import logging_handler as log
+
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {})
+    contracts = [
+        {"strike": 138.0, "expiration": "2027-01-15", "dte": 193, "delta": 0.90},
+        {"strike": 150.0, "expiration": "2027-01-15", "dte": 193, "delta": 0.88},
+        {"strike": 179.0, "expiration": "2026-07-24", "dte": 15, "delta": 0.72},
+        {"strike": 183.0, "expiration": "2026-07-17", "dte": 5, "delta": 0.64},
+    ]
+    monkeypatch.setattr(schwab_api, "parse_call_chain", lambda p: (186.02, contracts))
+    monkeypatch.setattr(oc, "_augment_call_greeks", lambda *a, **k: None)
+    monkeypatch.setattr(log, "load_state", lambda: {})
+    monkeypatch.setattr(log, "find_position", lambda s, t: {
+        "ticker": "XLK", "status": "active",
+        "leap": {"strike": 138.0, "contracts": 1, "expiration": "2027-01-15"},
+        "leap_legs": [
+            {"strike": 138.0, "contracts": 1, "expiration": "2027-01-15"},
+            {"strike": 150.0, "contracts": 1, "expiration": "2027-01-15"},
+        ],
+        "short_calls": [
+            {"strike": 179.0, "contracts": 1, "expiration": "2026-07-24"},
+            {"strike": 183.0, "contracts": 1, "expiration": "2026-07-17"},
+        ]})
+
+    cov = oc.coverage("XLK")
+    assert cov["long_total_delta"] == 1.78 and cov["short_total_delta"] == 1.36
+    assert cov["net_delta"] == round(1.78 - 1.36, 4)
+    assert cov["covered"] is True and cov["status"] == "green"
+    assert len(cov["leaps"]) == 2
+    assert "exceeds the LEAP" not in cov["message"]
+
+
 def test_coverage_unknown_without_schwab(monkeypatch):
     import option_chain as oc
     import schwab_api
