@@ -114,9 +114,12 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   const qtyNum = Number(qty) || 0;
 
   // Live payoff: how much LEAP extrinsic must be covered, and ~weeks for the
-  // selected weekly's juice to cover it. Existing-LEAP cover is a fixed remaining
-  // balance; a new entry scales with the chosen LEAP's extrinsic and quantity.
-  const coverTotal = position?.has_leap
+  // selected weekly's juice to cover it. A new-LEAP entry scales with the chosen
+  // LEAP's extrinsic and quantity — even when the position already holds a LEAP
+  // (an add-on), the cover total is the LEAP being bought, not the existing one.
+  // Selling a short against an already-owned LEAP covers its fixed remaining balance.
+  const buyingLeap = action === "open_position_atomic" || action === "buy_leap";
+  const coverTotal = position?.has_leap && !buyingLeap
     ? chain?.payoff?.leap_extrinsic_to_cover
     : chosenLeap?.extrinsic != null ? chosenLeap.extrinsic * 100 * qtyNum : null;
   const weeklyJuice = chosenWeekly?.extrinsic != null ? chosenWeekly.extrinsic * 100 * qtyNum : null;
