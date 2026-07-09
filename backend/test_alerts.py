@@ -83,6 +83,29 @@ def test_delta_uncovered_floor_and_inversion(monkeypatch):
     assert floor["data"]["leap_delta"] < config.LEAP_DELTA_FLOOR
 
 
+def test_delta_uncovered_sums_all_leap_legs(monkeypatch):
+    import data_handler
+    import indicators
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([180.0] * 60))
+    # Two LEAP legs (0.90 + 0.88 = 1.78 long) covering one short whose delta (0.95)
+    # exceeds leg 0 alone. Summing every long leg means no false uncovered alert;
+    # reading only leg 0 (0.90 < 0.95) would have inverted. Deterministic deltas by
+    # strike so the test drives the coverage math, not Black-Scholes.
+    deltas = {100.0: 0.90, 110.0: 0.88, 150.0: 0.95}
+    monkeypatch.setattr(indicators, "call_greeks",
+                        lambda S, K, dte, mark, **kw: (deltas.get(float(K)), 30.0))
+    p = _pos(
+        leap={"strike": 100, "contracts": 1, "dte": 190, "current_bid": 8000.0},
+        leap_legs=[
+            {"strike": 100, "contracts": 1, "dte": 190, "current_bid": 8000.0},
+            {"strike": 110, "contracts": 1, "dte": 190, "current_bid": 7000.0},
+        ],
+        short_calls=[{"strike": 150, "contracts": 1, "dte": 10, "current_bid": 3.0,
+                      "entry_premium_total": 300.0}],
+    )
+    assert alerts.check_delta_uncovered(_state(p)) == []
+
+
 def test_delta_covered_no_alert(monkeypatch):
     import data_handler
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
