@@ -61,6 +61,9 @@ ALERT_TYPES = {
     "REGIME_CHANGE": ("MEDIUM", "HARD_CFM_RULE: the published (dwell-adjusted) market regime transitioned -> re-check entry posture; raw four-light flaps are suppressed by the yellow dwell"),
     "PAYOUT_READY": ("MEDIUM", "PROPOSED_DEFAULT: the last short of the month has closed (or the calendar month ended) with net income earned -> the monthly payout can be finalized and withdrawn"),
     "EXTRINSIC_ABOVE_ENTRY": ("LOW", "PROPOSED_DEFAULT: a short's remaining extrinsic rose materially above what it was sold for (a vol/IV event) -> the leg is underwater on time value; the payout capture meter floors this at 0% and hides it"),
+    "RECOMMENDATION": ("HIGH", "HARD_CFM_RULE: the engine committed to an actionable recommendation BEFORE the operator acts -> execute or dismiss with a coded reason (never ignore silently)"),
+    "TRUST_COVERAGE_MISS": ("HIGH", "HARD_CFM_RULE: an operator action had NO matching open recommendation -> the engine failed to commit first; the trust evidence for that action type is void until investigated"),
+    "ORDER_FIDELITY_FAIL": ("HIGH", "HARD_CFM_RULE: a live order lifecycle failed a fidelity check (illegal transition / slippage / orphan leg / unconfirmed cancel) -> the execution layer did not behave exactly as specified"),
 }
 
 
@@ -79,7 +82,8 @@ _FOCUS_ACTIONS = {
     "KILL_SWITCH_SECTOR", "KILL_SWITCH_SPY", "CIRCUIT_BREAKER", "SHORT_STOCK_DETECTED",
     "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
     "WHIPSAW_EXIT", "JUICE_INADEQUATE", "EARNINGS_DATE_STALE", "ROLL_LEG_IMBALANCE",
-    "EXTRINSIC_ABOVE_ENTRY",
+    "EXTRINSIC_ABOVE_ENTRY", "RECOMMENDATION", "TRUST_COVERAGE_MISS",
+    "ORDER_FIDELITY_FAIL",
 }
 
 
@@ -162,6 +166,7 @@ def check_kill_switch(state: dict) -> list[dict]:
 
 def check_delta_uncovered(state: dict) -> list[dict]:
     import dividends  # deferred: continuous dividend yield for delta-adjustment
+    import position_manager
     out = []
     for p in _open_positions(state):
         t = p.get("ticker", "")
@@ -172,46 +177,24 @@ def check_delta_uncovered(state: dict) -> list[dict]:
         # can suppress a DELTA_UNCOVERED alert that should fire. Thread the real q
         # through both legs of the coverage comparison. [R3(b)]
         q, q_src = dividends.q_with_source(t)
-        # Long side: sum delta across EVERY LEAP leg (contract-weighted). A
-        # multi-tranche position holds more than one long, and p["leap"] is only
-        # leg 0 — reading it alone under-counts coverage and can fire a false
-        # "uncovered" alert (this mirrors option_chain.coverage()).
-        long_total, long_contracts, min_leg_delta = 0.0, 0, None
-        for leg in log.leap_legs(p):
-            n = int(leg.get("contracts") or 0)
-            if not n:
-                continue
-            leg_mark = (float(leg["current_bid"]) / (n * 100)
-                        if leg.get("current_bid") is not None else None)
-            d, _ = indicators.call_greeks(price, leg.get("strike"), leg.get("dte"), leg_mark, q=q)
-            if d is None:
-                continue
-            long_total += d * n
-            long_contracts += n
-            min_leg_delta = d if min_leg_delta is None else min(min_leg_delta, d)
-        if min_leg_delta is None:
+        # The rule itself is the shared pure core (also consumed by the
+        # recommendation engine off frozen snapshot inputs) — never fork it.
+        cov = position_manager.delta_coverage(p, price, q=q)
+        if not cov["assessable"]:
             continue  # no priceable long leg — can't assess coverage
-        # Floor: the weakest leg dropping below the stock-proxy line (per contract).
-        if min_leg_delta < config.LEAP_DELTA_FLOOR:
+        if cov["floor_breach"]:
             out.append(_alert(
                 "DELTA_UNCOVERED", t,
-                f"{t} LEAP delta {min_leg_delta:.2f} is below the {config.LEAP_DELTA_FLOOR:.2f} floor.",
+                f"{t} LEAP delta {cov['min_leg_delta']:.2f} is below the {config.LEAP_DELTA_FLOOR:.2f} floor.",
                 "The LEAP no longer tracks the stock — roll it down/out or exit the position.",
-                {"leap_delta": min_leg_delta, "q": round(q, 4), "q_source": q_src}, key="floor"))
-        # Coverage: the shorts' total delta must not outrun the longs' total delta.
-        short_total = 0.0
-        for sc in p.get("short_calls", []):
-            sd, _ = indicators.call_greeks(price, sc.get("strike"), sc.get("dte"),
-                                           sc.get("current_bid"), q=q)
-            if sd is not None:
-                short_total += sd * int(sc.get("contracts") or 0)
-        if p.get("short_calls") and short_total > long_total + 1e-9:
+                {"leap_delta": cov["min_leg_delta"], "q": round(q, 4), "q_source": q_src}, key="floor"))
+        if cov["inverted"]:
             out.append(_alert(
                 "DELTA_UNCOVERED", t,
-                f"{t} short delta {short_total:.2f} exceeds long delta {long_total:.2f} "
-                f"(across {long_contracts} long contract(s)).",
+                f"{t} short delta {cov['short_delta']:.2f} exceeds long delta {cov['long_delta']:.2f} "
+                f"(across {cov['long_contracts']} long contract(s)).",
                 "The diagonal is net-short deltas — roll the short up/out or deepen the LEAP.",
-                {"long_delta": round(long_total, 4), "short_delta": round(short_total, 4),
+                {"long_delta": cov["long_delta"], "short_delta": cov["short_delta"],
                  "q": round(q, 4), "q_source": q_src},
                 key="inverted"))
     return out
@@ -965,6 +948,55 @@ def check_payout_ready(state: dict) -> list[dict]:
     return [a]
 
 
+def check_trust_coverage_miss(state: dict) -> list[dict]:
+    """A manual action with no matching open recommendation — the loudest trust
+    failure (the engine did not commit before the operator acted). Reads the
+    DERIVED recommendation_resolutions; windowed so ancient misses stop paging
+    while remaining on the scoreboard forever."""
+    out = []
+    cutoff = (datetime.now(ET) - timedelta(days=config.TRUST_ALERT_WINDOW_DAYS)).date().isoformat()
+    for res in state.get("recommendation_resolutions", []) or []:
+        if res.get("status") != "COVERAGE_MISS":
+            continue
+        if str(res.get("at") or "")[:10] < cutoff:
+            continue
+        t = res.get("ticker")
+        execs = ",".join(str(x) for x in res.get("execution_ids") or [])
+        out.append(_alert(
+            "TRUST_COVERAGE_MISS", t,
+            f"{t} {res.get('action_type')} executed with NO matching recommendation "
+            f"(execution {execs}).",
+            "Investigate on the Trust Scoreboard: the engine must commit before the "
+            "operator acts, or the automation evidence is void.",
+            {"resolution": res}, key=execs))
+    return out
+
+
+def check_order_fidelity_fail(state: dict) -> list[dict]:
+    """A graded order lifecycle failed a fidelity check. Reads the DERIVED
+    order_fidelity ledger; each failing ticket pages once (keyed by order id)."""
+    out = []
+    cutoff = (datetime.now(ET) - timedelta(days=config.TRUST_ALERT_WINDOW_DAYS)).date().isoformat()
+    for rec in (state.get("order_fidelity") or {}).values():
+        if rec.get("pass") is not False:
+            continue
+        if str(rec.get("graded_at") or "")[:10] < cutoff:
+            continue
+        failed = [f"{name}: {chk.get('defect')}"
+                  for name, chk in (rec.get("checks") or {}).items()
+                  if chk.get("status") == "FAIL"]
+        out.append(_alert(
+            "ORDER_FIDELITY_FAIL", rec.get("ticker"),
+            f"Order {rec.get('order_id')} ({rec.get('intent')}) failed fidelity: "
+            f"{'; '.join(failed) or 'unknown defect'}.",
+            "Review the order on the Trust Scoreboard; reconcile against the broker "
+            "before trading this position again.",
+            {"fidelity": {k: rec.get(k) for k in ("order_id", "intent", "state", "paper")},
+             "failed_checks": failed},
+            key=str(rec.get("order_id"))))
+    return out
+
+
 EVALUATORS = [
     check_kill_switch,
     check_circuit_breaker,
@@ -990,6 +1022,8 @@ EVALUATORS = [
     check_book_correlation,
     check_regime_change,
     check_payout_ready,
+    check_trust_coverage_miss,
+    check_order_fidelity_fail,
 ]
 
 

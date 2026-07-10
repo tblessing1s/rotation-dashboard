@@ -67,7 +67,7 @@ def enrich_leap(leap: dict, stock_price: float | None) -> dict:
 
 
 def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
-                 live_mark: float | None = None) -> dict:
+                 live_mark: float | None = None, today=None) -> dict:
     """Per-short management signals, all derived from stored execution data:
 
     - decay_pct + roll_now: the 75% buyback rule (HARD_CFM_RULE — when the short
@@ -173,13 +173,14 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
     ex_date, amount = (dividend or {}).get("ex_date"), (dividend or {}).get("amount")
     if ex_date and amount and current is not None and strike is not None and stock_price is not None:
         from datetime import date, datetime, timedelta
+        today = today or date.today()
         try:
             ex = datetime.strptime(str(ex_date)[:10], "%Y-%m-%d").date()
             expiry = (datetime.strptime(str(sc["expiration"])[:10], "%Y-%m-%d").date()
                       if sc.get("expiration")
-                      else date.today() + timedelta(days=int(dte)) if dte is not None else None)
+                      else today + timedelta(days=int(dte)) if dte is not None else None)
             extrinsic = max(float(current) - max(stock_price - float(strike), 0.0), 0.0)
-            if expiry and date.today() <= ex <= expiry and extrinsic < float(amount):
+            if expiry and today <= ex <= expiry and extrinsic < float(amount):
                 out["assignment_risk"] = {
                     "trigger": "dividend",
                     "extrinsic": round(extrinsic, 2), "dividend": float(amount),
@@ -204,6 +205,56 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
                      "the LEAP to cover an assignment."),
         }
     return out
+
+
+def delta_coverage(position: dict, price: float | None, q: float = 0.0) -> dict:
+    """The delta-coverage guardrail as a PURE function over a position dict, a
+    stock price, and a continuous dividend yield — the single decision core
+    shared by alerts.check_delta_uncovered and the recommendation engine (which
+    feed it live vs frozen-snapshot inputs respectively).
+
+    Two independent checks [HARD_CFM_RULE]:
+      - floor: the weakest LEAP leg's delta below config.LEAP_DELTA_FLOOR — the
+        long no longer tracks the stock;
+      - inverted: the shorts' contract-weighted delta exceeding the longs' —
+        the diagonal is net-short deltas.
+    Greeks recomputed per leg via indicators.call_greeks (pure math, q-aware).
+    Returns None-valued fields when no long leg is priceable."""
+    import indicators
+    import logging_handler as log
+    long_total, long_contracts, min_leg_delta = 0.0, 0, None
+    for leg in log.leap_legs(position):
+        n = int(leg.get("contracts") or 0)
+        if not n:
+            continue
+        leg_mark = (float(leg["current_bid"]) / (n * 100)
+                    if leg.get("current_bid") is not None else None)
+        d, _ = indicators.call_greeks(price, leg.get("strike"), leg.get("dte"), leg_mark, q=q)
+        if d is None:
+            continue
+        long_total += d * n
+        long_contracts += n
+        min_leg_delta = d if min_leg_delta is None else min(min_leg_delta, d)
+    short_total = 0.0
+    priced_shorts = False
+    for sc in position.get("short_calls", []):
+        sd, _ = indicators.call_greeks(price, sc.get("strike"), sc.get("dte"),
+                                       sc.get("current_bid"), q=q)
+        if sd is not None:
+            priced_shorts = True
+            short_total += sd * int(sc.get("contracts") or 0)
+    assessable = min_leg_delta is not None
+    return {
+        "assessable": assessable,
+        "min_leg_delta": min_leg_delta,
+        "long_delta": round(long_total, 4) if assessable else None,
+        "long_contracts": long_contracts,
+        "short_delta": round(short_total, 4) if priced_shorts else None,
+        "floor": config.LEAP_DELTA_FLOOR,
+        "floor_breach": bool(assessable and min_leg_delta < config.LEAP_DELTA_FLOOR),
+        "inverted": bool(assessable and position.get("short_calls")
+                         and short_total > long_total + 1e-9),
+    }
 
 
 def _parse_day(value):

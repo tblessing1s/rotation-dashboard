@@ -1,5 +1,79 @@
 # Changelog
 
+## v2.6.0 — Recommendation engine + trust scoreboard + execution fidelity ledger (state schema v17)
+
+The trust layer that must exist before any automated execution is permitted.
+The app now (a) commits to specific, actionable recommendations BEFORE the
+operator acts, (b) measures agreement between its recommendations and the
+operator's actual actions, and (c) grades whether every order lifecycle behaved
+exactly as specified. Automation eligibility is a derived, per-action-type,
+display-only readout — **no automated order submission exists anywhere in this
+version**, and while post-fill reconciliation is `NOT_YET_IMPLEMENTED` no
+action type may graduate. Operator doc: `docs/trust-layer.md`.
+
+- **Recommendation records** (`recommendations`, append-only, immutable):
+  every scheduled alert slot also runs an evaluation pass emitting, per open
+  position, either an actionable recommendation (EXIT / DEFEND / ROLL_OUT,
+  with a full proposed ticket: legs, strikes, NET limit, minimum acceptable
+  net credit, max slippage vs mid) or an explicit `ALL_CLEAR` — silence is not
+  a valid output. Coded trigger rules (`rec_types.TriggerRule`), frozen
+  `input_snapshot` (incl. condition-first-true dates for timeliness),
+  `valid_until` expiry, and supersession chains.
+- **Same-code-path invariant**: the engine
+  (`recommendation_engine.evaluate`) is a PURE function over a frozen market
+  snapshot + injected clock — the exact function a future automation switch
+  would call — and it reuses the existing single sources of truth rather than
+  forking them: `strike_policy` for every proposed strike, a newly extracted
+  pure `kill_switch.classify` core, `circuit_breaker.evaluate(df=...)`,
+  `position_manager.whipsaw_status` / `enrich_short` / a new shared
+  `delta_coverage` core (the `DELTA_UNCOVERED` alert now calls the same core).
+  The impure shell (`recommendation_runner.py`) owns providers/clock/state.
+- **Resolution matching** (derived in `recompute_derived`, never
+  hand-entered): executions match the latest open, valid recommendation of the
+  same action type on the same position (`source_rec_id` passthrough from the
+  UI makes it exact); dismissals carry coded override reasons
+  (`DISAGREE_TIMING/STRIKE/ACTION`, `EXTERNAL_INFO`, `DISCIPLINE_LAPSE`,
+  `OTHER`+note) as append-only override records; expiries and **coverage
+  misses** (an action with no matching recommendation — the loudest failure)
+  are synthesized. Pre-activation history (`metadata.trust_layer_since`) and
+  out-of-scope mechanics (LEAP rolls, scale-ins, leg repairs, adjustments) are
+  excluded by rule.
+- **Execution fidelity ledger** (`order_fidelity`, derived + retained past the
+  order_events cap): per live ticket — `LIFECYCLE_LEGAL` (replayed against the
+  now data-encoded legal transition graph in `order_lifecycle`),
+  `SLIPPAGE_IN_BOUND` (reusing `slippage.py`'s exact math against the ticket's
+  own bound), `NO_ORPHAN_LEG` (incl. the fill-during-cancel race),
+  `CANCEL_CONFIRMED_DEAD` (a cancel that never confirms terminal fails after a
+  deadline), and `RECONCILED_CLEAN` = `NOT_YET_IMPLEMENTED` (never a silent
+  pass). Paper tickets are graded on what a paper fill can express, flagged
+  paper. Failures page via new `ORDER_FIDELITY_FAIL` / `TRUST_COVERAGE_MISS`
+  alerts; new actionable recommendations push via the existing notifier.
+- **Trust scoreboard** (`trust_scoreboard`, derived; `GET
+  /api/trust-scoreboard` + Settings-tab panel): coverage, precision (+ override
+  breakdown), timeliness (emission lag + late-after-action flags), fidelity
+  pass rate, and per-action-type graduation status with the failing criterion
+  named. Criteria: `GRAD_MIN_LIVE_CYCLES`=10, `GRAD_MIN_WEEKS` 8/16/16/26
+  (ENTER never eligible), override rate <= 0.10 with zero `DISAGREE_ACTION`
+  (PROPOSED_DEFAULT); zero coverage misses, 100% fidelity, reconciliation
+  green (HARD, in code).
+- **UI**: recommendation cards on each position (proposed ticket, trigger,
+  validity countdown, one-tap Execute into the existing flow / Dismiss with a
+  forced coded reason), open-recommendation count in the Overview digest, and
+  the Trust Scoreboard panel with coverage misses and fidelity failures
+  rendered loud.
+- **Schema v17** (pre-migration snapshot as always): adds `recommendations`,
+  `recommendation_overrides`, `order_fidelity`, `metadata.trust_layer_since`;
+  `recommendation_resolutions` + `trust_scoreboard` are derived keys.
+- **Offline test suite** (53 new tests): the XLK July-6th labeled failure case
+  regression-locked (real scorecard path must block, engine must emit NO
+  ENTER), the AAPL laggard -> `KILL_RS_SECTOR` EXIT on first pass, ALL_CLEAR
+  emission, coverage-miss synthesis, stale/superseded/overridden matching,
+  timeliness lag + late-after-action, graduation math (miss / under-cycles /
+  reconciliation-blocked, each with the named reason), fidelity lifecycles
+  (clean two-leg, fill-during-cancel orphan + page, unconfirmed cancel,
+  out-of-bound slippage), crash recovery (open recs survive restart, no
+  duplicate claims in-window), and migration idempotency.
+
 ## Risk-path math hardening
 
 The app's *accounting* math was already honest; three places where a

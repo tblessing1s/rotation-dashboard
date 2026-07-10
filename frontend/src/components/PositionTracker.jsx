@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Meter, Loading, money, fmt, useApi } from "./ui.jsx";
+import { Card, Meter, Loading, Modal, money, fmt, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { Orange, pulpOf, balanceOf } from "./JuiceStand.jsx";
@@ -195,6 +195,279 @@ function DefendPanel({ ticker, onStage }) {
       <p className="mt-0.5 text-xs text-slate-500">
         Estimated from trailing vol — the staged roll re-prices from the live chain.
       </p>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Recommendation trust layer — engine-emitted action cards on the position.
+// Display + staging only: Execute routes into the EXISTING roll flow (the same
+// cfm-action intent AlertsPanel deep links dispatch, extended with rec_id so
+// the fill carries source_rec_id back to the recommendation); Dismiss appends
+// an immutable coded override record. Nothing here places an order on its own.
+// ---------------------------------------------------------------------------
+const REC_BADGE = {
+  EXIT: "border-rose-500/40 bg-rose-500/15 text-rose-300",
+  DEFEND: "border-amber-500/40 bg-amber-500/15 text-amber-300",
+  ROLL_OUT: "border-sky-500/40 bg-sky-500/15 text-sky-300",
+  ROLL_DOWN: "border-amber-500/40 bg-amber-500/15 text-amber-300",
+  ENTER: "border-emerald-500/40 bg-emerald-500/15 text-emerald-300",
+};
+
+// The 6 coded override reasons the backend accepts (OTHER requires a note).
+const OVERRIDE_REASONS = [
+  ["DISAGREE_TIMING", "Disagree with the timing"],
+  ["DISAGREE_STRIKE", "Disagree with the strike"],
+  ["DISAGREE_ACTION", "Disagree with the action itself"],
+  ["EXTERNAL_INFO", "Acting on external information"],
+  ["DISCIPLINE_LAPSE", "Discipline lapse (logged honestly)"],
+  ["OTHER", "Other — typed note required"],
+];
+
+// Minute tick shared by the validity countdowns — live-ish without per-card timers.
+function useNow(intervalMs = 60000) {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+// "valid 26h" while comfortable, "expires in 3h" once inside 6h, "expired" past it.
+function validity(validUntil, now) {
+  const t = Date.parse(validUntil || "");
+  if (Number.isNaN(t)) return null;
+  const hrs = (t - now) / 3600000;
+  if (hrs <= 0) return { text: "expired", tone: "text-rose-400" };
+  if (hrs < 1) return { text: `expires in ${Math.max(1, Math.round(hrs * 60))}m`, tone: "text-amber-300" };
+  if (hrs <= 6) return { text: `expires in ${Math.round(hrs)}h`, tone: "text-amber-300" };
+  return { text: `valid ${Math.round(hrs)}h`, tone: "text-slate-500" };
+}
+
+// One-line ticket read: legs (instruction + strike + expiry) · order type · est net.
+function ticketSummary(t) {
+  if (!t) return "no ticket attached";
+  const legs = (t.legs || [])
+    .map((l) => {
+      const when = l.expiration ? ` exp ${l.expiration}` : l.dte != null ? ` ${l.dte} DTE` : "";
+      return `${(l.instruction || "").replaceAll("_", " ")} ${fmt(l.strike, 2)}${when}`;
+    })
+    .join(" / ");
+  const net = t.estimates?.net_per_share;
+  const netStr = net != null
+    ? `est ${net < 0 ? "−" : ""}$${Math.abs(Number(net)).toFixed(2)}/sh ${net >= 0 ? "credit" : "debit"}`
+    : "unpriced";
+  return [legs, (t.order_type || "").replaceAll("_", " "), netStr].filter(Boolean).join(" · ");
+}
+
+// Dismissal modal: one coded reason is mandatory; OTHER additionally demands a
+// typed note (the backend 400s without one — the submit stays disabled until then).
+function DismissRecModal({ rec, onClose, onDismissed }) {
+  const toast = useToast();
+  const [reason, setReason] = React.useState(null);
+  const [note, setNote] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const noteRequired = reason === "OTHER";
+  const canSubmit = !!reason && !(noteRequired && !note.trim()) && !busy;
+
+  async function submit() {
+    setBusy(true);
+    try {
+      await api.dismissRecommendation(rec.rec_id, reason, note.trim() || undefined);
+      toast.show(`Dismissed ${rec.action_type} on ${rec.ticker} (${reason})`, { type: "success" });
+      onDismissed?.();
+      onClose?.();
+    } catch (e) {
+      toast.show(String(e.message || e), { type: "error" });
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal onClose={onClose} maxWidth="max-w-md">
+      <Card title={`Dismiss recommendation — ${rec.ticker}`}>
+        <p className="text-xs text-slate-500">
+          {rec.action_type} · <span className="font-mono">{rec.trigger_rule}</span> ·{" "}
+          <span className="font-mono">{rec.rec_id}</span>
+        </p>
+        <p className="mt-1 text-xs text-slate-400">
+          A dismissal writes an immutable override record that feeds the trust scoreboard —
+          pick the coded reason that honestly describes why you're not taking this action.
+        </p>
+        <div className="mt-3 space-y-1">
+          {OVERRIDE_REASONS.map(([code, label]) => (
+            <label
+              key={code}
+              className={`flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-sm ${
+                reason === code ? "bg-sky-500/10" : "hover:bg-slate-800/50"
+              }`}
+            >
+              <input
+                type="radio" name={`dismiss-${rec.rec_id}`} checked={reason === code}
+                onChange={() => setReason(code)} className="accent-sky-400"
+              />
+              <span className="text-slate-200">{label}</span>
+              <span className="ml-auto font-mono text-[10px] text-slate-500">{code}</span>
+            </label>
+          ))}
+        </div>
+        <label className="mt-3 block text-[10px] uppercase tracking-wide text-slate-500">
+          note{noteRequired ? " — required for OTHER" : " (optional)"}
+          <textarea
+            value={note} onChange={(e) => setNote(e.target.value)} rows={2}
+            placeholder={noteRequired ? "A typed note is required for OTHER." : "Optional context…"}
+            className="mt-1 w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-sm normal-case tracking-normal text-slate-100 placeholder:text-slate-600"
+          />
+        </label>
+        <div className="mt-3 flex items-center justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="rounded-lg border border-slate-700 px-3 py-1.5 text-sm text-slate-300 hover:bg-slate-800"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={submit} disabled={!canSubmit}
+            className="rounded-lg border border-rose-700 bg-rose-500/10 px-3 py-1.5 text-sm font-semibold text-rose-300 hover:bg-rose-500/20 disabled:opacity-40"
+          >
+            {busy ? "Dismissing…" : "Dismiss"}
+          </button>
+        </div>
+      </Card>
+    </Modal>
+  );
+}
+
+// One actionable recommendation on its position card.
+function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss }) {
+  const v = validity(rec.valid_until, now);
+  const t = rec.proposed_ticket;
+  const badge = REC_BADGE[rec.action_type] || "border-slate-600 bg-slate-800/60 text-slate-300";
+  return (
+    <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${badge}`}>
+          {(rec.action_type || "").replaceAll("_", " ")}
+        </span>
+        <span className="font-mono text-xs text-slate-400" title="Trigger rule">{rec.trigger_rule}</span>
+        {v && (
+          <span className={`ml-auto text-xs ${v.tone}`} title={`valid until ${rec.valid_until}`}>
+            {v.text}
+          </span>
+        )}
+      </div>
+      <p className="mt-1 text-xs text-slate-300">{ticketSummary(t)}</p>
+      {expanded && t && (
+        <div className="mt-2 rounded-lg border border-slate-800 bg-slate-900/60 p-2 text-xs text-slate-300">
+          <div className="text-[10px] uppercase tracking-wide text-slate-500">Proposed ticket</div>
+          <ul className="mt-1 space-y-0.5">
+            {(t.legs || []).map((l, i) => (
+              <li key={i}>
+                {(l.instruction || "").replaceAll("_", " ")} {l.quantity != null ? `${l.quantity}× ` : ""}
+                {fmt(l.strike, 2)}
+                {l.expiration ? ` exp ${l.expiration}` : ""}{l.dte != null ? ` (${l.dte} DTE)` : ""}
+                {l.role ? <span className="text-slate-500"> · {l.role}</span> : null}
+              </li>
+            ))}
+          </ul>
+          <div className="mt-1 text-slate-400">
+            {(t.order_type || "").replaceAll("_", " ")}
+            {" · "}limit {t.limit_price != null ? `$${Number(t.limit_price).toFixed(2)}` : "unpriced"}
+            {t.min_acceptable_net_credit != null && <> · min net ${Number(t.min_acceptable_net_credit).toFixed(2)}</>}
+            {t.max_slippage_pct_of_mid != null && <> · max slip {t.max_slippage_pct_of_mid}% of mid</>}
+            {t.price_source && <> · priced from {t.price_source}</>}
+          </div>
+        </div>
+      )}
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          onClick={onExecute}
+          className="rounded-full border border-emerald-600/50 bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20"
+        >
+          Execute
+        </button>
+        <button
+          onClick={onDismiss}
+          className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-0.5 text-xs text-slate-300 hover:bg-slate-800"
+        >
+          Dismiss
+        </button>
+        {t && (
+          <button
+            onClick={onToggleDetail}
+            className="ml-auto text-[11px] text-slate-500 hover:text-slate-300"
+          >
+            {expanded ? "hide ticket ▲" : "ticket details ▼"}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// The recommendation strip under a position's header. Actionable recs (never
+// NO_ACTION) render as cards; when the ONLY open rec is an ALL_CLEAR/NO_ACTION,
+// a single muted line says so with the valid-until time.
+function RecSection({ p, recs, onRecsChanged, focusCard }) {
+  const now = useNow();
+  const [dismissing, setDismissing] = React.useState(null); // rec being dismissed
+  const [detailId, setDetailId] = React.useState(null); // rec_id with ticket expanded
+  const list = recs || [];
+  const actionable = list.filter((r) => r.action_type !== "NO_ACTION");
+  if (list.length === 0) return null;
+
+  if (actionable.length === 0) {
+    const r = list[list.length - 1];
+    return (
+      <div className="px-4 pb-2 text-[11px] text-slate-600">
+        engine: all clear · valid until {(r.valid_until || "").slice(0, 16).replace("T", " ")}Z
+      </div>
+    );
+  }
+
+  function execute(rec) {
+    if (rec.action_type === "EXIT") {
+      // There is no in-app exit modal on this page (exits go through the order
+      // ticket) — focus the card and show the full proposed ticket instead of
+      // building a new order path.
+      focusCard(p.ticker);
+      setDetailId(rec.rec_id);
+      return;
+    }
+    // ROLL_OUT / ROLL_DOWN / DEFEND ride the existing roll-staging intent — the
+    // same cfm-action event AlertsPanel deep links dispatch (App.jsx listener →
+    // positionIntent → RollModal), extended with rec_id so the /api/execute
+    // payload carries source_rec_id.
+    window.dispatchEvent(new CustomEvent("cfm-action", {
+      detail: {
+        action: "roll",
+        ticker: rec.ticker,
+        reason: rec.proposed_ticket?.roll_reason
+          || (rec.action_type === "DEFEND" ? "defend" : "scheduled"),
+        rec_id: rec.rec_id,
+      },
+    }));
+  }
+
+  return (
+    <div className="space-y-2 px-4 pb-3">
+      {actionable.map((rec) => (
+        <RecCard
+          key={rec.rec_id} rec={rec} now={now}
+          expanded={detailId === rec.rec_id}
+          onToggleDetail={() => setDetailId((id) => (id === rec.rec_id ? null : rec.rec_id))}
+          onExecute={() => execute(rec)}
+          onDismiss={() => setDismissing(rec)}
+        />
+      ))}
+      {dismissing && (
+        <DismissRecModal
+          rec={dismissing}
+          onClose={() => setDismissing(null)}
+          onDismissed={onRecsChanged}
+        />
+      )}
     </div>
   );
 }
@@ -588,7 +861,7 @@ function BookSummary({ positions, diffsByTicker, payback, risk }) {
 // intrinsic balance, extrinsic burn-off, short-call capture. Expanded: those three
 // in full (orange, juice-battery, short list), plus any active safety alert
 // (reconciliation, defend, whipsaw) which also auto-opens the row.
-function PositionRow({ p, diffs, payback, focused, setRolling, onOpenTicket, afterResolve }) {
+function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focused, setRolling, onOpenTicket, afterResolve }) {
   const shorts = p.short_calls || [];
   const hasAlert = !!(p.needs_review || p.defend || p.whipsaw?.tripped || (diffs && diffs.length));
   // Collapsed by default for a clean, scannable list; a tapped-alert deep link
@@ -639,6 +912,10 @@ function PositionRow({ p, diffs, payback, focused, setRolling, onOpenTicket, aft
         </span>
       </button>
 
+      {/* Engine recommendations stay visible even when the row is collapsed —
+          they're the "act now" layer, not detail. */}
+      <RecSection p={p} recs={recs} onRecsChanged={onRecsChanged} focusCard={focusCard} />
+
       {open && (
         <div className="border-t border-slate-800 p-4">
           {/* Active safety alerts — surfaced, never hidden. */}
@@ -681,28 +958,48 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
   const { data, error, loading, reload } = useApi(api.positions, [], null);
   const { data: recon, reload: reloadRecon } = useApi(api.reconcile, [], null);
   const { data: risk } = useApi(api.portfolioRisk, [], null);
-  const [rolling, setRolling] = React.useState(null); // {ticker, reason}
+  // Open engine recommendations (trust layer) — refetched whenever the tab
+  // remounts (the execNonce key) and after a dismissal.
+  const { data: recsData, reload: reloadRecs } = useApi(api.recommendations, [], null);
+  const [rolling, setRolling] = React.useState(null); // {ticker, reason, recId?}
   const [focusedTicker, setFocusedTicker] = React.useState(null);
   const handledIntentId = React.useRef(null);
 
+  // Scroll-to + highlight for a position card (deep links, EXIT rec Execute).
+  const focusCard = React.useCallback((ticker) => {
+    setFocusedTicker(ticker);
+    requestAnimationFrame(() =>
+      document.getElementById(`pos-${ticker}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "center" }));
+    setTimeout(() => setFocusedTicker((t) => (t === ticker ? null : t)), 2500);
+  }, []);
+
   // Deep-link intent from a tapped alert: open the prefilled roll ticket for the
   // ticker, or (for exit/kill-switch alerts) scroll to and highlight its card.
+  // A recommendation-card Execute travels the same path with intent.recId set,
+  // which rides into RollModal so the fill carries source_rec_id.
   React.useEffect(() => {
     if (!intent || !data || handledIntentId.current === intent.id) return;
     handledIntentId.current = intent.id;
     const posList = (data.positions || []).filter((p) => p.status !== "closed");
     const pos = posList.find((p) => p.ticker === intent.ticker);
     if (pos && intent.action === "roll" && (pos.short_calls || []).length > 0) {
-      setRolling({ ticker: intent.ticker, reason: intent.reason || "scheduled" });
+      setRolling({ ticker: intent.ticker, reason: intent.reason || "scheduled", recId: intent.recId });
     } else if (pos) {
-      setFocusedTicker(intent.ticker);
-      requestAnimationFrame(() =>
-        document.getElementById(`pos-${intent.ticker}`)
-          ?.scrollIntoView({ behavior: "smooth", block: "center" }));
-      setTimeout(() => setFocusedTicker((t) => (t === intent.ticker ? null : t)), 2500);
+      focusCard(intent.ticker);
     }
     onIntentHandled?.();
-  }, [intent, data, onIntentHandled]);
+  }, [intent, data, onIntentHandled, focusCard]);
+
+  // Open recommendations grouped by ticker for the position cards.
+  const recsByTicker = React.useMemo(() => {
+    const out = {};
+    for (const r of recsData?.open || []) {
+      const t = (r.ticker || "").toUpperCase();
+      if (t) (out[t] ||= []).push(r);
+    }
+    return out;
+  }, [recsData]);
 
   // Open (unresolved) reconciliation diffs indexed by ticker — drives the review
   // panel + the state-unverified marker on frozen positions.
@@ -748,6 +1045,9 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
             p={p}
             diffs={openDiffsByTicker[p.ticker]}
             payback={data?.extrinsic_payback?.[p.ticker]}
+            recs={recsByTicker[(p.ticker || "").toUpperCase()]}
+            onRecsChanged={reloadRecs}
+            focusCard={focusCard}
             focused={focusedTicker === p.ticker}
             setRolling={setRolling}
             onOpenTicket={onOpenTicket}
@@ -760,6 +1060,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
         <RollModal
           ticker={rolling.ticker}
           reason={rolling.reason}
+          sourceRecId={rolling.recId}
           onExecute={runRoll}
           onClose={() => setRolling(null)}
         />

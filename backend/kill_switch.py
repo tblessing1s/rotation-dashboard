@@ -48,8 +48,12 @@ def _rs_pair(ticker: str) -> tuple[float | None, float | None]:
     return rs_vs_spy, rs_vs_sector
 
 
-def evaluate(ticker: str) -> dict:
-    rs_vs_spy, rs_vs_sector = _rs_pair(ticker)
+def classify(ticker: str, rs_vs_spy: float | None,
+             rs_vs_sector: float | None) -> dict:
+    """The kill-switch rule as a PURE function over the two RS3M inputs — the
+    single decision core shared by the live evaluator below and the
+    recommendation engine (which feeds it frozen snapshot values). No provider,
+    clock, or state access; the rule itself has no debate built in."""
     status = "green"
     alert = False
     action = "Hold — relative strength intact."
@@ -65,13 +69,6 @@ def evaluate(ticker: str) -> dict:
          (rs_vs_spy is not None and rs_vs_spy < config.STOCK_RS_VS_SPY_MIN):
         status = "yellow"
         action = "Watch — relative strength thinning toward the kill line."
-    try:
-        earn = earnings.next_earnings(ticker)
-    except Exception:  # noqa: BLE001
-        earn = {"date": None, "days_until": None, "warning": False}
-    if earn.get("warning"):
-        action = (f"{action}  Earnings in {earn['days_until']}d ({earn['date']}) — "
-                  "roll the short deep-ITM or exit before the report.")
     return {
         "ticker": ticker,
         "rs3m_vs_spy": rs_vs_spy,
@@ -79,8 +76,21 @@ def evaluate(ticker: str) -> dict:
         "status": status,
         "alert": alert,
         "suggested_action": action,
-        "earnings": earn,
     }
+
+
+def evaluate(ticker: str) -> dict:
+    rs_vs_spy, rs_vs_sector = _rs_pair(ticker)
+    verdict = classify(ticker, rs_vs_spy, rs_vs_sector)
+    action = verdict["suggested_action"]
+    try:
+        earn = earnings.next_earnings(ticker)
+    except Exception:  # noqa: BLE001
+        earn = {"date": None, "days_until": None, "warning": False}
+    if earn.get("warning"):
+        action = (f"{action}  Earnings in {earn['days_until']}d ({earn['date']}) — "
+                  "roll the short deep-ITM or exit before the report.")
+    return {**verdict, "suggested_action": action, "earnings": earn}
 
 
 def evaluate_all(state: dict) -> list[dict]:

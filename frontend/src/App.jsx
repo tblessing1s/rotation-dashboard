@@ -74,10 +74,12 @@ export default function App() {
 
   // Route an alert action (from a tapped push or an in-app "Act" click) to the
   // Positions tab with a prefilled intent. Each call gets a fresh id so the same
-  // ticker/action re-triggers the modal.
-  const goToAction = React.useCallback((action, ticker, reason) => {
+  // ticker/action re-triggers the modal. recId (optional) is the recommendation
+  // that staged the action — it travels with the intent into the roll ticket so
+  // the resulting execution carries source_rec_id (trust-layer matching).
+  const goToAction = React.useCallback((action, ticker, reason, recId) => {
     if (!action || !ticker) return;
-    setPositionIntent({ action, ticker, reason, id: Date.now() });
+    setPositionIntent({ action, ticker, reason, recId, id: Date.now() });
     setExecute(null);
     setTab("Positions");
   }, []);
@@ -90,8 +92,8 @@ export default function App() {
     const action = params.get("action");
     const ticker = params.get("ticker");
     if (action && ticker) {
-      goToAction(action, ticker, params.get("reason") || undefined);
-      params.delete("action"); params.delete("ticker"); params.delete("reason");
+      goToAction(action, ticker, params.get("reason") || undefined, params.get("rec_id") || undefined);
+      params.delete("action"); params.delete("ticker"); params.delete("reason"); params.delete("rec_id");
       const qs = params.toString();
       window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
     }
@@ -105,8 +107,10 @@ export default function App() {
       const qs = params.toString();
       window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
     }
-    // In-app "Act" clicks from the Alerts panel dispatch this event.
-    const onAction = (e) => goToAction(e.detail?.action, e.detail?.ticker, e.detail?.reason);
+    // In-app "Act" clicks from the Alerts panel (and recommendation-card
+    // Execute buttons, which additionally carry rec_id) dispatch this event.
+    const onAction = (e) =>
+      goToAction(e.detail?.action, e.detail?.ticker, e.detail?.reason, e.detail?.rec_id);
     window.addEventListener("cfm-action", onAction);
     return () => window.removeEventListener("cfm-action", onAction);
   }, [authed, goToAction]);
