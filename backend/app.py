@@ -717,7 +717,24 @@ def api_overview():
         # Live BS-engine verification harness: realized-vs-projected burn drift.
         "burn_divergence": section(lambda: __import__("burn_marks").aggregate_divergence()),
         "kill_switch": section(lambda: kill_switch.evaluate_all(state)),
+        # Monthly payout glance: this month's estimated payout + last month's, so
+        # the landing shows "what the payout is going to be" without a second call.
+        "payouts": section(lambda: _payouts_glance(state)),
     })
+
+
+def _payouts_glance(state: dict) -> dict:
+    """The compact current+previous payout figures for the Overview landing,
+    pulled from the payouts view (full detail lives on the Payouts tab)."""
+    import payouts
+    v = payouts.view(state)
+    keep = ("month", "label", "net_juice", "leap_burn", "burn_tracked",
+            "net_payout", "payout_amount", "status", "finalizable", "finalized",
+            "paid", "estimated")
+    return {
+        "current": {k: v["current"].get(k) for k in keep},
+        "previous": {k: v["previous"].get(k) for k in keep},
+    }
 
 
 # ---------------------------------------------------------------------------

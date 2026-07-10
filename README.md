@@ -95,8 +95,10 @@ maxes out.
   `PortfolioRisk` collapsed to headlines) — manage the book.
 - **History** (`HistoryTab` incl. the theta ledger + per-week closes) — review
   results.
-- **Payouts** (`PayoutsTab`) — the monthly income-withdrawal view: this month's
-  estimated payout, last month's payout, month-by-month history, and a per-month
+- **Payouts** (`PayoutsTab`) — the monthly income-withdrawal view. The payout is
+  the **leftover**: `net juice collected − LEAP extrinsic burn` (the burn reserved
+  to maintain/roll the LEAP), shown with the full breakdown. Covers this month's
+  estimate, last month's payout, month-by-month history, and a per-month
   finalize → paid record. A payout becomes finalizable the moment its last short
   of the month closes (or the month ends); a `PAYOUT_READY` push fires then.
 - **Settings** (`SettingsTab`: demo/posture toggles, `LiveTradingSwitch`,
@@ -127,7 +129,7 @@ ticker" button, with a ← Back button to return.
 | `GET /api/positions` | Positions (LEAP/share/cap), capital summary, milestones. |
 | `GET /api/coverage?ticker=ON` | Delta-coverage guardrail: LEAP vs short deltas, the 0.50 LEAP floor, and whether the long still covers the short. |
 | `GET /api/theta-ledger` | Net juice (week/month/YTD) + extrinsic payback per position. |
-| `GET /api/payouts` | Monthly payout tracker: current-month estimate + last-month payout + month-by-month history (net juice derived from short closes) + totals (YTD/all-time/paid/awaiting). Each month is in progress → finalizable (last short closed / month ended) → finalized → paid. |
+| `GET /api/payouts` | Monthly payout tracker: current-month estimate + last-month payout + month-by-month history + totals. Payout = net juice (from short closes) − realized LEAP extrinsic burn (from burn marks) = the leftover. Each month is in progress → finalizable (last short closed / month ended) → finalized → paid. |
 | `POST /api/payouts/finalize` · `POST /api/payouts/unfinalize` | Lock in / undo a month's payout once finalizable (`{month, amount?, note?}`; snapshots the amount, refuses a month still earning juice). |
 | `POST /api/payouts/mark-paid` · `POST /api/payouts/unmark-paid` | Record/undo a month's payout as withdrawn (finalizes first if needed). |
 | `GET /api/kill-switch` | Per-position RS3M vs SPY/Sector + exit signals. |

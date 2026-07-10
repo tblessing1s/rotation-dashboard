@@ -5,10 +5,21 @@ on every ``close_short`` execution as ``net_juice_total``. The theta ledger sums
 that into this-week / this-month / YTD live totals, but it keeps no month-by-month
 record and has no notion of an operator *paying themselves out* each month.
 
+The payout an operator can actually take is not the raw juice: the long LEAP is
+decaying underneath it, and that weekly extrinsic burn has to be reserved to
+maintain/roll the LEAP. So the headline **payout is the leftover** —
+
+    payout (leftover) = net juice collected − LEAP extrinsic burn
+
+— where the burn is the REALIZED weekly extrinsic decay from ``burn_marks`` (same
+whole-position dollars as the juice ledger), summed over the month. When burn
+hasn't been marked for a month yet the payout degrades cleanly to juice-only and
+says so, rather than pretending the burn is zero.
+
 This module adds exactly that, WITHOUT duplicating the source of truth:
 
-* Net juice per calendar month is **derived** from the immutable executions
-  (never stored) — recompute is idempotent, same as the theta ledger.
+* Net juice per calendar month is **derived** from the immutable executions, and
+  the LEAP burn from the weekly burn marks — neither is stored here.
 * The only thing persisted is the operator's *payout bookkeeping*: whether a
   month has been finalized and/or marked paid, when, the amount snapshotted at
   each step, and an optional note. Snapshotting freezes what was actually
@@ -146,18 +157,34 @@ def is_finalizable(state: dict, month: str, net_by_month: dict,
     return not has_open_short_expiring_in(state, month)
 
 
+def monthly_leap_burn() -> dict[str, float]:
+    """Realized LEAP extrinsic burn per month (whole-position $), from the weekly
+    burn marks. Best-effort: any read failure (no marks file yet, telemetry
+    unavailable) degrades to {} so the payout falls back to juice-only."""
+    try:
+        import burn_marks
+        return burn_marks.monthly_realized_burn()
+    except Exception:  # noqa: BLE001 — burn is an overlay, never breaks the payout
+        return {}
+
+
+def _net_payout(net_juice: float, leap_burn: float | None) -> float:
+    """The leftover: juice minus LEAP burn (burn treated as 0 when untracked)."""
+    return round(float(net_juice) - float(leap_burn or 0), 2)
+
+
 def _records(state: dict) -> dict[str, dict]:
     return (state.get("payouts") or {}).get("records") or {}
 
 
-def _payout_amount(entry_net: float, record: dict) -> float:
+def _payout_amount(net_payout: float, record: dict) -> float:
     """The figure to show for a month: the paid amount if paid, else the finalized
-    amount if finalized, else the live/derived net juice."""
+    amount if finalized, else the live leftover (juice − LEAP burn)."""
     if record.get("paid") and record.get("paid_amount") is not None:
         return float(record["paid_amount"])
     if record.get("finalized") and record.get("finalized_amount") is not None:
         return float(record["finalized_amount"])
-    return round(float(entry_net), 2)
+    return round(float(net_payout), 2)
 
 
 def _status(month: str, net: float, record: dict, finalizable: bool,
@@ -174,16 +201,25 @@ def _status(month: str, net: float, record: dict, finalizable: bool,
 
 
 def _month_entry(month: str, net: dict | None, record: dict | None,
-                 state: dict, cur: str) -> dict:
-    """One month's row for the view: derived income merged with paid bookkeeping."""
+                 leap_burn: float | None, state: dict, cur: str) -> dict:
+    """One month's row for the view: derived income (juice − LEAP burn = leftover)
+    merged with the finalize/paid bookkeeping."""
     net = net or {"net_juice": 0.0, "closes": 0}
     record = record or {}
     net_juice = round(float(net.get("net_juice") or 0), 2)
+    burn_tracked = leap_burn is not None
+    burn = round(float(leap_burn or 0), 2)
+    net_payout = _net_payout(net_juice, burn)
     finalizable = is_finalizable(state, month, {month: net}, cur)
     return {
         "month": month,
         "label": month_label(month),
+        # The income breakdown: juice collected, the LEAP burn reserved against it,
+        # and the leftover the operator can actually take.
         "net_juice": net_juice,
+        "leap_burn": burn,
+        "burn_tracked": burn_tracked,
+        "net_payout": net_payout,
         "closes": int(net.get("closes") or 0),
         # A month still in progress shows an ESTIMATE; finalized months are locked.
         "estimated": month == cur and not record.get("finalized"),
@@ -192,11 +228,13 @@ def _month_entry(month: str, net: dict | None, record: dict | None,
         "finalized": bool(record.get("finalized")),
         "finalized_at": record.get("finalized_at"),
         "finalized_amount": record.get("finalized_amount"),
+        "finalized_juice": record.get("finalized_juice"),
+        "finalized_burn": record.get("finalized_burn"),
         "paid": bool(record.get("paid")),
         "paid_at": record.get("paid_at"),
         "paid_amount": record.get("paid_amount"),
-        # The single figure the UI headlines for this month.
-        "payout_amount": _payout_amount(net_juice, record),
+        # The single figure the UI headlines for this month: the leftover payout.
+        "payout_amount": _payout_amount(net_payout, record),
         "note": record.get("note"),
     }
 
@@ -206,13 +244,16 @@ def view(state: dict | None = None) -> dict:
     the full month-by-month history, and roll-up totals."""
     state = state if state is not None else log.load_state()
     net_by_month = monthly_net_juice(state)
+    burn_by_month = monthly_leap_burn()
     records = _records(state)
     cur = _cur_month()
     prev = _prev_month(cur)
 
-    # Union of every month that has income OR a payout record, newest first.
-    months = sorted(set(net_by_month) | set(records) | {cur, prev}, reverse=True)
-    history = [_month_entry(m, net_by_month.get(m), records.get(m), state, cur)
+    # Union of every month that has income, burn, OR a payout record, newest first.
+    months = sorted(set(net_by_month) | set(burn_by_month) | set(records) | {cur, prev},
+                    reverse=True)
+    history = [_month_entry(m, net_by_month.get(m), records.get(m),
+                            burn_by_month.get(m), state, cur)
                for m in months]
     by_month = {h["month"]: h for h in history}
 
@@ -220,11 +261,14 @@ def view(state: dict | None = None) -> dict:
     previous = by_month[prev]
 
     year = cur[:4]
-    ytd = round(sum(r["net_juice"] for m, r in net_by_month.items() if m[:4] == year), 2)
-    all_time = round(sum(r["net_juice"] for r in net_by_month.values()), 2)
+    in_year = [h for h in history if h["month"][:4] == year]
+    ytd_juice = round(sum(h["net_juice"] for h in in_year), 2)
+    ytd_burn = round(sum(h["leap_burn"] for h in in_year), 2)
+    ytd = round(ytd_juice - ytd_burn, 2)  # leftover, year to date
+    all_time = round(sum(h["net_payout"] for h in history), 2)
     paid_out = round(sum(h["payout_amount"] for h in history if h["paid"]), 2)
-    # Income that's yours but not withdrawn yet: finalized-unpaid + income sitting
-    # in months that could be finalized (last short closed / month ended) now.
+    # Leftover that's yours but not withdrawn yet: finalized-unpaid + months that
+    # could be finalized now (last short closed / month ended).
     awaiting = round(sum(h["payout_amount"] for h in history
                          if not h["paid"] and (h["finalized"] or h["finalizable"])), 2)
 
@@ -234,6 +278,8 @@ def view(state: dict | None = None) -> dict:
         "history": history,
         "totals": {
             "ytd": ytd,
+            "ytd_juice": ytd_juice,
+            "ytd_burn": ytd_burn,
             "all_time": all_time,
             "paid_out": paid_out,
             "awaiting": awaiting,
@@ -263,13 +309,19 @@ def finalize(month: str, amount: float | None = None,
             f"{month_label(month)} can't be finalized yet — it's still earning "
             f"juice (an open short still expires this month).")
     net = float((net_by_month.get(month) or {}).get("net_juice") or 0)
-    snapshot = float(amount) if amount is not None else net
+    burn = float(monthly_leap_burn().get(month) or 0)
+    leftover = _net_payout(net, burn)
+    # The finalized payout is the leftover (juice − LEAP burn); an explicit amount
+    # overrides it. Snapshot the breakdown so the record survives later marks.
+    snapshot = float(amount) if amount is not None else leftover
     payouts = state.setdefault("payouts", {"records": {}})
     rec = payouts.setdefault("records", {}).setdefault(month, {"month": month})
     rec.update({
         "finalized": True,
         "finalized_at": log.utcnow(),
         "finalized_amount": round(snapshot, 2),
+        "finalized_juice": round(net, 2),
+        "finalized_burn": round(burn, 2),
         "net_juice_at_finalize": round(net, 2),
     })
     if note is not None:
@@ -285,8 +337,9 @@ def unfinalize(month: str) -> dict:
     state = log.load_state()
     rec = _records(state).get(month)
     if rec:
-        for k in ("finalized", "finalized_at", "finalized_amount",
-                  "net_juice_at_finalize", "paid", "paid_at", "paid_amount"):
+        for k in ("finalized", "finalized_at", "finalized_amount", "finalized_juice",
+                  "finalized_burn", "net_juice_at_finalize", "paid", "paid_at",
+                  "paid_amount"):
             rec.pop(k, None)
         log.save_state(state)
     return view(state)
@@ -307,15 +360,20 @@ def mark_paid(month: str, note: str | None = None,
             f"{month_label(month)} can't be paid yet — finalize it once its last "
             f"short of the month has closed.")
     net = float((net_by_month.get(month) or {}).get("net_juice") or 0)
+    burn = float(monthly_leap_burn().get(month) or 0)
+    leftover = _net_payout(net, burn)
     payouts = state.setdefault("payouts", {"records": {}})
     rec = payouts.setdefault("records", {}).setdefault(month, {"month": month})
     now = log.utcnow()
     if not rec.get("finalized"):
         rec.update({"finalized": True, "finalized_at": now,
-                    "finalized_amount": round(net, 2),
+                    "finalized_amount": round(leftover, 2),
+                    "finalized_juice": round(net, 2),
+                    "finalized_burn": round(burn, 2),
                     "net_juice_at_finalize": round(net, 2)})
     snapshot = (float(amount) if amount is not None
-                else float(rec.get("finalized_amount") or net))
+                else float(rec.get("finalized_amount") if rec.get("finalized_amount")
+                           is not None else leftover))
     rec.update({"paid": True, "paid_at": now, "paid_amount": round(snapshot, 2)})
     if note is not None:
         rec["note"] = str(note)[:500]
@@ -344,12 +402,15 @@ def pending_finalization(state: dict) -> dict | None:
     None when nothing is waiting. Reports ``reason`` so the alert can say why."""
     cur = _cur_month()
     net_by_month = monthly_net_juice(state)
+    burn_by_month = monthly_leap_burn()
     records = _records(state)
     for month, reason in ((cur, "last_short_closed"), (_prev_month(cur), "month_ended")):
         if records.get(month, {}).get("finalized"):
             continue
         if is_finalizable(state, month, net_by_month, cur):
             net = float(net_by_month[month]["net_juice"])
+            burn = burn_by_month.get(month)
             return {"month": month, "label": month_label(month),
-                    "net_juice": net, "reason": reason}
+                    "net_juice": net, "leap_burn": round(float(burn or 0), 2),
+                    "net_payout": _net_payout(net, burn), "reason": reason}
     return None

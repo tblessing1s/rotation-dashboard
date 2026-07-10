@@ -46,6 +46,28 @@ function subline(m) {
   return "No income this month";
 }
 
+// The juice − LEAP burn = leftover breakdown line under a headline payout.
+function BurnBreakdown({ m }) {
+  if (!m || (m.status === "none")) return null;
+  return (
+    <div className="mt-1 text-xs text-slate-500">
+      {cash(m.net_juice)} juice
+      {" − "}
+      {m.burn_tracked ? (
+        <span title="Realized weekly LEAP extrinsic decay this month, reserved to maintain/roll the LEAP">
+          {cash(m.leap_burn)} LEAP burn
+        </span>
+      ) : (
+        <span className="text-slate-600" title="No weekly burn marks recorded for this month yet — leftover shown before LEAP decay">
+          LEAP burn n/a
+        </span>
+      )}
+      {" = "}
+      <span className="font-semibold text-slate-300">{cash(m.net_payout)} leftover</span>
+    </div>
+  );
+}
+
 // The action buttons for one month, driven by its state. `compact` renders the
 // tight variant used inside the history table.
 function PayoutActions({ m, busy, onFinalize, onMarkPaid, onUnfinalize, onUnmarkPaid, compact = false }) {
@@ -136,18 +158,21 @@ export default function PayoutsTab() {
       {/* Headline cards: this month's estimate + last month's payout */}
       <div className="grid gap-4 sm:grid-cols-2">
         <Card title="Est. payout — this month" right={<StatusPill status={cur.status} />}>
-          <Stat label={cur.label} value={cash(cur.payout_amount)} tone={tone(cur.net_juice)}
-                sub={subline(cur)} />
+          <Stat label={`${cur.label} · leftover`} value={cash(cur.payout_amount)}
+                tone={tone(cur.net_payout)} sub={subline(cur)} />
+          <BurnBreakdown m={cur} />
           <p className="mt-3 text-xs text-slate-500">
-            Net juice booked this month. It's an estimate while shorts are still
+            Leftover = juice booked this month minus the LEAP's weekly extrinsic
+            burn (reserved to maintain the LEAP). It's an estimate while shorts are
             open — once the last short of the month closes, you can finalize it.
           </p>
           <div className="mt-3"><PayoutActions m={cur} {...actions} /></div>
         </Card>
 
         <Card title="Last month's payout" right={<StatusPill status={prev.status} />}>
-          <Stat label={prev.label} value={cash(prev.payout_amount)} tone={tone(prev.net_juice)}
-                sub={subline(prev)} />
+          <Stat label={`${prev.label} · leftover`} value={cash(prev.payout_amount)}
+                tone={tone(prev.net_payout)} sub={subline(prev)} />
+          <BurnBreakdown m={prev} />
           <div className="mt-3"><PayoutActions m={prev} {...actions} /></div>
         </Card>
       </div>
@@ -155,7 +180,8 @@ export default function PayoutsTab() {
       {ready && (
         <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-200/90">
           <span className="font-semibold text-emerald-300">{ready.label} payout is ready.</span>{" "}
-          {cash(ready.net_juice)} of net income —{" "}
+          {cash(ready.net_payout)} leftover
+          {ready.burn_tracked ? ` (${cash(ready.net_juice)} juice − ${cash(ready.leap_burn)} LEAP burn)` : ""} —{" "}
           {ready.month === cur.month ? "the last short of the month has closed" : "the month has closed"}.
           Finalize to lock it in; you'll also get a push notification for this each month.
         </div>
@@ -170,10 +196,10 @@ export default function PayoutsTab() {
       {/* Roll-up totals */}
       <Card title="Totals">
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-          <Stat label={`${totals.year || ""} income`} value={cash(totals.ytd)} tone={tone(totals.ytd)}
-                sub="net juice year to date" />
-          <Stat label="All-time income" value={cash(totals.all_time)} tone={tone(totals.all_time)}
-                sub="net juice, every month" />
+          <Stat label={`${totals.year || ""} leftover`} value={cash(totals.ytd)} tone={tone(totals.ytd)}
+                sub={`${cash(totals.ytd_juice)} juice − ${cash(totals.ytd_burn)} LEAP burn`} />
+          <Stat label="All-time leftover" value={cash(totals.all_time)} tone={tone(totals.all_time)}
+                sub="juice minus LEAP burn, every month" />
           <Stat label="Paid out" value={cash(totals.paid_out)}
                 sub="withdrawn across all months" />
           <Stat label="Awaiting payout" value={cash(totals.awaiting)}
@@ -189,8 +215,9 @@ export default function PayoutsTab() {
             <thead>
               <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
                 <th className="py-2 pr-3">Month</th>
-                <th className="py-2 pr-3">Payout</th>
-                <th className="py-2 pr-3">Closes</th>
+                <th className="py-2 pr-3">Juice</th>
+                <th className="py-2 pr-3">LEAP burn</th>
+                <th className="py-2 pr-3">Leftover</th>
                 <th className="py-2 pr-3">Status</th>
                 <th className="py-2 pr-3 text-right">Action</th>
               </tr>
@@ -199,10 +226,14 @@ export default function PayoutsTab() {
               {history.map((m) => (
                 <tr key={m.month} className="border-t border-slate-800">
                   <td className="py-2 pr-3 font-semibold text-slate-100">{m.label}</td>
-                  <td className={`py-2 pr-3 ${tone(m.net_juice)}`}>
+                  <td className={`py-2 pr-3 ${tone(m.net_juice)}`}>{cash(m.net_juice)}</td>
+                  <td className="py-2 pr-3 text-rose-300/80"
+                      title={m.burn_tracked ? "Realized weekly LEAP extrinsic burn this month" : "No burn marks yet"}>
+                    {m.burn_tracked ? (m.leap_burn ? `−${cash(m.leap_burn)}` : cash(0)) : "n/a"}
+                  </td>
+                  <td className={`py-2 pr-3 font-semibold ${tone(m.net_payout)}`}>
                     {cash(m.payout_amount)}{m.estimated ? " ·est" : ""}
                   </td>
-                  <td className="py-2 pr-3 text-slate-400">{m.closes || 0}</td>
                   <td className="py-2 pr-3"><StatusPill status={m.status} /></td>
                   <td className="py-2 pr-3">
                     <div className="flex justify-end">
@@ -212,7 +243,7 @@ export default function PayoutsTab() {
                 </tr>
               ))}
               {history.length === 0 && (
-                <tr><td colSpan={5} className="py-6 text-center text-slate-500">
+                <tr><td colSpan={6} className="py-6 text-center text-slate-500">
                   No income logged yet — payouts appear as short closes book net juice.
                 </td></tr>
               )}

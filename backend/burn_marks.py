@@ -127,6 +127,35 @@ def series(ticker: str) -> list[dict]:
     return list(_load().get((ticker or "").strip().upper(), []))
 
 
+def monthly_realized_burn(clamp_negative: bool = True) -> dict[str, float]:
+    """Realized LEAP extrinsic burn per calendar month ('YYYY-MM' -> whole-position
+    dollars), summed across every tracked ticker.
+
+    Burn for the span between two consecutive marks is the drop in model extrinsic
+    ``prev.extrinsic_now - cur.extrinsic_now`` (whole-position $, same units as the
+    juice ledger), attributed to the month of the later mark. By default negative
+    spans are clamped to 0 so a LEAP roll or an IV spike that GROWS extrinsic can't
+    masquerade as income against the monthly payout — burn is only ever a cost.
+    Returns {} when there aren't two comparable marks yet (feature degrades to
+    juice-only cleanly)."""
+    out: dict[str, float] = {}
+    for rows in _load().values():
+        prev = None
+        for m in sorted(rows, key=lambda r: str(r.get("date"))):
+            ext = m.get("extrinsic_now")
+            if ext is None:
+                continue
+            if prev is not None:
+                drop = float(prev) - float(ext)
+                if clamp_negative and drop < 0:
+                    drop = 0.0
+                month = str(m.get("date"))[:7]
+                if len(month) == 7 and month[4] == "-":
+                    out[month] = out.get(month, 0.0) + drop
+            prev = ext
+    return {k: round(v, 2) for k, v in out.items()}
+
+
 def weekly_due(day: str | None = None) -> bool:
     """True at most once per ISO week — the weekly-mark cadence gate for the
     nightly job. Fires at end of week (Friday onward) and only if no mark has yet
