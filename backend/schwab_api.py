@@ -475,20 +475,28 @@ def build_single_leg_order(instruction: str, quantity: int, option_symbol: str,
     }
 
 
-def build_net_order(legs: list[tuple], net_price: float) -> dict:
-    """A single multi-leg NET_CREDIT/NET_DEBIT DAY order so several option legs
-    fill together or not at all — no legging risk. ``legs`` is a list of
-    (instruction, option_symbol, quantity). ``net_price`` is per share: positive
-    = net credit received, negative = net debit paid. Used for atomic exits
-    (sell-to-close the LEAP + buy-to-close the short) and atomic LEAP rolls."""
+def build_net_order(legs: list[tuple], net_price: float, *,
+                    complex_strategy_type: str = "CUSTOM", duration: str = "DAY") -> dict:
+    """A single multi-leg NET_CREDIT/NET_DEBIT order so several option legs fill
+    together or not at all — no legging risk. ``legs`` is a list of (instruction,
+    option_symbol, quantity). ``net_price`` is per share: positive = net credit
+    received, negative = net debit paid. Used for atomic entries (buy-to-open the
+    LEAP + sell-to-open the weekly short), atomic exits (sell-to-close the LEAP +
+    buy-to-close the short), and atomic LEAP rolls.
+
+    ``complex_strategy_type`` and ``duration`` are parameters (not hardcoded) so
+    the ATOMIC ENTRY can route them through its provenance-tagged config constants
+    (config.ENTRY_COMPLEX_STRATEGY_TYPE / ENTRY_ORDER_DURATION), matching how the
+    roll already reads ROLL_COMPLEX_STRATEGY_TYPE / ROLL_ORDER_DURATION. The
+    defaults preserve the exit / LEAP-roll behavior unchanged (CUSTOM / DAY)."""
     credit = float(net_price) >= 0
     return {
         "orderType": "NET_CREDIT" if credit else "NET_DEBIT",
         "session": "NORMAL",
         "price": f"{abs(float(net_price)):.2f}",
-        "duration": "DAY",
+        "duration": duration,
         "orderStrategyType": "SINGLE",
-        "complexOrderStrategyType": "CUSTOM",
+        "complexOrderStrategyType": complex_strategy_type,
         "orderLegCollection": [
             {"instruction": instr, "quantity": int(qty),
              "instrument": {"symbol": sym, "assetType": "OPTION"}}

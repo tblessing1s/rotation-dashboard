@@ -15,6 +15,7 @@ import config
 import data_handler
 import indicators
 import logging_handler as log
+import order_lifecycle as olc
 import schwab_api
 import sector_data
 
@@ -93,6 +94,137 @@ def _assert_transmit_allowed(action: str) -> None:
         raise schwab_api.SchwabError(
             f"Refusing to place a live {action} order in demo/paper mode — "
             "switch to Live data to trade the real account.")
+
+
+class ResubmitLockedError(RuntimeError):
+    """A new LIVE order for a position intent was blocked by the resubmission gate
+    (order_lifecycle: NO_RESUBMIT_BEFORE_TERMINAL / MAX_RESUBMIT_ATTEMPTS). The API
+    surfaces this as HTTP 409. This gate is IN ADDITION to — never a replacement
+    for — the Level-5 account gate, the kill switch, and the reconciliation freeze."""
+
+    def __init__(self, intent_key: str, reason: str):
+        self.intent_key = intent_key
+        self.reason = reason
+        super().__init__(
+            f"An order for {intent_key} can't be sent yet — {reason}. The prior order "
+            "must be confirmed terminal at the broker (and its fill reconciled) first.")
+
+
+# The per-position resubmission gate covers ENTRY intents (this task's scope). The
+# roll/exit paths have their own freeze/leg-imbalance lifecycle and are untouched.
+_LOCKED_INTENTS = {"buy_leap", "sell_short", "open_position_atomic"}
+
+
+def _num(v) -> float:
+    try:
+        return float(v or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _intent_key(ticker: str, action: str) -> str:
+    return f"{(ticker or '').upper()}:{action}"
+
+
+def _guard_resubmit(ticker: str, action: str) -> None:
+    """Enforce the resubmission gate before a LIVE placement. Raises
+    ResubmitLockedError when a prior order for this intent isn't cleanly terminal
+    and reconciled at the broker, or the per-session attempt cap is hit.
+
+    HARD_CFM_RULE NO_RESUBMIT_BEFORE_TERMINAL is asserted here, not merely
+    consulted — the flag existing-and-True is the invariant; the decision itself is
+    order_lifecycle.check_resubmit (the single source of the rule)."""
+    if action not in _LOCKED_INTENTS or not config.NO_RESUBMIT_BEFORE_TERMINAL:
+        return
+    key = _intent_key(ticker, action)
+    lock = log.get_order_lock(key)
+    allowed, reason = olc.check_resubmit(lock, config.MAX_RESUBMIT_ATTEMPTS)
+    if not allowed:
+        # Attempt cap exhausted is an alerted, terminal stop (do not keep crossing).
+        if (lock and int(lock.get("attempts") or 0) >= config.MAX_RESUBMIT_ATTEMPTS
+                and olc.is_terminal(lock.get("state"))):
+            _alert_order("ORDER_RESUBMIT_EXHAUSTED", ticker,
+                         f"{ticker} {action}: {reason}. The app has stopped resubmitting "
+                         "this order — reprice or reassess the entry manually.",
+                         data={"intent": key, "attempts": lock.get("attempts")})
+        log.logger.warning("resubmit gate blocked %s: %s", key, reason)
+        raise ResubmitLockedError(key, reason)
+    # Belt-and-suspenders: a crash could leave a pending broker order with no lock.
+    # Never place a second order for an intent that still has a live pending order.
+    for oid, rec in log.list_pending_orders().items():
+        if (rec.get("ticker") or "").upper() == (ticker or "").upper() and rec.get("action") == action:
+            raise ResubmitLockedError(key, f"order {oid} for this position is still pending at the broker")
+
+
+def _record_placement(ticker: str, action: str, order_id: str, **extra) -> None:
+    """After a confirmed live placement: append the SUBMITTED->WORKING event and,
+    for a gated entry intent, (re)acquire the per-position lock — one placement is
+    one resubmit attempt, counted for MAX_RESUBMIT_ATTEMPTS."""
+    key = _intent_key(ticker, action)
+    attempts = 0
+    if action in _LOCKED_INTENTS:
+        prior = log.get_order_lock(key) or {}
+        attempts = int(prior.get("attempts") or 0) + 1
+        log.save_order_lock(key, {
+            "intent": key, "ticker": (ticker or "").upper(), "action": action,
+            "order_id": str(order_id), "state": olc.WORKING,
+            "reconciled": False, "attempts": attempts, "at": log.utcnow(),
+        })
+    log.append_order_event({
+        "order_id": str(order_id), "ticker": (ticker or "").upper(), "action": action,
+        "intent": key, "prior_state": olc.SUBMITTED, "new_state": olc.WORKING,
+        "raw_status": "SUBMITTED", "attempt": attempts, **extra,
+    })
+
+
+def _settle_order(order_id: str, rec: dict, coded_state: str, raw: str, **extra) -> None:
+    """Append a lifecycle transition to ``coded_state`` and update the intent lock.
+    Terminal + clean states (CANCELED/REJECTED/EXPIRED/FILLED) mark the lock
+    reconciled so a fresh order is allowed; review/unknown states leave it blocking."""
+    ticker = rec.get("ticker") or ""
+    action = rec.get("action") or rec.get("kind") or ""
+    key = _intent_key(ticker, action)
+    prior = None
+    lock = log.get_order_lock(key)
+    if lock is not None:
+        prior = lock.get("state")
+        updated = dict(lock)
+        updated["state"] = coded_state
+        updated["reconciled"] = coded_state in olc.RESUBMIT_OK_STATES
+        updated["order_id"] = str(order_id)
+        updated["at"] = log.utcnow()
+        log.save_order_lock(key, updated)
+    log.append_order_event({
+        "order_id": str(order_id), "ticker": (ticker or "").upper(), "action": action,
+        "intent": key, "prior_state": prior, "new_state": coded_state,
+        "raw_status": raw, **extra,
+    })
+
+
+def _alert_order(type_: str, ticker: str, message: str, data: dict | None = None) -> None:
+    """Fire a high-priority order-lifecycle alert through the existing engine.
+    Best-effort: an alert failure must never unwind an already-committed fill."""
+    try:
+        import alerts
+        alerts.record_event(type_, ticker, message, data=data, notify=True)
+    except Exception as e:  # noqa: BLE001 — alerting is best-effort
+        log.logger.error("order alert %s failed for %s: %s", type_, ticker, e)
+
+
+def _order_filled_qty(order: dict) -> tuple[float, float]:
+    """(filled, ordered) contract counts for an order. Prefers the order-level
+    filledQuantity/quantity fields; falls back to summing execution-leg quantities
+    as a coarse "some filled" signal. Schwab's exact partial-fill fields are a
+    LIVE-VERIFY item, so the mapping is deliberately conservative."""
+    ordered = _num(order.get("quantity"))
+    filled = order.get("filledQuantity")
+    if filled is not None:
+        return _num(filled), ordered
+    total = 0.0
+    for act in order.get("orderActivityCollection", []) or []:
+        for leg in act.get("executionLegs", []) or []:
+            total += _num(leg.get("quantity"))
+    return total, ordered
 
 
 def _capture_price(ticker: str, supplied: float | None) -> tuple[float | None, str]:
@@ -493,6 +625,7 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
     """Transmit a real single-leg LIMIT order and park it as pending. The fill is
     confirmed (and committed) later via order_status; cancel_order drops it."""
     _assert_transmit_allowed(action)
+    _guard_resubmit(ticker, action)
     client = data_handler.client()
     account_hash = client.primary_account_hash()
 
@@ -521,6 +654,7 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
         if payload.get(k) is not None:
             pending[k] = payload[k]
     log.save_pending_order(order_id, pending)
+    _record_placement(ticker, action, order_id, limit_price=limit)
     return {
         "success": True,
         "status": "working",
@@ -687,9 +821,12 @@ def order_status(order_id: str) -> dict:
             result = _commit_from_pending(rec, _fill_price(order))
         log.pop_pending_order(order_id)
         _capture_order_receipt(order_id, raw, rec, order, result)
+        _settle_order(order_id, rec, olc.FILLED, raw)
         return {"order_id": order_id, "status": "filled", "raw_status": raw, **result}
     if raw in ("CANCELED", "REJECTED", "EXPIRED"):
         log.pop_pending_order(order_id)
+        coded = {"REJECTED": olc.REJECTED, "EXPIRED": olc.EXPIRED}.get(raw, olc.CANCELED)
+        _settle_order(order_id, rec, coded, raw)
         return {"order_id": order_id, "status": "rejected" if raw == "REJECTED" else "canceled",
                 "raw_status": raw}
     return {"order_id": order_id, "status": "working", "raw_status": raw}
@@ -718,33 +855,39 @@ def _capture_order_receipt(order_id, raw_status, rec, order, result) -> None:
 
 # Terminal broker states that confirm an order is truly gone (no longer working).
 _TERMINAL_STATUSES = ("CANCELED", "REJECTED", "EXPIRED")
-# Schwab's cancel is asynchronous — after the DELETE we re-poll the order for up
-# to this long to confirm it actually reached a terminal state before claiming it.
-CANCEL_CONFIRM_TIMEOUT_S = 2.5
-CANCEL_CONFIRM_POLL_S = 0.4
+# Schwab's cancel is asynchronous — after the DELETE we re-poll the order to
+# confirm it actually reached a terminal state. Bounded retries + interval come
+# from provenance-tagged config (CANCEL_POLL_*); the module names are kept so the
+# window stays monkeypatchable (tests set interval ~0 for an effectively mocked
+# clock). TIMEOUT = interval x max attempts.
+CANCEL_CONFIRM_POLL_S = config.CANCEL_POLL_INTERVAL_SEC
+CANCEL_CONFIRM_TIMEOUT_S = config.CANCEL_POLL_INTERVAL_SEC * config.CANCEL_POLL_MAX_ATTEMPTS
+
+
+def _safe_status(client, rec: dict, order_id: str) -> str:
+    """Best-effort current broker status (uppercased), "" if the read fails."""
+    try:
+        return (client.get_order(rec["account_hash"], order_id).get("status") or "").upper()
+    except Exception:  # noqa: BLE001 — status is best-effort at call sites
+        return ""
 
 
 def cancel_order(order_id: str) -> dict:
-    """Cancel a working order at the broker and drop the pending entry.
+    """Cancel a working order at the broker and drop the pending entry — BROKER
+    FIRST (rule 1). The local pending record is cleared ONLY once the order is
+    confirmed gone at the broker (a terminal state). A cancel that fails leaves the
+    pending record in place and surfaces the error: dropping it would make us
+    forget an order still working at Schwab, and the next order would collide.
 
-    The local pending record is cleared ONLY once the order is confirmed gone at
-    the broker — Schwab reports a terminal state (CANCELED/REJECTED/EXPIRED). A
-    cancel that fails must leave the pending record in place and surface the
-    error: dropping it would make us forget an order that is still working at
-    Schwab, and the operator's next order would then be rejected for colliding
-    with it ("an order is already running").
+    Lifecycle races handled up front: the order may have already FILLED (settle it
+    as a fill, never lose it) or already be terminal (clear the stale record, which
+    for a partial fill trips the defensive-review path). Otherwise we transition to
+    CANCEL_REQUESTED, DELETE with bounded retries, and CONFIRM a terminal state
+    before claiming the cancel — the 2xx ack alone is not trusted (rule 2).
 
-    Two lifecycle races are handled first: the order may have FILLED in the gap
-    between the last poll and this cancel (cancelling a filled order fails at the
-    broker), in which case it is settled as a fill rather than silently dropped;
-    or it may already be canceled/rejected/expired, in which case the stale
-    pending record is simply cleared.
-
-    Crucially, the DELETE only ACKNOWLEDGES the cancel request — Schwab cancels
-    asynchronously (WORKING -> PENDING_CANCEL -> CANCELED) and a marketable order
-    can refuse the cancel and still fill. So we must CONFIRM the order reached a
-    terminal state before dropping the record; trusting the 2xx acknowledgment is
-    what previously reported orders "cancelled" that ToS still showed working."""
+    If every DELETE fails while the order is still WORKING, the broker state is
+    effectively UNKNOWN: hard-lock the position (no resubmit while unknown, rule 5)
+    and raise, keeping the pending record for the startup reconciler."""
     rec = log.get_pending_order(order_id)
     if not rec:
         # Already resolved (committed or cleared) — nothing left to cancel.
@@ -752,55 +895,191 @@ def cancel_order(order_id: str) -> dict:
 
     client = data_handler.client()
     # Reconcile against the broker's current view before attempting the cancel.
-    try:
-        raw = (client.get_order(rec["account_hash"], order_id).get("status") or "").upper()
-    except Exception:  # noqa: BLE001 — status is best-effort; fall through to cancel
-        raw = ""
+    raw = _safe_status(client, rec, order_id)
     if raw == "FILLED":
-        # It filled before we could pull it — commit the fill instead of losing it.
+        # It filled before we asked to cancel — a clean fill, commit it (no alert).
         return order_status(order_id)
     if raw in _TERMINAL_STATUSES:
-        log.pop_pending_order(order_id)
-        return {"order_id": order_id,
-                "status": "rejected" if raw == "REJECTED" else "canceled",
-                "raw_status": raw}
+        return _finalize_cancel_terminal(client, rec, order_id, cancel_requested=False)
 
-    # Still working — ask the broker to cancel. A broker failure propagates so the
-    # caller knows the order is still live. On success the DELETE only means the
-    # request was accepted, so confirm the order actually goes terminal.
-    client.cancel_order(rec["account_hash"], order_id)
-    return _confirm_cancel(client, rec, order_id)
+    # Still working — record the cancel request, then DELETE with bounded retries.
+    _settle_order(order_id, rec, olc.CANCEL_REQUESTED, raw or "WORKING")
+    last_err: Exception | None = None
+    for _ in range(max(1, int(config.CANCEL_POLL_MAX_ATTEMPTS))):
+        try:
+            client.cancel_order(rec["account_hash"], order_id)
+            return _confirm_cancel(client, rec, order_id)
+        except Exception as e:  # noqa: BLE001 — broker refused the DELETE
+            last_err = e
+            # Rule 4: the order may have raced to a FILL (a filled order can't be
+            # cancelled — that's why the DELETE failed). Settle the fill instead.
+            chk = _safe_status(client, rec, order_id)
+            if chk == "FILLED":
+                return order_status(order_id)
+            if chk in _TERMINAL_STATUSES:
+                return _finalize_cancel_terminal(client, rec, order_id, cancel_requested=True)
+            if config.CANCEL_POLL_INTERVAL_SEC:
+                time.sleep(config.CANCEL_POLL_INTERVAL_SEC)
+    # Rule 5: every cancel failed and the order is still working — broker state is
+    # unknown. Hard-lock (no resubmit ever while unknown) and surface the error.
+    _hard_lock_unknown(order_id, rec, str(last_err))
+    raise schwab_api.SchwabError(
+        f"cancel of order {order_id} failed and it is still WORKING at the broker — "
+        f"position hard-locked pending manual reconciliation: {last_err}")
 
 
 def _confirm_cancel(client, rec: dict, order_id: str) -> dict:
-    """Confirm a just-issued cancel actually took at the broker before dropping
-    the pending record. Schwab cancels asynchronously, so poll the order until it
-    reaches a terminal state, fills (settle it), or the window closes.
+    """Confirm a just-issued cancel actually took before dropping the pending
+    record. Schwab cancels asynchronously, so poll (bounded) until the order is
+    terminal, fills (settle it), or the window closes.
 
     If it hasn't gone terminal within the window it may be PENDING_CANCEL or still
     WORKING (and could yet fill) — keep the pending record and report
-    ``pending_cancel`` so the operator is told the order may still be live rather
-    than shown a cancel ToS won't reflect."""
+    ``pending_cancel`` so the operator is told the order may still be live."""
     deadline = time.monotonic() + CANCEL_CONFIRM_TIMEOUT_S
     raw = ""
     while time.monotonic() < deadline:
         time.sleep(CANCEL_CONFIRM_POLL_S)
-        try:
-            raw = (client.get_order(rec["account_hash"], order_id).get("status") or "").upper()
-        except Exception:  # noqa: BLE001 — transient; keep polling until the deadline
+        raw = _safe_status(client, rec, order_id)
+        if not raw:
             continue
-        if raw == "FILLED":
-            # It filled before the cancel took hold — settle the fill, don't lose it.
-            return order_status(order_id)
-        if raw in _TERMINAL_STATUSES:
-            log.pop_pending_order(order_id)
-            return {"order_id": order_id,
-                    "status": "rejected" if raw == "REJECTED" else "canceled",
-                    "raw_status": raw}
+        if raw == "FILLED" or raw in _TERMINAL_STATUSES:
+            # Terminal after we requested the cancel — resolve it with fill/partial
+            # awareness (a FILLED here is a fill-DURING-cancel; a partial is a
+            # defensive-review state). cancel_requested=True drives that mapping.
+            return _finalize_cancel_terminal(client, rec, order_id, cancel_requested=True)
 
     # Accepted but not yet terminal — the order may still be working at Schwab.
     # Keep the pending record (never popped above) and say so plainly.
     return {"order_id": order_id, "status": "pending_cancel", "raw_status": raw or "PENDING_CANCEL"}
+
+
+def _finalize_cancel_terminal(client, rec: dict, order_id: str, *, cancel_requested: bool) -> dict:
+    """Resolve an order that is terminal at the broker during/after a cancel, with
+    fill-quantity awareness (rules 3-4). Maps the raw status + filled quantity to a
+    coded state and acts:
+
+    - FILLED / fully filled -> reconcile the fill (never lose it). If it filled
+      AFTER we requested the cancel, it's a fill-DURING-cancel: the position is
+      unexpectedly LIVE -> high-priority alert, and NO resubmit (lock left blocking).
+    - partial fill + canceled/expired -> PARTIAL_FILL_CANCELED: freeze the position
+      for defensive review (trips the delta-coverage check) + alert. Flag only; the
+      app never auto-fixes an unbalanced position. Resubmit blocked.
+    - clean canceled/rejected/expired, zero filled -> clear the record; resubmit
+      allowed once the terminal event is logged."""
+    order = client.get_order(rec["account_hash"], order_id)
+    raw = (order.get("status") or "").upper()
+    filled, ordered = _order_filled_qty(order)
+
+    if raw == "FILLED":
+        # A genuine broker fill: order_status re-reads FILLED and books it through
+        # the same commit/receipt path (no second, divergent commit here). If it
+        # filled AFTER we asked to cancel it's a fill-DURING-cancel — the position
+        # is unexpectedly LIVE: alert and leave the lock blocking (no resubmit).
+        result = order_status(order_id)
+        if cancel_requested:
+            _settle_order(order_id, rec, olc.FILLED_DURING_CANCEL, raw, filled=filled)
+            _alert_order(
+                "ORDER_FILLED_DURING_CANCEL", rec.get("ticker"),
+                f"{rec.get('ticker')} order {order_id} FILLED during cancel — the position "
+                "is LIVE. Reconciled the fill; do NOT resubmit. Confirm delta coverage.",
+                data={"order_id": str(order_id), "filled": filled})
+        return result
+
+    if filled > 0:
+        # Terminal-but-not-FILLED yet some quantity filled: an unbalanced position
+        # (or, in the contradictory "canceled-yet-filled" case, an ambiguous one).
+        # Never silently commit OR drop it — freeze for defensive review and trip
+        # the delta-coverage guardrail. The app flags; it never auto-fixes (rule 4).
+        log.pop_pending_order(order_id)
+        _settle_order(order_id, rec, olc.PARTIAL_FILL_CANCELED, raw, filled=filled, ordered=ordered)
+        return _freeze_for_partial_fill_cancel(rec.get("ticker"), order_id, filled, ordered)
+
+    # Clean terminal, zero filled.
+    coded = olc.map_broker_status(raw, cancel_requested=cancel_requested)
+    if not olc.is_terminal(coded):
+        coded = olc.CANCELED  # defensive: an unexpected non-terminal here is treated as gone
+    log.pop_pending_order(order_id)
+    _settle_order(order_id, rec, coded, raw)
+    return {"order_id": order_id,
+            "status": "rejected" if coded == olc.REJECTED else "canceled",
+            "raw_status": raw}
+
+
+def _freeze_for_partial_fill_cancel(ticker: str, order_id: str, filled: float, ordered: float) -> dict:
+    """A partial fill remained after the cancel: some quantity is LIVE, the rest was
+    canceled — a two-leg entry can now be unbalanced (delta coverage unverified).
+    Record it as a distinct coded review state, trip the delta-coverage guardrail
+    review, and alert. The app FLAGS; it never auto-fixes (rule 4)."""
+    summary = (f"order {order_id}: PARTIAL fill on cancel — {int(filled)} of {int(ordered)} "
+               "filled, remainder canceled. Position may be unbalanced and its delta "
+               "coverage is unverified. Frozen for review; the app will not auto-fix.")
+    state = log.load_state()
+    position = log.find_position(state, ticker) if ticker else None
+    if position is not None:
+        position["needs_review"] = True
+        review = dict(position.get("review") or {})
+        review["since"] = log.utcnow()
+        review["summary"] = summary
+        classes = set(review.get("classifications") or [])
+        classes.add("PARTIAL_FILL_CANCELED")
+        classes.add("DELTA_COVERAGE_CHECK")  # trips the delta-coverage guardrail review
+        review["classifications"] = sorted(classes)
+        review["partial_fill_cancel"] = {
+            "order_id": str(order_id), "filled": int(filled), "ordered": int(ordered),
+            "at": log.utcnow()}
+        position["review"] = review
+        log.save_state(state)
+    _alert_order("ORDER_PARTIAL_FILL_CANCELED", ticker, summary,
+                 data={"order_id": str(order_id), "filled": int(filled), "ordered": int(ordered)})
+    log.logger.error("PARTIAL FILL ON CANCEL %s (%s): %s/%s — froze position, no auto-fix",
+                     order_id, ticker, int(filled), int(ordered))
+    return {"order_id": order_id, "status": "partial_fill_canceled", "frozen": True,
+            "ticker": ticker, "filled": int(filled), "ordered": int(ordered), "summary": summary}
+
+
+def _hard_lock_unknown(order_id: str, rec: dict, err: str) -> None:
+    """The broker state of an order is UNKNOWN (cancel failed, still working). Lock
+    the position intent so no new order can be sent while a working order might be
+    live (rule 5), log a LOCKED_UNKNOWN transition, and alert. The pending record
+    is kept — the startup reconciler (or a later poll) resolves it."""
+    _settle_order(order_id, rec, olc.LOCKED_UNKNOWN, "UNKNOWN", error=err)
+    _alert_order(
+        "ORDER_STATE_UNKNOWN", rec.get("ticker"),
+        f"{rec.get('ticker')} order {order_id}: cancel failed and the order may still be "
+        "WORKING at the broker. Position hard-locked — resolve manually before trading it.",
+        data={"order_id": str(order_id), "error": err})
+
+
+def reconcile_pending_orders_on_startup() -> dict:
+    """On app start, re-poll every locally non-terminal pending order against the
+    broker BEFORE any new order activity is allowed for those positions (rule 6).
+
+    A crash can leave a WORKING order in state.json that the app has otherwise
+    forgotten. Re-polling settles it (fill / cancel / reject / partial), which
+    releases or review-locks its intent. If the broker can't be reached for an
+    order, its position is HARD-LOCKED (LOCKED_UNKNOWN) so no new order can be sent
+    while a working order might still be live — a crash mid-cancel must never
+    orphan a broker order invisibly. Best-effort per order; one failure never
+    blocks reconciling the rest. Safe no-op when no live broker is configured."""
+    if not schwab_api.configured():
+        return {"reconciled": 0, "pending": 0, "skipped": "broker-not-configured"}
+    pending = list(log.list_pending_orders().items())
+    resolved = 0
+    for order_id, rec in pending:
+        try:
+            res = order_status(order_id)
+            if res.get("status") not in ("working", "pending_cancel", "unknown"):
+                resolved += 1
+        except Exception as e:  # noqa: BLE001 — unreachable broker: hard-lock, don't skip
+            log.logger.error("startup reconcile: order %s unresolved (%s) — hard-locking", order_id, e)
+            try:
+                _hard_lock_unknown(order_id, rec, str(e))
+            except Exception:  # noqa: BLE001 — never let one bad order abort startup
+                pass
+    if pending:
+        log.logger.info("startup reconcile: %s/%s pending orders resolved", resolved, len(pending))
+    return {"reconciled": resolved, "pending": len(pending)}
 
 
 def _capture_entry_context(ticker: str, payload: dict) -> dict | None:
@@ -1519,6 +1798,7 @@ def _place_live_open(payload, ticker, contracts, stock_price, price_source):
     + sell-to-open the weekly short on one ticket, so it can't leg out. Committed
     on fill via the same pending -> poll lifecycle as the atomic exit."""
     _assert_transmit_allowed("open_position_atomic")
+    _guard_resubmit(ticker, "open_position_atomic")
     leap_strike = payload.get("strike")
     short_strike = payload.get("short_strike")
     client = data_handler.client()
@@ -1540,7 +1820,12 @@ def _place_live_open(payload, ticker, contracts, stock_price, price_source):
     # NET_DEBIT at that magnitude.
     net_ps = round(short_ps - leap_ps, 2)
     legs = [("BUY_TO_OPEN", leap_symbol, contracts), ("SELL_TO_OPEN", short_symbol, contracts)]
-    order = schwab_api.build_net_order(legs, net_ps)
+    # Entry routes strategy type / duration through its provenance-tagged config
+    # (LIVE_VERIFY: DIAGONAL vs CUSTOM), so entry and roll can't silently disagree.
+    order = schwab_api.build_net_order(
+        legs, net_ps,
+        complex_strategy_type=config.ENTRY_COMPLEX_STRATEGY_TYPE,
+        duration=config.ENTRY_ORDER_DURATION)
     placed = client.place_order(account_hash, order)
     order_id = placed.get("orderId")
     if not order_id:
@@ -1551,6 +1836,7 @@ def _place_live_open(payload, ticker, contracts, stock_price, price_source):
         "account_hash": account_hash, "leap_symbol": leap_symbol, "short_symbol": short_symbol,
         "net_limit": net_ps, "placed_at": log.utcnow(),
     })
+    _record_placement(ticker, "open_position_atomic", order_id, net_limit=net_ps)
     return {"success": True, "status": "working", "order_id": str(order_id), "mode": "live",
             "option_symbols": [leap_symbol, short_symbol], "net_limit": net_ps}
 

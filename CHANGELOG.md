@@ -54,6 +54,82 @@ audit in `AUDIT_RISK_PATH.md`.
   guarantee holds only for prefixes sharing the earliest bar, which the backfill
   now makes explicit.
 
+## Order lifecycle: entry order type + broker-side cancel/retry state machine
+
+Two entry-path fixes, both fully exercisable offline (mocked broker + mocked
+clock — no order is ever auto-sent to the live broker as part of this work).
+
+**Entry order type.** The live entry was already ONE atomic two-leg NET_DEBIT
+diagonal (buy-to-open the deep-ITM LEAP + sell-to-open the weekly short on one
+ticket); the gap was that `build_net_order` hardcoded `complexOrderStrategyType`
+/`duration` while the roll routed them through config. The entry now reads its own
+provenance-tagged constants (`ENTRY_COMPLEX_STRATEGY_TYPE` / `ENTRY_ORDER_DURATION`)
+so entry and roll can't silently disagree — `CUSTOM`/`DAY` today, with DIAGONAL a
+`[LIVE-VERIFY]` swap. The standalone `buy_leap`/`sell_short` actions stay for
+scale-in and leg repair; a fresh two-leg entry routes atomic (UI default).
+
+**Cancel is broker-first, with an explicit state machine.** Cancels already sent
+`DELETE` to Schwab before clearing local state and confirmed the async cancel; this
+change makes the whole lifecycle explicit and closes the resubmission/partial gaps:
+
+- **Explicit coded states** (`order_lifecycle.py`, pure functions):
+  `SUBMITTED → WORKING → { FILLED | CANCEL_REQUESTED → PENDING_CANCEL →
+  { CANCELED | FILLED_DURING_CANCEL | PARTIAL_FILL_CANCELED } | REJECTED | EXPIRED }`,
+  plus a non-terminal `LOCKED_UNKNOWN` hard lock.
+- **Fill-during-cancel** (a fill that lands after the DELETE): the fill is
+  reconciled into state, the order is NOT retried, and a CRITICAL alert fires — the
+  position is unexpectedly live.
+- **Partial fill on cancel**: recorded as a distinct `PARTIAL_FILL_CANCELED` state
+  that freezes the position for defensive review, trips the delta-coverage
+  guardrail review, and alerts. The app flags; it never auto-fixes an unbalanced
+  position.
+- **Resubmission gate** (`NO_RESUBMIT_BEFORE_TERMINAL`): a per-position-intent lock
+  persisted in `state.json` (survives restart). A new live order for an intent may
+  only be sent once the prior order is confirmed terminal at the broker AND
+  reconciled; `MAX_RESUBMIT_ATTEMPTS` per session then stops with an alert. This is
+  IN ADDITION to the Level-5 account gate, kill switch, and reconciliation freeze —
+  none are weakened.
+- **DELETE failure handling**: if the DELETE is refused because the order already
+  filled, the fill is reconciled; if it's refused while the order is still WORKING,
+  the cancel retries per the bounded poll policy and, if exhausted, the position is
+  hard-locked (`LOCKED_UNKNOWN`) — no resubmit ever while the broker state is
+  unknown.
+- **Startup reconciliation**: on app start, every locally non-terminal order is
+  re-polled against the broker before any new order activity is allowed for its
+  position; an unreachable order hard-locks its position so a crash mid-cancel can't
+  orphan a working broker order invisibly.
+- **Every transition is an append-only event** in `state.json` (`order_events`,
+  with prior/new coded state + raw broker status); `recompute_derived()` derives the
+  current `order_state` from the log — order state is never a mutated field.
+
+### What changed
+
+- **`backend/order_lifecycle.py`** (new): the coded-state vocabulary,
+  `map_broker_status()`, `is_terminal()`, and the `check_resubmit()` invariant — all
+  pure functions, no I/O.
+- **`backend/executor.py`**: resubmit gate + per-intent lock on the live entry
+  placers; `CANCEL_REQUESTED`/`PENDING_CANCEL`/`PARTIAL_FILL_CANCELED`/
+  `FILLED_DURING_CANCEL`/`LOCKED_UNKNOWN` on the cancel path; config-driven bounded
+  cancel polling; `reconcile_pending_orders_on_startup()`.
+- **`backend/schwab_api.py`**: `build_net_order` takes `complex_strategy_type` /
+  `duration` (defaults unchanged for exit / LEAP roll).
+- **`backend/config.py`**: `ENTRY_COMPLEX_STRATEGY_TYPE`, `ENTRY_ORDER_DURATION`,
+  `ORDER_FILL_TIMEOUT_SEC`, `CANCEL_POLL_INTERVAL_SEC`, `CANCEL_POLL_MAX_ATTEMPTS`,
+  `MAX_RESUBMIT_ATTEMPTS`, `REPRICE_ON_RETRY` (`"none"` — never silently chase
+  price), `NO_RESUBMIT_BEFORE_TERMINAL` (all provenance-tagged).
+- **`backend/logging_handler.py`**: `order_events` / `order_locks` stores,
+  `append_order_event`, `get`/`save_order_lock`, `list_pending_orders`, and
+  `order_state` derivation in `recompute_derived`.
+- **`backend/alerts.py`**: `ORDER_FILLED_DURING_CANCEL`, `ORDER_PARTIAL_FILL_CANCELED`,
+  `ORDER_STATE_UNKNOWN`, `ORDER_RESUBMIT_EXHAUSTED` alert types.
+- **`backend/app.py`**: `/api/execute` maps `ResubmitLockedError` to HTTP 409;
+  startup runs order reconciliation after the durability check.
+- **Migration v16** seeds the additive `order_events` / `order_locks` stores.
+- **`backend/test_order_lifecycle.py`** (new): the pure state machine + the ten
+  lifecycle branches (clean cancel, fill/partial during cancel, DELETE-error races,
+  rejection, crash/startup reconcile, lock-held + max-attempts, golden entry JSON) —
+  all offline with a mocked broker and clock.
+
 ## Payout = juice − LEAP burn (the leftover)
 
 The monthly payout now nets out the **LEAP's weekly extrinsic burn**, so the
