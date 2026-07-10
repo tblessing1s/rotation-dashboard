@@ -406,6 +406,14 @@ BUYBACK_MIN_DTE = 2            # HARD_CFM_RULE — ">2 days to expiration" leg o
 # stock, so the short call is effectively uncovered risk.
 LEAP_DELTA_FLOOR = 0.50
 
+# PROPOSED_DEFAULT — a short's remaining extrinsic rising this many percent ABOVE
+# its entry extrinsic is the "underwater on the leg because vol spiked" event. The
+# payout-side capture meter clamps/floors that case to 0% (correct for income
+# accounting — an IV spike must never book as negative income), which hides it
+# from the defend view; this LOW-severity alert surfaces it. Risk-path only — it
+# changes no threshold, trigger, or strike rule. [CAPTURE_CLAMP_SCOPE]
+EXTRINSIC_ABOVE_ENTRY_ALERT_PCT = 25.0
+
 # Assignment risk is fundamentally an EXTRINSIC problem, not a dividend problem: a
 # deep-ITM short is assignable whenever its extrinsic collapses to ~0 (the
 # counterparty forfeits no time value by exercising), no ex-date required — a
@@ -736,7 +744,10 @@ JUICE_RICH_FACTOR = 1.75
 # (lights, raw vote, dwell state, secondary breadth/VIX indicators, published
 # regime) in ADDITION to the legacy status/breadth/vix fields. Older v1 snapshots
 # stay valid — the new fields are purely additive.
-SNAPSHOT_SCHEMA_VERSION = 2
+# v3: the stock section records rs3m_vs_sector_method ("direct" — the RS3M-vs-
+# sector figure that gated the entry is now the true rs3m(stock, sector_etf)
+# ratio, not the vs-SPY difference approximation). Additive; v1/v2 stay valid.
+SNAPSHOT_SCHEMA_VERSION = 3
 
 # HARD_CFM_RULE — a trade must NEVER be blocked or delayed because telemetry
 # capture failed. Snapshot capture is best-effort and wrapped so any failure

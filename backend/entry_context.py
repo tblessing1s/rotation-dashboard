@@ -264,6 +264,12 @@ def _stock_section(ticker: str, gate: dict | None, row: dict | None,
     return {
         "rs3m_vs_spy": track("stock.rs3m_vs_spy", d.get("rs3m_vs_spy"), reason),
         "rs3m_vs_sector": track("stock.rs3m_vs_sector", d.get("rs3m_vs_sector"), reason),
+        # Provenance: which RS-vs-sector variant gated this entry. The gate now
+        # uses the DIRECT rs3m(stock, sector_etf) ratio everywhere (no vs-SPY
+        # difference approximation), so this is constant "direct" — recorded
+        # explicitly so a future change of variant can never be silent, and old
+        # v1/v2 snapshots (which predate the switch) stay distinguishable.
+        "rs3m_vs_sector_method": "direct",
         "atr_pct": track("stock.atr_pct", d.get("atr_pct"), reason),
         "atr_value": track("stock.atr_value", atr_value, reason),
         "rsi": track("stock.rsi", rsi, reason),

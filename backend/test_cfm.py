@@ -1047,21 +1047,24 @@ def test_stock_row_waives_self_sector_leg_for_a_sector_etf(monkeypatch):
 
     df = _frame([100.0] * 70)
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
-    monkeypatch.setattr(ind, "rs3m", lambda d, b, **k: 8.0)  # beats SPY either way
+    monkeypatch.setattr(ind, "rs3m", lambda d, b, **k: 8.0)  # direct RS = 8 either way
     monkeypatch.setattr(ind, "atr_pct", lambda d, **k: 2.0)
     monkeypatch.setattr(ind, "consolidating", lambda d: True)
 
-    row = screening._stock_row("XLK", df, 8.0, "XLK", regime_green=True, sector_strong=True)
+    # _stock_row now takes the sector FRAME (direct rs3m(stock, sector_etf)); the
+    # sector-ETF-as-own-position guard still yields None regardless of the frame.
+    row = screening._stock_row("XLK", df, df, "XLK", regime_green=True, sector_strong=True)
     assert row["is_sector_etf"] is True
     assert row["rs3m_vs_sector"] is None
     assert row["stock_strong"] is True    # waived, not failed
     assert "stock" not in row["blocked_by"]
     assert row["status"] == "ready"
 
-    # A regular constituent (ticker != sector_etf) is unaffected.
-    normal = screening._stock_row("NVDA", df, 8.0, "XLK", regime_green=True, sector_strong=True)
+    # A regular constituent (ticker != sector_etf) gets the DIRECT rs3m(stock,
+    # sector) figure — here the mock returns 8.0 for that call.
+    normal = screening._stock_row("NVDA", df, df, "XLK", regime_green=True, sector_strong=True)
     assert normal["is_sector_etf"] is False
-    assert normal["rs3m_vs_sector"] == 0.0  # 8 - 8, a REAL (if coincidental) number here
+    assert normal["rs3m_vs_sector"] == 8.0  # direct rs3m(stock, sector), not a difference
 
 
 def test_entry_gate_level3_waives_sector_leg_for_a_sector_etf(monkeypatch):
@@ -1160,9 +1163,14 @@ def test_entry_gate_level3_waives_sector_leg_for_a_curated_etf(monkeypatch):
     monkeypatch.setattr(data_handler, "get_daily", fake_get_daily)
     monkeypatch.setattr(data_handler, "get_many", lambda syms, force=False: {s.upper(): other for s in syms})
     monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
-    # The sector (XLK) leads SPY by +10%; SMH / the stock lead SPY by only +2% —
-    # so RS3M-vs-sector is -8% (lagging the assigned sector).
-    monkeypatch.setattr(ind, "rs3m", lambda d, b, **k: 10.0 if d is xlk else 2.0)
+    # SMH / the stock lead SPY by +2%, but the DIRECT rs3m(stock, XLK) is -8%
+    # (lagging the assigned sector). The vs-SPY leg keys on the frame; the direct
+    # vs-sector leg keys on the sector-ETF frame being the benchmark.
+    def _fake_rs3m(d, b, **k):
+        if b is xlk:            # direct rs3m(stock, sector) — the vs-sector leg
+            return -8.0
+        return 10.0 if d is xlk else 2.0   # vs-SPY
+    monkeypatch.setattr(ind, "rs3m", _fake_rs3m)
     monkeypatch.setattr(ind, "atr_pct", lambda d, **k: 2.0)
     monkeypatch.setattr(ind, "consolidating", lambda d: True)
     monkeypatch.setattr(screening, "regime",

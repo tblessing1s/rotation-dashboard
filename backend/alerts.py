@@ -56,6 +56,7 @@ ALERT_TYPES = {
     "SNAPSHOT_DATA_QUALITY": ("LOW", "PROPOSED_DEFAULT: >25% of an entry-context snapshot's tracked fields came back null (stale/unavailable) -> the entry telemetry for calibration is thin, not a trade blocker"),
     "REGIME_CHANGE": ("MEDIUM", "HARD_CFM_RULE: the published (dwell-adjusted) market regime transitioned -> re-check entry posture; raw four-light flaps are suppressed by the yellow dwell"),
     "PAYOUT_READY": ("MEDIUM", "PROPOSED_DEFAULT: the last short of the month has closed (or the calendar month ended) with net income earned -> the monthly payout can be finalized and withdrawn"),
+    "EXTRINSIC_ABOVE_ENTRY": ("LOW", "PROPOSED_DEFAULT: a short's remaining extrinsic rose materially above what it was sold for (a vol/IV event) -> the leg is underwater on time value; the payout capture meter floors this at 0% and hides it"),
 }
 
 
@@ -74,6 +75,7 @@ _FOCUS_ACTIONS = {
     "KILL_SWITCH_SECTOR", "KILL_SWITCH_SPY", "CIRCUIT_BREAKER", "SHORT_STOCK_DETECTED",
     "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
     "WHIPSAW_EXIT", "JUICE_INADEQUATE", "EARNINGS_DATE_STALE", "ROLL_LEG_IMBALANCE",
+    "EXTRINSIC_ABOVE_ENTRY",
 }
 
 
@@ -155,10 +157,17 @@ def check_kill_switch(state: dict) -> list[dict]:
 
 
 def check_delta_uncovered(state: dict) -> list[dict]:
+    import dividends  # deferred: continuous dividend yield for delta-adjustment
     out = []
     for p in _open_positions(state):
         t = p.get("ticker", "")
         price = _last_close(t)
+        # A dividend payer's true call delta is lower (delta = e^(-qT)·N(d1)), and
+        # the effect is larger on the long-dated LEAP than on the weekly short —
+        # so q=0 systematically OVER-states long coverage relative to the short and
+        # can suppress a DELTA_UNCOVERED alert that should fire. Thread the real q
+        # through both legs of the coverage comparison. [R3(b)]
+        q, q_src = dividends.q_with_source(t)
         # Long side: sum delta across EVERY LEAP leg (contract-weighted). A
         # multi-tranche position holds more than one long, and p["leap"] is only
         # leg 0 — reading it alone under-counts coverage and can fire a false
@@ -170,7 +179,7 @@ def check_delta_uncovered(state: dict) -> list[dict]:
                 continue
             leg_mark = (float(leg["current_bid"]) / (n * 100)
                         if leg.get("current_bid") is not None else None)
-            d, _ = indicators.call_greeks(price, leg.get("strike"), leg.get("dte"), leg_mark)
+            d, _ = indicators.call_greeks(price, leg.get("strike"), leg.get("dte"), leg_mark, q=q)
             if d is None:
                 continue
             long_total += d * n
@@ -184,12 +193,12 @@ def check_delta_uncovered(state: dict) -> list[dict]:
                 "DELTA_UNCOVERED", t,
                 f"{t} LEAP delta {min_leg_delta:.2f} is below the {config.LEAP_DELTA_FLOOR:.2f} floor.",
                 "The LEAP no longer tracks the stock — roll it down/out or exit the position.",
-                {"leap_delta": min_leg_delta}, key="floor"))
+                {"leap_delta": min_leg_delta, "q": round(q, 4), "q_source": q_src}, key="floor"))
         # Coverage: the shorts' total delta must not outrun the longs' total delta.
         short_total = 0.0
         for sc in p.get("short_calls", []):
             sd, _ = indicators.call_greeks(price, sc.get("strike"), sc.get("dte"),
-                                           sc.get("current_bid"))
+                                           sc.get("current_bid"), q=q)
             if sd is not None:
                 short_total += sd * int(sc.get("contracts") or 0)
         if p.get("short_calls") and short_total > long_total + 1e-9:
@@ -198,7 +207,8 @@ def check_delta_uncovered(state: dict) -> list[dict]:
                 f"{t} short delta {short_total:.2f} exceeds long delta {long_total:.2f} "
                 f"(across {long_contracts} long contract(s)).",
                 "The diagonal is net-short deltas — roll the short up/out or deepen the LEAP.",
-                {"long_delta": round(long_total, 4), "short_delta": round(short_total, 4)},
+                {"long_delta": round(long_total, 4), "short_delta": round(short_total, 4),
+                 "q": round(q, 4), "q_source": q_src},
                 key="inverted"))
     return out
 
@@ -378,6 +388,32 @@ def check_earnings_date_stale(state: dict) -> list[dict]:
     return out
 
 
+def _model_extrinsic_for_assignment(ticker: str, S: float, K: float,
+                                    dte: int | None) -> tuple[float, str] | None:
+    """A q-aware Black-Scholes extrinsic for a short call, for the assignment
+    escalation when there is NO live quote (off-hours right before ex-div — the
+    exact window a dividend-capture assignment is most likely, and the window the
+    quote-based path goes silent). Volatility is EXOGENOUS (the underlying's
+    hist_vol from cached bars) so the dividend yield q genuinely moves the
+    extrinsic — a mark-implied vol would absorb q and cancel it. Returns
+    (extrinsic_per_share, q_source) or None when unpriceable. Offline/pure. [R3(a)]"""
+    import dividends  # deferred: continuous dividend yield
+    if dte is None or dte <= 0:
+        return None
+    df = data_handler.get_daily(ticker)
+    if df is None:
+        return None
+    hv = indicators.hist_vol(df)
+    if not hv:
+        return None
+    sigma = hv / 100.0
+    T = dte / 365.0
+    q, q_src = dividends.q_with_source(ticker)
+    price = indicators._bs_call_price(S, K, T, config.RISK_FREE_RATE, sigma, q)
+    extrinsic = max(price - max(S - K, 0.0), 0.0)
+    return round(extrinsic, 4), q_src
+
+
 def check_assignment_risk(state: dict) -> list[dict]:
     """Early-assignment risk. The base trigger is an EXTRINSIC one: an ITM short
     whose remaining time value has collapsed below ASSIGNMENT_EXTRINSIC_FLOOR is
@@ -404,12 +440,29 @@ def check_assignment_risk(state: dict) -> list[dict]:
                 ex = None  # already gone ex — no longer a dividend-capture trigger
         for sc in p.get("short_calls", []):
             strike, current, dte = sc.get("strike"), sc.get("current_bid"), sc.get("dte")
-            if strike is None or current is None:
+            if strike is None:
                 continue
-            intrinsic = max(price - float(strike), 0.0)
-            extrinsic = max(float(current) - intrinsic, 0.0)
             itm = price > float(strike)
             expiry = _short_expiry(sc, today)
+            intrinsic = max(price - float(strike), 0.0)
+
+            # Extrinsic for the assignment decision. Prefer the LIVE quote — the
+            # market already prices the coming dividend into the bid. When there is
+            # NO quote (off-hours, exactly when a dividend-capture assignment is
+            # most likely), fall back to a q-aware Black-Scholes extrinsic so the
+            # dividend escalation doesn't go silent; q=0 there overstates the
+            # extrinsic and MISSES the trigger. The base floor stays quote-only. [R3(a)]
+            if current is not None:
+                extrinsic = max(float(current) - intrinsic, 0.0)
+                extrinsic_source, q_src = "quote", "quote"
+            else:
+                fb = _model_extrinsic_for_assignment(t, price, float(strike),
+                                                     dte if dte is not None
+                                                     else ((expiry - today).days if expiry else None))
+                if fb is None:
+                    continue
+                extrinsic, q_src = fb
+                extrinsic_source = "model"
 
             # Escalation: the short spans a dividend its extrinsic no longer covers.
             if (ex is not None and amount is not None and expiry is not None
@@ -422,12 +475,15 @@ def check_assignment_risk(state: dict) -> list[dict]:
                      "is covered by a LEAP, not stock, so assignment creates SHORT STOCK that "
                      "owes the dividend — usually roll)."),
                     {"strike": strike, "extrinsic": round(extrinsic, 2), "trigger": "dividend",
-                     "dividend": float(amount), "ex_date": ex_date},
+                     "dividend": float(amount), "ex_date": ex_date,
+                     "extrinsic_source": extrinsic_source, "q_source": q_src},
                     key=f"{strike}:{ex_date}"))
                 continue
 
             # Base: an ITM short with near-zero extrinsic is assignable any time.
-            if (itm and dte is not None and dte > 0
+            # Quote-only — a model extrinsic near zero for a deep-ITM leg is
+            # expected and not itself an assignment signal.
+            if (extrinsic_source == "quote" and itm and dte is not None and dte > 0
                     and extrinsic < config.ASSIGNMENT_EXTRINSIC_FLOOR):
                 out.append(_alert(
                     "ASSIGNMENT_RISK", t,
@@ -440,6 +496,50 @@ def check_assignment_risk(state: dict) -> list[dict]:
                     {"strike": strike, "extrinsic": round(extrinsic, 2), "trigger": "extrinsic",
                      "floor": config.ASSIGNMENT_EXTRINSIC_FLOOR, "dte": dte},
                     key=f"{strike}:extrinsic"))
+    return out
+
+
+def check_extrinsic_above_entry(state: dict) -> list[dict]:
+    """A short whose remaining extrinsic has risen materially ABOVE what it was
+    sold for — a vol/IV event that leaves the leg underwater on time value. The
+    payout-side capture meter clamps/floors this case to 0% captured (correct for
+    income accounting — an IV spike must not book as negative income), which hides
+    it from the defend view. This LOW-severity alert is the "you are underwater on
+    the leg because vol spiked" event the clamp previously swallowed. Uses the
+    UNFLOORED quote extrinsic (never the clamped capture figure). Deduped per short
+    (fires once, auto-resolves when extrinsic falls back)."""
+    out = []
+    thresh = config.EXTRINSIC_ABOVE_ENTRY_ALERT_PCT / 100.0
+    for p in _open_positions(state):
+        t = p.get("ticker", "")
+        price = _last_close(t)
+        if price is None:
+            continue
+        for sc in p.get("short_calls", []):
+            strike, current = sc.get("strike"), sc.get("current_bid")
+            entry_extrinsic = sc.get("entry_extrinsic_per_share")
+            if strike is None or current is None or not entry_extrinsic:
+                continue
+            entry_extrinsic = float(entry_extrinsic)
+            if entry_extrinsic <= 0:
+                continue
+            intrinsic = max(price - float(strike), 0.0)
+            current_extrinsic = max(float(current) - intrinsic, 0.0)
+            over_pct = (current_extrinsic / entry_extrinsic - 1.0) * 100.0
+            if current_extrinsic > entry_extrinsic * (1.0 + thresh):
+                out.append(_alert(
+                    "EXTRINSIC_ABOVE_ENTRY", t,
+                    (f"{t} short {strike} extrinsic {current_extrinsic:.2f}/sh is "
+                     f"{over_pct:.0f}% above the {entry_extrinsic:.2f}/sh sold at entry "
+                     f"— a vol/IV event; the leg is underwater on time value."),
+                    ("Informational — the capture meter floors this at 0%. Watch the "
+                     "leg; if it persists, the buyback/roll math is worse than the "
+                     "'% captured' number implies."),
+                    {"strike": strike, "current_extrinsic": round(current_extrinsic, 2),
+                     "entry_extrinsic": round(entry_extrinsic, 2),
+                     "over_pct": round(over_pct, 1),
+                     "threshold_pct": config.EXTRINSIC_ABOVE_ENTRY_ALERT_PCT},
+                    key=f"{strike}:{sc.get('expiration') or sc.get('dte')}"))
     return out
 
 
@@ -518,7 +618,8 @@ def check_leap_roll_due(state: dict) -> list[dict]:
         if not (p.get("leap") or {}):
             continue
         t = p.get("ticker", "")
-        health = leap_policy.leap_health(p)
+        import dividends  # deferred: continuous dividend yield for burn/roll math
+        health = leap_policy.leap_health(p, q=dividends.yield_for(p.get("ticker", "")))
         if not health.get("roll_due"):
             continue
         est = leap_policy.roll_cost_estimate(t, position=p, state=state)
@@ -550,7 +651,8 @@ def check_capital_burn(state: dict) -> list[dict]:
         if not (p.get("leap") or {}):
             continue
         t = p.get("ticker", "")
-        health = leap_policy.leap_health(p)
+        import dividends  # deferred: continuous dividend yield for burn/roll math
+        health = leap_policy.leap_health(p, q=dividends.yield_for(p.get("ticker", "")))
         burn = health.get("leap_weekly_burn")
         if burn is None:
             continue
@@ -588,7 +690,8 @@ def check_juice_inadequate(state: dict) -> list[dict]:
         if not (p.get("leap") or {}):
             continue
         t = p.get("ticker", "")
-        health = leap_policy.leap_health(p)
+        import dividends  # deferred: continuous dividend yield for burn/roll math
+        health = leap_policy.leap_health(p, q=dividends.yield_for(p.get("ticker", "")))
         if health.get("juice_adequate") is not False:  # None (warming up) / True -> skip
             continue
         if health.get("maintenance_status") == "burning":  # capital_burn owns this regime
@@ -622,7 +725,8 @@ def check_delta_velocity(state: dict) -> list[dict]:
         if not (p.get("leap") or {}):
             continue
         t = p.get("ticker", "")
-        health = leap_policy.leap_health(p)
+        import dividends  # deferred: continuous dividend yield for burn/roll math
+        health = leap_policy.leap_health(p, q=dividends.yield_for(p.get("ticker", "")))
         vel = health.get("delta_velocity") or {}
         drop, end = vel.get("drop"), vel.get("end")
         leap_delta = health.get("leap_delta")
@@ -865,6 +969,7 @@ EVALUATORS = [
     check_defend_position,
     check_buyback_75,
     check_assignment_risk,
+    check_extrinsic_above_entry,
     check_earnings_window,
     check_earnings_date_stale,
     check_expiry_friday,

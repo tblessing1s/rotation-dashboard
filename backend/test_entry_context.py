@@ -88,6 +88,11 @@ def test_snapshot_is_complete_on_open(warm):
     assert {"etf", "rs3m_vs_spy", "breadth"} <= set(snap["sector"])
     assert {"rs3m_vs_spy", "rs3m_vs_sector", "atr_pct", "atr_value", "rsi",
             "price"} <= set(snap["stock"])
+    # R2: the snapshot records WHICH rs-vs-sector variant gated the entry (v3
+    # additive field) — always the direct rs3m(stock, sector_etf) now, so a future
+    # variant change can never be silent.
+    assert snap["stock"]["rs3m_vs_sector_method"] == "direct"
+    assert config.SNAPSHOT_SCHEMA_VERSION >= 3
     assert {"iv_rank", "iv_percentile"} <= set(snap["iv"])
 
     # Gates: entry-gate levels 1-4 + account-gate checks + typed override.

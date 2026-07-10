@@ -181,6 +181,14 @@ def backfill(force: bool = False) -> dict:
         slow = config.GENIUS_SLOW_MA
         published: list[str] = []
         records: list[dict] = []
+        # Anchor EVERY day's recompute to the EARLIEST cached bar: sub is always a
+        # prefix spy.iloc[:i+1] starting at index 0, never a rolling sub-window.
+        # Parabolic SAR is forward-causal ONLY across prefixes that share bar 0
+        # (its seed comes from the first two bars) — a shifted start would re-seed
+        # and diverge, making the published regime for a past date non-reproducible.
+        # So the full-history recompute below is the determinism guarantee, pinned
+        # by test_regime_regression.test_sar_is_prefix_causal_equals_full_history
+        # and test_four_light_regime_prefix_equals_full_history.
         index = list(spy.index)
         for i, ts in enumerate(index):
             if (i + 1) < slow:              # skip warm-up: no slow MA yet

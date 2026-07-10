@@ -376,16 +376,38 @@ function ShortCalls({ p, shorts, setRolling, onOpenTicket }) {
                        <span className="text-slate-600"> · {money(sc.extrinsic_remaining_total)} left</span>
                      )}
                    </span>
-                   {sc.extrinsic_captured_pct != null && (
-                     <span className={sc.extrinsic_captured_pct >= 75 ? "text-emerald-300" : "text-slate-400"}>
-                       {fmt(sc.extrinsic_captured_pct, 0)}% captured
+                   {sc.extrinsic_above_entry ? (
+                     /* The short's extrinsic has risen ABOVE what we sold it at (a
+                        vol/IV event) — the clamped "% captured" would read 0% and
+                        hide it. Surface the signed raw figure and a clear flag so an
+                        underwater leg is visible at defend-decision time. */
+                     <span
+                       className="text-amber-300"
+                       title="Current extrinsic is above the extrinsic sold at entry — the short leg is underwater on time value (an IV event). The payout meter floors this at 0% captured; this is the honest signed figure."
+                     >
+                       {sc.extrinsic_captured_pct_raw != null
+                         ? `${fmt(sc.extrinsic_captured_pct_raw, 0)}% captured`
+                         : "underwater"}
                      </span>
+                   ) : (
+                     sc.extrinsic_captured_pct != null && (
+                       <span className={sc.extrinsic_captured_pct >= 75 ? "text-emerald-300" : "text-slate-400"}>
+                         {fmt(sc.extrinsic_captured_pct, 0)}% captured
+                       </span>
+                     )
                    )}
                  </div>
+                 {sc.extrinsic_above_entry && (
+                   <div className="mt-0.5 text-[10px] text-amber-400/90">
+                     extrinsic above entry (IV event) — leg underwater on time value
+                   </div>
+                 )}
                  <div className="mt-1">
                    <Meter
-                     pct={sc.extrinsic_captured_pct}
-                     tone={sc.extrinsic_captured_pct >= 75 ? "bg-emerald-400" : "bg-sky-500"}
+                     pct={sc.extrinsic_above_entry ? 0 : sc.extrinsic_captured_pct}
+                     tone={sc.extrinsic_above_entry
+                       ? "bg-amber-500"
+                       : sc.extrinsic_captured_pct >= 75 ? "bg-emerald-400" : "bg-sky-500"}
                    />
                  </div>
                </div>

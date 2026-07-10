@@ -84,6 +84,28 @@ def test_enrich_short_extrinsic_capture():
     assert out3["extrinsic_captured_pct"] is None
 
 
+def test_enrich_short_raw_capture_coexists_with_clamped():
+    """R1: the clamped/floored payout capture and the signed raw capture live on
+    the SAME enriched short. Payout consumers keep reading the clamped figure; the
+    management view reads the raw figure + extrinsic_above_entry flag so an
+    underwater short leg is visible at defend-decision time."""
+    sc = {"strike": 132, "contracts": 5, "entry_premium_total": 600.0,
+          "entry_extrinsic_per_share": 0.80, "current_bid": 1.20, "dte": 4}
+    # Extrinsic has RISEN above entry: stock 130 (2.00 OTM, 0 intrinsic), the short
+    # marks 1.40 -> 1.40 extrinsic vs 0.80 sold. Clamped capture floors at 0%; the
+    # raw figure is negative and the flag is set.
+    out = pm.enrich_short(sc, stock_price=130.0, dividend=None, live_mark=1.40)
+    assert out["current_extrinsic_per_share"] == 1.40
+    assert out["extrinsic_captured_pct"] == 0.0          # clamped/floored (accounting-safe)
+    assert out["extrinsic_captured_per_share"] == 0.0
+    assert out["extrinsic_above_entry"] is True
+    assert out["extrinsic_captured_pct_raw"] == -75.0    # (0.80-1.40)/0.80 = -75%
+    # A normal in-the-money capture: raw and clamped agree, flag is False.
+    ok = pm.enrich_short(sc, stock_price=134.0, dividend=None, live_mark=2.30)
+    assert ok["extrinsic_above_entry"] is False
+    assert ok["extrinsic_captured_pct"] == 62.5 and ok["extrinsic_captured_pct_raw"] == 62.5
+
+
 def test_enrich_short_intrinsic_capture():
     # Sold an ITM call for 3.00 when the stock was ~135 (3.00 intrinsic at strike
     # 132) plus 0.80 extrinsic -> 3.80 total, so entry intrinsic = 3.80 - 0.80 = 3.00.

@@ -116,6 +116,19 @@ def yield_for(ticker: str, refresh: bool = False) -> float:
     return q if isinstance(q, (int, float)) and q >= 0 else 0.0
 
 
+def q_with_source(ticker: str, refresh: bool = False) -> tuple[float, str]:
+    """(q, source) — the continuous dividend yield AND where it came from, so a
+    risk path can LOG the provenance instead of silently defaulting q to 0.
+
+    source is "dividend_yield" when a real (>0) yield resolved (override or cached
+    provider value via the continuous trailing-12m ÷ spot approximation), or
+    "none" when unknown / a genuine non-payer — in which case q is 0.0, the
+    explicit fallback [Q_FALLBACK]. Never raises, never makes a NEW network call
+    beyond what yield_for already does (providers gated on configured())."""
+    q = yield_for(ticker, refresh=refresh)
+    return (q, "dividend_yield") if q and q > 0 else (0.0, "none")
+
+
 def cache_health() -> dict:
     """Staleness summary of the dividends cache for the data-health panel."""
     from datetime import datetime

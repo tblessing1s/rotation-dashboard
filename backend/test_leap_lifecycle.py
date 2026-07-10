@@ -125,6 +125,156 @@ def test_payback_carries_across_leap_roll(store):
     assert pb["leap_extrinsic_at_entry"] == pytest.approx(24500.0)  # 2000 + 22500
 
 
+def _full_cycle_execs():
+    """One realistic full cycle from the execution log (R5):
+    multi-tranche LEAP entry -> weekly short closes -> defensive short roll ->
+    LEAP roll (leap_roll_id) -> more shorts -> partial close -> true exit."""
+    D = "2025-01-%02dT00:00:00Z"
+    return [
+        _exec("buy_leap", "ABC", D % 6, extrinsic_captured=2000),                    # 0 fresh cycle
+        _exec("buy_leap", "ABC", D % 6, extrinsic_captured=1500, leap_add="add"),    # 1 multi-tranche add
+        _exec("close_short", "ABC", D % 10, net_juice_total=300, contracts=5),       # 2 weekly close
+        _exec("close_short", "ABC", D % 17, net_juice_total=300, contracts=5),       # 3 weekly close
+        # 4-5 defensive short roll (close_short net of buyback + sell_short), shares a roll_id.
+        _exec("close_short", "ABC", D % 21, net_juice_total=150, contracts=5,
+              roll_id="roll1", roll_reason="defend", close_total=500, strike=120),
+        _exec("sell_short", "ABC", D % 21, premium_total=650, roll_id="roll1", strike=118),
+        # 6-7 LEAP roll: linked close_leap + buy_leap (shared leap_roll_id).
+        _exec("close_leap", "ABC", D % 24, leap_roll_id="lr1", realized_pnl=0),      # 6 roll close (latch)
+        _exec("buy_leap", "ABC", D % 24, leap_roll_id="lr1", extrinsic_captured=3000),  # 7 roll buy (carry)
+        _exec("close_short", "ABC", D % 28, net_juice_total=400, contracts=5),       # 8 more shorts
+        _exec("close_leap", "ABC", D % 30, legs_remaining=1),                        # 9 partial close (carries)
+        _exec("close_leap", "ABC", D % 31, legs_remaining=0),                        # 10 true exit (reset)
+    ]
+
+
+def _cycle_state():
+    state = log.load_state()
+    # extrinsic_at_entry=0 so the post-true-exit fallback reads a clean 0 target;
+    # while a cycle is live, cycle_target wins and this fallback is ignored.
+    state["positions"] = [{"ticker": "ABC", "status": "active",
+                           "leap": {"strike": 120, "contracts": 5, "extrinsic_at_entry": 0},
+                           "delta_history": []}]
+    return state
+
+
+def test_payback_full_cycle_state_at_every_transition(store):
+    """R5: replay the full cycle and assert the payback target AND collected state
+    at EVERY transition, not just the end state."""
+    execs = _full_cycle_execs()
+    # (prefix length, expected leap_extrinsic_at_entry (target), expected collected)
+    checkpoints = [
+        (1,  2000.0, 0.0),      # fresh cycle: target = first LEAP extrinsic
+        (2,  3500.0, 0.0),      # multi-tranche add: target grows, collected carries (0)
+        (3,  3500.0, 300.0),    # first weekly close
+        (4,  3500.0, 600.0),    # second weekly close
+        (5,  3500.0, 750.0),    # defensive roll's close_short (net of buyback) adds 150
+        (6,  3500.0, 750.0),    # the roll's sell_short leg does not touch payback
+        (7,  3500.0, 750.0),    # LEAP roll close latches; target/collected unchanged
+        (8,  6500.0, 750.0),    # roll buy: +3000 to target, juice carries
+        (9,  6500.0, 1150.0),   # more shorts
+        (10, 6500.0, 1150.0),   # partial close (legs_remaining=1): cycle carries
+        (11, 0.0,    0.0),      # true exit (legs_remaining=0): cycle resets
+    ]
+    for n, exp_target, exp_collected in checkpoints:
+        state = _cycle_state()
+        state["executions"] = execs[:n]
+        log.recompute_derived(state)
+        pb = state["extrinsic_payback"]["ABC"]
+        assert pb["leap_extrinsic_at_entry"] == pytest.approx(exp_target), f"target at prefix {n}"
+        assert pb["collected_to_date"] == pytest.approx(exp_collected), f"collected at prefix {n}"
+
+    # The complete, well-formed log validates clean.
+    state = _cycle_state()
+    state["executions"] = execs
+    log.recompute_derived(state)
+    assert state["payback_reconciliation"]["ok"] is True
+    assert log.validate_payback(execs) == []
+
+
+def test_payback_validation_flags_missing_leap_roll_id(store):
+    """R5 negative: strip the leap_roll_id off the roll's BUY leg. The replay would
+    SILENTLY demote it to a fresh cycle (dropping the carried juice and resetting
+    the target) — the state machine must instead flag reconciliation, loudly."""
+    execs = _full_cycle_execs()
+    execs[7] = dict(execs[7]); execs[7].pop("leap_roll_id")   # buy leg mislabeled
+    issues = log.validate_payback(execs)
+    assert any(i["type"] == "dangling_leap_roll" and i["ticker"] == "ABC" for i in issues)
+
+    state = _cycle_state()
+    state["executions"] = execs
+    log.recompute_derived(state)
+    assert state["payback_reconciliation"]["ok"] is False
+
+
+def test_payback_validation_ignores_in_progress_roll(store):
+    """R5: the executor appends a LEAP roll's close_leap and buy_leap as two
+    separate recompute-triggering appends. In the one-append window the close is
+    latched with no buy yet — a legitimately IN-PROGRESS roll, NOT corruption. The
+    validator must stay clean when that dangling close is the ticker's LAST
+    execution, and only flag once later activity proves the buy never came."""
+    execs = _full_cycle_execs()
+    # Truncate right after the roll's close_leap (index 6) — buy leg not yet
+    # appended, close is the last execution: in-progress, must NOT flag.
+    in_progress = execs[:7]
+    assert log.validate_payback(in_progress) == []
+    state = _cycle_state()
+    state["executions"] = in_progress
+    log.recompute_derived(state)
+    assert state["payback_reconciliation"]["ok"] is True
+
+    # But a close that never gets its buy AND has later same-ticker activity is a
+    # genuine orphan -> flagged.
+    orphaned = execs[:7] + [_exec("close_short", "ABC", "2025-01-27T00:00:00Z",
+                                  net_juice_total=100, contracts=5)]
+    issues = log.validate_payback(orphaned)
+    assert any(i["type"] == "dangling_leap_roll" for i in issues)
+
+
+def test_payback_validation_never_raises_on_bad_legs_remaining(store):
+    """R5: validate_payback must survive a corrupt (non-numeric) legs_remaining
+    stamp — it exists to flag corruption, not choke on it. And recompute_derived
+    guards the whole validation call so a pathological execution can never break
+    the recompute (the reconciliation degrades to unvalidated, never raises)."""
+    # validate_payback does not raise on a non-numeric legs_remaining; the
+    # un-parseable stamp is simply not count-checked (junk, not a real
+    # disagreement), so no mismatch is emitted.
+    corrupt = _full_cycle_execs()
+    corrupt[9] = dict(corrupt[9], legs_remaining="oops")
+    issues = log.validate_payback(corrupt)
+    assert not any(i["type"] == "legs_remaining_mismatch" for i in issues)
+
+    # And the recompute guards the whole validation call: even if validate_payback
+    # blew up on some future input, recompute_derived degrades to unvalidated
+    # rather than raising. Use a CLEAN log (the replay's own int() would choke on
+    # 'oops' first) and force validate_payback to raise.
+    state = _cycle_state()
+    state["executions"] = _full_cycle_execs()
+    import logging_handler as _lh
+    orig = _lh.validate_payback
+    try:
+        _lh.validate_payback = lambda _e: (_ for _ in ()).throw(RuntimeError("boom"))
+        _lh.recompute_derived(state)   # must not raise despite validation blowing up
+    finally:
+        _lh.validate_payback = orig
+    assert state["payback_reconciliation"] == {"ok": True, "issues": []}
+
+
+def test_payback_validation_flags_wrong_legs_remaining(store):
+    """R5 negative: mis-stamp legs_remaining on the partial close (1 -> 0). The
+    replay would treat it as a TRUE exit and wipe a live cycle. The count-based
+    validation catches the disagreement with the execution history."""
+    execs = _full_cycle_execs()
+    execs[9] = dict(execs[9], legs_remaining=0)   # was 1 (one leg still open)
+    issues = log.validate_payback(execs)
+    assert any(i["type"] == "legs_remaining_mismatch" and i["ticker"] == "ABC" for i in issues)
+
+    state = _cycle_state()
+    state["executions"] = execs
+    log.recompute_derived(state)
+    assert state["payback_reconciliation"]["ok"] is False
+
+
 def test_payback_resets_on_true_exit_and_reentry(store):
     state = log.load_state()
     state["positions"] = [{"ticker": "NVDA", "status": "active",

@@ -98,6 +98,57 @@ def test_realized_burn_negative_when_extrinsic_grows_on_iv_spike():
 
 
 # ---------------------------------------------------------------------------
+# Case 2b — day-count consistency (R4): juice/wk and burn/wk share ONE time base
+# ---------------------------------------------------------------------------
+def test_net_juice_day_count_convention_is_pinned():
+    """R4 [NET_JUICE_TIME_BASE / HARD_CFM_RULE]: juice/week and burn/week are on
+    the SAME time base — a 7-CALENDAR-day week — so net_juice_per_week subtracts
+    like-for-like. This encodes the worked example end-to-end so the convention
+    can never drift silently.
+
+    Convention (documented, load-bearing):
+      * theta is per CALENDAR day: call_greeks_full returns theta_year / 365
+        (a deliberate engine choice — NOT changed here).
+      * burn/week = theta_per_calendar_day x 7 calendar days (leap_weekly_burn),
+        and equivalently the two-point model difference divided by
+        (current_dte - exit_dte)/7 — calendar DTEs over 7. Both routes agree.
+      * juice/week (the realized headline) is one weekly short cycle's net juice
+        booked per ISO CALENDAR week (~7 calendar days) — the same 7-day base.
+
+    Worked example — the LEAP fixture (spot 100, strike 79, IV 30%, 195 DTE,
+    planned exit 135 DTE):"""
+    p = burn.burn_projection(LEAP, 100, 30, 195, 135)
+
+    # weeks_remaining is calendar DTEs / 7 (NOT trading days, NOT /52).
+    assert p["weeks_remaining"] == round((195 - 135) / 7.0, 2) == 8.57
+
+    # Route A: the two-point model difference averaged over the calendar-week window.
+    assert p["projected_burn_per_week"] == 11.97
+
+    # Route B: leap_weekly_burn = -theta_per_CALENDAR_day x 7 calendar days. The
+    # ÷365 → ×7 chain, computed independently and asserted term by term.
+    T = 195 / 365.0
+    mark = indicators._bs_call_price(100, 79, T, config.RISK_FREE_RATE, 0.30)
+    sigma = indicators.implied_vol_call(mark, 100, 79, T, config.RISK_FREE_RATE)
+    _, theta_day, _ = indicators.call_greeks_full(100, 79, T, config.RISK_FREE_RATE, sigma)
+    lwb = indicators.leap_weekly_burn(100, 79, 195, mark, 1)
+    assert lwb == round(-theta_day * 7.0 * 1 * 100, 2) == 11.98
+
+    # The two burn routes agree to within a few cents -> SAME 7-calendar-day base
+    # (Route A is the window average, Route B the instantaneous rate at 195 DTE).
+    assert abs(p["projected_burn_per_week"] - lwb) < 0.10
+
+    # net_juice_per_week composes juice/wk and burn/wk on that shared base. A
+    # realized $50.00 of net juice booked in one calendar week nets against the
+    # $13.36 burn/wk (with slippage) for the SAME week.
+    juice_per_week = 50.00
+    burn_pw_slip = p["burn_per_week_with_slippage"]
+    assert burn_pw_slip == 13.36
+    net = burn.net_juice_per_week(juice_per_week, burn_pw_slip)
+    assert net == round(juice_per_week - burn_pw_slip, 2) == 36.64
+
+
+# ---------------------------------------------------------------------------
 # Case 3 — deep-ITM drift: extrinsic near zero -> floor, flag, capped coverage
 # ---------------------------------------------------------------------------
 def test_deep_itm_drift_floors_burn_and_caps_coverage():
