@@ -789,6 +789,100 @@ def api_alerts_settings():
 
 
 # ---------------------------------------------------------------------------
+# Recommendation trust layer: open recommendations, dismissals, the scoreboard.
+# Everything served here is either an immutable record or a recompute_derived
+# product — no endpoint computes a score.
+# ---------------------------------------------------------------------------
+@app.route("/api/recommendations")
+def api_recommendations():
+    """Open (unresolved, unexpired) recommendations + the last pass summary."""
+    import recommendation_runner
+    import trust_derive
+    from datetime import datetime, timezone
+    try:
+        state = log.load_state()
+        now = datetime.now(timezone.utc)
+        open_recs = trust_derive.open_recommendations(state, now)
+        # Bars are snapshot working data, not payload — strip anything
+        # non-JSON-serializable defensively (records themselves never carry
+        # DataFrames, but keep the endpoint robust to engine additions).
+        return jsonify({
+            "open": open_recs,
+            "open_actionable": [r for r in open_recs if r.get("action_type") != "NO_ACTION"],
+            "last_run": recommendation_runner.last_run(),
+            "total": len(state.get("recommendations", [])),
+        })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/recommendations/run", methods=["POST"])
+def api_recommendations_run():
+    """Force one evaluation pass now (the scheduled slots call the same code)."""
+    import recommendation_runner
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(recommendation_runner.run(
+            notify=bool(payload.get("notify", True)),
+            include_entry=bool(payload.get("include_entry", True)),
+            dry_run=payload.get("dry_run")))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/recommendations/dismiss", methods=["POST"])
+def api_recommendations_dismiss():
+    """Operator dismissal with a CODED override reason (+ optional note; OTHER
+    requires one). Appends an immutable override record — the recommendation
+    itself is never mutated; precision math derives from the record."""
+    import rec_types
+    import trust_derive
+    from datetime import datetime, timezone
+    payload = request.get_json(silent=True) or {}
+    rec_id = str(payload.get("rec_id") or "")
+    reason = str(payload.get("reason") or "").strip().upper()
+    note = (payload.get("note") or "").strip() or None
+    if not rec_id:
+        return jsonify({"error": "rec_id is required"}), 400
+    if not rec_types.is_override_reason(reason):
+        return jsonify({"error": f"reason must be one of {sorted(rec_types.OVERRIDE_REASONS)}"}), 400
+    if rec_types.override_requires_note(reason) and not note:
+        return jsonify({"error": f"a typed note is required for {reason}"}), 400
+    try:
+        state = log.load_state()
+        now = datetime.now(timezone.utc)
+        open_ids = {r.get("rec_id") for r in trust_derive.open_recommendations(state, now)}
+        if rec_id not in open_ids:
+            return jsonify({"error": f"{rec_id} is not an open recommendation "
+                                     "(already resolved, expired, or unknown)"}), 404
+        stored = log.append_recommendation_override(
+            {"rec_id": rec_id, "reason": reason, "note": note})
+        return jsonify({"override": stored})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/trust-scoreboard")
+def api_trust_scoreboard():
+    """The derived trust scoreboard: coverage / precision / timeliness /
+    fidelity / graduation per action type, plus the loud lists (coverage
+    misses, fidelity failures). Read-only; recompute_derived owns the math."""
+    try:
+        state = log.load_state()
+        board = state.get("trust_scoreboard") or {}
+        fidelity = state.get("order_fidelity") or {}
+        return jsonify({
+            "scoreboard": board,
+            "fidelity_failures": [f for f in fidelity.values() if f.get("pass") is False],
+            "fidelity_records": sorted(fidelity.values(),
+                                       key=lambda f: f.get("graded_at") or "")[-50:],
+            "resolutions": (state.get("recommendation_resolutions") or [])[-100:],
+        })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+# ---------------------------------------------------------------------------
 # Web Push (PWA native push): VAPID key handshake + subscription registry.
 # ---------------------------------------------------------------------------
 @app.route("/api/verify-fills", methods=["POST"])

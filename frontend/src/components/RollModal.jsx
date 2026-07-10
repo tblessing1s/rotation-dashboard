@@ -19,8 +19,11 @@ function bigDollars(n) {
  *   • strike — SAME strike or a DIFFERENT one (e.g. deep-ITM into earnings)
  * The modal shows the live buy-to-close cost of the current short and the new
  * premium for the chosen leg, nets them, and submits a single roll_short action.
+ * sourceRecId (optional): the trust-layer recommendation that staged this roll —
+ * carried into the /api/execute payload as source_rec_id so the execution
+ * matches back to its recommendation.
  */
-export default function RollModal({ ticker, reason = "scheduled", onExecute, onClose }) {
+export default function RollModal({ ticker, reason = "scheduled", sourceRecId, onExecute, onClose }) {
   const [data, setData] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -104,6 +107,7 @@ export default function RollModal({ ticker, reason = "scheduled", onExecute, onC
       premium_per_share: chosen.mark,
       stock_price: data.underlying_price,
       roll_reason: reason, // whipsaw-ledger key: scheduled | 75%-rule | defend | earnings | kill-switch-exit
+      ...(sourceRecId ? { source_rec_id: sourceRecId } : {}),
     };
   }
 

@@ -2,6 +2,7 @@ import React from "react";
 import { Card } from "./ui.jsx";
 import LiveTradingSwitch from "./LiveTradingSwitch.jsx";
 import AlertsPanel from "./AlertsPanel.jsx";
+import TrustScoreboard from "./TrustScoreboard.jsx";
 import DataHealth from "./DataHealth.jsx";
 
 // Low-frequency controls and admin surfaces, gathered off the trading tabs:
@@ -62,6 +63,7 @@ export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, pos
       </Card>
       <LiveTradingSwitch />
       <AlertsPanel />
+      <TrustScoreboard />
       <DataHealth />
     </div>
   );

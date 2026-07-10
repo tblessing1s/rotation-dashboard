@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 16
+CURRENT_VERSION = 17
 
 
 class MigrationAbortedError(RuntimeError):
@@ -235,6 +235,34 @@ def _v15_to_v16(state: dict) -> dict:
     return state
 
 
+def _v16_to_v17(state: dict) -> dict:
+    """v17 (recommendation trust layer): three additive stores —
+
+    - ``recommendations``: append-only, immutable Recommendation records emitted
+      by the evaluation pass BEFORE the operator acts (recommendation_engine.py).
+    - ``recommendation_overrides``: append-only operator dismissals (coded
+      reason + optional note) — the one resolution input that is raw record,
+      not derivation, mirroring exit_reason on a close.
+    - ``order_fidelity``: per-ticket lifecycle grades. Derived by
+      recompute_derived from order_events/receipts/executions, but PERSISTED
+      (merge-retain) because order_events is capped at 1000 — a graded verdict
+      must survive its events rolling off the log.
+
+    ``metadata.trust_layer_since`` marks activation: executions BEFORE it have
+    no recommendations by construction and are excluded from coverage matching
+    (they would otherwise all read as coverage misses). Derived keys
+    (``recommendation_resolutions``, ``trust_scoreboard``) are rebuilt by the
+    post-migration recompute, not seeded here. Executions untouched."""
+    state.setdefault("recommendations", [])
+    state.setdefault("recommendation_overrides", [])
+    state.setdefault("order_fidelity", {})
+    meta = state.setdefault("metadata", {})
+    if not meta.get("trust_layer_since"):
+        from datetime import datetime, timezone
+        meta["trust_layer_since"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -251,6 +279,7 @@ MIGRATIONS = {
     13: _v13_to_v14,
     14: _v14_to_v15,
     15: _v15_to_v16,
+    16: _v16_to_v17,
 }
 
 

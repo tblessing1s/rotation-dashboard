@@ -28,9 +28,19 @@ const SEV_PILL = { critical: "red", high: "yellow", medium: "unknown", low: "unk
 
 // Fold the position/kill-switch/capital signals into one severity-ranked list of
 // things to act on. Each item carries a go() that routes into the owning tab.
-function buildActionItems({ positions, capital, killSwitch }, nav) {
+function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
   const items = [];
   const push = (severity, ticker, label, go) => items.push({ severity, ticker, label, go });
+
+  // Open actionable engine recommendations (trust layer) — the cards live on
+  // the Positions tab; this is the digest pointer. EXIT/DEFEND anywhere in the
+  // set bumps the whole item to high.
+  if (openRecs && openRecs.length > 0) {
+    const hot = openRecs.some((r) => r.action_type === "EXIT" || r.action_type === "DEFEND");
+    push(hot ? "high" : "medium", null,
+      `${openRecs.length} open recommendation${openRecs.length === 1 ? "" : "s"} — review on Positions`,
+      () => nav.tab("Positions"));
+  }
 
   if (capital && capital.reserve_ok === false) {
     push("high", null,
@@ -342,6 +352,21 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
   const ov = useApi(api.overview, [], 5 * 60 * 1000);
   const regimeData = ov.data?.regime?.error ? null : ov.data?.regime;
 
+  // Open actionable recommendations for the digest — fetched alongside the
+  // overview load on the same cadence, and deliberately best-effort: a failed
+  // call just leaves the digest without the item.
+  const [openRecs, setOpenRecs] = React.useState(null);
+  React.useEffect(() => {
+    let stop = false;
+    const poll = () =>
+      api.recommendations()
+        .then((r) => { if (!stop) setOpenRecs(r.open_actionable || []); })
+        .catch(() => {});
+    poll();
+    const id = setInterval(poll, 5 * 60 * 1000);
+    return () => { stop = true; clearInterval(id); };
+  }, []);
+
   // Which detail card is popped open over the ribbon (null = none). The ribbon's
   // illustrations carry the high-level read; the rich card is one click away.
   const [detail, setDetail] = React.useState(null);
@@ -379,8 +404,9 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
       positions: openPositions,
       capital,
       killSwitch: killPositions,
+      openRecs,
     }, nav),
-    [openPositions, capital, killPositions, nav],
+    [openPositions, capital, killPositions, openRecs, nav],
   );
 
   if (ov.loading && !ov.data) {

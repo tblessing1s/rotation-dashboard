@@ -911,6 +911,62 @@ RECONCILE_HISTORY_MAX = 30
 # failure signal (the positions call failing, the scheduler wedged, etc.).
 RECONCILE_STALE_HOURS = 36
 
+# ---- Recommendation trust layer (v2.6, state schema v17) -------------------
+# The engine (recommendation_engine.py) commits to specific recommendations
+# BEFORE the operator acts; recompute_derived() then measures agreement
+# (coverage/precision/timeliness) and order-lifecycle fidelity. Automation
+# eligibility ("graduation") is a derived, display-only readout — NO automated
+# order submission exists anywhere in this version.
+
+# PROPOSED_DEFAULT — how long an emitted recommendation stays matchable, by
+# action type (hours from emission). A stale recommendation must never match a
+# later action, so these are deliberately short: EXIT mirrors the kill switch's
+# "within 1-2 days" (72h covers a weekend gap); rolls are same/next-day acts.
+REC_VALID_HOURS = {
+    "ENTER": 24,
+    "ROLL_OUT": 72,
+    "ROLL_DOWN": 48,
+    "DEFEND": 48,
+    "EXIT": 72,
+    "NO_ACTION": 26,   # an all-clear covers roughly one trading day
+}
+
+# PROPOSED_DEFAULT — max adverse slippage vs the reference mid a proposed
+# ticket tolerates, stamped on every proposed_ticket and graded by the
+# SLIPPAGE_IN_BOUND fidelity check. Anchored to ASSUMED_SLIPPAGE_PCT so the
+# fidelity bound and the net-juice haircut assumption can't silently diverge.
+REC_MAX_SLIPPAGE_PCT_OF_MID = ASSUMED_SLIPPAGE_PCT
+
+# PROPOSED_DEFAULT — a cancel that has not been confirmed terminal at the
+# broker within this many minutes fails CANCEL_CONFIRMED_DEAD (the
+# pending_cancel escape path relies on later polls; this is the deadline that
+# turns "still waiting" into a graded defect).
+FIDELITY_CANCEL_CONFIRM_STALE_MIN = 30
+
+# PROPOSED_DEFAULT — coverage misses / fidelity failures older than this many
+# days stop re-paging through the alert engine (they remain on the scoreboard
+# forever; only the alert noise is windowed).
+TRUST_ALERT_WINDOW_DAYS = 14
+
+# ---- Graduation criteria (ALL PROPOSED_DEFAULT unless marked HARD) ---------
+# Per action type, automation-eligible only when EVERY criterion holds over the
+# trailing window. Display-only in this iteration: nothing is automated.
+GRAD_MIN_LIVE_CYCLES = 10          # PROPOSED_DEFAULT — consecutive live instances
+GRAD_MIN_WEEKS = {                 # PROPOSED_DEFAULT — trailing window length
+    "ROLL_OUT": 8,
+    "ROLL_DOWN": 16,
+    "DEFEND": 16,
+    "EXIT": 26,
+    "ENTER": None,                 # ENTER is never auto-eligible in this iteration
+    "NO_ACTION": None,             # not a gradable action
+}
+GRAD_MAX_OVERRIDE_RATE = 0.10      # PROPOSED_DEFAULT — plus zero unresolved DISAGREE_ACTION
+# HARD requirements (not tunable, enforced in trust_derive.graduation):
+#   - coverage misses in window == 0
+#   - fidelity pass rate == 100% for the ticket type in window
+#   - reconciliation green throughout the window; while post-fill
+#     reconciliation is NOT_YET_IMPLEMENTED, no action type may graduate.
+
 # ---- Consistency guards ----------------------------------------------------
 # EOD_MAX_AGE_HOURS is written as a literal up in the tiered-scheduler section
 # (DATA_STALE_HOURS isn't assigned yet at that point); assert they stay in sync so

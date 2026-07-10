@@ -57,6 +57,12 @@ def warm_scan_enabled() -> bool:
     return os.environ.get("CFM_WARM_SCAN", "1").strip() not in ("0", "false", "no")
 
 
+def recommendations_enabled() -> bool:
+    """Scheduled recommendation passes on by default; CFM_RECOMMENDATIONS=0
+    turns them off (tests, one-off scripts). Manual runs via the API still work."""
+    return os.environ.get("CFM_RECOMMENDATIONS", "1").strip() not in ("0", "false", "no")
+
+
 def _warm_scan() -> None:
     """Prime the full-universe scan cache so the first Scan of the day loads warm.
     Best-effort: logged, never fatal to the tick or the process."""
@@ -197,6 +203,23 @@ def _tick() -> None:
         import heartbeat
         heartbeat.ping("/fail", force=True)
         logger.error("scheduled alert run (%s ET) failed: %s", "+".join(due), e)
+    # Recommendation pass — the SAME slots as the alert pass (incl. 16:15 for
+    # the confirmed-close kill switch), after it: the alert engine pages on raw
+    # conditions first; the engine then commits to the explicit recommendation
+    # records the trust scoreboard measures. A failed pass pages like a failed
+    # alert run — an engine that silently stops emitting voids the coverage
+    # evidence, which is exactly the failure the scoreboard exists to catch.
+    if recommendations_enabled():
+        try:
+            import recommendation_runner
+            summary = recommendation_runner.run()
+            logger.info("scheduled recommendation pass (%s ET): %d emitted",
+                        "+".join(due), summary.get("emitted", 0))
+        except Exception as e:  # noqa: BLE001
+            import heartbeat
+            heartbeat.ping("/fail", force=True)
+            logger.error("scheduled recommendation pass (%s ET) failed: %s",
+                         "+".join(due), e)
     # Warm the full-universe scan cache after the alert pass (which is what pages
     # the operator, so it runs first). At the pre-open 08:30 slot this primes the
     # morning's first Scan; later slots keep the daily-bar cache from ageing out.

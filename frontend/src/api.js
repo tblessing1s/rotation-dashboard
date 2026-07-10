@@ -135,6 +135,15 @@ export const api = {
       body: JSON.stringify(dryRun === undefined ? {} : { dry_run: dryRun }),
     }),
   ackAlert: (id) => request("/api/alerts/ack", { method: "POST", body: JSON.stringify({ id }) }),
+  // Recommendation trust layer: open recs + the derived trust scoreboard.
+  recommendations: () => request("/api/recommendations"),
+  runRecommendations: () => request("/api/recommendations/run", { method: "POST", body: JSON.stringify({}) }),
+  dismissRecommendation: (recId, reason, note) =>
+    request("/api/recommendations/dismiss", {
+      method: "POST",
+      body: JSON.stringify({ rec_id: recId, reason, ...(note ? { note } : {}) }),
+    }),
+  trustScoreboard: () => request("/api/trust-scoreboard"),
   reconcile: () => request("/api/reconcile"),
   runReconcile: () => request("/api/reconcile", { method: "POST" }),
   verifyFills: (limit) =>

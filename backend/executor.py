@@ -574,6 +574,7 @@ def _commit(payload, ticker, action, contracts, strike, stock_price, price_sourc
     # orders (the legacy fallback), each leg carries the shared roll linkage in
     # its payload so the roll ledger treats the pair identically to an atomic roll.
     _stamp_roll_linkage(execution, payload)
+    _stamp_source_rec(execution, payload)
     stored = log.append_execution(execution)
 
     state = log.load_state()
@@ -607,6 +608,17 @@ def _stamp_roll_linkage(execution: dict, source: dict) -> None:
         execution["roll_leg"] = source["roll_leg"]
     if source.get("roll_reason") is not None:
         execution["roll_reason"] = source["roll_reason"]
+
+
+def _stamp_source_rec(execution: dict, source: dict) -> None:
+    """Passive trust-layer annotation: when the operator staged this action from
+    a recommendation card, the payload carries the rec id — copying it onto the
+    immutable execution lets resolution matching prefer the exact record the
+    operator acted on (fallback matching by type/position/validity still works
+    without it). Never changes order behavior; no-op when absent."""
+    rid = source.get("source_rec_id")
+    if rid:
+        execution["source_rec_id"] = str(rid)
 
 
 def _limit_price(action, payload):
@@ -1684,6 +1696,8 @@ def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source,
         leg_exec["roll_reference_net_mid"] = ref_net_mid
         leg_exec["roll_net_fill"] = net_fill
 
+    _stamp_source_rec(close_exec, payload)
+    _stamp_source_rec(sell_exec, payload)
     stored_close = log.append_execution(close_exec)
     stored_sell = log.append_execution(sell_exec)
 
@@ -1767,6 +1781,8 @@ def _commit_open(payload, ticker, contracts, stock_price, mode, price_source):
 
     # Establish the long, then sell the cover. Apply both mutations once on fresh
     # state (leap sets up the position; short appends its call).
+    _stamp_source_rec(leap_exec, payload)
+    _stamp_source_rec(short_exec, payload)
     stored_leap = log.append_execution(leap_exec)
     stored_short = log.append_execution(short_exec)
 
@@ -1960,6 +1976,9 @@ def _commit_exit(payload, ticker, stock_price, mode, price_source):
     # Append shorts (buy-to-close) then the LEAP (sell-to-close); on the immutable
     # log order is cosmetic, but this mirrors "cover the short, then release the
     # long". Apply all mutations on the freshly written state, once.
+    for se, _ in shorts:
+        _stamp_source_rec(se, payload)
+    _stamp_source_rec(leap_exec, payload)
     stored = [log.append_execution(se) for se, _ in shorts]
     stored_leap = log.append_execution(leap_exec)
 

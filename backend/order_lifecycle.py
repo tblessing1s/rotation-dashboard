@@ -53,6 +53,45 @@ RESUBMIT_OK_STATES = frozenset({CANCELED, REJECTED, EXPIRED, FILLED})
 REVIEW_BLOCKING = frozenset({FILLED_DURING_CANCEL, PARTIAL_FILL_CANCELED, LOCKED_UNKNOWN})
 
 
+# The legal transition graph, as data — the docstring picture above, verbatim.
+# Consumed by the order-fidelity grader (trust_derive.py) to check that every
+# OBSERVED transition in the append-only order_events log was legal. SUBMITTED
+# may settle terminal directly (a marketable order can fill before the first
+# poll ever sees WORKING), and LOCKED_UNKNOWN is reachable from any live state
+# (rule 5's hard lock) and exits only via reconciliation to a terminal state.
+_LIVE = frozenset({WORKING, CANCEL_REQUESTED, PENDING_CANCEL})
+LEGAL_TRANSITIONS = {
+    SUBMITTED: frozenset({WORKING, FILLED, REJECTED, EXPIRED, CANCELED,
+                          CANCEL_REQUESTED, LOCKED_UNKNOWN}),
+    WORKING: frozenset({FILLED, CANCEL_REQUESTED, REJECTED, EXPIRED, CANCELED,
+                        PARTIAL_FILL_CANCELED, LOCKED_UNKNOWN}),
+    CANCEL_REQUESTED: frozenset({PENDING_CANCEL, CANCELED, FILLED_DURING_CANCEL,
+                                 PARTIAL_FILL_CANCELED, REJECTED, EXPIRED,
+                                 LOCKED_UNKNOWN}),
+    PENDING_CANCEL: frozenset({CANCELED, FILLED_DURING_CANCEL,
+                               PARTIAL_FILL_CANCELED, REJECTED, EXPIRED,
+                               LOCKED_UNKNOWN}),
+    LOCKED_UNKNOWN: TERMINAL,  # operator/reconciliation resolves it to terminal
+    # Terminal states have no legal successors.
+    FILLED: frozenset(), CANCELED: frozenset(), REJECTED: frozenset(),
+    EXPIRED: frozenset(), FILLED_DURING_CANCEL: frozenset(),
+    PARTIAL_FILL_CANCELED: frozenset(),
+}
+
+
+def is_legal_transition(prior: str | None, new: str | None) -> bool:
+    """True when the (prior -> new) edge exists in the legal graph. A None prior
+    is the placement itself: only SUBMITTED (or WORKING, for a placement that is
+    recorded in one SUBMITTED->WORKING event) may open a lifecycle."""
+    if prior is None:
+        return new in (SUBMITTED, WORKING)
+    if prior == new:
+        # Idempotent re-record (e.g. a cancel retry re-stamping CANCEL_REQUESTED)
+        # is not a lifecycle violation — only terminal states may not repeat.
+        return prior not in TERMINAL
+    return new in LEGAL_TRANSITIONS.get(prior, frozenset())
+
+
 def is_terminal(state: str | None) -> bool:
     return state in TERMINAL
 

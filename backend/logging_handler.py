@@ -44,6 +44,10 @@ def _default_state() -> dict:
             "reserve_required": config.RESERVE_REQUIRED,
             "capital_deployed": 0,
             "operating_cash": 0,
+            # Trust-layer activation boundary: executions before this instant
+            # predate the recommendation engine and are excluded from coverage
+            # matching (they would otherwise all read as coverage misses).
+            "trust_layer_since": utcnow(),
         },
         "positions": [],
         "executions": [],
@@ -71,6 +75,14 @@ def _default_state() -> dict:
         "alerts": migrations.default_alert_state(),
         # Position reconciliation vs Schwab: last report + capped history.
         "reconciliation": {"last": None, "history": [], "last_success": None},
+        # Recommendation trust layer (schema v17). recommendations and
+        # recommendation_overrides are append-only and immutable once written;
+        # recommendation_resolutions and trust_scoreboard are DERIVED by
+        # recompute_derived; order_fidelity is derived-then-retained (the
+        # order_events source is capped, graded verdicts must outlive it).
+        "recommendations": [],
+        "recommendation_overrides": [],
+        "order_fidelity": {},
     }
 
 
@@ -104,6 +116,9 @@ def load_state() -> dict:
         path = config.active_state_path()
         if not os.path.exists(path):
             state = _default_state()
+            # Seed the derived keys (trust scoreboard, order_state, ledgers) so
+            # a fresh store's readers never key-error before the first append.
+            recompute_derived(state)
             _write(state)
             return state
         try:
@@ -339,6 +354,51 @@ def append_order_event(event: dict) -> dict:
 
 
 _ORDER_EVENT_CAP = 1000
+
+
+# ---------------------------------------------------------------------------
+# Recommendation trust layer (append-only writers; resolutions are derived)
+# ---------------------------------------------------------------------------
+def _next_rec_id(state: dict) -> str:
+    return f"rec_{len(state.get('recommendations', [])) + 1:05d}"
+
+
+def append_recommendations(recs: list[dict]) -> list[dict]:
+    """Append one evaluation pass's Recommendation records (already fully built
+    by the pure engine), assign monotonic ids, then recompute derived state so
+    resolutions/scoreboard reflect them immediately. Records are IMMUTABLE once
+    written — resolution status lives in the derived recommendation_resolutions,
+    never on the record. Returns the stored records (with ids)."""
+    if not recs:
+        return []
+    with _lock:
+        state = load_state()
+        stored = []
+        for rec in recs:
+            rec = dict(rec)
+            rec.setdefault("rec_id", _next_rec_id(state))
+            rec.setdefault("emitted_at", utcnow())
+            state.setdefault("recommendations", []).append(rec)
+            stored.append(rec)
+        recompute_derived(state)
+        save_state(state)
+        return stored
+
+
+def append_recommendation_override(override: dict) -> dict:
+    """Append one operator dismissal (coded reason + optional note) — the only
+    hand-authored input to resolution status, mirroring the typed-override /
+    exit_reason pattern. Validation of the coded reason happens at the API
+    layer; this writer only persists and recomputes."""
+    with _lock:
+        state = load_state()
+        override = dict(override)
+        override.setdefault("id", f"rov_{len(state.get('recommendation_overrides', [])) + 1:05d}")
+        override.setdefault("at", utcnow())
+        state.setdefault("recommendation_overrides", []).append(override)
+        recompute_derived(state)
+        save_state(state)
+        return override
 
 
 def get_order_lock(intent_key: str) -> dict | None:
@@ -791,4 +851,14 @@ def recompute_derived(state: dict) -> dict:
             "at": ev.get("at"),
         }
     state["order_state"] = order_state
+
+    # Trust layer: recommendation resolutions, the trust scoreboard, and the
+    # order-fidelity ledger are pure derivations over the immutable records
+    # (trust_derive.py). Guarded like validate_payback — a derivation bug must
+    # never block an execution append.
+    try:
+        import trust_derive
+        trust_derive.recompute(state, now)
+    except Exception:  # noqa: BLE001
+        logger.exception("trust derivation failed (non-fatal); scoreboard stale")
     return state
