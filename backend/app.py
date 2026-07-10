@@ -728,8 +728,9 @@ def _payouts_glance(state: dict) -> dict:
     pulled from the payouts view (full detail lives on the Payouts tab)."""
     import payouts
     v = payouts.view(state)
-    keep = ("month", "label", "net_juice", "payout_amount", "status",
-            "finalizable", "finalized", "paid", "estimated")
+    keep = ("month", "label", "net_juice", "leap_burn", "burn_tracked",
+            "net_payout", "payout_amount", "status", "finalizable", "finalized",
+            "paid", "estimated")
     return {
         "current": {k: v["current"].get(k) for k in keep},
         "previous": {k: v["previous"].get(k) for k in keep},

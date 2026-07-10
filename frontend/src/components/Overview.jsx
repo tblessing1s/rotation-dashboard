@@ -312,14 +312,19 @@ function PayoutGlance({ payouts, onOpen }) {
         <div className="min-w-0">
           <div className="mb-1 flex items-center gap-2">
             <span className="text-xs uppercase tracking-wide text-slate-500">
-              {cur.label}{cur.estimated ? " · est." : ""}
+              {cur.label} leftover{cur.estimated ? " · est." : ""}
             </span>
             <Pill status={curPill.status}>{curPill.label}</Pill>
           </div>
           <div className="text-2xl font-semibold leading-tight text-emerald-300">
             {cash(cur.payout_amount)}
           </div>
-          <div className="text-xs text-slate-500">{payoutSub(cur, true)}</div>
+          <div className="text-xs text-slate-500"
+               title="Juice collected minus the LEAP's weekly extrinsic burn">
+            {cur.burn_tracked
+              ? `${cash(cur.net_juice)} juice − ${cash(cur.leap_burn)} LEAP burn`
+              : payoutSub(cur, true)}
+          </div>
         </div>
         {prev && (
           <Stat label={`${prev.label} (last month)`} value={cash(prev.payout_amount)}

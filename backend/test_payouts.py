@@ -35,9 +35,11 @@ def _pos_with_short(ticker, expiration):
                              "expiration": expiration, "dte": 5}]}
 
 
-def _seed(monkeypatch, execs, positions=None, cur_month="2026-07"):
-    """Write a state file with the given executions/positions and pin 'now'."""
+def _seed(monkeypatch, execs, positions=None, cur_month="2026-07", burn=None):
+    """Write a state file with the given executions/positions and pin 'now'.
+    ``burn`` is an optional {month: leap_burn} map stubbed in for the burn marks."""
     monkeypatch.setattr(payouts, "_cur_month", lambda: cur_month)
+    monkeypatch.setattr(payouts, "monthly_leap_burn", lambda: dict(burn or {}))
     state = log.load_state()
     state["executions"] = execs
     state["positions"] = positions or []
@@ -125,6 +127,70 @@ def test_short_expiry_falls_back_to_open_date_plus_dte(isolated_state, monkeypat
                   positions=[pos])
     assert payouts.has_open_short_expiring_in(state, "2026-07") is True
     assert payouts.view(state)["current"]["finalizable"] is False
+
+
+# --- LEAP burn folded into the payout (leftover) ---------------------------
+def test_payout_is_juice_minus_leap_burn(isolated_state, monkeypatch):
+    state = _seed(monkeypatch, [
+        _close("AA", "2026-06-05T15:00:00Z", 510.0),
+        _close("AA", "2026-07-02T15:00:00Z", 300.0),
+    ], burn={"2026-06": 120.0, "2026-07": 80.0})
+    v = payouts.view(state)
+    assert v["previous"]["net_juice"] == 510.0
+    assert v["previous"]["leap_burn"] == 120.0
+    assert v["previous"]["burn_tracked"] is True
+    assert v["previous"]["net_payout"] == 390.0        # 510 − 120 leftover
+    assert v["previous"]["payout_amount"] == 390.0
+    assert v["current"]["net_payout"] == 220.0         # 300 − 80
+    # YTD leftover = juice 810 − burn 200 = 610
+    assert v["totals"]["ytd_juice"] == 810.0
+    assert v["totals"]["ytd_burn"] == 200.0
+    assert v["totals"]["ytd"] == 610.0
+
+
+def test_payout_untracked_burn_degrades_to_juice(isolated_state, monkeypatch):
+    state = _seed(monkeypatch, [_close("AA", "2026-06-05T15:00:00Z", 510.0)], burn={})
+    prev = payouts.view(state)["previous"]
+    assert prev["burn_tracked"] is False
+    assert prev["leap_burn"] == 0.0
+    assert prev["net_payout"] == 510.0                 # falls back to juice-only
+
+
+def test_finalize_snapshots_leftover_and_breakdown(isolated_state, monkeypatch):
+    _seed(monkeypatch, [_close("AA", "2026-06-05T15:00:00Z", 510.0)],
+          burn={"2026-06": 120.0})
+    v = payouts.finalize("2026-06")
+    prev = v["previous"]
+    assert prev["finalized_amount"] == 390.0           # leftover snapshotted
+    assert prev["finalized_juice"] == 510.0
+    assert prev["finalized_burn"] == 120.0
+    assert prev["payout_amount"] == 390.0
+
+
+def test_payout_ready_alert_reports_leftover(isolated_state, monkeypatch):
+    state = _seed(monkeypatch, [_close("AA", "2026-06-05T15:00:00Z", 510.0)],
+                  burn={"2026-06": 120.0})
+    a = alerts.check_payout_ready(state)[0]
+    assert a["data"]["net_payout"] == 390.0
+    assert a["data"]["leap_burn"] == 120.0
+    assert "390.00 leftover" in a["message"]
+    assert "LEAP burn" in a["message"]
+
+
+def test_monthly_realized_burn_from_marks(monkeypatch):
+    import burn_marks
+    marks = {
+        "AA": [
+            {"date": "2026-06-05", "extrinsic_now": 1000.0},
+            {"date": "2026-06-12", "extrinsic_now": 900.0},   # −100 burn (Jun)
+            {"date": "2026-07-03", "extrinsic_now": 850.0},   # −50 burn (Jul)
+            {"date": "2026-07-10", "extrinsic_now": 880.0},   # +30 grew -> clamped 0
+        ],
+    }
+    monkeypatch.setattr(burn_marks, "_load", lambda: marks)
+    by_month = burn_marks.monthly_realized_burn()
+    assert by_month["2026-06"] == 100.0
+    assert by_month["2026-07"] == 50.0                 # the +30 week clamped to 0
 
 
 # --- finalize / mark paid --------------------------------------------------

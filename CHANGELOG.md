@@ -1,5 +1,30 @@
 # Changelog
 
+## Payout = juice − LEAP burn (the leftover)
+
+The monthly payout now nets out the **LEAP's weekly extrinsic burn**, so the
+headline figure is the *leftover* an operator can actually take rather than the
+raw juice: `payout = net juice collected − LEAP extrinsic burn`. The burn is the
+REALIZED weekly extrinsic decay from the burn marks (`burn_marks.py`, same
+whole-position dollars as the juice ledger), summed over the month and clamped so
+a roll or IV spike that grows extrinsic can't masquerade as income.
+
+### What changed
+
+- **`backend/burn_marks.py`**: `monthly_realized_burn()` — realized LEAP extrinsic
+  burn per calendar month, summed across tickers from consecutive marks'
+  extrinsic drops (negatives clamped to 0 — burn is only ever a cost).
+- **`backend/payouts.py`**: every month now carries `net_juice`, `leap_burn`,
+  `burn_tracked`, and `net_payout` (the leftover); the payout headline and the
+  finalize/paid snapshots are the leftover, with the juice/burn breakdown frozen
+  alongside. Totals gain YTD juice and YTD LEAP burn. When a month has no burn
+  marks yet the payout degrades cleanly to juice-only and says so.
+- **`PAYOUT_READY` alert** now headlines the leftover with the juice − burn
+  breakdown.
+- **Frontend**: the Payouts cards, history table (Juice / LEAP burn / Leftover
+  columns), and totals show the breakdown; the Overview glance headlines the
+  leftover with the juice − burn sub.
+
 ## Monthly payout tracking
 
 Income is booked as **net juice** (premium sold − buyback) on every short close,
