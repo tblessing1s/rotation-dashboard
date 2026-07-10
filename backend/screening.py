@@ -255,18 +255,22 @@ def _compute_sectors() -> dict:
 # ---------------------------------------------------------------------------
 # Levels 3 & 4 — stock filter
 # ---------------------------------------------------------------------------
-def _stock_row(ticker: str, spy, sector_rs_vs_spy: float | None, sector_etf: str,
+def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
                regime_green: bool = False, sector_strong: bool = False) -> dict:
     df = data_handler.get_daily(ticker)
     rs_vs_spy = indicators.rs3m(df, spy) if df is not None else None
+    # RS3M vs Sector is the DIRECT rs3m(stock, sector_etf) ratio over the same
+    # 63-day lookback — the true relative strength against the sector, not the
+    # vs-SPY difference approximation. Same figure the kill switch consumes, so
+    # the entry gate and the exit rule agree on what "beating the sector" means.
     # A sector ETF entered as its own candidate has no distinct peer sector to
     # beat — comparing it to itself is tautologically zero every time, so that
     # leg is waived (not applicable) rather than scored as a fail.
     is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
     is_etf = sector_data.is_etf(ticker)
     rs_vs_sector = None
-    if not is_sector_etf and rs_vs_spy is not None and sector_rs_vs_spy is not None:
-        rs_vs_sector = round(rs_vs_spy - sector_rs_vs_spy, 2)
+    if not is_sector_etf and df is not None and sector_df is not None:
+        rs_vs_sector = indicators.rs3m(df, sector_df)
     atrp = indicators.atr_pct(df) if df is not None else None
     cons = indicators.consolidating(df) if df is not None else None
 
@@ -335,14 +339,13 @@ def _compute_stock_filter(sector: str | None = None) -> list[dict]:
     rows = []
     for etf in etfs:
         sector_df = data_handler.get_daily(etf)
-        sector_rs = indicators.rs3m(sector_df, spy) if sector_df is not None else None
         sector_strong = sector_status.get(etf, {}).get("status") == "green"
         # The ETF itself is a valid CFM candidate alongside its constituents —
         # liquid, weekly-optionable, and a real entry choice in its own right.
-        rows.append(_stock_row(etf, spy, sector_rs, etf,
+        rows.append(_stock_row(etf, spy, sector_df, etf,
                                regime_green=regime_green, sector_strong=sector_strong))
         for ticker in sector_data.constituents(etf):
-            rows.append(_stock_row(ticker, spy, sector_rs, etf,
+            rows.append(_stock_row(ticker, spy, sector_df, etf,
                                    regime_green=regime_green, sector_strong=sector_strong))
     # Sort by RS3M vs Sector descending (best fit first); None last.
     rows.sort(key=lambda r: (r["rs3m_vs_sector"] is None, -(r["rs3m_vs_sector"] or 0)))
@@ -407,9 +410,8 @@ def entry_gate(ticker: str) -> dict:
     # Levels 3 & 4 — stock beating peers + consolidating
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_df = data_handler.get_daily(sector_etf) if sector_etf else None
-    sector_rs = indicators.rs3m(sector_df, spy) if sector_df is not None else None
     # Pass the regime/sector verdicts so the row's status matches this gate's.
-    row = _stock_row(ticker, spy, sector_rs, sector_etf or "",
+    row = _stock_row(ticker, spy, sector_df, sector_etf or "",
                      regime_green=regime_green, sector_strong=_all(l2_checks))
 
     # The two legs are checked separately: "beats SPY" and "beats its sector"

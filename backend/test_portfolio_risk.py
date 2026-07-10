@@ -78,6 +78,36 @@ def test_position_risk_diagonal_signs(monkeypatch):
     assert row["delta_dollars_spy_adj"] == pytest.approx(row["delta_dollars"] * 1.5, rel=0.01)
 
 
+def test_position_risk_q_lowers_call_delta(monkeypatch):
+    """R3(c): portfolio greeks with a dividend yield q > 0 differ from q=0 in the
+    right direction — a dividend payer's call delta (e^(-qT)·N(d1)) is LOWER, and
+    the effect is largest on the long-dated LEAP that dominates book delta. The
+    beta-adjusted book-delta leverage warning must run on these honest greeks."""
+    import data_handler
+    import dividends
+    spy = _trend_frame(seed=7)
+    frames = {"SPY": spy, "PG": _scaled_frame(spy, 1.0, base=140.0)}
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: frames.get(s.upper()))
+    price = float(frames["PG"]["Close"].iloc[-1])
+    leap_mark = max(price - 100, 0) + 6.0
+    # A single long LEAP so book delta is LEAP-dominated (no offsetting short).
+    p = {"ticker": "PG", "sector": "XLP", "status": "active",
+         "leap": {"strike": 100, "contracts": 5, "dte": 300,
+                  "current_bid": leap_mark * 500, "cost_basis": 12000},
+         "short_calls": [], "shares": {"count": 0}}
+
+    monkeypatch.setattr(dividends, "yield_for", lambda t, refresh=False: 0.0)
+    row0 = pr.position_risk(p, spy)
+    monkeypatch.setattr(dividends, "yield_for", lambda t, refresh=False: 0.035)
+    rowq = pr.position_risk(p, spy)
+
+    assert row0["q_source"] == "none" and rowq["q_source"] == "dividend_yield"
+    assert rowq["q"] == 0.035
+    # q > 0 lowers the LEAP call delta -> lower book delta (shares & dollars).
+    assert rowq["delta_shares"] < row0["delta_shares"]
+    assert rowq["delta_dollars"] < row0["delta_dollars"]
+
+
 def test_portfolio_view_aggregates_and_sectors(isolated_state, monkeypatch):
     import data_handler
     spy = _trend_frame(seed=7)

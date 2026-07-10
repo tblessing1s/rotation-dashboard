@@ -18,6 +18,7 @@ import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
 
 import config  # noqa: E402
+import indicators as ind  # noqa: E402
 import regime_genius as rg  # noqa: E402
 
 FIX_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures", "regime")
@@ -86,3 +87,52 @@ def test_fixtures_are_well_formed(name):
     assert list(df.columns) == ["Open", "High", "Low", "Close", "Volume"]
     assert df.index.is_monotonic_increasing
     assert len(df) > config.GENIUS_SLOW_MA
+
+
+# ---------------------------------------------------------------------------
+# SAR causality (R6): the property the regime backfill relies on.
+# ---------------------------------------------------------------------------
+def test_sar_is_prefix_causal_equals_full_history():
+    """R6: Parabolic SAR is forward-causal — the value computed on history
+    TRUNCATED at date D equals the value at D from the full-history run, for EVERY
+    D. The regime backfill computes each historical day from a prefix of the
+    cached SPY frame (regime_history.backfill: spy.iloc[:i+1]); this is exactly
+    the invariant that makes that legitimate. Over >= 1 trading year of bars."""
+    df = _load("distribution_rollover")
+    assert len(df) >= 252
+    full = ind.parabolic_sar(df)
+    for i in range(1, len(df)):
+        assert ind.parabolic_sar_last(df.iloc[: i + 1]) == full[i], f"SAR diverged at bar {i}"
+
+
+def test_four_light_regime_prefix_equals_full_history():
+    """R6: the WHOLE four-light published regime (SAR + slow/fast MA + momentum +
+    the yellow dwell) computed on history truncated at D equals the value at D from
+    the full-history replay — for every sampled D. Determinism of the published
+    regime history is the requirement; this pins it (the dwell is path-dependent
+    but forward-causal, so a prefix reproduces the full run's value at its end)."""
+    df = _load("distribution_rollover")
+    pub_full, _ = _replay(df)
+    warm = config.GENIUS_SLOW_MA - 1
+    # Sample across the range (the nested replay is O(n^2); a stride keeps it fast
+    # while still covering green/yellow/red and the transitions between them).
+    for i in range(warm, len(df), 4):
+        pub_trunc, _ = _replay(df.iloc[: i + 1])
+        assert pub_trunc[-1] == pub_full[i - warm], f"published regime diverged at bar {i}"
+
+
+def test_sar_shifted_start_diverges_documents_the_boundary():
+    """R6 (boundary): the causality guarantee holds ONLY for prefixes sharing the
+    SAME first bar. A window that starts LATER (a different bar 0 — e.g. a rolling
+    cache that dropped old bars over time) re-seeds SAR from its own first two bars
+    and diverges for the bars right after the shift. This is WHY the backfill must
+    always recompute from the EARLIEST cached bar, never a rolling sub-window —
+    the determinism above is a property of that slicing discipline, not of SAR
+    alone."""
+    df = _load("distribution_rollover")
+    full = ind.parabolic_sar(df)
+    k = 120
+    shifted = ind.parabolic_sar(df.iloc[k:])
+    # Right after the shifted start the fresh two-bar seed dominates -> a visible
+    # (> 1 point) divergence from the full-history SAR at the same absolute bar.
+    assert abs(shifted[2] - full[k + 2]) > 0.5

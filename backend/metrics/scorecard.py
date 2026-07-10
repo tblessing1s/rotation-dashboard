@@ -201,15 +201,15 @@ def compute_inputs(df: pd.DataFrame | None) -> dict:
 def metrics_for(df: pd.DataFrame | None, spy_df: pd.DataFrame | None,
                 sector_df: pd.DataFrame | None) -> dict:
     """All scorecard metric values for one ticker (the row's numeric fields).
-    Pure over the three frames; relative strength reuses indicators.rs3m (RS3M vs
-    Sector = RS3M vs SPY - sector's RS3M vs SPY, exactly as the entry gate does)."""
+    Pure over the three frames; relative strength reuses indicators.rs3m. RS3M vs
+    Sector is the DIRECT rs3m(stock, sector_etf) ratio over the same 63-day
+    lookback (the same figure the kill switch and entry gate now use), NOT the
+    vs-SPY difference approximation."""
     inp = compute_inputs(df)
 
     rs_vs_spy = indicators.rs3m(df, spy_df) if (df is not None and spy_df is not None) else None
-    sector_rs_vs_spy = (indicators.rs3m(sector_df, spy_df)
-                        if (sector_df is not None and spy_df is not None) else None)
-    rs_vs_sector = (round(rs_vs_spy - sector_rs_vs_spy, 2)
-                    if (rs_vs_spy is not None and sector_rs_vs_spy is not None) else None)
+    rs_vs_sector = (indicators.rs3m(df, sector_df)
+                    if (df is not None and sector_df is not None) else None)
 
     obv_above, obv_dist = obv_vs_ema(inp["obv"], inp["obv_20ema"])
     return {

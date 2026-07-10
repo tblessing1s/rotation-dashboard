@@ -330,6 +330,85 @@ def test_assignment_risk_collapsed_extrinsic_no_dividend(monkeypatch):
     assert len(out2) == 1 and out2[0]["data"]["trigger"] == "dividend"
 
 
+def test_assignment_risk_q_aware_model_fallback_no_quote(monkeypatch):
+    """R3(a): when there is NO live quote (off-hours right before ex-div — the
+    exact window a dividend-capture assignment is most likely), the dividend
+    escalation falls back to a q-AWARE Black-Scholes extrinsic. With q=0 the model
+    extrinsic sits just ABOVE the coming dividend (no trigger); with the correct q
+    it sits BELOW it (trigger fires). This is the exact miss the fix exists to
+    catch — the quote-based path went silent here, and q=0 would understate the
+    assignment risk."""
+    import data_handler
+    import dividends
+    import indicators as ind
+
+    # Deterministic ~20%-vol frame; ITM short (spot ~6% above strike), 28 DTE.
+    rng = np.random.default_rng(7)
+    rets = rng.normal(0, 0.22 / np.sqrt(252), 59)
+    px = 100 * np.exp(np.cumsum(np.insert(rets, 0, 0)))
+    idx = pd.bdate_range("2024-01-01", periods=60)
+    c = pd.Series(px, index=idx)
+    df = pd.DataFrame({"Open": c, "High": c * 1.005, "Low": c * 0.995,
+                       "Close": c, "Volume": 1e6}, index=idx)
+    spot = float(c.iloc[-1])
+    strike = round(spot * 0.94)
+    dte = 28
+    sigma = ind.hist_vol(df) / 100.0
+    T = dte / 365.0
+    e0 = max(ind._bs_call_price(spot, strike, T, config.RISK_FREE_RATE, sigma, 0.0)
+             - max(spot - strike, 0.0), 0.0)
+    q_real = 0.06
+    eq = max(ind._bs_call_price(spot, strike, T, config.RISK_FREE_RATE, sigma, q_real)
+             - max(spot - strike, 0.0), 0.0)
+    assert e0 > eq                      # q lowers the call extrinsic — the whole point
+    amount = round((e0 + eq) / 2, 4)    # dividend sits BETWEEN the two extrinsics
+
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(alerts, "_last_close", lambda t: spot)
+    div = {"ex_date": (date.today() + timedelta(days=10)).isoformat(), "amount": amount}
+    # No live quote (current_bid=None) — the quote path would `continue` (silent).
+    sc = {"strike": strike, "contracts": 5, "dte": dte, "current_bid": None,
+          "entry_premium_total": 500.0,
+          "expiration": (date.today() + timedelta(days=dte)).isoformat()}
+
+    # q=0 (no dividend data): model extrinsic e0 > dividend -> NO trigger (the miss).
+    monkeypatch.setattr(dividends, "yield_for", lambda t, refresh=False: 0.0)
+    assert alerts.check_assignment_risk(_state(_pos(dividend=div, short_calls=[sc]))) == []
+
+    # correct q: model extrinsic eq < dividend -> trigger FIRES.
+    monkeypatch.setattr(dividends, "yield_for", lambda t, refresh=False: q_real)
+    out = alerts.check_assignment_risk(_state(_pos(dividend=div, short_calls=[sc])))
+    assert len(out) == 1
+    d = out[0]["data"]
+    assert d["trigger"] == "dividend"
+    assert d["extrinsic_source"] == "model" and d["q_source"] == "dividend_yield"
+    assert d["extrinsic"] < amount
+
+
+def test_extrinsic_above_entry_fires_when_leg_underwater(monkeypatch):
+    """R1: a short whose remaining extrinsic rose materially above what it was
+    sold for (a vol spike) fires the LOW-severity underwater alert — the exact
+    case the payout capture clamp/floor hides at 0% captured."""
+    monkeypatch.setattr(alerts, "_last_close", lambda t: 100.0)
+    # Sold with 0.80/sh of extrinsic; now the short marks 1.30 with 0 intrinsic
+    # (strike above spot) -> 1.30 extrinsic, +62% above entry, well past the 25%
+    # threshold. entry_extrinsic_per_share is the stored entry figure.
+    sc = {"strike": 105, "contracts": 5, "dte": 4, "current_bid": 1.30,
+          "entry_premium_total": 400.0, "entry_extrinsic_per_share": 0.80,
+          "expiration": (date.today() + timedelta(days=4)).isoformat()}
+    out = alerts.check_extrinsic_above_entry(_state(_pos(short_calls=[sc])))
+    assert len(out) == 1
+    a = out[0]
+    assert a["type"] == "EXTRINSIC_ABOVE_ENTRY" and a["severity"] == "LOW"
+    assert a["data"]["over_pct"] > 25 and a["data"]["current_extrinsic"] == 1.30
+    # Below the threshold (only +10% above entry) -> no alert.
+    calm = dict(sc, current_bid=0.88)
+    assert alerts.check_extrinsic_above_entry(_state(_pos(short_calls=[calm]))) == []
+    # Below entry (captured normally) -> no alert.
+    good = dict(sc, current_bid=0.30)
+    assert alerts.check_extrinsic_above_entry(_state(_pos(short_calls=[good]))) == []
+
+
 def test_earnings_date_stale_and_conflict(monkeypatch):
     import earnings
     monkeypatch.setattr(config, "_demo_mode", False)

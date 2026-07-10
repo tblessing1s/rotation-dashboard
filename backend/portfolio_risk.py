@@ -27,15 +27,20 @@ import indicators
 _call_greeks_full = indicators.call_greeks_full
 
 
-def _leg_greeks(S, strike, dte, mark_per_share):
-    """Greeks per share for a call leg, implying vol from its stored mark."""
+def _leg_greeks(S, strike, dte, mark_per_share, q: float = 0.0):
+    """Greeks per share for a call leg, implying vol from its stored mark.
+
+    q is the underlying's continuous dividend yield (decimal). It lowers a
+    dividend payer's call delta (delta = e^(-qT)·N(d1)) — most on the long-dated
+    LEAP — so the book's net delta / beta-adjusted leverage warning is computed
+    on honest greeks rather than q=0. [R3(c)]"""
     T = (dte or 0) / 365.0
     if not (S and strike and T > 0):
         return None, None, None
-    sigma = indicators.implied_vol_call(mark_per_share, S, strike, T, config.RISK_FREE_RATE)
+    sigma = indicators.implied_vol_call(mark_per_share, S, strike, T, config.RISK_FREE_RATE, q)
     if not sigma:
         return None, None, None
-    return _call_greeks_full(S, strike, T, config.RISK_FREE_RATE, sigma)
+    return _call_greeks_full(S, strike, T, config.RISK_FREE_RATE, sigma, q)
 
 
 def beta(df, spy_df, lookback: int = 250) -> float | None:
@@ -63,12 +68,17 @@ def position_risk(p: dict, spy_df) -> dict | None:
     share_equiv = theta_day = vega_total = 0.0
     greeks_complete = True
 
+    # Dividend-adjusted greeks: q lowers call delta most on the long-dated LEAP,
+    # so the book delta / beta-adjusted leverage warning must not run at q=0. [R3(c)]
+    import dividends
+    q, q_src = dividends.q_with_source(ticker)
+
     leap = p.get("leap") or {}
     contracts = int(leap.get("contracts") or 0)
     if leap and contracts:
         mark = (float(leap["current_bid"]) / (contracts * 100)
                 if leap.get("current_bid") is not None else None)
-        d, th, v = _leg_greeks(price, leap.get("strike"), leap.get("dte"), mark)
+        d, th, v = _leg_greeks(price, leap.get("strike"), leap.get("dte"), mark, q)
         if d is None:
             greeks_complete = False
         else:
@@ -78,7 +88,7 @@ def position_risk(p: dict, spy_df) -> dict | None:
 
     for sc in p.get("short_calls", []):
         n = int(sc.get("contracts") or 0)
-        d, th, v = _leg_greeks(price, sc.get("strike"), sc.get("dte"), sc.get("current_bid"))
+        d, th, v = _leg_greeks(price, sc.get("strike"), sc.get("dte"), sc.get("current_bid"), q)
         if d is None:
             greeks_complete = False
             continue
@@ -102,6 +112,8 @@ def position_risk(p: dict, spy_df) -> dict | None:
         "vega": round(vega_total, 2),
         "capital": round(float(leap.get("cost_basis") or 0), 2),
         "greeks_complete": greeks_complete,
+        "q": round(q, 4),
+        "q_source": q_src,
     }
 
 

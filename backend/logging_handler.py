@@ -312,6 +312,85 @@ def _iso_week(date_str: str) -> str:
     return f"{y}-W{w:02d}"
 
 
+def validate_payback(execs: list[dict]) -> list[dict]:
+    """Integrity check on the cycle-scoped payback state machine's INPUTS, so a
+    corrupt/mislabeled execution log can't silently produce a plausible-but-wrong
+    payback target. Pure over the executions; returns a list of issue dicts
+    (empty == clean). VALIDATION ONLY — it does not change the meter or the state
+    machine (R5).
+
+    Detects the three ways the replay (recompute_derived) goes silently wrong:
+      * dangling_leap_roll — a close_leap latched a leap_roll_id that NO following
+        buy_leap consumed (an aborted/half-logged roll, or a dropped buy leg).
+        The latch never clears, so cycle_collected/target carry a phantom target
+        forever.
+      * orphan_roll_buy — a buy_leap carried a leap_roll_id with no matching
+        pending close (out-of-order or a mislabeled leg); the replay silently
+        demotes it to a fresh cycle / add, dropping the carry.
+      * legs_remaining_mismatch — a close_leap's stamped legs_remaining disagrees
+        with the leg count derived from the execution history, so the true-exit
+        branch fires early (wipes a live cycle) or never (cycle never ends).
+    """
+    issues: list[dict] = []
+    pending_close_roll: dict[str, tuple[str, int]] = {}   # ticker -> (rid, set-at index)
+    last_idx: dict[str, int] = {}                         # ticker -> index of its last execution
+    open_legs: dict[str, int] = {}   # per-ticker LEAP leg COUNT (merge adds no leg)
+
+    def _as_int(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    for i, e in enumerate(execs):
+        t = e.get("ticker", "")
+        a = e.get("action")
+        last_idx[t] = i
+        if a == "buy_leap":
+            rid = e.get("leap_roll_id")
+            if rid:
+                if pending_close_roll.get(t, (None,))[0] == rid:
+                    pending_close_roll.pop(t, None)
+                    open_legs[t] = open_legs.get(t, 0) + 1   # roll: close(-1)+buy(+1)
+                else:
+                    issues.append({"type": "orphan_roll_buy", "ticker": t,
+                                   "detail": f"buy_leap leap_roll_id={rid} has no matching close_leap latch"})
+                    open_legs[t] = open_legs.get(t, 0) + 1
+            elif e.get("leap_add") == "merge":
+                open_legs[t] = open_legs.get(t, 0) or 1      # scale-in: no new leg
+            else:
+                open_legs[t] = open_legs.get(t, 0) + 1       # fresh cycle or new leg (add)
+        elif a == "close_leap":
+            rid = e.get("leap_roll_id")
+            before = open_legs.get(t, 0)
+            expected = max(before - 1, 0)
+            if rid:
+                pending_close_roll[t] = (rid, i)             # a roll IF a buy follows
+            else:
+                # A true/partial close: the stamped legs_remaining must match the
+                # count the history implies. (Roll closes carry a leap_roll_id and
+                # are validated by the latch, not this count.) Non-numeric stamps
+                # are skipped, never raised on.
+                stamped = e.get("legs_remaining")
+                stamped_int = _as_int(stamped)
+                if stamped_int is not None and stamped_int != expected:
+                    issues.append({"type": "legs_remaining_mismatch", "ticker": t,
+                                   "detail": (f"close_leap stamped legs_remaining={stamped} but the "
+                                              f"execution history implies {expected}")})
+            open_legs[t] = expected
+    # A latch still set at the end is a roll whose buy leg never arrived. BUT the
+    # executor appends the roll's close_leap and buy_leap as two separate appends
+    # (each recomputes), so a legitimately IN-PROGRESS roll is momentarily latched
+    # with the close as the last execution for that ticker — that is not a
+    # corruption. Only flag when later activity for the SAME ticker exists without
+    # the buy ever consuming the latch (a genuinely orphaned/aborted roll).
+    for t, (rid, idx) in pending_close_roll.items():
+        if last_idx.get(t, idx) > idx:
+            issues.append({"type": "dangling_leap_roll", "ticker": t,
+                           "detail": f"close_leap leap_roll_id={rid} was never consumed by a buy_leap"})
+    return issues
+
+
 def recompute_derived(state: dict) -> dict:
     """Rebuild theta_ledger + extrinsic_payback from executions/positions."""
     execs = state.get("executions", [])
@@ -426,6 +505,21 @@ def recompute_derived(state: dict) -> dict:
             agg_collected += collected
             agg_remaining += remaining
     state["extrinsic_payback"] = payback
+
+    # Payback-input integrity: flag (never raise into the recompute path) any
+    # corrupt/mislabeled execution log that would make the meter above
+    # plausible-but-wrong. Loud, not silent — surfaced on the derived state and
+    # logged; resolution is the operator's (validation only, R5). The whole check
+    # is guarded so a pathological execution can never break recompute_derived.
+    try:
+        payback_issues = validate_payback(execs)
+    except Exception as exc:  # noqa: BLE001 — validation must never break the recompute
+        logger.warning("payback validation raised (%s); treating as unvalidated", exc)
+        payback_issues = []
+    state["payback_reconciliation"] = {"ok": not payback_issues, "issues": payback_issues}
+    if payback_issues:
+        logger.warning("payback state-machine reconciliation found %d issue(s): %s",
+                       len(payback_issues), payback_issues)
 
     # Book-wide income hurdle: the LEAP extrinsic folded into the ledger so the
     # net juice is only "real" income once the LEAP extrinsic is paid off.

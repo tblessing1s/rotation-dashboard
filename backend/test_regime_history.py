@@ -112,10 +112,11 @@ def test_snapshot_regime_section_carries_full_trace():
     section = entry_context._regime_section(gate, lambda p, v, r: v, "unavailable")
     # legacy v1 fields still present...
     assert "status" in section and "breadth" in section and "vix" in section
-    # ...plus the additive v2 decision trace.
+    # ...plus the additive v2 decision trace (present at v2 and every later
+    # additive version — v3 added the stock-section rs3m_vs_sector_method field).
     assert section["published_regime"] == "green"
     assert section["lights"]["sar"]["signal"] == "green"
-    assert config.SNAPSHOT_SCHEMA_VERSION == 2
+    assert config.SNAPSHOT_SCHEMA_VERSION >= 2
 
 
 def test_old_v1_snapshot_still_loads():

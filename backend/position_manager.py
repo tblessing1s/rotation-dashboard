@@ -113,10 +113,25 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
                 if entry_extrinsic is not None and current_extrinsic is not None else None)
     captured_pct = (min(max(captured / entry_extrinsic * 100, 0.0), 100.0)
                     if captured is not None and entry_extrinsic else None)
+    # SIGNED raw capture — the SAME arithmetic without the floor/clamp. The
+    # payout/accounting figures above stay clamped (an IV spike must never book as
+    # negative income). But the floor pins captured_pct at 0 when the short's
+    # extrinsic has risen ABOVE entry (vol spike → the leg moved against you), which
+    # hides an underwater short at defend-decision time. The raw figure (may be < 0,
+    # may exceed 100) and the extrinsic_above_entry flag make that visible on the
+    # management view without touching any payout number. [CAPTURE_CLAMP_SCOPE]
+    captured_raw = (entry_extrinsic - current_extrinsic
+                    if entry_extrinsic is not None and current_extrinsic is not None else None)
+    captured_pct_raw = (captured_raw / entry_extrinsic * 100
+                        if captured_raw is not None and entry_extrinsic else None)
+    extrinsic_above_entry = bool(entry_extrinsic is not None and current_extrinsic is not None
+                                 and current_extrinsic > entry_extrinsic)
     out["entry_extrinsic_per_share"] = round(entry_extrinsic, 2) if entry_extrinsic is not None else None
     out["current_extrinsic_per_share"] = round(current_extrinsic, 2) if current_extrinsic is not None else None
     out["extrinsic_captured_per_share"] = round(captured, 2) if captured is not None else None
     out["extrinsic_captured_pct"] = round(captured_pct, 1) if captured_pct is not None else None
+    out["extrinsic_captured_pct_raw"] = round(captured_pct_raw, 1) if captured_pct_raw is not None else None
+    out["extrinsic_above_entry"] = extrinsic_above_entry
     mult = contracts * 100
     out["entry_extrinsic_total"] = round(entry_extrinsic * mult, 2) if entry_extrinsic is not None and mult else None
     out["extrinsic_captured_total"] = round(captured * mult, 2) if captured is not None and mult else None
@@ -281,9 +296,14 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
         # engines also get per-leg health + the aggregated verdict.
         try:
             import leap_policy
-            out["leap_health"] = leap_policy.leap_health(position, stock_price=price)
+            # Dividend-adjusted burn/roll-runway: the stored burn marks already use
+            # q (maintenance sweep), so the live card must too or the two disagree
+            # on the LEAP roll-timing decision. q=0 when no dividend data. [R3]
+            import dividends
+            q = dividends.yield_for(position.get("ticker", ""))
+            out["leap_health"] = leap_policy.leap_health(position, stock_price=price, q=q)
             if len(legs) > 1:
-                per_leg = [leap_policy.leap_health(position, stock_price=price, leg=l)
+                per_leg = [leap_policy.leap_health(position, stock_price=price, q=q, leg=l)
                            for l in legs]
                 out["leap_health_legs"] = per_leg
                 out["leap_health_agg"] = leap_policy.aggregate_health(per_leg)

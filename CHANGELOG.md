@@ -1,5 +1,59 @@
 # Changelog
 
+## Risk-path math hardening
+
+The app's *accounting* math was already honest; three places where a
+bookkeeping-safe simplification leaked into a live **risk** decision (defend,
+kill switch, assignment) are now corrected, and three more flagged items get
+permanent verification tests. **No strategy rule, threshold, or trigger level
+changed — only the inputs to them.** Payout/ledger outputs are untouched. Full
+audit in `AUDIT_RISK_PATH.md`.
+
+### Risk paths now run on honest inputs
+
+- **Unclamped capture on the defend view.** The short-capture meter clamps/floors
+  at 0% for payout accounting (an IV spike must never book as negative income) —
+  correct there, but it hid an *underwater* short leg from the management view.
+  `enrich_short` now also emits a signed `extrinsic_captured_pct_raw` and an
+  `extrinsic_above_entry` flag; the position card surfaces the raw figure and an
+  "extrinsic above entry (IV event)" indicator, and a new LOW-severity
+  `EXTRINSIC_ABOVE_ENTRY` alert fires when a short's extrinsic rises >25% above
+  entry. The clamped payout figure is unchanged.
+- **Direct sector RS for the kill switch (and gate + scorecard).** RS3M-vs-sector
+  was the *difference* of two RS-vs-SPY figures; it is now the true direct ratio
+  `rs3m(stock, sector_etf)` over the same 63-day lookback everywhere — the same
+  `indicators.rs3m` with a different benchmark (no fork), at zero extra cache
+  cost. The kill switch's thinning band no longer lags on large sector moves. The
+  entry-context snapshot records `rs3m_vs_sector_method` (snapshot schema v2→v3,
+  additive; old snapshots still load).
+- **Dividend-adjusted greeks on the assignment path.** The real continuous yield
+  `q` (existing `dividends` cache; `q_source` logged, `0` fallback explicit) now
+  flows through the delta-coverage guardrail, `portfolio_risk._leg_greeks` (book
+  delta / beta-adjusted leverage), and the live `leap_health` roll-timing numbers
+  (matching the stored burn marks, which already used q). The dividend-assignment
+  trigger's extrinsic is the live quote (already q-aware via the market); when
+  there is *no* quote — off-hours before ex-div, where it went silent — it now
+  falls back to a q-aware Black-Scholes extrinsic so the escalation still fires.
+
+### Verified and pinned
+
+- **Day-count convention documented and pinned.** Juice/week and burn/week are on
+  one shared 7-calendar-day base (θ ÷365 calendar × 7); a permanent worked-example
+  test (`test_net_juice_day_count_convention_is_pinned`) encodes it end-to-end so
+  it can't drift. θ's ÷365 is unchanged.
+- **Payback state-machine validation.** `validate_payback` flags the three silent
+  corruption modes (dangling LEAP roll, orphan roll-buy, `legs_remaining`
+  mismatch) so a mislabeled execution log can no longer produce a
+  plausible-but-wrong payback target; surfaced on `payback_reconciliation` (never
+  raises into recompute). A full-cycle fixture asserts the meter at every
+  transition, plus mutation negatives.
+- **SAR causality property test.** Parabolic SAR (and the full four-light
+  published regime) computed on history truncated at date D equals the value at D
+  from the full-history run, for every D over a year of fixture bars — the
+  invariant the regime backfill relies on. A boundary test documents that the
+  guarantee holds only for prefixes sharing the earliest bar, which the backfill
+  now makes explicit.
+
 ## Payout = juice − LEAP burn (the leftover)
 
 The monthly payout now nets out the **LEAP's weekly extrinsic burn**, so the

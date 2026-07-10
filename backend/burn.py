@@ -217,7 +217,15 @@ def net_juice_per_week(juice_per_week: float | None,
                        burn_per_week_with_slippage: float | None) -> float | None:
     """The headline: juice collected/week - burn/week (with slippage). The SINGLE
     definition of net juice — the position view and the entry queue both call
-    this so they can never disagree (spec §6). None when either input is None."""
+    this so they can never disagree (spec §6). None when either input is None.
+
+    DAY-COUNT CONVENTION [NET_JUICE_TIME_BASE / HARD_CFM_RULE]: both terms are on
+    ONE shared time base — a 7-CALENDAR-day week. burn/week is theta_per_calendar
+    -day (call_greeks_full's theta_year ÷ 365 — a deliberate engine choice) × 7,
+    equivalently the two-point model difference ÷ (Δdte/7). juice/week (realized)
+    is one weekly cycle's net juice booked per ISO calendar week (~7 calendar
+    days). The subtraction is therefore like-for-like. Pinned by
+    test_burn.test_net_juice_day_count_convention_is_pinned so it can't drift."""
     if juice_per_week is None or burn_per_week_with_slippage is None:
         return None
     return round(juice_per_week - burn_per_week_with_slippage, 2)
