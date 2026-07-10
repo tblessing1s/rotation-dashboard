@@ -478,6 +478,12 @@ def api_execute():
         # actions are never rejected here, so the operator can still exit.
         return jsonify({"error": str(e), "frozen": True, "ticker": e.ticker,
                         "review": e.review}), 409
+    except executor.ResubmitLockedError as e:
+        # 409: the resubmission gate blocked a new live order for this position
+        # intent — a prior order isn't confirmed terminal at the broker yet (or the
+        # per-session attempt cap is hit). In addition to the freeze/gate/kill-switch.
+        return jsonify({"error": str(e), "resubmit_locked": True,
+                        "intent": e.intent_key, "reason": e.reason}), 409
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001
@@ -1307,6 +1313,14 @@ def serve_frontend(path: str = ""):
 # only if explicitly disabled (some one-off scripts import app without a store).
 if os.environ.get("CFM_SKIP_STARTUP_CHECK", "").strip() not in ("1", "true", "yes"):
     log.startup_check()
+    # Order-lifecycle startup reconciliation: any locally non-terminal order is
+    # re-polled against the broker before new order activity is allowed for its
+    # position (a crash mid-cancel must not orphan a working broker order). No-op
+    # when no live broker is configured (paper/tests); never blocks serving.
+    try:
+        executor.reconcile_pending_orders_on_startup()
+    except Exception as e:  # noqa: BLE001 — reconciliation must never block startup
+        log.logger.error("startup order reconciliation failed: %s", e)
 
 # Start the in-process alert scheduler (gunicorn imports this module; the CLI
 # path below reaches it too). start_once() is idempotent and a no-op when

@@ -318,14 +318,19 @@ gate stops new activity on that position meanwhile (F-4).
 
 ---
 
-## STOP — awaiting approval before Phase 2
+## Phase 2 — IMPLEMENTED
 
-Per the task, no code has been changed. The two premises the task is built on are
-both already satisfied in the tree (atomic entry + broker-first cancel), so Phase
-2 is a **gap-closing** effort, not a rebuild. The concrete gaps are F-1…F-11
-above. **Requesting approval to proceed to Phase 2**, and one decision:
+Approval was given. Phase 2 landed in the same branch (see CHANGELOG.md, "Order
+lifecycle: entry order type + broker-side cancel/retry state machine"). Summary of
+how each finding was closed:
 
-- **Scope of F-11:** leave the legged `buy_leap`/`sell_short` actions intact
-  (they're needed for scale-in and leg repair) and only guarantee a *fresh*
-  two-leg entry routes atomic — or do you also want a guard that refuses a
-  standalone `buy_leap` as a *fresh entry* when no LEAP exists yet?
+| # | Resolution |
+|---|---|
+| F-1 | `build_net_order` takes `complex_strategy_type`/`duration`; entry routes `ENTRY_COMPLEX_STRATEGY_TYPE`/`ENTRY_ORDER_DURATION` (exit/LEAP-roll defaults unchanged) |
+| F-2 | `PARTIAL_FILL_CANCELED` + fill-during-cancel handled on the cancel path: freeze + delta-coverage review + CRITICAL alert; never auto-fix |
+| F-3 | Per-position-intent lock in `state.json` + `order_lifecycle.check_resubmit` (`NO_RESUBMIT_BEFORE_TERMINAL`, `MAX_RESUBMIT_ATTEMPTS`); surfaced as HTTP 409 |
+| F-4/F-7 | `executor.reconcile_pending_orders_on_startup()` wired into app startup; unreachable orders hard-lock (`LOCKED_UNKNOWN`) |
+| F-5/F-6 | Cancel poll bounded by `CANCEL_POLL_*` (interval 0 in tests = mocked clock); `ORDER_FILL_TIMEOUT_SEC` added |
+| F-8/F-9 | Append-only `order_events`; `recompute_derived` derives `order_state`; named coded states in `order_lifecycle.py` |
+| F-10 | `backend/test_order_lifecycle.py` — pure state machine + the 10 required branches, all offline |
+| F-11 | **Decision taken:** legged `buy_leap`/`sell_short` actions kept (scale-in / leg repair); a lone long LEAP is not a naked-short risk and the naked-short guard already exists — no new hard refusal added; atomic routing for fresh entry stays the UI default |

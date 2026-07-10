@@ -59,6 +59,15 @@ def _default_state() -> dict:
         # order id; an entry is removed when the order fills (then committed as an
         # execution) or is cancelled/rejected.
         "pending_orders": {},
+        # Append-only order-lifecycle event log: one record per state transition
+        # (SUBMITTED->WORKING->…terminal) with the Schwab orderId, prior/new coded
+        # state, and raw broker status. recompute_derived() derives order_state
+        # from this; the log itself is never mutated. See order_lifecycle.py.
+        "order_events": [],
+        # Per-position-intent order lock (the resubmission gate, rule 5). Keyed by
+        # "TICKER:intent"; survives restart so a crash mid-cancel can't orphan a
+        # working broker order invisibly or let a double order through.
+        "order_locks": {},
         "alerts": migrations.default_alert_state(),
         # Position reconciliation vs Schwab: last report + capped history.
         "reconciliation": {"last": None, "history": [], "last_success": None},
@@ -298,6 +307,49 @@ def pop_pending_order(order_id: str) -> dict | None:
         rec = state.get("pending_orders", {}).pop(str(order_id), None)
         save_state(state)
         return rec
+
+
+def list_pending_orders() -> dict:
+    """A shallow copy of the live pending-orders map (order_id -> record). Used by
+    startup reconciliation to re-poll every unresolved order against Schwab."""
+    return dict(load_state().get("pending_orders", {}))
+
+
+# ---------------------------------------------------------------------------
+# Order-lifecycle event log + per-position resubmission lock
+# ---------------------------------------------------------------------------
+def append_order_event(event: dict) -> dict:
+    """Append one immutable order-lifecycle transition and recompute derived state.
+
+    Every state change (place, poll, cancel-request, terminal) writes one of these
+    with the Schwab orderId, prior/new coded state, and raw broker status, so the
+    current order state is a pure replay of the log (never a mutated field). A crash
+    between two events leaves a consistent prefix, not a half-written status."""
+    with _lock:
+        state = load_state()
+        event = dict(event)
+        event.setdefault("at", utcnow())
+        events = state.setdefault("order_events", [])
+        event.setdefault("seq", len(events) + 1)
+        events.append(event)
+        del events[:-_ORDER_EVENT_CAP]  # bounded; order_receipts is the long audit trail
+        recompute_derived(state)
+        save_state(state)
+        return event
+
+
+_ORDER_EVENT_CAP = 1000
+
+
+def get_order_lock(intent_key: str) -> dict | None:
+    return load_state().get("order_locks", {}).get(str(intent_key))
+
+
+def save_order_lock(intent_key: str, lock: dict) -> None:
+    with _lock:
+        state = load_state()
+        state.setdefault("order_locks", {})[str(intent_key)] = lock
+        save_state(state)
 
 
 # ---------------------------------------------------------------------------
@@ -720,4 +772,23 @@ def recompute_derived(state: dict) -> dict:
         juice_weeks = juice_weeks[-config.JUICE_TRAILING_WEEKS:]
         p["trailing_avg_weekly_juice"] = (round(sum(juice_weeks) / len(juice_weeks), 2)
                                           if juice_weeks else None)
+
+    # Order lifecycle: current coded state per Schwab orderId is DERIVED from the
+    # append-only order_events log (never stored imperatively). The last event for
+    # an order wins, so recompute is a pure replay — a crash mid-cancel can't leave
+    # a half-written status behind. order_lifecycle.py owns the state vocabulary.
+    order_state: dict[str, dict] = {}
+    for ev in state.get("order_events", []):
+        oid = str(ev.get("order_id") or "")
+        if not oid:
+            continue
+        order_state[oid] = {
+            "order_id": oid,
+            "state": ev.get("new_state"),
+            "ticker": ev.get("ticker"),
+            "intent": ev.get("intent"),
+            "raw_status": ev.get("raw_status"),
+            "at": ev.get("at"),
+        }
+    state["order_state"] = order_state
     return state

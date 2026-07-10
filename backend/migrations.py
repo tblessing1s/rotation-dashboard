@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 15
+CURRENT_VERSION = 16
 
 
 class MigrationAbortedError(RuntimeError):
@@ -222,6 +222,19 @@ def _v14_to_v15(state: dict) -> dict:
     return state
 
 
+def _v15_to_v16(state: dict) -> dict:
+    """v16 (order lifecycle: broker-side cancel state machine): two additive stores
+    — an append-only ``order_events`` log (one record per SUBMITTED->…->terminal
+    transition, from which recompute_derived derives ``order_state``) and an
+    ``order_locks`` map (the per-position-intent resubmission gate, which must
+    survive restart so a crash mid-cancel can't orphan a working broker order).
+    No live orders exist historically, so both seed empty; executions and the
+    existing pending_orders/order_receipts are untouched."""
+    state.setdefault("order_events", [])
+    state.setdefault("order_locks", {})
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -237,6 +250,7 @@ MIGRATIONS = {
     12: _v12_to_v13,
     13: _v13_to_v14,
     14: _v14_to_v15,
+    15: _v15_to_v16,
 }
 
 

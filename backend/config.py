@@ -546,6 +546,67 @@ ROLL_LEG_IMBALANCE_ACTION = "freeze"
 # ledger books at the net mid (paper fills are never haircut on the ledger).
 PAPER_ROLL_HAIRCUT_CROSSINGS = 1
 
+# ---- Entry (atomic open) order type ----------------------------------------
+# The live entry is ONE two-leg NET_DEBIT diagonal (buy-to-open the deep-ITM LEAP
+# + sell-to-open the weekly short) so it fills as a unit or not at all — the same
+# atomic pattern as the roll. These mirror the roll's provenance-tagged knobs so
+# the entry and roll can't silently disagree on strategy type / duration.
+
+# HARD_CFM_RULE — an unfilled entry is canceled and leaves no execution trace,
+# exactly like every other CFM order. The entry ticket is always a DAY order.
+ENTRY_ORDER_DURATION = "DAY"
+
+# PROPOSED_DEFAULT / LIVE_VERIFY — complexOrderStrategyType for the entry diagonal
+# (deep-ITM LEAP long + near-dated short: different strike AND different expiry).
+# CUSTOM is the safe superset Schwab accepts for any strike/expiry combination and
+# is what the atomic open/exit have used to date; DIAGONAL is the documented enum
+# for a different-expiry pair. MUST be confirmed against a live Schwab account
+# (spread-approval logic may prefer a specific enum) before production reliance.
+ENTRY_COMPLEX_STRATEGY_TYPE = "CUSTOM"
+
+# ---- Order lifecycle: cancel-and-retry state machine -----------------------
+# Provenance tags are load-bearing (see the roll block above): HARD_CFM_RULE
+# encodes an invariant, PROPOSED_DEFAULT is tunable, LIVE_VERIFY must be confirmed
+# against a real Schwab account. The lifecycle itself is order_lifecycle.py (pure
+# state machine) + executor.py (broker I/O). None of these auto-submit an order.
+
+# PROPOSED_DEFAULT — how long an unfilled live order may sit WORKING before the
+# operator/monitor initiates a broker cancel. A DAY limit that hasn't filled this
+# long has almost certainly missed the mid; chasing is a deliberate, gated choice
+# (see REPRICE_ON_RETRY), never automatic.
+ORDER_FILL_TIMEOUT_SEC = 45
+
+# PROPOSED_DEFAULT — Schwab's DELETE only ACKNOWLEDGES a cancel; the order cancels
+# asynchronously (WORKING -> PENDING_CANCEL -> CANCELED) and can still fill. After
+# the DELETE we re-poll the order this many times, waiting this long between polls,
+# to CONFIRM it reached a terminal state before claiming it canceled. Bounded so a
+# stuck PENDING_CANCEL surfaces as such rather than hanging. Set the interval to 0
+# in tests for an effectively mocked clock.
+CANCEL_POLL_INTERVAL_SEC = 0.4
+CANCEL_POLL_MAX_ATTEMPTS = 6
+
+# PROPOSED_DEFAULT — how many times a NEW order may be submitted for the SAME
+# position intent within one app session (a place, cancel, and re-place counts as
+# two attempts). After this many, the app alerts and STOPS auto-offering a retry —
+# repeated no-fills mean the price or the thesis is wrong, not that we should keep
+# crossing the spread. Enforced in order_lifecycle.check_resubmit.
+MAX_RESUBMIT_ATTEMPTS = 3
+
+# PROPOSED_DEFAULT — how a resubmitted order adjusts its limit toward the ask.
+# "none" (the default) re-sends at the SAME mid-seeded limit: honest, never chases
+# price, but may miss again if the market moved. Any price-chasing variant must be
+# an explicit, logged, config-gated behavior — silently walking the limit toward
+# the ask is how a "just get it filled" retry loop quietly pays up. "none" is the
+# only value wired today; a future "one_tick"/"toward_ask_frac" stays opt-in.
+REPRICE_ON_RETRY = "none"
+
+# HARD_CFM_RULE — the named invariant behind the resubmission gate: a new order for
+# a position intent may ONLY be sent once the prior order is confirmed TERMINAL at
+# the broker AND its fill is reconciled. This flag exists so the rule is a checked,
+# greppable constant, not a convention. Turning it off is a strategy change and is
+# not a supported configuration; it is asserted, not consulted-and-skipped.
+NO_RESUBMIT_BEFORE_TERMINAL = True
+
 # ---- Durability / backups --------------------------------------------------
 # state.json is the single source of truth on a single Fly volume, so the
 # nightly job keeps rotating local copies AND ships one copy off the machine.
