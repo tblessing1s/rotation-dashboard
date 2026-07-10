@@ -160,12 +160,33 @@ def is_finalizable(state: dict, month: str, net_by_month: dict,
 def monthly_leap_burn() -> dict[str, float]:
     """Realized LEAP extrinsic burn per month (whole-position $), from the weekly
     burn marks. Best-effort: any read failure (no marks file yet, telemetry
-    unavailable) degrades to {} so the payout falls back to juice-only."""
+    unavailable) degrades to {} so the payout falls back to juice-only — but the
+    failure is LOGGED, never silently swallowed, so a real telemetry error can't
+    hide behind an empty burn column."""
     try:
         import burn_marks
         return burn_marks.monthly_realized_burn()
-    except Exception:  # noqa: BLE001 — burn is an overlay, never breaks the payout
+    except Exception as exc:  # noqa: BLE001 — burn is an overlay, never breaks the payout
+        log.logger.warning("monthly LEAP burn unavailable (%s); payout falls back "
+                           "to juice-only for this render", exc)
         return {}
+
+
+def _burn_untracked_reason(month: str, burn_by_month: dict[str, float]) -> str | None:
+    """Why a month has no LEAP-burn figure, so the UI can say so honestly instead
+    of a bare 'n/a'. LEAP burn is FORWARD-ONLY weekly telemetry (burn_marks.json),
+    unlike juice which comes from the immutable execution ledger — so a month can
+    lack burn for distinct reasons the operator should be able to tell apart."""
+    if month in burn_by_month:
+        return None
+    if not burn_by_month:
+        # No month has burn at all: either the nightly burn-mark job hasn't
+        # recorded two spanning marks yet (just deployed / no open LEAP), or the
+        # telemetry errored (logged in monthly_leap_burn).
+        return "no_burn_marks_yet"
+    if month < min(burn_by_month):
+        return "predates_burn_tracking"
+    return "no_marks_span_month"
 
 
 def _net_payout(net_juice: float, leap_burn: float | None) -> float:
@@ -255,6 +276,10 @@ def view(state: dict | None = None) -> dict:
     history = [_month_entry(m, net_by_month.get(m), records.get(m),
                             burn_by_month.get(m), state, cur)
                for m in months]
+    # Say WHY a month has no LEAP burn (predates tracking / no marks yet / gap) so
+    # the UI shows an honest reason instead of a bare "n/a".
+    for h in history:
+        h["burn_untracked_reason"] = _burn_untracked_reason(h["month"], burn_by_month)
     by_month = {h["month"]: h for h in history}
 
     current = by_month[cur]
@@ -284,6 +309,13 @@ def view(state: dict | None = None) -> dict:
             "paid_out": paid_out,
             "awaiting": awaiting,
             "year": year,
+        },
+        # LEAP-burn telemetry status, so the UI can explain the burn column: burn
+        # is forward-only weekly telemetry, so months before it started (or before
+        # the nightly recorded two spanning marks) are juice-only, not an error.
+        "burn_tracking": {
+            "present": bool(burn_by_month),
+            "since": min(burn_by_month) if burn_by_month else None,
         },
     }
 

@@ -156,6 +156,43 @@ def test_payout_untracked_burn_degrades_to_juice(isolated_state, monkeypatch):
     assert prev["net_payout"] == 510.0                 # falls back to juice-only
 
 
+def test_burn_untracked_months_carry_an_honest_reason(isolated_state, monkeypatch):
+    """The monthly-history rows say WHY a month has no LEAP burn instead of a bare
+    'n/a' — burn is forward-only telemetry, so a blank month predates tracking, has
+    no marks yet, or is a gap. And the view exposes when tracking started."""
+    # Juice in Feb (pre-tracking), Apr, May; burn marks only for Apr and May.
+    state = _seed(monkeypatch, [
+        _close("AA", "2026-02-14T15:00:00Z", 200.0),
+        _close("AA", "2026-04-18T15:00:00Z", 150.0),
+        _close("AA", "2026-05-16T15:00:00Z", 150.0),
+    ], burn={"2026-04": 36.0, "2026-05": 60.0})
+    v = payouts.view(state)
+    by = {h["month"]: h for h in v["history"]}
+    assert by["2026-04"]["burn_tracked"] is True
+    assert by["2026-04"]["burn_untracked_reason"] is None
+    assert by["2026-02"]["burn_tracked"] is False
+    assert by["2026-02"]["burn_untracked_reason"] == "predates_burn_tracking"
+    assert v["burn_tracking"] == {"present": True, "since": "2026-04"}
+
+    # No burn marks anywhere -> the "not recorded yet" reason + present=False.
+    none_state = _seed(monkeypatch, [_close("AA", "2026-06-05T15:00:00Z", 510.0)], burn={})
+    v2 = payouts.view(none_state)
+    assert v2["burn_tracking"]["present"] is False
+    assert all(h["burn_untracked_reason"] == "no_burn_marks_yet" for h in v2["history"])
+
+
+def test_monthly_leap_burn_logs_instead_of_swallowing(monkeypatch, caplog):
+    """A telemetry error must be LOGGED, not silently swallowed into an empty burn
+    column (which would hide a real failure behind expected juice-only months)."""
+    import burn_marks
+    def _boom():
+        raise RuntimeError("marks file corrupt")
+    monkeypatch.setattr(burn_marks, "monthly_realized_burn", _boom)
+    with caplog.at_level("WARNING"):
+        assert payouts.monthly_leap_burn() == {}       # still degrades gracefully
+    assert any("monthly LEAP burn unavailable" in r.message for r in caplog.records)
+
+
 def test_finalize_snapshots_leftover_and_breakdown(isolated_state, monkeypatch):
     _seed(monkeypatch, [_close("AA", "2026-06-05T15:00:00Z", 510.0)],
           burn={"2026-06": 120.0})

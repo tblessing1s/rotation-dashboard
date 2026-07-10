@@ -25,6 +25,15 @@ function tone(n) {
   return n > 0 ? "text-emerald-300" : n < 0 ? "text-rose-300" : "text-slate-100";
 }
 
+// Why a month's LEAP burn reads "n/a" — burn is forward-only weekly telemetry
+// (unlike juice, which comes from the immutable execution ledger), so a blank
+// month is not an error. These explain the gap on hover.
+const BURN_REASON = {
+  predates_burn_tracking: "Predates LEAP-burn tracking — this month is juice-only (burn can't be backfilled from the ledger).",
+  no_burn_marks_yet: "No burn marks recorded yet — the weekly burn-mark job hasn't logged two spanning marks (just deployed, or no open LEAP).",
+  no_marks_span_month: "No burn marks span this month (a gap in the weekly telemetry).",
+};
+
 const STATUS_PILL = {
   in_progress: { status: "caution", label: "In progress" },
   finalizable: { status: "ready", label: "Ready to finalize" },
@@ -210,6 +219,19 @@ export default function PayoutsTab() {
 
       {/* Month-by-month history */}
       <Card title="Monthly history">
+        {data?.burn_tracking && !data.burn_tracking.present && (
+          <p className="mb-3 text-xs text-slate-400">
+            LEAP burn is forward-only weekly telemetry and hasn't been recorded yet,
+            so months show juice only. It begins populating once the nightly
+            burn-mark job logs two spanning marks against an open LEAP.
+          </p>
+        )}
+        {data?.burn_tracking?.present && data.burn_tracking.since && (
+          <p className="mb-3 text-xs text-slate-400">
+            LEAP burn tracked since {data.burn_tracking.since}; earlier months are
+            juice-only (burn can't be reconstructed from the ledger).
+          </p>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
@@ -228,7 +250,9 @@ export default function PayoutsTab() {
                   <td className="py-2 pr-3 font-semibold text-slate-100">{m.label}</td>
                   <td className={`py-2 pr-3 ${tone(m.net_juice)}`}>{cash(m.net_juice)}</td>
                   <td className="py-2 pr-3 text-rose-300/80"
-                      title={m.burn_tracked ? "Realized weekly LEAP extrinsic burn this month" : "No burn marks yet"}>
+                      title={m.burn_tracked
+                        ? "Realized weekly LEAP extrinsic burn this month"
+                        : BURN_REASON[m.burn_untracked_reason] || "No burn marks for this month"}>
                     {m.burn_tracked ? (m.leap_burn ? `−${cash(m.leap_burn)}` : cash(0)) : "n/a"}
                   </td>
                   <td className={`py-2 pr-3 font-semibold ${tone(m.net_payout)}`}>
