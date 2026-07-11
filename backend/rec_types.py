@@ -134,8 +134,7 @@ class CheckStatus:
 class FidelityDefect:
     """Coded defect stamped on a failed fidelity check."""
 
-    ILLEGAL_TRANSITION = "ILLEGAL_TRANSITION"        # observed transition not in the legal graph
-    EVENT_CHAIN_GAP = "EVENT_CHAIN_GAP"              # event's prior_state != previous event's new_state
+    ILLEGAL_TRANSITION = "ILLEGAL_TRANSITION"        # observed new_state sequence not in the legal graph
     SLIPPAGE_EXCEEDED = "SLIPPAGE_EXCEEDED"          # adverse fill beyond the ticket's bound
     ORPHAN_LEG = "ORPHAN_LEG"                        # one leg of a multi-leg ticket live without the other
     PARTIAL_FILL = "PARTIAL_FILL"                    # partial quantity terminal (unbalanced)

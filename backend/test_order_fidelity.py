@@ -168,6 +168,59 @@ def test_graded_verdicts_survive_event_cap_rollover():
     assert "new1" in second
 
 
+def test_executor_shaped_events_with_lock_derived_priors_pass():
+    """Regression (v2.6.1): the executor stamps each event's prior_state from
+    the per-intent LOCK — None for un-locked intents (rolls/exits), and shared
+    across successive orders for locked ones. A clean lifecycle whose events
+    carry None/foreign prior_state pointers must PASS: the grader reads the
+    observed new_state sequence, never the recorded prior pointers."""
+    ev = [
+        {"order_id": "o8", "ticker": "XLK", "intent": "XLK:open_position_atomic",
+         "prior_state": olc.SUBMITTED, "new_state": olc.WORKING,
+         "raw_status": "SUBMITTED", "seq": 1, "at": _iso(NOW - timedelta(hours=2))},
+        # settle event: prior_state None (lock lookup missed) — the exact shape
+        # that produced the false ILLEGAL_TRANSITION pages at first deploy
+        {"order_id": "o8", "ticker": "XLK", "intent": "XLK:open_position_atomic",
+         "prior_state": None, "new_state": olc.FILLED,
+         "raw_status": "FILLED", "seq": 2, "at": _iso(NOW - timedelta(hours=1))},
+    ]
+    state = _state(events=ev, receipts=[{"order_id": "o8", "execution_ids": ["e1", "e2"]}],
+                   execs=_roll_execs())
+    fid = trust_derive.derive_order_fidelity(state, NOW)["o8"]
+    assert fid["checks"][FidelityCheck.LIFECYCLE_LEGAL]["status"] == CheckStatus.PASS
+    assert fid["pass"] is True
+
+
+def test_plain_fill_discovered_during_cancel_is_legal():
+    """A fill that races the cancel but is discovered by the plain poll path
+    records CANCEL_REQUESTED -> FILLED (not FILLED_DURING_CANCEL). Legal."""
+    ev = _events("o9", [olc.SUBMITTED, olc.WORKING, olc.CANCEL_REQUESTED, olc.FILLED])
+    fid = trust_derive.derive_order_fidelity(_state(events=ev), NOW)["o9"]
+    assert fid["checks"][FidelityCheck.LIFECYCLE_LEGAL]["status"] == CheckStatus.PASS
+    assert fid["checks"][FidelityCheck.CANCEL_CONFIRMED_DEAD]["status"] == CheckStatus.PASS
+
+
+def test_pre_activation_lifecycles_graded_but_never_page_or_block():
+    """Orders whose lifecycle ended BEFORE trust_layer_since are graded for the
+    record, flagged pre_activation, excluded from paging and graduation — the
+    deploy-time migration must not retroactively wake the operator."""
+    old = datetime(2025, 11, 3, 15, 0, tzinfo=timezone.utc)   # before SINCE
+    ev = _events("hist1", [olc.SUBMITTED, olc.WORKING, olc.FILLED], start=old)
+    ev.append({"order_id": "hist1", "ticker": "XLK", "intent": "XLK:buy_leap",
+               "prior_state": olc.FILLED, "new_state": olc.WORKING,   # genuinely illegal
+               "raw_status": "WORKING", "seq": 4, "at": _iso(old + timedelta(minutes=5))})
+    state = _state(events=ev)
+    fid = trust_derive.derive_order_fidelity(state, NOW)["hist1"]
+    assert fid["pass"] is False and fid["pre_activation"] is True
+    state["order_fidelity"] = {"hist1": fid}
+    assert alerts.check_order_fidelity_fail(state) == []   # never pages
+    board = trust_derive.scoreboard(state, [], state["order_fidelity"], NOW)
+    assert board["totals"]["fidelity_failures"] == 0
+    assert board["totals"]["pre_activation_failures"] == 1
+    grad = board["by_action_type"]["ENTER"]["graduation"]
+    assert not any("fidelity failures" in f for f in grad["failing"])
+
+
 def test_slippage_bound_from_source_recommendation_ticket():
     """A ticket staged from a recommendation grades against ITS OWN bound."""
     ev = _events("o7", [olc.SUBMITTED, olc.WORKING, olc.FILLED])

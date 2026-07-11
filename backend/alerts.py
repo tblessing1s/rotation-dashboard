@@ -980,6 +980,8 @@ def check_order_fidelity_fail(state: dict) -> list[dict]:
     for rec in (state.get("order_fidelity") or {}).values():
         if rec.get("pass") is not False:
             continue
+        if rec.get("pre_activation"):
+            continue  # graded for the record; never page for pre-trust history
         if str(rec.get("graded_at") or "")[:10] < cutoff:
             continue
         failed = [f"{name}: {chk.get('defect')}"

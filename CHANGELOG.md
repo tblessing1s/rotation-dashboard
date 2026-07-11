@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.6.1 — Fidelity grader: fix false ILLEGAL_TRANSITION pages at deploy
+
+The v2.6.0 deploy retroactively graded every historical order lifecycle and
+paged HIGH `ORDER_FIDELITY_FAIL` alerts for clean orders. Two causes, both in
+the grader (the executor behaved correctly all along):
+
+- **Grade the observed lifecycle, not the lock pointer.** `_settle_order`
+  stamps each event's `prior_state` from the per-intent resubmission lock —
+  `None` for un-locked intents and shared across successive orders for locked
+  ones — so it is bookkeeping, not a lifecycle edge. `LIFECYCLE_LEGAL` now
+  validates the sequence of observed `new_state` values per order and ignores
+  the recorded prior pointers (`EVENT_CHAIN_GAP` defect removed).
+- **Missing legal edges.** A fill that races a cancel but is discovered by the
+  plain poll path records `CANCEL_REQUESTED/PENDING_CANCEL -> FILLED`; a
+  broker-side cancel first seen by a poll records `WORKING -> PENDING_CANCEL`.
+  Added to the legal graph (with `SUBMITTED -> PENDING_CANCEL` and
+  `WORKING -> FILLED_DURING_CANCEL` for the restart-recovered flag).
+- **Pre-activation lifecycles never page.** Orders whose lifecycle ended
+  before `metadata.trust_layer_since` are still graded (flagged
+  `pre_activation`) but are excluded from fidelity alerts, scoreboard failure
+  totals, and graduation — deploy-time migration must not wake the operator
+  for pre-trust history. Existing wrong grades self-heal: the next recompute
+  re-derives them and the alert engine auto-resolves the stale pages.
+
+Three regression tests lock the executor-shaped event fixtures (lock-derived
+priors, plain-fill-during-cancel, pre-activation exclusion).
+
 ## v2.6.0 — Recommendation engine + trust scoreboard + execution fidelity ledger (state schema v17)
 
 The trust layer that must exist before any automated execution is permitted.

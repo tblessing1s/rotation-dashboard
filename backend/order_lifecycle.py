@@ -62,13 +62,21 @@ REVIEW_BLOCKING = frozenset({FILLED_DURING_CANCEL, PARTIAL_FILL_CANCELED, LOCKED
 _LIVE = frozenset({WORKING, CANCEL_REQUESTED, PENDING_CANCEL})
 LEGAL_TRANSITIONS = {
     SUBMITTED: frozenset({WORKING, FILLED, REJECTED, EXPIRED, CANCELED,
-                          CANCEL_REQUESTED, LOCKED_UNKNOWN}),
-    WORKING: frozenset({FILLED, CANCEL_REQUESTED, REJECTED, EXPIRED, CANCELED,
+                          CANCEL_REQUESTED, PENDING_CANCEL, LOCKED_UNKNOWN}),
+    # WORKING may settle PENDING_CANCEL (a broker-side cancel first seen by a
+    # poll) or FILLED_DURING_CANCEL (a restart lost the local cancel-requested
+    # event but the pending record remembers) — both real, rule-abiding paths.
+    WORKING: frozenset({FILLED, CANCEL_REQUESTED, PENDING_CANCEL, REJECTED,
+                        EXPIRED, CANCELED, FILLED_DURING_CANCEL,
                         PARTIAL_FILL_CANCELED, LOCKED_UNKNOWN}),
-    CANCEL_REQUESTED: frozenset({PENDING_CANCEL, CANCELED, FILLED_DURING_CANCEL,
-                                 PARTIAL_FILL_CANCELED, REJECTED, EXPIRED,
-                                 LOCKED_UNKNOWN}),
-    PENDING_CANCEL: frozenset({CANCELED, FILLED_DURING_CANCEL,
+    # A fill that races the cancel is USUALLY coded FILLED_DURING_CANCEL, but
+    # the plain-poll discovery path (order_status during the cancel retry loop
+    # / startup reconciliation) books it as a plain FILLED — same rules, same
+    # outcome, different discovery route. Both edges are legal.
+    CANCEL_REQUESTED: frozenset({PENDING_CANCEL, CANCELED, FILLED,
+                                 FILLED_DURING_CANCEL, PARTIAL_FILL_CANCELED,
+                                 REJECTED, EXPIRED, LOCKED_UNKNOWN}),
+    PENDING_CANCEL: frozenset({CANCELED, FILLED, FILLED_DURING_CANCEL,
                                PARTIAL_FILL_CANCELED, REJECTED, EXPIRED,
                                LOCKED_UNKNOWN}),
     LOCKED_UNKNOWN: TERMINAL,  # operator/reconciliation resolves it to terminal

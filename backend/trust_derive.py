@@ -315,17 +315,27 @@ def _check(status: str, defect: str | None = None, **detail) -> dict:
 
 
 def _grade_lifecycle(events: list[dict]) -> dict:
-    prior_seen = None
-    for ev in events:
-        prior, new = ev.get("prior_state"), ev.get("new_state")
-        if prior_seen is not None and prior is not None and prior != prior_seen:
-            return _check(CheckStatus.FAIL, FidelityDefect.EVENT_CHAIN_GAP,
-                          expected_prior=prior_seen, event_prior=prior, at=ev.get("at"))
-        if not olc.is_legal_transition(prior, new):
+    """Grade the OBSERVED lifecycle: the sequence of new_state values per order.
+
+    Deliberately NOT graded: each event's recorded ``prior_state``. The executor
+    stamps it from the per-intent lock (executor._settle_order) — shared across
+    successive orders for the same intent, and None entirely for un-locked
+    intents (rolls/exits) — so it is bookkeeping about the resubmission gate,
+    not a statement about this order's chain. Grading it produced false
+    ILLEGAL_TRANSITION failures on perfectly clean lifecycles. The new_state
+    sequence IS the order's observed lifecycle; that is what legality means."""
+    seq = [ev.get("new_state") for ev in events]
+    if not seq:
+        return _check(CheckStatus.NOT_APPLICABLE)
+    if seq[0] not in (olc.SUBMITTED, olc.WORKING):
+        return _check(CheckStatus.FAIL, FidelityDefect.ILLEGAL_TRANSITION,
+                      prior=None, new=seq[0], at=events[0].get("at"))
+    for prev_ev, ev in zip(events, events[1:]):
+        a, b = prev_ev.get("new_state"), ev.get("new_state")
+        if not olc.is_legal_transition(a, b):
             return _check(CheckStatus.FAIL, FidelityDefect.ILLEGAL_TRANSITION,
-                          prior=prior, new=new, at=ev.get("at"))
-        prior_seen = new
-    if prior_seen == olc.LOCKED_UNKNOWN:
+                          prior=a, new=b, at=ev.get("at"))
+    if seq[-1] == olc.LOCKED_UNKNOWN:
         return _check(CheckStatus.FAIL, FidelityDefect.HARD_LOCKED)
     return _check(CheckStatus.PASS)
 
@@ -461,12 +471,19 @@ def derive_order_fidelity(state: dict, now: datetime) -> dict:
             # separate work item; NEVER silently pass in its absence.
             FidelityCheck.RECONCILED_CLEAN: _check(CheckStatus.NOT_YET_IMPLEMENTED),
         }
+        last_at = _parse_ts(events[-1].get("at"))
         out[oid] = {
             "order_id": oid, "paper": False,
             "ticker": events[-1].get("ticker"), "intent": intent,
             "action_type": _INTENT_ACTION.get(intent or ""),
             "state": final_state, "terminal": olc.is_terminal(final_state),
             "checks": checks, "pass": _ticket_pass(checks),
+            # Lifecycles that ended before the trust layer activated are graded
+            # for the record but never page and never count toward (or against)
+            # graduation — retroactively waking the operator at deploy time for
+            # pre-activation history is noise, not evidence.
+            "pre_activation": bool(since is not None and last_at is not None
+                                   and last_at < since),
             "graded_at": _iso(now),
         }
         # Refine roll tickets to DEFEND when the committed legs say so.
@@ -584,7 +601,8 @@ def _graduation(action_type: str, window_res: list[dict], fidelity: list[dict],
                        f"GRAD_MAX_OVERRIDE_RATE {config.GRAD_MAX_OVERRIDE_RATE}")
     if any(r.get("reason") == "DISAGREE_ACTION" for r in overridden):
         failing.append("unresolved DISAGREE_ACTION override(s) in window")
-    live_fidelity = [f for f in fidelity if not f.get("paper") and f.get("pass") is not None]
+    live_fidelity = [f for f in fidelity if not f.get("paper")
+                     and not f.get("pre_activation") and f.get("pass") is not None]
     if any(f["pass"] is False for f in live_fidelity):
         failing.append("fidelity failures in window (HARD: pass rate must be 100%)")
     if not reconciliation_ok:
@@ -634,7 +652,8 @@ def scoreboard(state: dict, resolutions: list[dict], fidelity_map: dict,
         for r in overridden:
             override_breakdown[r.get("reason") or "?"] = \
                 override_breakdown.get(r.get("reason") or "?", 0) + 1
-        fid_t = [f for f in fidelity if f.get("action_type") == at]
+        fid_t = [f for f in fidelity if f.get("action_type") == at
+                 and not f.get("pre_activation")]
         fid_graded = [f for f in fid_t if f.get("pass") is not None]
         fid_pass = [f for f in fid_graded if f["pass"]]
         by_type[at] = {
@@ -670,7 +689,11 @@ def scoreboard(state: dict, resolutions: list[dict], fidelity_map: dict,
                              if r.get("trigger_rule") == TriggerRule.ALL_CLEAR),
             "coverage_misses": sum(1 for r in resolutions
                                    if r["status"] == Resolution.COVERAGE_MISS),
-            "fidelity_failures": sum(1 for f in fidelity if f.get("pass") is False),
+            "fidelity_failures": sum(1 for f in fidelity if f.get("pass") is False
+                                     and not f.get("pre_activation")),
+            "pre_activation_failures": sum(1 for f in fidelity
+                                           if f.get("pass") is False
+                                           and f.get("pre_activation")),
         },
         "reconciliation_status": ("NOT_YET_IMPLEMENTED"),
         "automation_note": ("Display-only. No automation switch exists; while "
