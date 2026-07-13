@@ -264,6 +264,66 @@ def ingested_ids(state: dict) -> set[str]:
     return set((state.get("ingested_transactions") or {}).keys())
 
 
+# Map a broker leg to the app execution ACTION it would book, keyed by
+# instruction. Mirrors executor.INSTRUCTION inverted; used to dedupe a broker
+# fill against an execution the app ALREADY holds.
+def _leg_action(leg: dict) -> str | None:
+    if leg.get("asset_type") != "OPTION":
+        return None
+    buying = (leg.get("amount") or 0) > 0
+    closing = leg.get("position_effect") == "CLOSING" or _instruction_of(leg) in _CLOSING
+    if closing:
+        return "close_short" if buying else "close_leap"
+    return "buy_leap" if buying else "sell_short"
+
+
+def _exec_key(ticker, action, strike, expiry, contracts) -> tuple:
+    def _r(v):
+        try:
+            return round(float(v), 4)
+        except (TypeError, ValueError):
+            return None
+    return ((ticker or "").upper(), action, _r(strike),
+            str(expiry)[:10] if expiry else None, int(contracts or 0))
+
+
+def existing_execution_keys(state: dict) -> dict[tuple, int]:
+    """A multiset of (ticker, action, strike, expiry, contracts) keys the app has
+    ALREADY booked as executions. A broker leg whose key is present here is a fill
+    the app already has — it must be CONFIRMED, never surfaced for adoption (that
+    was the duplicate-leg defect). Count-valued so N identical legs match N booked
+    executions, not one."""
+    keys: dict[tuple, int] = {}
+    for e in state.get("executions") or []:
+        action = e.get("action")
+        if action not in ("sell_short", "close_short", "buy_leap", "close_leap"):
+            continue
+        k = _exec_key(e.get("ticker"), action, e.get("strike"),
+                      e.get("expiration"), e.get("contracts"))
+        keys[k] = keys.get(k, 0) + 1
+    return keys
+
+
+def _group_already_booked(legs: list[dict], exec_keys: dict[tuple, int]) -> bool:
+    """True when EVERY option leg of a group corresponds to an execution the app
+    already holds (consuming counts so a genuinely-new second identical leg is not
+    swallowed by one booked leg). Equity legs (assignments) never count as booked —
+    those are always surfaced."""
+    opt_legs = [l for l in legs if l["asset_type"] == "OPTION"]
+    if not opt_legs:
+        return False
+    remaining = dict(exec_keys)
+    ticker = _underlying(legs)
+    for leg in opt_legs:
+        action = _leg_action(leg)
+        k = _exec_key(ticker, action, leg.get("strike"), leg.get("expiry"),
+                      abs(leg.get("amount") or 0))
+        if remaining.get(k, 0) <= 0:
+            return False
+        remaining[k] -= 1
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Exposure description (spec §6) for an out-of-band / unbalanced group
 # ---------------------------------------------------------------------------
@@ -322,6 +382,7 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
     records, errors = parse_feed(feed)
     already = ingested_ids(state)
     known_orders = app_order_ids(state)
+    exec_keys = existing_execution_keys(state)
 
     groups = group_by_order(records)
     matched: list[dict] = []
@@ -336,7 +397,12 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
             continue  # every leg of this group already ingested — idempotent no-op
 
         action = infer_action(g["legs"])
-        is_app = g["order_id"] is not None and str(g["order_id"]) in known_orders
+        # A broker fill is "already ours" when EITHER its Schwab orderId is a known
+        # app order OR every leg corresponds to an execution the app already booked
+        # (the latter guards the duplicate-leg defect: an app fill whose orderId
+        # didn't link must be CONFIRMED, never offered for adoption).
+        is_app = ((g["order_id"] is not None and str(g["order_id"]) in known_orders)
+                  or _group_already_booked(g["legs"], exec_keys))
         common = {
             "order_id": g["order_id"],
             "group_key": g["group_key"],
@@ -349,8 +415,10 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
             "leg_summaries": [_summ_leg(l) for l in g["legs"]],
         }
         if is_app:
+            by = (f"app order {g['order_id']}" if g["order_id"] and str(g["order_id"]) in known_orders
+                  else "an execution the app already booked")
             matched.append(dict(common, source=SOURCE_APP,
-                                summary=f"broker fill confirms app order {g['order_id']}"))
+                                summary=f"broker fill confirms {by}"))
         else:
             pid = f"adopt_{g['group_key']}".replace(":", "_")
             proposals.append(dict(

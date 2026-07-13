@@ -660,6 +660,24 @@ def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
     if not ticker:
         raise ValueError(f"proposal {proposal_id} has no resolvable underlying — cannot adopt")
     legs = proposal.get("legs") or []
+
+    # Defense-in-depth against the duplicate-leg defect: state may have changed
+    # since the proposal was surfaced (a matching fill got booked, or the operator
+    # already reconciled). If every leg now corresponds to an execution the app
+    # already holds, this proposal is stale — refuse rather than double-book, and
+    # point at reconciliation (the broker-verified correction path).
+    if ingest._group_already_booked(legs, ingest.existing_execution_keys(state)):
+        # Drop the stale proposal so it stops being offered.
+        ing = state.setdefault("ingestion", {"last": None, "proposals": []})
+        ing["proposals"] = [p for p in (ing.get("proposals") or [])
+                            if p.get("proposal_id") != proposal_id]
+        for tid in {t for leg in legs for t in ([leg.get("transaction_id")] if leg.get("transaction_id") else [])}:
+            ingest.record_ingested(state, tid, source=ingest.SOURCE_APP,
+                                   order_id=proposal.get("order_id"))
+        log.save_state(state)
+        raise ValueError(
+            f"proposal {proposal_id} is already booked in state — refusing to duplicate it. "
+            "Run reconciliation to verify against the broker.")
     # A multi-leg out-of-band order (e.g. a manual roll) is booked as one linked
     # logical action so it lands in the roll ledger like an atomic roll.
     roll_group_id = _next_roll_id(state) if len(legs) > 1 else None
