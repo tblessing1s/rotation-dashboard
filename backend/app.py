@@ -529,6 +529,22 @@ def api_order_cancel():
         return _err(e)
 
 
+@app.route("/api/order-submission-status")
+def api_order_submission_status():
+    """MANUAL status check for a client_order_ref (incident hotfix, D2/D4). Resolves
+    an order whose broker outcome isn't yet confirmed — recovers a missing orderId by
+    recent-orders match and syncs the durable record to the broker truth. Never
+    auto-retries the submission; the operator drives it. Reading it never lies:
+    UNKNOWN stays 'confirming', a rejection carries Schwab's verbatim reason."""
+    ref = request.args.get("ref", "") or request.args.get("client_order_ref", "")
+    if not ref:
+        return jsonify({"error": "ref is required"}), 400
+    try:
+        return jsonify(executor.submission_status(ref))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 # ---------------------------------------------------------------------------
 # Track
 # ---------------------------------------------------------------------------

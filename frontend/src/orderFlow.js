@@ -20,19 +20,85 @@ const ACTION_VERB = {
 
 const FILL_TIMEOUT_MS = 3000;
 const POLL_MS = 400;
+// Confirming an UNKNOWN (lost-response / accepted-no-id) order by client_order_ref.
+// A handful of quick reads to catch the common "the ack was just slow" case; if it's
+// still unconfirmed we leave a persistent, truthful message rather than poll forever.
+const CONFIRM_ATTEMPTS = 5;
+const CONFIRM_MS = 2000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// The order's broker outcome isn't confirmed yet (no response, a timeout, or a 2xx
+// ack with no id). It may be LIVE at Schwab — so we NEVER say "failed". Poll the
+// truthful by-ref status a few times; resolve on a real outcome, else leave a
+// persistent "confirming — check your broker" message the operator can act on.
+async function confirmByRef(api, toast, id, label, ref) {
+  for (let i = 0; i < CONFIRM_ATTEMPTS; i++) {
+    await sleep(CONFIRM_MS);
+    let st;
+    try {
+      st = await api.submissionStatus(ref);
+    } catch {
+      continue; // transient — keep confirming
+    }
+    if (st.status === "filled") {
+      toast.update(id, `${label} filled & logged.`, { type: "success" });
+      return st;
+    }
+    if (st.status === "rejected") {
+      toast.update(id, `${label} rejected by Schwab: ${st.reason || "no reason given"}.`,
+        { type: "error", duration: 10000 });
+      return st;
+    }
+    if (st.status === "canceled") {
+      toast.update(id, `${label} canceled.`, { type: "error", duration: 8000 });
+      return st;
+    }
+    if (st.status === "working") {
+      toast.update(id,
+        `${label} confirmed working at Schwab${st.order_id ? ` (order ${st.order_id})` : ""}.`,
+        { type: "success" });
+      return st;
+    }
+  }
+  // Still UNKNOWN — do NOT claim failure. Tell the truth and stop.
+  toast.update(id,
+    `${label} — the broker hasn't confirmed this order yet. It may be working at Schwab; ` +
+      `use "Check status" or confirm in your broker before placing another.`,
+    { type: "pending", duration: 0 });
+  return { status: "unknown", client_order_ref: ref };
+}
 
 export async function submitOrder(api, toast, payload) {
   const label = `${ACTION_VERB[payload.action] || payload.action} ${payload.ticker || ""}`.trim();
   const id = toast.show(`Submitting ${label}…`, { type: "pending", duration: 0 });
+  const ref = payload.client_order_ref;
 
   let res;
   try {
     res = await api.execute(payload);
   } catch (e) {
+    // A refuse-to-construct (400) is a real, pre-submission validation stop — show it.
+    // But a LOST response for a ref-keyed order is NOT a failure: the order may be live
+    // at Schwab. Switch to confirming-by-ref instead of lying "failed" (D2/D3).
+    if (ref && !(e.status >= 400 && e.status < 500 && !e.timeout)) {
+      toast.update(id, `${label} — confirming with broker…`, { type: "pending", duration: 0 });
+      return confirmByRef(api, toast, id, label, ref);
+    }
     toast.update(id, `${label} failed: ${e.message}`, { type: "error", duration: 8000 });
     throw e;
+  }
+
+  // Explicit broker rejection — show Schwab's verbatim reason (never a generic "failed").
+  if (res.status === "rejected") {
+    toast.update(id, `${label} rejected by Schwab: ${res.reason || "no reason given"}.`,
+      { type: "error", duration: 10000 });
+    return res;
+  }
+  // Broker outcome not yet confirmed (UNKNOWN) — confirm by ref, never "failed".
+  if (res.status === "unknown") {
+    toast.update(id, `${label} — confirming with broker…`, { type: "pending", duration: 0 });
+    return confirmByRef(api, toast, id, label, ref || res.client_order_ref);
   }
 
   // Immediate fill (paper/logged path, or a live order that filled on placement).

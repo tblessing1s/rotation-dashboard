@@ -274,14 +274,22 @@ def test_roll_debit_counts_as_drag(isolated_state):
 def test_live_roll_builds_single_two_leg_net_order(isolated_state, monkeypatch):
     placed = {}
 
+    close_sym = schwab_api.occ_option_symbol("NVDA", "2026-07-02", 130)
+    open_sym = schwab_api.occ_option_symbol("NVDA", "2026-07-10", 125)
+
     class _FakeClient:
         def primary_account_hash(self):
             return "HASH"
 
-        def place_order(self, account_hash, order):
+        def get_quotes(self, symbols):
+            # Re-read mids reproduce the staged legs (buyback 0.25, new premium 1.10).
+            m = {close_sym: {"bid": 0.20, "ask": 0.30}, open_sym: {"bid": 1.05, "ask": 1.15}}
+            return {s: m.get(s) for s in symbols}
+
+        def submit_order(self, account_hash, order):
             placed["account_hash"] = account_hash
             placed["order"] = order
-            return {"orderId": "9001"}
+            return {"outcome": "accepted", "order_id": "9001"}
 
     import data_handler
     # Seed the open short on the paper path, then flip live for the roll.
@@ -297,6 +305,7 @@ def test_live_roll_builds_single_two_leg_net_order(isolated_state, monkeypatch):
         "close_price_per_share": 0.25,
         "to_strike": 125, "to_expiration": "2026-07-10", "to_dte": 7,
         "premium_per_share": 1.10, "stock_price": 128, "roll_reason": "75%-rule",
+        "client_order_ref": "cor_pm_build",
     })
     assert res["status"] == "working" and res["order_id"] == "9001"
 
@@ -326,8 +335,12 @@ def test_live_roll_fill_commits_both_legs_at_leg_prices(isolated_state, monkeypa
         def primary_account_hash(self):
             return "HASH"
 
-        def place_order(self, account_hash, order):
-            return {"orderId": "9001"}
+        def get_quotes(self, symbols):
+            m = {close_sym: {"bid": 0.20, "ask": 0.30}, open_sym: {"bid": 1.05, "ask": 1.15}}
+            return {s: m.get(s) for s in symbols}
+
+        def submit_order(self, account_hash, order):
+            return {"outcome": "accepted", "order_id": "9001"}
 
         def get_order(self, account_hash, order_id):
             return {
@@ -358,6 +371,7 @@ def test_live_roll_fill_commits_both_legs_at_leg_prices(isolated_state, monkeypa
         "close_price_per_share": 0.25,
         "to_strike": 125, "to_expiration": "2026-07-10", "to_dte": 7,
         "premium_per_share": 1.10, "stock_price": 128, "roll_reason": "75%-rule",
+        "client_order_ref": "cor_pm_fill",
     })
     out = executor.order_status("9001")
     assert out["status"] == "filled"

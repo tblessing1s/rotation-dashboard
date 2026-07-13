@@ -23,6 +23,16 @@ function bigDollars(n) {
  * carried into the /api/execute payload as source_rec_id so the execution
  * matches back to its recommendation.
  */
+// A client-generated order reference: opaque, unique, and the ONLY thing that lets
+// the backend collapse a retry/refresh into one order. Prefer crypto.randomUUID;
+// fall back for older/non-secure contexts.
+function newOrderRef() {
+  try {
+    if (typeof crypto !== "undefined" && crypto.randomUUID) return `cor_${crypto.randomUUID()}`;
+  } catch { /* fall through */ }
+  return `cor_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export default function RollModal({ ticker, reason = "scheduled", sourceRecId, onExecute, onClose }) {
   const [data, setData] = React.useState(null);
   const [error, setError] = React.useState(null);
@@ -35,6 +45,25 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
   const [execErr, setExecErr] = React.useState(null);
   const tradeMode = useTradeMode(); // "paper" | "live" | null — is this roll routed to Schwab?
   const [pendingLive, setPendingLive] = React.useState(null); // live roll awaiting explicit confirm
+
+  // A stable client_order_ref for THIS staged roll: generated once when the modal
+  // opens and reused across every retry so a lost-response retry — or a mid-flight
+  // browser refresh that remounts this modal — can never place a SECOND order (the
+  // backend keys idempotency on it). Persisted in sessionStorage so a reload resumes
+  // the same ref instead of minting a new one; cleared on a confirmed terminal
+  // outcome so the next distinct roll starts fresh.
+  const refKey = `cfm-roll-ref:${ticker}`;
+  const clientOrderRef = React.useRef(null);
+  if (clientOrderRef.current === null) {
+    let stored = null;
+    try { stored = sessionStorage.getItem(refKey); } catch { /* private mode */ }
+    clientOrderRef.current = stored || newOrderRef();
+    try { sessionStorage.setItem(refKey, clientOrderRef.current); } catch { /* ignore */ }
+  }
+  function clearOrderRef() {
+    clientOrderRef.current = null;
+    try { sessionStorage.removeItem(refKey); } catch { /* ignore */ }
+  }
 
   React.useEffect(() => {
     let live = true;
@@ -107,6 +136,7 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
       premium_per_share: chosen.mark,
       stock_price: data.underlying_price,
       roll_reason: reason, // whipsaw-ledger key: scheduled | 75%-rule | defend | earnings | kill-switch-exit
+      client_order_ref: clientOrderRef.current, // idempotency key — one order per staged roll
       ...(sourceRecId ? { source_rec_id: sourceRecId } : {}),
     };
   }
@@ -121,7 +151,13 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
   async function doExecute(payload) {
     setBusy(true); setExecErr(null);
     try {
-      await onExecute?.(payload);
+      const res = await onExecute?.(payload);
+      // Retire the idempotency ref ONLY on a confirmed terminal outcome — a distinct
+      // next roll should mint a fresh ref. On UNKNOWN ("confirming…") keep the ref so
+      // a retry reuses it and cannot place a second order for the same intent.
+      const terminal = !res || ["filled", "canceled", "rejected", "logged"].includes(res.status)
+        || res.mode === "logged";
+      if (terminal) clearOrderRef();
       setPendingLive(null);
       onClose?.();
     } catch (e) { setExecErr(e.message); setPendingLive(null); }

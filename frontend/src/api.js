@@ -96,6 +96,10 @@ export const api = {
   // Live order lifecycle (used when an order comes back "working"; paper fills immediately).
   orderStatus: (orderId) => request(`/api/order-status?order_id=${encodeURIComponent(orderId)}`),
   cancelOrder: (orderId) => request("/api/order-cancel", { method: "POST", body: JSON.stringify({ order_id: orderId }) }),
+  // Truthful status by client_order_ref (incident hotfix): resolves an order whose
+  // broker outcome isn't confirmed yet — recovers a missing orderId and never lies
+  // (UNKNOWN stays "confirming", a rejection carries Schwab's verbatim reason).
+  submissionStatus: (ref) => request(`/api/order-submission-status?ref=${encodeURIComponent(ref)}`),
   positions: () => request("/api/positions"),
   burn: (ticker) => request(`/api/burn/${ticker}`),
   thetaLedger: (params = "") => request(`/api/theta-ledger${params}`),
