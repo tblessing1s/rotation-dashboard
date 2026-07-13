@@ -18,14 +18,18 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import config
 import data_handler
+import execution_gate
 import indicators
 import kill_switch
 import logging_handler as log
 import recommendation_engine as engine
+import recommendation_settle as settle
 import sector_data
+import session as session_model
 import strike_policy
 import trust_derive
 from rec_types import ActionType
@@ -179,15 +183,19 @@ def build_market_snapshot(state: dict, include_entry: bool = True) -> dict:
     return market
 
 
-def _notify(new_recs: list[dict], state: dict, dry_run: bool | None) -> None:
+def _notify(new_recs: list[dict], staged: dict, state: dict, dry_run: bool | None) -> None:
     """Push newly emitted ACTIONABLE recommendations through the existing
-    notifier channels. Dedup is inherent: the engine emits a given claim once
-    per validity window, so a repeat pass re-sends nothing."""
+    notifier channels. The ALERT ALWAYS FIRES — a settle-deferred rec is not
+    suppressed; instead its copy states the window ("Defense staged, executable
+    10:00 ET (9:00 CT)"), converting the alert from a fire alarm into a planning
+    input (Design §7). Dedup is inherent: the engine emits a given claim once per
+    validity window, so a repeat pass re-sends nothing."""
     import notifier
     from urllib.parse import quote
     actionable = [r for r in new_recs if r.get("action_type") != ActionType.NO_ACTION]
     if not actionable:
         return
+    staged = staged or {}
     settings = (state.get("alerts") or {}).get("settings") or {}
     if dry_run is None:
         dry_run = bool(settings.get("dry_run", config.alerts_dry_run_default()))
@@ -196,18 +204,30 @@ def _notify(new_recs: list[dict], state: dict, dry_run: bool | None) -> None:
         t = r.get("ticker") or ""
         ticket = r.get("proposed_ticket") or {}
         net = (ticket.get("estimates") or {}).get("net_per_share")
+        est = f", est net {net:+.2f}/sh" if isinstance(net, (int, float)) else ""
+        sb = staged.get(r.get("rec_id"))
+        if sb:
+            when = _fmt_dual_tz(settle.parse_ts(sb.get("executable_at")))
+            reason = sb.get("reason")
+            message = (f"{t}: {r.get('action_type')} staged ({r.get('trigger_rule')}) — "
+                       f"executable {when}{est}. {reason} — the opening range is forming.")
+            action = (f"Open the {t} position card to pre-approve or dismiss "
+                      f"(rec {r.get('rec_id')}, executable {when}).")
+        else:
+            message = (f"{t}: {r.get('action_type')} recommended ({r.get('trigger_rule')}){est}")
+            action = (f"Open the {t} position card to execute or dismiss "
+                      f"(rec {r.get('rec_id')}, valid until {r.get('valid_until')}).")
         batch.append({
             "type": "RECOMMENDATION",
             "severity": _SEVERITY.get(r.get("action_type"), "MEDIUM"),
             "rule": f"trigger {r.get('trigger_rule')}",
             "ticker": t,
-            "message": (f"{t}: {r.get('action_type')} recommended "
-                        f"({r.get('trigger_rule')})"
-                        + (f", est net {net:+.2f}/sh" if isinstance(net, (int, float)) else "")),
-            "action": (f"Open the {t} position card to execute or dismiss "
-                       f"(rec {r.get('rec_id')}, valid until {r.get('valid_until')})."),
+            "message": message,
+            "action": action,
             "data": {"rec_id": r.get("rec_id"), "action_type": r.get("action_type"),
-                     "trigger_rule": r.get("trigger_rule")},
+                     "trigger_rule": r.get("trigger_rule"),
+                     "settle_status": (sb or {}).get("status"),
+                     "executable_at": (sb or {}).get("executable_at")},
             "fingerprint": f"RECOMMENDATION|{t}|{r.get('rec_id')}",
             "action_url": f"/?action=focus&ticker={quote(t)}" if t else None,
         })
@@ -217,20 +237,210 @@ def _notify(new_recs: list[dict], state: dict, dry_run: bool | None) -> None:
         logger.exception("recommendation notification dispatch failed")
 
 
+# ---------------------------------------------------------------------------
+# Market-settle deferral (PENDING_SETTLE) — staging + release re-validation
+# ---------------------------------------------------------------------------
+def _coerce_now(now: datetime | None) -> datetime:
+    if now is None:
+        return datetime.now(timezone.utc)
+    return now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+
+
+def _fmt_dual_tz(dt: datetime | None) -> str:
+    """"10:00 ET (9:00 CT)" — the settle-window time in Eastern plus the operator's
+    local zone, so a phone alert is a planning input, not a fire alarm."""
+    if dt is None:
+        return "the next session"
+    try:
+        et = dt.astimezone(session_model.ET)
+        op = dt.astimezone(ZoneInfo(config.OPERATOR_TZ))
+        op_abbr = op.tzname() or "local"
+        return f"{et.strftime('%-H:%M')} ET ({op.strftime('%-H:%M')} {op_abbr})"
+    except Exception:  # noqa: BLE001
+        return dt.isoformat()
+
+
+def _gap_from_market(rec: dict, market: dict, sess) -> execution_gate.GapContext:
+    """Gap-emergency inputs for a DEFENSE/EXIT from the frozen market snapshot (no
+    extra reads). Fail-closed: opening-range break unavailable (False), print
+    duration proxied by elapsed session time, all CFM orders are LIMIT."""
+    tk = (market.get("tickers") or {}).get((rec.get("ticker") or "").upper()) or {}
+    prior_close, atr, cur = tk.get("last_close"), tk.get("atr"), tk.get("price")
+    adverse = None
+    if prior_close is not None and atr and atr > 0 and cur is not None:
+        adverse = max(0.0, float(prior_close) - float(cur)) / float(atr)
+    return execution_gate.GapContext(
+        adverse_gap_atr=adverse, broke_opening_range_low=False,
+        two_sided_print_minutes=sess.minutes_since_open, is_limit_order=True)
+
+
+def _verdict_for_rec(rec: dict, market: dict, now: datetime):
+    """The gate verdict for a recommendation at ``now`` (None for non-actionable)."""
+    gate_action = settle.gate_action_for(rec)
+    if gate_action is None:
+        return None
+    sess = session_model.session_state(now)
+    gap = None
+    if (gate_action in (execution_gate.GateAction.DEFENSE, execution_gate.GateAction.EXIT_KILL)
+            and sess.is_open
+            and (sess.minutes_since_open or 0.0) < config.MARKET_SETTLE_MINUTES):
+        gap = _gap_from_market(rec, market, sess)
+    return execution_gate.execution_window(gate_action, now, sess, gap)
+
+
+def _stage_new(stored: list[dict], market: dict, now: datetime) -> dict:
+    """Stage each newly-emitted ACTIONABLE rec that falls in a blocked window as
+    PENDING_SETTLE (carrying executable_at). Returns {rec_id: settle_block} for the
+    ones staged, so the notifier can render window-aware copy."""
+    ids = {r.get("rec_id") for r in stored
+           if r.get("action_type") != ActionType.NO_ACTION}
+    if not ids:
+        return {}
+    state = log.load_state()
+    staged: dict = {}
+    for rec in state.get("recommendations", []):
+        if rec.get("rec_id") in ids and not rec.get("settle"):
+            verdict = _verdict_for_rec(rec, market, now)
+            if settle.stage(rec, verdict, now):
+                staged[rec["rec_id"]] = rec["settle"]
+    if staged:
+        log.save_state(state)
+    return staged
+
+
+def _trigger_still_holds(rec: dict, market: dict, state: dict, now: datetime):
+    """Re-validate a pending rec's trigger at release. Re-runs the pure engine with
+    no open recs (so its dedup can't suppress a still-firing trigger) and checks the
+    same action_type re-emerges for the position. Returns True (holds), False
+    (cleared — e.g. the gap filled, or the confirmed-close breach recovered), or
+    None (could not evaluate → don't self-cancel, but don't auto-submit either)."""
+    try:
+        fresh = engine.evaluate(market, state, now, open_recs=[])
+    except Exception:  # noqa: BLE001
+        return None
+    action = rec.get("action_type")
+    pid, tkr = rec.get("position_id"), (rec.get("ticker") or "").upper()
+    for r in fresh:
+        same_action = r.get("action_type") == action
+        same_pos = (pid and r.get("position_id") == pid) or (r.get("ticker") or "").upper() == tkr
+        if same_action and same_pos:
+            return True
+    return False
+
+
+def release_pending(now: datetime | None = None, market: dict | None = None,
+                    notify: bool = True, dry_run: bool | None = None,
+                    submit_fn=None) -> dict:
+    """Process PENDING_SETTLE recs whose window has opened. Each is re-validated
+    against a fresh snapshot: still-firing -> RELEASED (and, if pre-approved,
+    auto-submitted via ``submit_fn``); cleared -> SELF_CANCELED (with a
+    notification); stale past validity -> EXPIRED. All transitions append to the
+    record. Deterministic given ``now``."""
+    now = _coerce_now(now)
+    state = log.load_state()
+    due = settle.due(state, now)
+    summary = {"released": 0, "self_canceled": 0, "expired": 0, "executed": 0}
+    if not due:
+        return summary
+    if market is None:
+        market = build_market_snapshot(state, include_entry=False)
+    events: list[tuple[dict, str]] = []
+    for rec in due:
+        if settle.is_expired(rec, now):
+            settle.mark(rec, settle.SettleStatus.EXPIRED, now,
+                        "validity window elapsed before the settle window opened")
+            summary["expired"] += 1
+            events.append((rec, settle.SettleStatus.EXPIRED))
+            continue
+        holds = _trigger_still_holds(rec, market, state, now)
+        if holds is False:
+            settle.mark(rec, settle.SettleStatus.SELF_CANCELED, now,
+                        "trigger no longer valid at release — condition cleared "
+                        "(e.g. the gap filled / stock recovered above the strike)")
+            summary["self_canceled"] += 1
+            events.append((rec, settle.SettleStatus.SELF_CANCELED))
+            continue
+        note = ("released after the settle window; trigger re-validated"
+                if holds else "released; trigger could not be re-validated — confirm manually")
+        settle.mark(rec, settle.SettleStatus.RELEASED, now, note)
+        summary["released"] += 1
+        if holds and rec["settle"].get("pre_approved") and submit_fn is not None:
+            try:
+                submit_fn(rec, now)
+                settle.mark(rec, settle.SettleStatus.EXECUTED, now,
+                            "auto-submitted on release (pre-approved, trigger re-validated)")
+                summary["executed"] += 1
+                events.append((rec, settle.SettleStatus.EXECUTED))
+                continue
+            except Exception as e:  # noqa: BLE001 — a submit failure never loses the record
+                settle.mark(rec, settle.SettleStatus.RELEASED, now,
+                            f"pre-approved auto-submit failed ({e}); confirm manually")
+        events.append((rec, settle.SettleStatus.RELEASED))
+    log.save_state(state)
+    if notify and events:
+        _notify_settle(events, state, dry_run)
+    return summary
+
+
+def _notify_settle(events: list[tuple[dict, str]], state: dict,
+                   dry_run: bool | None) -> None:
+    """Push release-pass outcomes (self-cancel / released / expired) — so a defense
+    that self-cancels because the gap filled tells the operator so, per Design §6."""
+    import notifier
+    from urllib.parse import quote
+    settings = (state.get("alerts") or {}).get("settings") or {}
+    if dry_run is None:
+        dry_run = bool(settings.get("dry_run", config.alerts_dry_run_default()))
+    _copy = {
+        settle.SettleStatus.SELF_CANCELED: ("MEDIUM", "self-canceled — trigger cleared before the window opened"),
+        settle.SettleStatus.RELEASED: ("MEDIUM", "released — the settle window has opened; execute or dismiss"),
+        settle.SettleStatus.EXECUTED: ("HIGH", "auto-submitted on release (pre-approved)"),
+        settle.SettleStatus.EXPIRED: ("LOW", "expired before the settle window opened"),
+    }
+    batch = []
+    for rec, status in events:
+        sev, tail = _copy.get(status, ("MEDIUM", status))
+        t = rec.get("ticker") or ""
+        batch.append({
+            "type": "RECOMMENDATION_SETTLE",
+            "severity": sev,
+            "rule": f"settle {status}",
+            "ticker": t,
+            "message": f"{t}: {rec.get('action_type')} {tail}.",
+            "action": f"Open the {t} position card (rec {rec.get('rec_id')}).",
+            "data": {"rec_id": rec.get("rec_id"), "settle_status": status,
+                     "action_type": rec.get("action_type")},
+            "fingerprint": f"RECOMMENDATION_SETTLE|{t}|{rec.get('rec_id')}|{status}",
+            "action_url": f"/?action=focus&ticker={quote(t)}" if t else None,
+        })
+    try:
+        notifier.dispatch(batch, settings, dry_run=dry_run)
+    except Exception:  # noqa: BLE001
+        logger.exception("settle notification dispatch failed")
+
+
 def run(notify: bool = True, include_entry: bool = True,
-        dry_run: bool | None = None) -> dict:
+        dry_run: bool | None = None, now: datetime | None = None) -> dict:
     """One scheduled/manual evaluation pass. Returns a summary; the emitted
-    records live in state.recommendations (append-only)."""
+    records live in state.recommendations (append-only). ``now`` is injectable for
+    tests; production defaults to the wall clock."""
     global _last_run
     with _run_lock:
-        now = datetime.now(timezone.utc)
+        now = _coerce_now(now)
+        # 1) Release any PENDING_SETTLE recs whose window has now opened (re-validates
+        #    the trigger against a fresh snapshot; self-cancels a filled gap).
+        release_summary = release_pending(now=now, notify=notify, dry_run=dry_run)
+        # 2) Evaluate fresh (state may have been mutated by the release pass).
         state = log.load_state()
         market = build_market_snapshot(state, include_entry=include_entry)
         open_recs = trust_derive.open_recommendations(state, now)
         new_recs = engine.evaluate(market, state, now, open_recs)
         stored = log.append_recommendations(new_recs)
+        # 3) Stage newly-emitted recs that land in a blocked window as PENDING_SETTLE.
+        staged = _stage_new(stored, market, now)
+        # 4) Notify actionable recs, settle-aware (staged ones say "executable …").
         if notify and stored:
-            _notify(stored, state, dry_run)
+            _notify(stored, staged, state, dry_run)
         _last_run = {
             "at": log.utcnow(),
             "positions_evaluated": sum(1 for p in state.get("positions", [])
@@ -239,6 +449,8 @@ def run(notify: bool = True, include_entry: bool = True,
             "open_before": len(open_recs),
             "emitted": len(stored),
             "emitted_ids": [r.get("rec_id") for r in stored],
+            "staged_pending": len(staged),
+            "released": release_summary,
         }
         logger.info("recommendation pass: %s", _last_run)
         return _last_run

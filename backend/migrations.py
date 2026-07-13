@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 17
+CURRENT_VERSION = 18
 
 
 class MigrationAbortedError(RuntimeError):
@@ -263,6 +263,28 @@ def _v16_to_v17(state: dict) -> dict:
     return state
 
 
+def _v17_to_v18(state: dict) -> dict:
+    """v18 (market-settle execution gate): one additive store —
+
+    - ``spread_baselines``: per-contract trailing bid-ask spread samples, fed from
+      quotes the data layer already fetches (no new polling). The gate's
+      spread-quality check compares the current spread to this trailing mean;
+      until enough samples exist it reports "no baseline" rather than fabricating
+      one (spread_monitor.py).
+
+    The PENDING_SETTLE lifecycle lives in an additive, nullable ``settle`` block on
+    individual (immutable-core) Recommendation records — a purely additive field
+    that needs no per-record rewrite, so it is not seeded here. ``metadata`` gets a
+    ``market_settle_gate_since`` marker for parity with the trust-layer marker.
+    Executions untouched."""
+    state.setdefault("spread_baselines", {})
+    meta = state.setdefault("metadata", {})
+    if not meta.get("market_settle_gate_since"):
+        from datetime import datetime, timezone
+        meta["market_settle_gate_since"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -280,6 +302,7 @@ MIGRATIONS = {
     14: _v14_to_v15,
     15: _v15_to_v16,
     16: _v16_to_v17,
+    17: _v17_to_v18,
 }
 
 

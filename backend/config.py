@@ -108,6 +108,19 @@ def set_live_trading_enabled(on: bool) -> None:
     os.replace(tmp, LIVE_TRADING_PATH)
 
 
+def market_settle_gate_enabled() -> bool:
+    """Whether the market-settle execution gate ENFORCES (blocks / defers orders
+    inside the settle window, close blackout, and off-hours). Off by default so the
+    gate rolls out deliberately — it changes *live execution timing*, exactly the
+    kind of behaviour change that wants an explicit ops opt-in (mirrors
+    CFM_LIVE_TRADING). ``CFM_MARKET_SETTLE_GATE=1`` turns enforcement on.
+
+    The gate's *verdict* is always computed and surfaced (so the PENDING_SETTLE
+    staging / countdown UI works regardless); this flag governs only whether a
+    blocked verdict actually refuses the order."""
+    return os.environ.get("CFM_MARKET_SETTLE_GATE", "").strip().lower() in ("1", "true", "yes")
+
+
 def active_state_path() -> str:
     """state.json path for the current mode (demo store stays separate)."""
     return DEMO_STATE_PATH if demo_enabled() else STATE_PATH
@@ -486,6 +499,29 @@ ALERT_LOG_MAX = 500            # PROPOSED_DEFAULT — alert history cap in state
 # PROPOSED_DEFAULT — nightly maintenance slot (ET, every calendar day): refresh
 # the earnings/dividend caches for held names and sync position snapshots.
 MAINTENANCE_ET = "17:30"
+
+# ---- Market-settle execution gate (time-of-day order discipline) -----------
+# The first ~30 min after the open and the last ~15 before the close are
+# structurally hostile to this strategy's order types (widest spreads, unreliable
+# IV marks, gap-distorted daily-bar signals, closing-auction imbalances). ALERTS
+# still fire immediately; only ORDER EXECUTION is gated/deferred by action type,
+# with one narrow gap-emergency exception for DEFENSE/EXIT_KILL. The gate is a pure
+# function (backend/execution_gate.py) wired into the shared executor.execute path.
+# Provenance tags below are load-bearing (see the atomic-roll section for the key).
+MARKET_SETTLE_MINUTES = 30          # PROPOSED_DEFAULT — post-open blackout for entries/rolls; DEFENSE/EXIT only via gap-emergency
+ENTRY_EARLIEST_MINUTES = 60         # PROPOSED_DEFAULT — entries additionally blocked until open+this (entries are never urgent)
+CLOSE_BLACKOUT_MINUTES = 15         # PROPOSED_DEFAULT — pre-close blackout (keys off the ACTUAL close, early-close included)
+GAP_EMERGENCY_ATR_MULT = 2.0        # PROPOSED_DEFAULT — overnight gap vs position >= this * ATR unlocks the pre-settle emergency path
+OPENING_RANGE_MINUTES = 15          # PROPOSED_DEFAULT — opening-range window for the gap-continuation (break-of-range-low) confirmation
+EMERGENCY_MIN_PRINT_MINUTES = 5     # PROPOSED_DEFAULT — underlying must print two-sided quotes >= this before an emergency execution
+SPREAD_QUALITY_MULT = 2.0           # PROPOSED_DEFAULT — current spread > this * trailing average -> WIDE_SPREAD acknowledge (post-settle)
+SPREAD_BASELINE_MIN_SAMPLES = 5     # PROPOSED_DEFAULT — trailing spread samples required before a baseline exists ("no baseline" until then)
+NO_MARKET_ORDERS_AT_OPEN = True     # HARD_CFM_RULE — inside the settle window market orders are refused for EVERY action, emergency included
+EMERGENCY_NEVER_FOR_ENTRY = True    # HARD_CFM_RULE — the gap-emergency path never applies to ENTRY or routine rolls
+CANCEL_NEVER_GATED = True           # HARD_CFM_RULE — canceling a resting order is allowed any time the broker accepts cancels
+# PROPOSED_DEFAULT — the operator's local timezone, shown alongside ET in window-aware
+# push copy ("executable 10:00 ET (9:00 CT)"). Override with CFM_OPERATOR_TZ.
+OPERATOR_TZ = (os.environ.get("CFM_OPERATOR_TZ") or "America/Chicago").strip() or "America/Chicago"
 
 # ---- Paper-fill slippage (mid-fill assumption) -----------------------------
 # Paper fills are booked at the quoted MIDPOINT, but deep-ITM options rarely fill

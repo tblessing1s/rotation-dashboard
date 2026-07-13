@@ -245,6 +245,34 @@ function validity(validUntil, now) {
   return { text: `valid ${Math.round(hrs)}h`, tone: "text-slate-500" };
 }
 
+const SETTLE_REASON_LABEL = {
+  SETTLE_WINDOW: "post-open settle window",
+  ENTRY_WINDOW: "entry window",
+  CLOSE_BLACKOUT: "close blackout",
+  MARKET_CLOSED: "market closed",
+};
+
+// Interpret the rec's settle block (the market-settle gate deferred the ORDER; the
+// alert already fired). Returns null when there is no settle state to show.
+function settleInfo(settle, now) {
+  if (!settle || !settle.status) return null;
+  if (settle.status !== "PENDING_SETTLE") return { status: settle.status };
+  const t = Date.parse(settle.executable_at || "");
+  const etTime = Number.isNaN(t)
+    ? null
+    : new Intl.DateTimeFormat("en-US", {
+        hour: "numeric", minute: "2-digit", timeZone: "America/New_York", hour12: false,
+      }).format(t);
+  const mins = Number.isNaN(t) ? null : Math.round((t - now) / 60000);
+  return {
+    status: "PENDING_SETTLE",
+    etTime,
+    countdown: mins == null ? "" : mins > 0 ? `in ${mins}m` : "now",
+    preApproved: !!settle.pre_approved,
+    reason: SETTLE_REASON_LABEL[settle.reason] || settle.reason,
+  };
+}
+
 // One-line ticket read: legs (instruction + strike + expiry) · order type · est net.
 function ticketSummary(t) {
   if (!t) return "no ticket attached";
@@ -340,10 +368,12 @@ function DismissRecModal({ rec, onClose, onDismissed }) {
 }
 
 // One actionable recommendation on its position card.
-function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss }) {
+function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onPreapprove }) {
   const v = validity(rec.valid_until, now);
   const t = rec.proposed_ticket;
   const badge = REC_BADGE[rec.action_type] || "border-slate-600 bg-slate-800/60 text-slate-300";
+  const s = settleInfo(rec.settle, now);
+  const pending = s?.status === "PENDING_SETTLE";
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -357,6 +387,21 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss }) {
           </span>
         )}
       </div>
+      {pending && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
+          <span title="The market-settle gate deferred the order; the alert already fired.">
+            ⏳ Staged — executable{s.etTime ? ` ${s.etTime} ET` : " next session"}
+            {s.countdown ? ` (${s.countdown})` : ""}
+          </span>
+          {s.reason && <span className="text-amber-300/70">· {s.reason}</span>}
+          {s.preApproved && <span className="font-semibold text-emerald-300">· pre-approved</span>}
+        </div>
+      )}
+      {!pending && s && (
+        <div className="mt-1.5 text-[11px] text-slate-500">
+          settle: {(s.status || "").replaceAll("_", " ").toLowerCase()}
+        </div>
+      )}
       <p className="mt-1 text-xs text-slate-300">{ticketSummary(t)}</p>
       {expanded && t && (
         <div className="mt-2 rounded-lg border border-slate-800 bg-slate-900/60 p-2 text-xs text-slate-300">
@@ -381,12 +426,26 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss }) {
         </div>
       )}
       <div className="mt-2 flex items-center gap-2">
-        <button
-          onClick={onExecute}
-          className="rounded-full border border-emerald-600/50 bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20"
-        >
-          Execute
-        </button>
+        {pending ? (
+          <button
+            onClick={() => onPreapprove(rec, !s.preApproved)}
+            title="Auto-submit when the settle window opens — only if the trigger still holds then."
+            className={`rounded-full border px-2.5 py-0.5 text-xs font-semibold ${
+              s.preApproved
+                ? "border-emerald-600/60 bg-emerald-500/20 text-emerald-200 hover:bg-emerald-500/30"
+                : "border-amber-600/50 bg-amber-500/10 text-amber-200 hover:bg-amber-500/20"
+            }`}
+          >
+            {s.preApproved ? "✓ Pre-approved" : "Pre-approve"}
+          </button>
+        ) : (
+          <button
+            onClick={onExecute}
+            className="rounded-full border border-emerald-600/50 bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20"
+          >
+            Execute
+          </button>
+        )}
         <button
           onClick={onDismiss}
           className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-0.5 text-xs text-slate-300 hover:bg-slate-800"
@@ -411,6 +470,7 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss }) {
 // a single muted line says so with the valid-until time.
 function RecSection({ p, recs, onRecsChanged, focusCard }) {
   const now = useNow();
+  const toast = useToast();
   const [dismissing, setDismissing] = React.useState(null); // rec being dismissed
   const [detailId, setDetailId] = React.useState(null); // rec_id with ticket expanded
   const list = recs || [];
@@ -450,6 +510,15 @@ function RecSection({ p, recs, onRecsChanged, focusCard }) {
     }));
   }
 
+  async function preapprove(rec, approve) {
+    try {
+      await api.preapproveRecommendation(rec.rec_id, approve);
+      onRecsChanged?.();
+    } catch (e) {
+      toast?.show?.(`Pre-approve failed: ${e.message || e}`, { type: "error" });
+    }
+  }
+
   return (
     <div className="space-y-2 px-4 pb-3">
       {actionable.map((rec) => (
@@ -459,6 +528,7 @@ function RecSection({ p, recs, onRecsChanged, focusCard }) {
           onToggleDetail={() => setDetailId((id) => (id === rec.rec_id ? null : rec.rec_id))}
           onExecute={() => execute(rec)}
           onDismiss={() => setDismissing(rec)}
+          onPreapprove={preapprove}
         />
       ))}
       {dismissing && (

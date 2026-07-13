@@ -484,6 +484,22 @@ def api_execute():
         # per-session attempt cap is hit). In addition to the freeze/gate/kill-switch.
         return jsonify({"error": str(e), "resubmit_locked": True,
                         "intent": e.intent_key, "reason": e.reason}), 409
+    except executor.ExecutionWindowError as e:
+        # 409: the market-settle execution gate deferred the order (settle window /
+        # close blackout / off-hours). The UI stages it as PENDING_SETTLE and shows
+        # the countdown to executable_at; the alert already fired.
+        return jsonify({"error": str(e), "execution_deferred": True,
+                        "reason": e.reason, "ticker": e.ticker,
+                        "action": e.gate_action,
+                        "executable_at": (e.executable_at.isoformat()
+                                          if e.executable_at else None)}), 409
+    except executor.SpreadAckRequiredError as e:
+        # 409: spread abnormally wide vs the trailing baseline — the operator must
+        # acknowledge the estimated excess slippage (resend with spread_ack: true).
+        return jsonify({"error": str(e), "spread_ack_required": True,
+                        "ticker": e.ticker, "current_spread": e.current_spread,
+                        "baseline_spread": e.baseline_spread,
+                        "est_excess_slippage_usd": e.est_excess_slippage_usd}), 409
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001
@@ -797,6 +813,7 @@ def api_alerts_settings():
 def api_recommendations():
     """Open (unresolved, unexpired) recommendations + the last pass summary."""
     import recommendation_runner
+    import recommendation_settle as settle
     import trust_derive
     from datetime import datetime, timezone
     try:
@@ -809,6 +826,11 @@ def api_recommendations():
         return jsonify({
             "open": open_recs,
             "open_actionable": [r for r in open_recs if r.get("action_type") != "NO_ACTION"],
+            # PENDING_SETTLE recs carry executable_at so the card can render a
+            # live countdown and a pre-approve toggle (the gate deferred the order;
+            # the alert already fired).
+            "pending_settle": settle.pending(state),
+            "gate_enforced": config.market_settle_gate_enabled(),
             "last_run": recommendation_runner.last_run(),
             "total": len(state.get("recommendations", [])),
         })
@@ -858,6 +880,31 @@ def api_recommendations_dismiss():
         stored = log.append_recommendation_override(
             {"rec_id": rec_id, "reason": reason, "note": note})
         return jsonify({"override": stored})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/recommendations/preapprove", methods=["POST"])
+def api_recommendations_preapprove():
+    """Toggle pre-approval on a PENDING_SETTLE recommendation. A pre-approved rec
+    auto-submits when its settle window opens — but ONLY if its trigger re-validates
+    at that moment (a filled gap self-cancels it). Body: {rec_id, approve?: bool}."""
+    import recommendation_settle as settle
+    from datetime import datetime, timezone
+    payload = request.get_json(silent=True) or {}
+    rec_id = str(payload.get("rec_id") or "")
+    approve = bool(payload.get("approve", True))
+    if not rec_id:
+        return jsonify({"error": "rec_id is required"}), 400
+    try:
+        with log._lock:
+            state = log.load_state()
+            rec = settle.set_pre_approved(state, rec_id, approve, datetime.now(timezone.utc))
+            if rec is None:
+                return jsonify({"error": f"{rec_id} is not a PENDING_SETTLE recommendation "
+                                         "(unknown, already released, or not deferred)"}), 404
+            log.save_state(state)
+        return jsonify({"rec_id": rec_id, "settle": rec.get("settle")})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

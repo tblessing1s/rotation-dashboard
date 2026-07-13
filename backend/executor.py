@@ -10,14 +10,18 @@ honest paper path. Position state updates identically either way.
 from __future__ import annotations
 
 import time
+from datetime import datetime, timezone
 
 import config
 import data_handler
+import execution_gate
 import indicators
 import logging_handler as log
 import order_lifecycle as olc
 import schwab_api
 import sector_data
+import session
+import spread_monitor
 
 VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_short",
                  "roll_leap", "open_position_atomic", "close_position_atomic", "adjustment"}
@@ -45,6 +49,46 @@ class PositionFrozenError(RuntimeError):
         super().__init__(
             f"{ticker} is frozen for review — {summary}. New entries/rolls are blocked "
             f"until the reconciliation diff is resolved; closing the position is still allowed.")
+
+
+class ExecutionWindowError(RuntimeError):
+    """The market-settle execution gate blocked or deferred an order (settle window,
+    close blackout, or off-hours). The API surfaces this as HTTP 409 with the
+    machine-readable ``reason`` and an ``executable_at`` so the UI can stage the
+    recommendation as PENDING_SETTLE and show a countdown. CANCEL is never gated,
+    and this never fires for a genuine gap-emergency DEFENSE/EXIT (which the gate
+    unlocks). Enforcement is governed by config.market_settle_gate_enabled()."""
+
+    def __init__(self, ticker: str, gate_action: str, verdict) -> None:
+        self.ticker = ticker
+        self.gate_action = gate_action
+        self.reason = verdict.reason
+        self.executable_at = verdict.executable_at
+        self.emergency_path = verdict.emergency_path
+        at = verdict.executable_at.isoformat() if verdict.executable_at else "the next session"
+        super().__init__(
+            f"{ticker} {gate_action} is deferred by the market-settle gate "
+            f"({verdict.reason}); executable at {at}. Alerts still fired — the "
+            f"recommendation is staged and can be pre-approved for auto-release.")
+
+
+class SpreadAckRequiredError(RuntimeError):
+    """The spread-quality check found the current spread abnormally wide (> the
+    trailing baseline * SPREAD_QUALITY_MULT). Execution is not blocked by time here,
+    but the operator must explicitly acknowledge the estimated excess slippage
+    (payload ``spread_ack: true``) before the order transmits. Never raised on the
+    emergency path (a kill-switch exit is informed, not stopped)."""
+
+    def __init__(self, ticker: str, verdict) -> None:
+        self.ticker = ticker
+        self.current_spread = verdict.current_spread
+        self.baseline_spread = verdict.baseline_spread
+        self.est_excess_slippage_usd = verdict.est_excess_slippage_usd
+        super().__init__(
+            f"{ticker}: spread {verdict.current_spread:.2f} is wide vs the trailing "
+            f"baseline {verdict.baseline_spread:.2f} (~${verdict.est_excess_slippage_usd:.0f} "
+            f"est. excess slippage). Acknowledge to proceed.")
+
 
 # Why a roll happened — the whipsaw ledger key. Unrecognized values fall back to
 # "scheduled" so the ledger enum stays clean for later calibration.
@@ -94,6 +138,112 @@ def _assert_transmit_allowed(action: str) -> None:
         raise schwab_api.SchwabError(
             f"Refusing to place a live {action} order in demo/paper mode — "
             "switch to Live data to trade the real account.")
+
+
+# ---------------------------------------------------------------------------
+# Market-settle execution gate (time-of-day order discipline)
+# ---------------------------------------------------------------------------
+def _gate_now(now: datetime | None) -> datetime:
+    """Normalize the injected clock to a UTC-aware datetime (defaulting to the wall
+    clock only when nothing is injected — every gated test injects one)."""
+    if now is None:
+        return datetime.now(timezone.utc)
+    return now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+
+
+def _build_gap_context(ticker: str, payload: dict,
+                       sess: "session.SessionState") -> execution_gate.GapContext:
+    """Assemble the gap-emergency inputs for a DEFENSE/EXIT_KILL inside the settle
+    window, from data the layer already has (daily bars + a live quote — no new
+    polling). FAIL-CLOSED per the audit: the overnight gap-vs-ATR is the one
+    computable leg; the opening-range-low break is genuinely unavailable (passed
+    False), and two-sided-print duration is proxied by elapsed session time pending
+    tick-level tracking. All CFM orders are LIMIT, so is_limit_order is True."""
+    adverse_gap_atr = None
+    try:
+        df = data_handler.get_daily(ticker)
+        prior_close = indicators.last(df)
+        atr_val = indicators.atr(df) if df is not None else None
+        current = _capture_price(ticker, payload.get("stock_price"))[0]
+        if (prior_close is not None and atr_val and atr_val > 0
+                and current is not None):
+            # Adverse (against the long LEAP) direction is DOWN: gap magnitude in
+            # ATR units, floored at 0 (a favorable up-gap is not an emergency).
+            adverse_gap_atr = max(0.0, float(prior_close) - float(current)) / float(atr_val)
+    except Exception:  # noqa: BLE001 — a data hiccup must never fabricate an unlock
+        adverse_gap_atr = None
+    return execution_gate.GapContext(
+        adverse_gap_atr=adverse_gap_atr,
+        broke_opening_range_low=False,               # unavailable -> not satisfied
+        two_sided_print_minutes=sess.minutes_since_open,  # elapsed-session proxy
+        is_limit_order=True,                          # CFM only ever sends LIMIT
+    )
+
+
+def _evaluate_execution_window(action: str, ticker: str, payload: dict,
+                               now: datetime) -> "execution_gate.WindowVerdict | None":
+    """Compute the gate verdict for an ``execute`` action (always computed, even
+    when enforcement is off, so the result can be surfaced for staging/countdown).
+    Returns ``None`` for ungated paths (adjustment / CANCEL)."""
+    gate_action = execution_gate.classify_action(action, payload)
+    if gate_action is None or gate_action == execution_gate.GateAction.CANCEL:
+        return None
+    sess = session.session_state(now)
+    gap = None
+    if (gate_action in (execution_gate.GateAction.DEFENSE, execution_gate.GateAction.EXIT_KILL)
+            and sess.is_open
+            and (sess.minutes_since_open or 0.0) < config.MARKET_SETTLE_MINUTES):
+        gap = _build_gap_context(ticker, payload, sess)
+    return execution_gate.execution_window(gate_action, now, sess, gap)
+
+
+def _enforce_execution_window(action: str, ticker: str, payload: dict,
+                              now: datetime) -> "execution_gate.WindowVerdict | None":
+    """The gate checkpoint in the shared execution path. Refuses a blocked order
+    (ExecutionWindowError) when enforcement is enabled; on the emergency path it
+    stamps ``emergency_path`` onto the payload so the immutable execution record is
+    tagged for post-hoc review. Cancels and adjustments are never gated."""
+    verdict = _evaluate_execution_window(action, ticker, payload, now)
+    if verdict is None:
+        return None
+    if verdict.emergency_path:
+        payload["emergency_path"] = True
+        payload["gate_reason"] = verdict.reason
+    if config.market_settle_gate_enabled() and not verdict.allowed:
+        raise ExecutionWindowError(ticker, execution_gate.classify_action(action, payload), verdict)
+    return verdict
+
+
+def _enforce_spread_quality(ticker: str, payload: dict, verdict) -> None:
+    """The independent spread-quality gate (Design §5). When the current spread is
+    abnormally wide vs the trailing baseline, require an explicit acknowledge
+    (payload ``spread_ack``) — except on the emergency path, where the warning is
+    surfaced but never blocks. Never blocks when enforcement is off or there is no
+    baseline. The spread inputs are read from the payload (``current_spread`` /
+    ``bid``+``ask``) so the check stays offline-testable; the traded contract's
+    spread is also recorded to build the baseline (no new polling)."""
+    if not config.market_settle_gate_enabled():
+        return
+    emergency = bool(verdict and verdict.emergency_path)
+    symbol = (payload.get("option_symbol") or payload.get("short_option_symbol")
+              or ticker or "").strip().upper()
+    current = payload.get("current_spread")
+    if current is None:
+        current = spread_monitor.spread_of(payload.get("bid"), payload.get("ask"))
+    state = log.load_state()
+    base = spread_monitor.baseline(state, symbol)
+    # Record this observation for the trailing baseline (from the already-fetched
+    # quote), then persist.
+    if spread_monitor.record(state, symbol, payload.get("bid"), payload.get("ask")) is not None:
+        log.save_state(state)
+    if current is None or base is None:
+        return  # no baseline yet, or nothing to compare -> never fabricate/block
+    contracts = int(payload.get("contracts") or 0) or 1
+    sq = execution_gate.spread_quality(current, base, contracts, emergency_path=emergency)
+    payload["spread_warning"] = sq.warning
+    payload["spread_excess_usd"] = sq.est_excess_slippage_usd
+    if sq.requires_ack and not payload.get("spread_ack"):
+        raise SpreadAckRequiredError(ticker, sq)
 
 
 class ResubmitLockedError(RuntimeError):
@@ -258,7 +408,7 @@ def _ensure_position(state: dict, ticker: str) -> dict:
     return p
 
 
-def execute(payload: dict) -> dict:
+def execute(payload: dict, now: datetime | None = None) -> dict:
     action = (payload.get("action") or "").strip()
     ticker = (payload.get("ticker") or "").strip().upper()
     if action not in VALID_ACTIONS:
@@ -307,6 +457,15 @@ def execute(payload: dict) -> dict:
     # order is placed. Normalizes payload["exit_reason"]/["exit_note"] in place.
     if action in ("close_leap", "close_position_atomic"):
         _validate_exit_reason(payload)
+
+    # Market-settle execution gate (time-of-day order discipline) — the single
+    # shared checkpoint every placement traverses (supervised approval today, the
+    # future-automation switch tomorrow). Cancels never reach here; adjustments
+    # returned above. Runs BEFORE any order is staged/placed. The independent
+    # spread-quality gate runs second, informed by the window verdict (a genuine
+    # gap-emergency exit is informed of a wide spread but never blocked by it).
+    _gate_verdict = _enforce_execution_window(action, ticker, payload, _gate_now(now))
+    _enforce_spread_quality(ticker, payload, _gate_verdict)
 
     log.save_state(state)  # persist the shell position before recording the fill
 
