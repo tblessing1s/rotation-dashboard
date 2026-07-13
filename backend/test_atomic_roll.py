@@ -49,27 +49,61 @@ def _roll_payload(**over):
         "from_strike": 140.5, "close_price_per_share": 2.5, "from_option_symbol": "ON_OLD",
         "to_strike": 139.0, "premium_per_share": 5.0, "to_option_symbol": "ON_NEW",
         "to_expiration": "2026-07-10", "to_dte": 7, "stock_price": 142,
+        # Idempotency key the frontend now generates when the roll is staged.
+        "client_order_ref": "cor_test_roll",
     }
     p.update(over)
     return p
 
 
+def _q(mid):
+    """A two-sided, fresh option quote centered on ``mid`` (no timestamp -> not aged
+    out; the stale-quote path is exercised explicitly elsewhere)."""
+    return {"bid": round(mid - 0.05, 2), "ask": round(mid + 0.05, 2), "quoteTimeMs": None}
+
+
+# Default leg quotes: mids reproduce the default _roll_payload (buyback 2.5, new
+# premium 5.0 -> +2.5 net credit), so the backend's re-read net equals the staged one.
+_DEFAULT_QUOTES = {"ON_OLD": _q(2.5), "ON_NEW": _q(5.0)}
+
+
 class _FakeClient:
     """A Schwab client stub. ``orders`` is a list consumed one get_order() call
-    at a time (repeating the last), so multi-poll (partial) flows are scriptable."""
-    def __init__(self, orders):
+    at a time (repeating the last), so multi-poll (partial) flows are scriptable.
+
+    ``quotes`` maps option symbol -> quote dict for the F1 pre-submit quote re-read
+    (defaults to two-sided fresh quotes matching the default roll). ``submit_result``
+    scripts the structured submit_order outcome (defaults to accepted with an OID)."""
+    def __init__(self, orders, quotes=None, submit_result=None):
         self._orders = list(orders)
+        self._quotes = dict(_DEFAULT_QUOTES if quotes is None else quotes)
+        self._submit_result = submit_result
         self.sent = []
+        self.listed = 0
 
     def primary_account_hash(self):
         return "acct"
+
+    def get_quotes(self, symbols):
+        return {s: self._quotes.get(s) for s in symbols}
 
     def place_order(self, account_hash, order):
         self.sent.append(order)
         return {"orderId": f"OID{len(self.sent)}"}
 
+    def submit_order(self, account_hash, order):
+        self.sent.append(order)
+        if self._submit_result is not None:
+            r = self._submit_result
+            return r(len(self.sent)) if callable(r) else dict(r)
+        return {"outcome": "accepted", "order_id": f"OID{len(self.sent)}"}
+
     def cancel_order(self, account_hash, order_id):
         return {"orderId": order_id, "canceled": True}
+
+    def list_orders(self, account_hash, **kw):
+        self.listed += 1
+        return []
 
     def get_order(self, account_hash, order_id):
         if len(self._orders) > 1:
@@ -121,9 +155,9 @@ def test_roll_order_is_one_net_credit_two_leg_ticket(store, monkeypatch):
 
 def test_roll_that_costs_money_is_net_debit(store, monkeypatch):
     _seed_position()
-    fake = _FakeClient([_filled_order()])
+    # Re-read leg mids: buyback 5.0 > new premium 2.5 -> net −2.5 -> a DEBIT.
+    fake = _FakeClient([_filled_order()], quotes={"ON_OLD": _q(5.0), "ON_NEW": _q(2.5)})
     _go_live(monkeypatch, fake)
-    # buyback 5.0 > new premium 2.5 -> net −2.5 -> a DEBIT.
     executor.execute(_roll_payload(close_price_per_share=5.0, premium_per_share=2.5))
     order = fake.sent[0]
     assert order["orderType"] == "NET_DEBIT"

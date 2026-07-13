@@ -643,6 +643,44 @@ REPRICE_ON_RETRY = "none"
 # not a supported configuration; it is asserted, not consulted-and-skipped.
 NO_RESUBMIT_BEFORE_TERMINAL = True
 
+# ---- Incident hotfix: roll-order path (D1-D4) ------------------------------
+# Shared constants for the roll-order incident hotfix. Named exactly as the
+# forthcoming order-lifecycle-reconciliation system expects, so it adopts them
+# unchanged. Provenance tags carry the same weight as the rest of this file.
+
+# PROPOSED_DEFAULT — a leg quote older than this at submit time is refused: an
+# order price derived from a stale quote is never transmitted. Both legs of a
+# roll must carry a two-sided, nonzero quote no older than this.
+QUOTE_MAX_AGE_FOR_ORDER_SECONDS = 60
+
+# PROPOSED_DEFAULT — an order whose broker outcome is UNKNOWN (no response /
+# timeout / accepted-but-no-id) is re-queried on this backoff, this many times,
+# by a MANUAL "check status" action. This hotfix never auto-retries a SUBMISSION;
+# these bound only the read-back that resolves an UNKNOWN into the truth.
+UNKNOWN_STATUS_RETRY_SECONDS = 10
+UNKNOWN_STATUS_MAX_ATTEMPTS = 6
+
+# HARD_CFM_RULE — on ANY submission response the Schwab orderId is extracted and
+# persisted to the durable order-submission record FIRST, before any further
+# parsing, so a fault after acknowledgment can never lose an order that is live
+# at the broker. Asserted in the ack handler, not merely consulted.
+ORDERID_PERSIST_FIRST = True
+
+# HARD_CFM_RULE — a failure/rejection is displayed ONLY when Schwab explicitly
+# returned one (its reason string is persisted verbatim). No response, a timeout,
+# or an unparseable response is UNKNOWN ("confirming with broker…"), NEVER failed.
+NO_FAILURE_WITHOUT_VERIFICATION = True
+
+# PROPOSED_DEFAULT / LIVE_VERIFY — U.S. listed option price increments. Schwab
+# accepts $0.01 increments for series trading below $3.00 and $0.05 at/above it
+# (the standard non-penny minimum). Penny-pilot names quote in $0.01 throughout;
+# this table intentionally uses the CONSERVATIVE $0.05-above-$3 rule so a limit is
+# never finer than the venue accepts. Confirm the exact per-symbol increment and
+# the NET (complex-order) increment against a live account before widening.
+OPTION_TICK_BREAKPOINT = 3.00   # PROPOSED_DEFAULT — price level where the tick changes
+OPTION_TICK_BELOW = 0.01        # PROPOSED_DEFAULT — increment for prices < breakpoint
+OPTION_TICK_ABOVE = 0.05        # PROPOSED_DEFAULT / LIVE_VERIFY — increment at/above breakpoint
+
 # ---- Durability / backups --------------------------------------------------
 # state.json is the single source of truth on a single Fly volume, so the
 # nightly job keeps rotating local copies AND ships one copy off the machine.

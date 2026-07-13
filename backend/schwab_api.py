@@ -21,6 +21,13 @@ import pandas as pd
 import requests
 
 import config
+import order_pricing
+from decimal import Decimal as _Decimal
+
+
+def _dec_ge_zero(value) -> bool:
+    """True when a price (Decimal or number) is >= 0, without float wobble."""
+    return _Decimal(str(value)) >= 0
 
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 AUTHORIZE_URL = "https://api.schwabapi.com/v1/oauth/authorize"
@@ -404,8 +411,72 @@ class SchwabClient:
         hint = self._ACCT_HINT if resp.status_code in (401, 403) else ""
         raise SchwabError(f"schwab place order: HTTP {resp.status_code} {resp.text[:300]}{hint}")
 
+    # -- truthful submission (incident hotfix, D2) ---------------------------
+    # HTTP status codes that are an EXPLICIT order rejection carrying a reason we
+    # can trust and display. Auth/rate/5xx/network are NOT rejections — the order
+    # may or may not have reached the order engine, so they resolve to UNKNOWN and
+    # are re-queried, never shown as "failed". LIVE_VERIFY: confirm the exact set
+    # of client-rejection codes against a live account.
+    _EXPLICIT_REJECT_CODES = (400, 422)
+
+    def submit_order(self, account_hash: str, order: dict) -> dict:
+        """Place a REAL order and return a STRUCTURED outcome instead of raising —
+        the ack handler needs to tell "Schwab rejected this" apart from "we never
+        heard back". Never raises for an HTTP-level result; only a programming error
+        would propagate. Outcomes:
+
+          {"outcome": "accepted", "order_id": str|None, "location": str}
+              HTTP 200/201 — the order is live. order_id is parsed from the Location
+              header (None if the header is absent — still accepted; the caller marks
+              it UNKNOWN and resolves by recent-orders match, never "failed").
+          {"outcome": "rejected", "status_code": int, "reason": str}
+              An EXPLICIT broker rejection (see _EXPLICIT_REJECT_CODES) with the
+              body preserved verbatim as the reason.
+          {"outcome": "unknown", "status_code": int|None, "detail": str}
+              No response / timeout / auth / rate-limit / 5xx — ambiguous. The order
+              may be live; the caller confirms with the broker before claiming
+              anything. status_code is None when the request never got a response.
+        """
+        url = f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders"
+        try:
+            resp = requests.post(
+                url, headers=self._auth_headers({"Content-Type": "application/json"}),
+                json=order, timeout=30,
+            )
+        except requests.exceptions.RequestException as e:
+            # Timeout / connection reset — the POST may have reached Schwab and the
+            # order may be working. UNKNOWN, never failed (D2).
+            return {"outcome": "unknown", "status_code": None,
+                    "detail": f"no response from broker (request error): {e}"}
+        if resp.status_code in (200, 201):
+            location = resp.headers.get("Location") or resp.headers.get("location") or ""
+            order_id = location.rstrip("/").rsplit("/", 1)[-1] if location else None
+            return {"outcome": "accepted", "order_id": order_id, "location": location}
+        body = (resp.text or "").strip()
+        if resp.status_code in self._EXPLICIT_REJECT_CODES:
+            return {"outcome": "rejected", "status_code": resp.status_code,
+                    "reason": body or f"Schwab rejected the order (HTTP {resp.status_code})"}
+        return {"outcome": "unknown", "status_code": resp.status_code,
+                "detail": body or f"HTTP {resp.status_code}"}
+
     def get_order(self, account_hash: str, order_id: str) -> dict:
         return self._get_json(f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}") or {}
+
+    def list_orders(self, account_hash: str, from_entered_time: str | None = None,
+                    to_entered_time: str | None = None, max_results: int = 50) -> list[dict]:
+        """Recent orders for an account, newest window first — used to RECOVER an
+        orderId when a 2xx ack carried no Location header (D4). LIVE_VERIFY: the
+        exact query-param names/format (fromEnteredTime/toEnteredTime, ISO-8601) and
+        the response array shape are unconfirmed against a live account; the caller
+        matches on leg symbols + time and treats a miss as still-UNKNOWN, so a wrong
+        assumption here degrades safely (never a false match)."""
+        params: dict = {"maxResults": max_results}
+        if from_entered_time:
+            params["fromEnteredTime"] = from_entered_time
+        if to_entered_time:
+            params["toEnteredTime"] = to_entered_time
+        out = self._get_json(f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders", params=params)
+        return out if isinstance(out, list) else []
 
     def cancel_order(self, account_hash: str, order_id: str) -> dict:
         """Cancel a working order. Schwab returns 200/201 or an empty 204."""
@@ -506,22 +577,37 @@ def build_net_order(legs: list[tuple], net_price: float, *,
 
 
 def build_roll_order(quantity: int, buy_to_close_symbol: str, sell_to_open_symbol: str,
-                     net_price: float) -> dict:
+                     net_price, order_type: str | None = None) -> dict:
     """A single two-leg NET_CREDIT/NET_DEBIT DAY order for a short-call roll:
     buy-to-close the old short + sell-to-open the new one on ONE ticket, so the
     roll cannot leg out (fill one side, miss the other). `net_price` is per
-    share: positive = credit received, negative = debit paid.
+    share: positive = credit received, negative = debit paid. It may be a Decimal
+    (preferred — the executor builds a tick-rounded Decimal via order_pricing) or a
+    float; the price is serialized EXACTLY (no binary-float artifact) either way.
+
+    `order_type` is derived from the sign of `net_price` when omitted (back-compat
+    for paper / direct callers). When the executor has already computed the
+    direction in one place (order_pricing.net_credit_debit), it passes the derived
+    NET_CREDIT/NET_DEBIT explicitly and this asserts the two agree — a contradiction
+    between the computed direction and the constructed order is an error, never a
+    silently-flipped submission (D1(b)).
 
     `duration` and `complexOrderStrategyType` come from config
     (ROLL_ORDER_DURATION / ROLL_COMPLEX_STRATEGY_TYPE). CUSTOM is the safe
     superset covering any strike/expiration combination (vertical or diagonal);
     the exact enum Schwab's spread approval wants is a LIVE_VERIFY item — see
     config.py — so it is a constant, not hardcoded here."""
-    credit = float(net_price) >= 0
+    derived = order_pricing.NET_CREDIT if _dec_ge_zero(net_price) else order_pricing.NET_DEBIT
+    if order_type is None:
+        order_type = derived
+    elif order_type != derived:
+        raise AssertionError(
+            f"build_roll_order: caller passed order_type={order_type} but net_price "
+            f"{net_price} implies {derived} — refusing to build a contradictory order")
     return {
-        "orderType": "NET_CREDIT" if credit else "NET_DEBIT",
+        "orderType": order_type,
         "session": "NORMAL",
-        "price": f"{abs(float(net_price)):.2f}",
+        "price": order_pricing.format_price(net_price),
         "duration": config.ROLL_ORDER_DURATION,
         "orderStrategyType": "SINGLE",
         "complexOrderStrategyType": config.ROLL_COMPLEX_STRATEGY_TYPE,

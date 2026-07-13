@@ -18,6 +18,7 @@ import execution_gate
 import indicators
 import logging_handler as log
 import order_lifecycle as olc
+import order_pricing
 import schwab_api
 import sector_data
 import session
@@ -966,6 +967,30 @@ def _roll_order_status(rec: dict, order: dict, order_id: str, raw: str) -> dict:
             "filled": already, "remaining": total - already}
 
 
+def _sync_roll_submission(rec: dict, res: dict) -> None:
+    """Keep the client_order_ref-keyed submission record in step with a roll's
+    settled outcome, so a status read by ref reflects the broker truth even when the
+    fill was resolved through the ordinary poll path. Best-effort — never unwinds a
+    committed fill."""
+    ref = rec.get("client_order_ref")
+    if not ref:
+        return
+    coded = {"filled": SUB_FILLED, "canceled": SUB_CANCELED, "rejected": SUB_REJECTED,
+             "leg_imbalance": SUB_LEG_IMBALANCE, "partially_filled": SUB_WORKING,
+             "working": SUB_WORKING}.get(res.get("status"))
+    if not coded:
+        return
+    try:
+        fields = {"status": coded}
+        if res.get("order_id"):
+            fields["order_id"] = str(res.get("order_id"))
+        if res.get("status") == "rejected":
+            fields["broker_reason"] = res.get("reason") or res.get("raw_status")
+        log.update_order_submission(ref, **fields)
+    except Exception as e:  # noqa: BLE001 — bookkeeping must never unwind a fill
+        log.logger.error("submission sync failed for %s: %s", ref, e)
+
+
 def order_status(order_id: str) -> dict:
     """Poll a live order. On FILLED, commit it as an execution and clear the
     pending entry; on CANCELED/REJECTED/EXPIRED, clear it; otherwise it's still
@@ -979,7 +1004,9 @@ def order_status(order_id: str) -> dict:
     # The atomic roll has its own lifecycle (partial whole-unit fills, leg-imbalance
     # freeze, rejection fallback) — see _roll_order_status.
     if rec.get("kind") == "roll_short":
-        return _roll_order_status(rec, order, order_id, raw)
+        res = _roll_order_status(rec, order, order_id, raw)
+        _sync_roll_submission(rec, res)
+        return res
     if raw == "FILLED":
         kind = rec.get("kind")
         if kind == "open":
@@ -1622,50 +1649,276 @@ def _place_legged_roll(payload, ticker, contracts, stock_price, price_source):
     }
 
 
+# Coded statuses on the durable order-submission record (client_order_ref-keyed).
+SUB_SUBMITTING = "SUBMITTING"   # record written, broker call not yet returned
+SUB_WORKING = "WORKING"         # accepted, orderId captured, live at the broker
+SUB_UNKNOWN = "UNKNOWN"         # no response / timeout / accepted-but-no-id
+SUB_REJECTED = "REJECTED"       # Schwab explicitly rejected (reason verbatim)
+SUB_FILLED = "FILLED"
+SUB_CANCELED = "CANCELED"
+SUB_LEG_IMBALANCE = "LEG_IMBALANCE"
+
+
+def _now_ms() -> float:
+    return time.time() * 1000.0
+
+
+def _roll_symbol(payload, ticker, prefix):
+    sym = payload.get(f"{prefix}_option_symbol")
+    if sym:
+        return sym
+    expiration = payload.get(f"{prefix}_expiration")
+    strike = payload.get(f"{prefix}_strike")
+    if not expiration:
+        raise ValueError(
+            f"live roll needs {prefix}_option_symbol or {prefix}_expiration to build the contract")
+    return schwab_api.occ_option_symbol(ticker, expiration, strike, call=True)
+
+
+def _submission_response(rec: dict, *, idempotent: bool = False) -> dict:
+    """Map a durable submission record to the /api/execute response the frontend
+    reads (status/order_id/mode). NEVER emits 'failed' — only working / unknown /
+    rejected / filled / canceled, all truthful to the persisted broker outcome."""
+    status = rec.get("status")
+    ref = rec.get("client_order_ref")
+    base = {"client_order_ref": ref, "mode": "live", "idempotent": idempotent,
+            "option_symbols": [rec.get("close_option_symbol"), rec.get("open_option_symbol")]}
+    if status in (SUB_WORKING, SUB_FILLED):
+        return {**base, "success": True,
+                "status": "filled" if status == SUB_FILLED else "working",
+                "order_id": rec.get("order_id"), "net_limit": rec.get("net_limit")}
+    if status == SUB_CANCELED:
+        return {**base, "success": True, "status": "canceled", "order_id": rec.get("order_id")}
+    if status == SUB_REJECTED:
+        return {**base, "success": False, "status": "rejected",
+                "reason": rec.get("broker_reason")}
+    if status == SUB_LEG_IMBALANCE:
+        return {**base, "success": False, "status": "leg_imbalance",
+                "order_id": rec.get("order_id"), "frozen": True}
+    # SUBMITTING or UNKNOWN — the broker outcome is not yet confirmed.
+    return {**base, "success": True, "status": "unknown", "order_id": rec.get("order_id"),
+            "message": "confirming with broker…", "detail": rec.get("detail"),
+            "net_limit": rec.get("net_limit")}
+
+
 def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
-    """Transmit the roll as a single two-leg NET order and park it as pending."""
+    """Transmit the roll as a single two-leg NET order — idempotent, truthful, and
+    orderId-first (fixes D1/D2/D3/D4 on the roll path).
+
+    F3: keyed by an app-generated ``client_order_ref``. A repeat call with the same
+    ref returns the existing record WITHOUT re-submitting — a refresh/retry storm
+    places exactly one order.
+
+    F1: both legs' quotes are re-read and validated (two-sided, nonzero, fresh)
+    before any price math; the net limit is a tick-rounded Decimal whose direction
+    (NET_CREDIT/NET_DEBIT) is computed in one place; a bad quote refuses construction
+    with a leg-named reason rather than submitting a malformed price.
+
+    F2/F4: a durable record is written BEFORE the broker call; on any response the
+    orderId is persisted FIRST; no-response/timeout/accepted-but-no-id becomes
+    UNKNOWN ("confirming with broker…"), never 'failed'; only an explicit Schwab
+    rejection is shown as rejected (reason verbatim)."""
     _assert_transmit_allowed("roll_short")
+
+    ref = payload.get("client_order_ref")
+    if not ref:
+        raise ValueError(
+            "live roll requires a client_order_ref (idempotency key) — the frontend "
+            "generates one when the order is staged; a submission without it could be "
+            "silently duplicated by a retry")
+
+    # F3 idempotency: any existing record for this ref means we already acted on it —
+    # return its truthful state, never re-submit (this is the refresh-storm guard).
+    existing = log.get_order_submission(ref)
+    if existing is not None:
+        return _submission_response(existing, idempotent=True)
+
     client = data_handler.client()
     account_hash = client.primary_account_hash()
+    close_symbol = _roll_symbol(payload, ticker, "from")
+    open_symbol = _roll_symbol(payload, ticker, "to")
 
-    def _symbol(prefix):
-        sym = payload.get(f"{prefix}_option_symbol")
-        if sym:
-            return sym
-        expiration = payload.get(f"{prefix}_expiration")
-        strike = payload.get(f"{prefix}_strike")
-        if not expiration:
-            raise ValueError(
-                f"live roll needs {prefix}_option_symbol or {prefix}_expiration to build the contract")
-        return schwab_api.occ_option_symbol(ticker, expiration, strike, call=True)
+    # F1 — validate BOTH legs' live quotes before any price math. A missing / one-
+    # sided / zero / stale quote refuses construction with a specific, leg-named
+    # reason. Never submit a price derived from a bad quote.
+    quotes = {}
+    try:
+        quotes = client.get_quotes([close_symbol, open_symbol]) or {}
+    except Exception as e:  # noqa: BLE001 — treat a quote-fetch failure as "no quote"
+        log.logger.warning("roll quote fetch failed for %s/%s: %s", close_symbol, open_symbol, e)
+    close_quote = quotes.get(close_symbol)
+    open_quote = quotes.get(open_symbol)
+    reasons = order_pricing.validate_roll_quotes(
+        close_quote, open_quote, close_symbol=close_symbol, new_symbol=open_symbol,
+        now_ms=_now_ms(), max_age_s=config.QUOTE_MAX_AGE_FOR_ORDER_SECONDS)
+    if reasons:
+        raise ValueError("Refusing to construct the roll order — " + "; ".join(reasons))
 
-    close_symbol = _symbol("from")
-    open_symbol = _symbol("to")
-    buyback = float(payload.get("close_price_per_share") or 0)
-    new_premium = float(payload.get("premium_per_share") or 0)
-    net = round(new_premium - buyback, 2)
-    order = schwab_api.build_roll_order(contracts, close_symbol, open_symbol, net)
-    placed = client.place_order(account_hash, order)
-    order_id = placed.get("orderId")
-    if not order_id:
-        raise schwab_api.SchwabError("Schwab accepted the roll but returned no order id")
+    # F1 — tick-rounded Decimal net + direction, computed in one place from the
+    # re-read mids. If the operator-staged mids imply a direction, assert it agrees
+    # (a flip means the quotes moved under the ticket — refuse, don't submit).
+    close_mid = order_pricing.quote_mid(close_quote)
+    open_mid = order_pricing.quote_mid(open_quote)
+    abs_net, order_type = order_pricing.net_credit_debit(close_mid, open_mid)
+    staged_close = payload.get("close_price_per_share")
+    staged_open = payload.get("premium_per_share")
+    if staged_close is not None and staged_open is not None:
+        _, staged_dir = order_pricing.net_credit_debit(staged_close, staged_open)
+        order_pricing.assert_direction(order_type, staged_dir)
+    signed_net = float(abs_net) if order_type == order_pricing.NET_CREDIT else -float(abs_net)
+    order = schwab_api.build_roll_order(
+        contracts, close_symbol, open_symbol, signed_net, order_type=order_type)
 
-    log.save_pending_order(order_id, {
-        "kind": "roll_short",
-        "payload": payload, "ticker": ticker, "action": "roll_short",
-        "contracts": contracts, "stock_price": stock_price,
-        "price_source": price_source, "account_hash": account_hash,
-        "close_option_symbol": close_symbol, "open_option_symbol": open_symbol,
-        "net_limit": net, "placed_at": log.utcnow(),
+    # F2/F4 — durable pre-submission record BEFORE the broker call. If the call
+    # faults after Schwab accepted the order, this record (and the orderId written
+    # onto it first, below) survives on disk.
+    log.save_order_submission(ref, {
+        "client_order_ref": ref, "ticker": ticker, "action": "roll_short",
+        "status": SUB_SUBMITTING, "order_id": None, "broker_reason": None,
+        "account_hash": account_hash, "close_option_symbol": close_symbol,
+        "open_option_symbol": open_symbol, "contracts": contracts,
+        "net_limit": signed_net, "order_type": order_type,
+        "request": order, "placed_at": log.utcnow(), "unknown_attempts": 0,
     })
-    return {
-        "success": True,
-        "status": "working",
-        "order_id": str(order_id),
-        "mode": "live",
-        "option_symbols": [close_symbol, open_symbol],
-        "net_limit": net,
-    }
+
+    result = client.submit_order(account_hash, order)
+    outcome = result.get("outcome")
+
+    if outcome == "accepted":
+        order_id = result.get("order_id")
+        if order_id:
+            # ORDERID_PERSIST_FIRST — write the orderId onto the durable record
+            # BEFORE building the pending record or any further parsing.
+            log.update_order_submission(ref, status=SUB_WORKING, order_id=str(order_id))
+            log.save_pending_order(order_id, {
+                "kind": "roll_short", "payload": payload, "ticker": ticker,
+                "action": "roll_short", "contracts": contracts, "stock_price": stock_price,
+                "price_source": price_source, "account_hash": account_hash,
+                "close_option_symbol": close_symbol, "open_option_symbol": open_symbol,
+                "net_limit": signed_net, "client_order_ref": ref, "placed_at": log.utcnow(),
+            })
+            return {"success": True, "status": "working", "order_id": str(order_id),
+                    "mode": "live", "client_order_ref": ref,
+                    "option_symbols": [close_symbol, open_symbol], "net_limit": signed_net}
+        # 2xx but NO orderId — the order is accepted and LIVE, we just don't have its
+        # id yet. UNKNOWN, never failed; the manual status check recovers the id by
+        # recent-orders match (D4).
+        rec = log.update_order_submission(
+            ref, status=SUB_UNKNOWN,
+            detail="broker accepted the order (2xx) but returned no order id; "
+                   "confirming and recovering the id")
+        _alert_order("ORDER_ACK_NO_ID", ticker,
+                     f"{ticker} roll accepted by Schwab with no order id in the ack — "
+                     "recovering by recent-orders match; do NOT resubmit.",
+                     data={"client_order_ref": ref})
+        return _submission_response(rec)
+
+    if outcome == "rejected":
+        rec = log.update_order_submission(
+            ref, status=SUB_REJECTED, broker_reason=result.get("reason"))
+        return _submission_response(rec)
+
+    # UNKNOWN — no response / timeout / auth / 5xx. The order MAY be live. Never
+    # "failed": UNKNOWN, and the operator confirms with the broker.
+    rec = log.update_order_submission(ref, status=SUB_UNKNOWN, detail=result.get("detail"))
+    _alert_order("ORDER_STATUS_UNKNOWN", ticker,
+                 f"{ticker} roll submission got no confirmed response — status UNKNOWN. "
+                 "The order may be working at Schwab; confirm before resubmitting.",
+                 data={"client_order_ref": ref, "detail": result.get("detail")})
+    return _submission_response(rec)
+
+
+def _match_recent_order(orders: list, close_symbol: str, open_symbol: str):
+    """Find the orderId of a recently-entered order whose two legs match this roll's
+    close/open symbols (D4 recovery when a 2xx ack carried no Location header). Pure:
+    given the broker's recent-orders list, return the matching orderId or None. A
+    miss is safe — the caller keeps the record UNKNOWN rather than guessing."""
+    want = {(close_symbol or "").strip(), (open_symbol or "").strip()}
+    for o in orders or []:
+        syms = set()
+        for leg in o.get("orderLegCollection") or []:
+            s = ((leg.get("instrument") or {}).get("symbol") or "").strip()
+            if s:
+                syms.add(s)
+        if want and want.issubset(syms):
+            oid = o.get("orderId") or o.get("order_id")
+            if oid is not None:
+                return str(oid)
+    return None
+
+
+def submission_status(client_order_ref: str) -> dict:
+    """MANUAL, bounded status check for a client_order_ref (F2). Resolves an order
+    whose outcome isn't yet confirmed — NEVER auto-retries the submission itself.
+
+      * Known orderId (WORKING/UNKNOWN) → re-poll it via order_status and sync the
+        record to the broker truth (filled/canceled/rejected/working).
+      * UNKNOWN with no orderId → recover the id by recent-orders match on the legs;
+        found → adopt it and re-poll; not found → stay UNKNOWN, count the attempt
+        (bounded by UNKNOWN_STATUS_MAX_ATTEMPTS), and say so plainly.
+    """
+    rec = log.get_order_submission(client_order_ref)
+    if rec is None:
+        return {"client_order_ref": client_order_ref, "status": "unknown",
+                "detail": "no submission record for this ref"}
+    status = rec.get("status")
+    if status in (SUB_FILLED, SUB_CANCELED, SUB_REJECTED, SUB_LEG_IMBALANCE):
+        return _submission_response(rec)
+
+    client = data_handler.client()
+    account_hash = rec.get("account_hash")
+    order_id = rec.get("order_id")
+
+    # Recover a missing orderId by recent-orders match on the legs.
+    if not order_id and status == SUB_UNKNOWN:
+        attempts = int(rec.get("unknown_attempts") or 0) + 1
+        recovered = None
+        try:
+            orders = client.list_orders(account_hash)
+            recovered = _match_recent_order(
+                orders, rec.get("close_option_symbol"), rec.get("open_option_symbol"))
+        except Exception as e:  # noqa: BLE001 — a failed lookup just leaves it UNKNOWN
+            log.logger.warning("recent-orders recovery failed for %s: %s", client_order_ref, e)
+        if recovered:
+            order_id = recovered
+            rec = log.update_order_submission(
+                client_order_ref, order_id=order_id, status=SUB_WORKING,
+                detail="orderId recovered by recent-orders match")
+            # Register a pending record so the normal poll/settle lifecycle owns it.
+            if not log.get_pending_order(order_id):
+                log.save_pending_order(order_id, {
+                    "kind": "roll_short", "payload": rec.get("request", {}),
+                    "ticker": rec.get("ticker"), "action": "roll_short",
+                    "contracts": rec.get("contracts"), "account_hash": account_hash,
+                    "close_option_symbol": rec.get("close_option_symbol"),
+                    "open_option_symbol": rec.get("open_option_symbol"),
+                    "net_limit": rec.get("net_limit"), "client_order_ref": client_order_ref,
+                    "placed_at": rec.get("placed_at"), "recovered": True})
+        else:
+            capped = attempts >= int(config.UNKNOWN_STATUS_MAX_ATTEMPTS)
+            rec = log.update_order_submission(
+                client_order_ref, unknown_attempts=attempts,
+                detail=("still UNKNOWN — no matching recent order found"
+                        + (f"; reached max {config.UNKNOWN_STATUS_MAX_ATTEMPTS} check "
+                           "attempts, resolve manually at the broker" if capped else "")))
+            return {**_submission_response(rec), "attempts": attempts,
+                    "max_attempts": int(config.UNKNOWN_STATUS_MAX_ATTEMPTS),
+                    "retry_after_seconds": int(config.UNKNOWN_STATUS_RETRY_SECONDS)}
+
+    if not order_id:
+        return _submission_response(rec)
+
+    # Known orderId — poll the broker and sync the durable record to the truth.
+    poll = order_status(order_id)
+    st = poll.get("status")
+    coded = {"filled": SUB_FILLED, "canceled": SUB_CANCELED, "rejected": SUB_REJECTED,
+             "leg_imbalance": SUB_LEG_IMBALANCE, "working": SUB_WORKING,
+             "partially_filled": SUB_WORKING}.get(st, SUB_UNKNOWN)
+    fields = {"status": coded}
+    if st == "rejected":
+        fields["broker_reason"] = poll.get("reason") or poll.get("raw_status")
+    rec = log.update_order_submission(client_order_ref, **fields) or rec
+    return {**_submission_response(rec), "poll": poll}
 
 
 def _roll_leg_fills(order: dict, close_symbol: str, open_symbol: str):

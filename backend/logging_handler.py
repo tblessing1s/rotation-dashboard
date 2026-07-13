@@ -331,6 +331,54 @@ def list_pending_orders() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Durable order-submission records (incident hotfix, D2/D4/F3)
+# ---------------------------------------------------------------------------
+# Keyed by an app-generated client_order_ref created BEFORE the broker call, so a
+# record exists even when the ack has no orderId or the response is lost — the only
+# structure that survives a header-less ack or a timeout. This is the F3 idempotency
+# key (a repeat submit for the same ref returns this record, never re-submits) and
+# the durable home for the orderId (ORDERID_PERSIST_FIRST). Co-located in state.json
+# next to pending_orders/order_events/order_locks (all operational, not execution,
+# records); the forthcoming lifecycle system adopts it as its client-ref index.
+def save_order_submission(client_order_ref: str, record: dict) -> None:
+    """Create/replace the durable submission record for ``client_order_ref``. Written
+    BEFORE the broker call (status SUBMITTING) so nothing is lost if the call faults."""
+    with _lock:
+        state = load_state()
+        record = dict(record)
+        record.setdefault("created_at", utcnow())
+        record["updated_at"] = utcnow()
+        state.setdefault("order_submissions", {})[str(client_order_ref)] = record
+        save_state(state)
+
+
+def update_order_submission(client_order_ref: str, **fields) -> dict | None:
+    """Merge ``fields`` into an existing submission record and re-stamp updated_at.
+    Returns the updated record, or None if the ref is unknown. Used to write the
+    orderId FIRST on a response, then the resolved status."""
+    with _lock:
+        state = load_state()
+        subs = state.setdefault("order_submissions", {})
+        rec = subs.get(str(client_order_ref))
+        if rec is None:
+            return None
+        rec = dict(rec)
+        rec.update(fields)
+        rec["updated_at"] = utcnow()
+        subs[str(client_order_ref)] = rec
+        save_state(state)
+        return rec
+
+
+def get_order_submission(client_order_ref: str) -> dict | None:
+    return load_state().get("order_submissions", {}).get(str(client_order_ref))
+
+
+def list_order_submissions() -> dict:
+    return dict(load_state().get("order_submissions", {}))
+
+
+# ---------------------------------------------------------------------------
 # Order-lifecycle event log + per-position resubmission lock
 # ---------------------------------------------------------------------------
 def append_order_event(event: dict) -> dict:
