@@ -163,6 +163,14 @@ export const api = {
     request("/api/reconcile/resolve-expiry", { method: "POST", body: JSON.stringify({ diff_id: diffId }) }),
   acknowledgeDiff: (diffId, ackReason) =>
     request("/api/reconcile/acknowledge", { method: "POST", body: JSON.stringify({ diff_id: diffId, ack_reason: ackReason }) }),
+  // The global reconciliation-freeze verdict + minutes staleness (spec §5).
+  freezeStatus: () => request("/api/reconcile/freeze-status"),
+  // Execution ingestion from Schwab transactions (spec §4).
+  ingestion: () => request("/api/ingestion"),
+  runIngestion: () => request("/api/ingestion", { method: "POST" }),
+  // Adopt one out-of-band broker trade (a proposal) into state.json.
+  adoptBrokerTrade: (proposalId) =>
+    request("/api/ingestion/adopt", { method: "POST", body: JSON.stringify({ proposal_id: proposalId }) }),
   alertSettings: (patch) =>
     request("/api/alerts/settings", { method: "POST", body: JSON.stringify(patch) }),
   pushVapidKey: () => request("/api/push/vapid-key"),

@@ -264,6 +264,10 @@ def test_leg_imbalance_freezes_and_writes_no_execution(store, monkeypatch):
 
     assert res["status"] == "leg_imbalance" and res["frozen"] is True
     assert res["close_filled"] == 5 and res["open_filled"] == 0
+    # §6: exposure direction — buyback filled, replacement didn't -> under-written
+    # (the SAFE direction: fewer shorts, no naked exposure).
+    assert res["direction"] == "orphaned_buyback"
+    assert "UNDER-WRITTEN" in res["exposure"]
     # No execution written, position frozen, pending cleared.
     assert len(log.load_state()["executions"]) == before
     pos = log.find_position(log.load_state(), "ON")
@@ -446,3 +450,14 @@ def test_migration_is_idempotent_and_preserves_existing_group_id():
         {"id": "e1", "action": "close_short", "roll_id": "roll_001", "roll_group_id": "keep_me"}]}
     out, _ = migrations.migrate(state)
     assert out["executions"][0]["roll_group_id"] == "keep_me"
+
+
+def test_leg_imbalance_exposure_direction_uncovered():
+    """§6: the URGENT direction — new short sold without its buyback -> an extra
+    short leg is live -> potentially NAKED. Pure helper, no I/O."""
+    direction, exposure = executor._leg_imbalance_exposure(close_qty=0, open_qty=3)
+    assert direction == "orphaned_new_short"
+    assert "UNCOVERED-RISK" in exposure and "NAKED" in exposure
+
+    direction, exposure = executor._leg_imbalance_exposure(close_qty=3, open_qty=3)
+    assert direction == "balanced"

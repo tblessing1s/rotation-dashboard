@@ -2145,14 +2145,43 @@ def _allocate_roll_fills(order: dict, rec: dict):
             open_px if open_px is not None else ref_open, "staged_estimate")
 
 
+def _leg_imbalance_exposure(close_qty: int, open_qty: int) -> tuple[str, str]:
+    """Name the leg-imbalance exposure DIRECTION (spec §6): which leg is unpaired
+    and whether the result is covered (safe) or potentially uncovered (urgent).
+
+    Roll legs: close = buy-to-close the OLD short, open = sell-to-open the NEW
+    short. Returns (direction, exposure_sentence).
+      * open > close  -> an EXTRA short call is live without its buyback: the
+        dangerous direction — potentially NAKED/uncovered if it exceeds LEAP
+        coverage. This is the one genuinely urgent case.
+      * close > open  -> the old short was bought back but the replacement wasn't
+        (fully) sold: FEWER short calls than intended — under-written, no naked
+        exposure, but the intended premium wasn't captured.
+    """
+    if open_qty > close_qty:
+        n = open_qty - close_qty
+        return ("orphaned_new_short",
+                f"UNCOVERED-RISK: {n} new short call(s) sold without the matching "
+                "buy-to-close — an EXTRA short leg is live. Verify it is covered by the "
+                "LEAP; if not, the position is NAKED short. Act at the broker now.")
+    if close_qty > open_qty:
+        n = close_qty - open_qty
+        return ("orphaned_buyback",
+                f"UNDER-WRITTEN (safe direction): {n} short call(s) bought back without "
+                "the replacement sold — fewer short calls than intended, no naked "
+                "exposure; the intended roll premium was not captured.")
+    return ("balanced", "legs balanced — no directional exposure detected.")
+
+
 def _freeze_for_leg_imbalance(ticker: str, order_id: str, close_qty: int, open_qty: int) -> dict:
     """A spread reported a leg-imbalanced fill (one leg filled, the other did not).
     Per ROLL_LEG_IMBALANCE_ACTION this NEVER auto-corrects: freeze the position
     for review and surface it as an alert. NO execution is written — the operator
     reconciles the true broker state and resolves the freeze. (R3.)"""
+    direction, exposure = _leg_imbalance_exposure(close_qty, open_qty)
     summary = (f"roll order {order_id}: leg-imbalanced fill — buy-to-close filled "
-               f"{close_qty}, sell-to-open filled {open_qty}. Position frozen; "
-               f"reconcile against the broker before trading it.")
+               f"{close_qty}, sell-to-open filled {open_qty}. {exposure} "
+               f"Position frozen; reconcile against the broker before trading it.")
     state = log.load_state()
     position = log.find_position(state, ticker)
     if position is not None:
@@ -2165,15 +2194,16 @@ def _freeze_for_leg_imbalance(ticker: str, order_id: str, close_qty: int, open_q
         review["classifications"] = sorted(classes)
         review["leg_imbalance"] = {
             "order_id": str(order_id), "close_filled": close_qty,
-            "open_filled": open_qty, "at": log.utcnow(),
+            "open_filled": open_qty, "direction": direction, "exposure": exposure,
+            "at": log.utcnow(),
         }
         position["review"] = review
         log.save_state(state)
-    log.logger.error("LEG IMBALANCE on roll %s (%s): close=%s open=%s — froze position, "
-                     "no execution written", order_id, ticker, close_qty, open_qty)
+    log.logger.error("LEG IMBALANCE on roll %s (%s): close=%s open=%s [%s] — froze position, "
+                     "no execution written", order_id, ticker, close_qty, open_qty, direction)
     return {"order_id": str(order_id), "status": "leg_imbalance", "frozen": True,
             "ticker": ticker, "close_filled": close_qty, "open_filled": open_qty,
-            "summary": summary}
+            "direction": direction, "exposure": exposure, "summary": summary}
 
 
 def _roll_reference_net_mid(payload, close_ps, open_ps) -> float | None:
