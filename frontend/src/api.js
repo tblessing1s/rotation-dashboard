@@ -143,6 +143,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ rec_id: recId, reason, ...(note ? { note } : {}) }),
     }),
+  // Toggle pre-approval on a PENDING_SETTLE rec: it auto-submits when its settle
+  // window opens, but only if its trigger re-validates at that moment.
+  preapproveRecommendation: (recId, approve = true) =>
+    request("/api/recommendations/preapprove", {
+      method: "POST",
+      body: JSON.stringify({ rec_id: recId, approve }),
+    }),
   trustScoreboard: () => request("/api/trust-scoreboard"),
   reconcile: () => request("/api/reconcile"),
   runReconcile: () => request("/api/reconcile", { method: "POST" }),
