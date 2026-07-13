@@ -487,6 +487,26 @@ ALERT_LOG_MAX = 500            # PROPOSED_DEFAULT — alert history cap in state
 # the earnings/dividend caches for held names and sync position snapshots.
 MAINTENANCE_ET = "17:30"
 
+# ---- Market-settle execution gate (time-of-day order discipline) -----------
+# The first ~30 min after the open and the last ~15 before the close are
+# structurally hostile to this strategy's order types (widest spreads, unreliable
+# IV marks, gap-distorted daily-bar signals, closing-auction imbalances). ALERTS
+# still fire immediately; only ORDER EXECUTION is gated/deferred by action type,
+# with one narrow gap-emergency exception for DEFENSE/EXIT_KILL. The gate is a pure
+# function (backend/execution_gate.py) wired into the shared executor.execute path.
+# Provenance tags below are load-bearing (see the atomic-roll section for the key).
+MARKET_SETTLE_MINUTES = 30          # PROPOSED_DEFAULT — post-open blackout for entries/rolls; DEFENSE/EXIT only via gap-emergency
+ENTRY_EARLIEST_MINUTES = 60         # PROPOSED_DEFAULT — entries additionally blocked until open+this (entries are never urgent)
+CLOSE_BLACKOUT_MINUTES = 15         # PROPOSED_DEFAULT — pre-close blackout (keys off the ACTUAL close, early-close included)
+GAP_EMERGENCY_ATR_MULT = 2.0        # PROPOSED_DEFAULT — overnight gap vs position >= this * ATR unlocks the pre-settle emergency path
+OPENING_RANGE_MINUTES = 15          # PROPOSED_DEFAULT — opening-range window for the gap-continuation (break-of-range-low) confirmation
+EMERGENCY_MIN_PRINT_MINUTES = 5     # PROPOSED_DEFAULT — underlying must print two-sided quotes >= this before an emergency execution
+SPREAD_QUALITY_MULT = 2.0           # PROPOSED_DEFAULT — current spread > this * trailing average -> WIDE_SPREAD acknowledge (post-settle)
+SPREAD_BASELINE_MIN_SAMPLES = 5     # PROPOSED_DEFAULT — trailing spread samples required before a baseline exists ("no baseline" until then)
+NO_MARKET_ORDERS_AT_OPEN = True     # HARD_CFM_RULE — inside the settle window market orders are refused for EVERY action, emergency included
+EMERGENCY_NEVER_FOR_ENTRY = True    # HARD_CFM_RULE — the gap-emergency path never applies to ENTRY or routine rolls
+CANCEL_NEVER_GATED = True           # HARD_CFM_RULE — canceling a resting order is allowed any time the broker accepts cancels
+
 # ---- Paper-fill slippage (mid-fill assumption) -----------------------------
 # Paper fills are booked at the quoted MIDPOINT, but deep-ITM options rarely fill
 # at mid — so every paper cycle's juice is optimistic by ~half the spread, twice a
