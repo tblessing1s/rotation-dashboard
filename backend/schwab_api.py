@@ -478,6 +478,34 @@ class SchwabClient:
         out = self._get_json(f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders", params=params)
         return out if isinstance(out, list) else []
 
+    def get_transactions(self, account_hash: str, start_date: str | None = None,
+                         end_date: str | None = None,
+                         types: str = "TRADE") -> list[dict]:
+        """Settled transactions (executions) for an account over a date window —
+        the GROUND-TRUTH feed for execution ingestion (INGESTION_IS_GROUND_TRUTH).
+        Read-only; no CFM_LIVE_TRADING needed.
+
+        LIVE_VERIFY: the exact endpoint path, query-param names/format
+        (``startDate``/``endDate`` ISO-8601), the ``types`` filter value(s), and
+        the transaction object shape (``activityId``, ``time``, ``type``,
+        ``orderId``, ``transferItems[]`` with ``instrument``/``amount``/``cost``/
+        ``price``/``positionEffect``/``feeType``) are assumptions stubbed behind
+        this interface and MUST be confirmed against a captured live response
+        before ingestion is trusted unsupervised. transaction_ingest.py parses
+        defensively and drops anything it can't understand (loudly, into the
+        report's ``errors``), so a wrong assumption here fails closed — an
+        unparsed transaction is never silently ingested."""
+        params: dict = {}
+        if start_date:
+            params["startDate"] = start_date
+        if end_date:
+            params["endDate"] = end_date
+        if types:
+            params["types"] = types
+        out = self._get_json(
+            f"{ACCOUNTS_BASE}/accounts/{account_hash}/transactions", params=params or None)
+        return out if isinstance(out, list) else []
+
     def cancel_order(self, account_hash: str, order_id: str) -> dict:
         """Cancel a working order. Schwab returns 200/201 or an empty 204."""
         resp = requests.delete(

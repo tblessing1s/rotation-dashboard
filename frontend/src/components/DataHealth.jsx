@@ -289,6 +289,85 @@ function VetCandidates() {
   );
 }
 
+// Execution ingestion (Schwab transactions -> state, spec §4): the last run
+// summary + any OUT-OF-BAND broker trades surfaced for one-click adoption. A
+// broker_manual trade (e.g. a manual ToS roll) is booked into state only when
+// the operator adopts it here — the app never auto-books it (NO_AUTO_REMEDIATION).
+function IngestionPanel() {
+  const { data, reload } = useApi(api.ingestion, [], null);
+  const [busy, setBusy] = React.useState(false);
+  const [adopting, setAdopting] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+
+  const run = async () => {
+    setBusy(true); setErr(null);
+    try { await api.runIngestion(); await reload(); }
+    catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+  const adopt = async (pid) => {
+    setAdopting(pid); setErr(null);
+    try { await api.adoptBrokerTrade(pid); await reload(); }
+    catch (e) { setErr(String(e.message || e)); }
+    finally { setAdopting(null); }
+  };
+
+  const proposals = data?.proposals || [];
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Broker execution ingestion</span>
+        <button onClick={run} disabled={busy}
+                className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          {busy ? "Ingesting…" : "Ingest now"}
+        </button>
+      </div>
+      {proposals.length === 0 && (
+        <p className="mt-2 text-xs text-slate-500">
+          No out-of-band trades to adopt. Matched broker fills confirm the app's own orders automatically.
+        </p>
+      )}
+      {proposals.length > 0 && (
+        <div className="mt-2 space-y-2">
+          <p className="text-xs text-amber-300">
+            {proposals.length} out-of-band broker trade{proposals.length > 1 ? "s" : ""} — executed outside the app.
+            Adopt to book {proposals.length > 1 ? "them" : "it"} into state (economics come from the broker record).
+          </p>
+          {proposals.map((p) => (
+            <div key={p.proposal_id} className="rounded-md border border-amber-800/60 bg-amber-950/20 p-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-semibold text-amber-200">
+                  <span className="mr-1 rounded bg-amber-900/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-amber-300">
+                    broker manual
+                  </span>
+                  {p.ticker} · {p.action}
+                </span>
+                <button onClick={() => adopt(p.proposal_id)} disabled={adopting === p.proposal_id}
+                        className="rounded-full border border-amber-700 bg-amber-900/40 px-2.5 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-900/70 disabled:opacity-50">
+                  {adopting === p.proposal_id ? "Adopting…" : "Adopt"}
+                </button>
+              </div>
+              {p.exposure && <p className="mt-1 text-xs text-amber-300/90">{p.exposure}</p>}
+              {(p.leg_summaries || []).map((s, i) => (
+                <p key={i} className="mt-0.5 font-mono text-[11px] text-slate-400">{s}</p>
+              ))}
+              {p.order_id && <p className="mt-0.5 text-[11px] text-slate-500">broker order {p.order_id}</p>}
+            </div>
+          ))}
+        </div>
+      )}
+      {data?.last && (
+        <p className="mt-2 text-[11px] text-slate-500">
+          Last ingest: {data.last.matched ?? 0} matched, {data.last.proposals ?? 0} proposed
+          {data.last.as_of ? ` · ${data.last.as_of.replace("T", " ").replace("Z", "")}` : ""}
+          {(data.last.errors || []).length > 0 ? ` · ${data.last.errors.length} parse issue(s)` : ""}
+        </p>
+      )}
+      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
 // Position reconciliation status (state.json vs Schwab): last run timestamp,
 // CLEAN/DIRTY (or FAILED), the diff count, and a manual "Reconcile now" trigger.
 function ReconcileStatus() {
@@ -586,6 +665,7 @@ export default function DataHealth() {
       )}
       {!data?.demo && <TieredScheduler data={data} />}
       <ReconcileStatus />
+      {!data?.demo && <IngestionPanel />}
       {!data?.demo && <LiveFillVerify />}
       {!data?.demo && <UniverseCheck />}
     </Card>

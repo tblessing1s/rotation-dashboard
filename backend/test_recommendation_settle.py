@@ -39,8 +39,10 @@ def test_migration_v17_to_v18_seeds_spread_baselines():
 
 
 def test_current_version_is_18():
-    assert migrations.CURRENT_VERSION == 18
+    # v19 adds the transaction-ingestion stores (ingested_transactions / ingestion).
+    assert migrations.CURRENT_VERSION == 19
     assert migrations.MIGRATIONS[17] is migrations._v17_to_v18
+    assert migrations.MIGRATIONS[18] is migrations._v18_to_v19
 
 
 # ---- staging -----------------------------------------------------------------

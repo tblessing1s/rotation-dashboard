@@ -432,6 +432,27 @@ def run(notify: bool = True, include_entry: bool = True,
         release_summary = release_pending(now=now, notify=notify, dry_run=dry_run)
         # 2) Evaluate fresh (state may have been mutated by the release pass).
         state = log.load_state()
+        # Reconciliation freeze gate (spec §5): while the book diverges from the
+        # broker (or holds an unbalanced leg), NO recommendations are generated —
+        # acting on unverified state is exactly the failure mode reconciliation
+        # exists to prevent. The app surfaces the freeze and waits for a human; it
+        # never auto-remediates. Release of already-open PENDING_SETTLE recs above
+        # still runs (closing/settling an existing rec is safe).
+        import reconcile
+        freeze = reconcile.freeze_status(state)
+        if freeze["frozen"]:
+            _last_run = {
+                "at": log.utcnow(),
+                "positions_evaluated": 0,
+                "emitted": 0, "emitted_ids": [],
+                "reconcile_frozen": True,
+                "frozen_tickers": freeze["tickers"],
+                "freeze_reason": freeze["reason"],
+                "released": release_summary,
+            }
+            logger.warning("recommendation pass SKIPPED — reconciliation freeze: %s",
+                           freeze["tickers"])
+            return _last_run
         market = build_market_snapshot(state, include_entry=include_entry)
         open_recs = trust_derive.open_recommendations(state, now)
         new_recs = engine.evaluate(market, state, now, open_recs)

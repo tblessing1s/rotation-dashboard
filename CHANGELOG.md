@@ -1,5 +1,41 @@
 # Changelog
 
+## v2.7.0 — Broker execution ingestion + reconciliation freeze gating (state schema v19)
+
+The reconciliation core the roll incident demanded: the app now reads Schwab's
+own transaction record as ground truth and reconciles out-of-band trades back
+into `state.json`. Built as **ingest-to-confirm** so it satisfies the ingestion
+spec without reversing the "no silent adopt-external-trade" safety stance. Audit:
+`AUDIT_LIFECYCLE_RECONCILIATION.md`; notes:
+`IMPLEMENTATION_NOTES_LIFECYCLE_RECONCILIATION.md`.
+
+- **Transaction ingestion** (`transaction_ingest.py`, `schwab_api.get_transactions`):
+  pulls the Schwab transactions feed, dedupes by transaction id (idempotent
+  re-runs), and classifies each broker execution — **matched** fills confirm the
+  app's own orders (`source: app`); **out-of-band** trades with no app order
+  (e.g. the manual ToS roll) surface as one-click adoption proposals
+  (`source: broker_manual`) with economics taken verbatim from the broker record.
+  Multi-leg orders sharing a Schwab orderId link into one logical action.
+  `executor.adopt_broker_trade` books an adopted proposal through the same
+  builders app fills use; `recompute_derived` then rebuilds ledgers/positions —
+  no derived value patched directly (`NO_AUTO_REMEDIATION`,
+  `INGESTION_IS_GROUND_TRUTH`).
+- **Reconciliation freeze gating** (`reconcile.freeze_status`): while the book
+  diverges from the broker (or holds an unbalanced leg), recommendation
+  generation is now blocked entirely (previously the freeze only blocked order
+  submission). Minutes-based market-hours staleness (`RECONCILE_STALE_MINUTES`)
+  degrades action-capable panels; a `RECONCILE_INTERVAL_MINUTES` scheduler runs
+  reconcile + ingestion during market hours (+ once after close).
+- **Unbalanced exposure direction** (`_leg_imbalance_exposure`): a leg-imbalanced
+  fill now names the direction — orphaned new short (potentially NAKED, urgent) vs
+  orphaned buyback (under-written, safe).
+- **UI**: ingestion panel with a `broker_manual` badge + one-click Adopt +
+  "Ingest now"; `/api/ingestion`, `/api/ingestion/adopt`,
+  `/api/reconcile/freeze-status`.
+- Config: `RECONCILE_INTERVAL_MINUTES`, `RECONCILE_STALE_MINUTES`,
+  `NO_AUTO_REMEDIATION`, `INGESTION_IS_GROUND_TRUTH`, `INGESTION_LOOKBACK_DAYS`.
+- Migration v18→v19 (additive: `ingested_transactions` + `ingestion`).
+
 ## v2.6.0 — Recommendation engine + trust scoreboard + execution fidelity ledger (state schema v17)
 
 The trust layer that must exist before any automated execution is permitted.

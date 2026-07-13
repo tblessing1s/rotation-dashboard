@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 18
+CURRENT_VERSION = 19
 
 
 class MigrationAbortedError(RuntimeError):
@@ -285,6 +285,24 @@ def _v17_to_v18(state: dict) -> dict:
     return state
 
 
+def _v18_to_v19(state: dict) -> dict:
+    """v19 (transaction ingestion): two additive stores —
+
+    - ``ingested_transactions``: the dedupe ledger, Schwab transaction id -> a
+      small record (source app|broker_manual, order_id, execution_ids,
+      ingested_at). Makes re-running ingestion idempotent — a transaction is
+      ingested at most once (INGESTION_IS_GROUND_TRUTH).
+    - ``ingestion``: the last ingestion report summary + the list of open
+      out-of-band ``proposals`` awaiting one-click operator adoption
+      (NO_AUTO_REMEDIATION — the app never auto-books an out-of-band trade).
+
+    Executions untouched; the new ``source``/``transaction_id`` execution fields
+    are additive and nullable, so no per-record rewrite is needed."""
+    state.setdefault("ingested_transactions", {})
+    state.setdefault("ingestion", {"last": None, "last_success": None, "proposals": []})
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -303,6 +321,7 @@ MIGRATIONS = {
     15: _v15_to_v16,
     16: _v16_to_v17,
     17: _v17_to_v18,
+    18: _v18_to_v19,
 }
 
 

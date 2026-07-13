@@ -646,6 +646,60 @@ def reevaluate_freezes(state: dict) -> None:
             p["review"] = None
 
 
+def freeze_status(state: dict) -> dict:
+    """The global reconciliation-freeze verdict (spec §5). The book is FROZEN when
+    any open position is under review (needs_review) — a divergence, an unbalanced
+    leg, or a partial-fill-canceled position. While frozen, recommendation
+    generation is blocked (recommendation_runner) and the diverging position's
+    new-risk order submission is blocked (executor._enforce_not_frozen); the app
+    NEVER auto-remediates — a human resolves at the broker.
+
+    Returns {frozen, tickers, reviews, reason}. Also carries the market-hours
+    staleness degrade (spec §5): ``stale`` True when the last SUCCESSFUL reconcile
+    is older than RECONCILE_STALE_MINUTES (a warning on action-capable panels, not
+    a freeze)."""
+    frozen_tickers = []
+    reviews = {}
+    for p in state.get("positions", []):
+        if p.get("status") == "closed":
+            continue
+        if p.get("needs_review"):
+            t = (p.get("ticker") or "").upper()
+            frozen_tickers.append(t)
+            reviews[t] = p.get("review") or {}
+    recon = state.get("reconciliation") or {}
+    reason = ""
+    if frozen_tickers:
+        reason = ("reconciliation freeze: " + ", ".join(sorted(set(frozen_tickers)))
+                  + " diverge from the broker or hold an unbalanced leg — resolve before trading")
+    return {
+        "frozen": bool(frozen_tickers),
+        "tickers": sorted(set(frozen_tickers)),
+        "reviews": reviews,
+        "reason": reason,
+        "stale": is_reconcile_stale_minutes(state),
+        "last_success": recon.get("last_success"),
+    }
+
+
+def is_reconcile_stale_minutes(state: dict, now=None) -> bool:
+    """True when the last SUCCESSFUL reconciliation is older than
+    RECONCILE_STALE_MINUTES (the market-hours freshness degrade; a warning, not a
+    freeze). A never-run book is not "stale" here — it degrades only once a
+    successful run has established a baseline that then ages out."""
+    last = (state.get("reconciliation") or {}).get("last_success")
+    if not last:
+        return False
+    if now is None:
+        now = datetime.now(timezone.utc)
+    try:
+        ts = datetime.strptime(str(last), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+    age_min = (now - ts).total_seconds() / 60.0
+    return age_min > float(config.RECONCILE_STALE_MINUTES)
+
+
 def _find_diff(state: dict, diff_id: str):
     report = (state.get("reconciliation") or {}).get("last") or {}
     for d in report.get("diffs", []):

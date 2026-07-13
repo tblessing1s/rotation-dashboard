@@ -75,6 +75,12 @@ def _default_state() -> dict:
         "alerts": migrations.default_alert_state(),
         # Position reconciliation vs Schwab: last report + capped history.
         "reconciliation": {"last": None, "history": [], "last_success": None},
+        # Execution ingestion from the Schwab transactions endpoint (spec §4).
+        # ingested_transactions is the dedupe ledger (Schwab transaction id ->
+        # record) so re-runs are idempotent; ingestion holds the last report
+        # summary + open out-of-band adoption proposals. See transaction_ingest.py.
+        "ingested_transactions": {},
+        "ingestion": {"last": None, "last_success": None, "proposals": []},
         # Recommendation trust layer (schema v17). recommendations and
         # recommendation_overrides are append-only and immutable once written;
         # recommendation_resolutions and trust_scoreboard are DERIVED by

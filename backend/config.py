@@ -985,6 +985,48 @@ RECONCILE_HISTORY_MAX = 30
 # failure signal (the positions call failing, the scheduler wedged, etc.).
 RECONCILE_STALE_HOURS = 36
 
+# ---- Order lifecycle + broker reconciliation (transactions ingestion) ------
+# Constants for the order-lifecycle-reconciliation system. Named exactly as its
+# spec expects. These extend the incident-hotfix block above (QUOTE_MAX_AGE_*,
+# UNKNOWN_STATUS_*, ORDERID_PERSIST_FIRST, NO_FAILURE_WITHOUT_VERIFICATION),
+# which this system adopts unchanged.
+
+# PROPOSED_DEFAULT — during market hours the reconciliation job runs on this
+# cadence (in addition to the existing pre-market + nightly runs), plus one run
+# shortly after the close. This is the *intended* cadence the minutes-based
+# stale clock below is measured against; it supersedes the hours-based
+# RECONCILE_STALE_HOURS as the market-hours freshness signal (the hours clock is
+# retained for the connected-but-quiet overnight case).
+RECONCILE_INTERVAL_MINUTES = 15
+
+# PROPOSED_DEFAULT — during market hours, a last-successful reconciliation older
+# than this degrades all action-capable panels to a warning state (it does NOT
+# freeze — a stale clock means "we haven't looked recently", not "we found a
+# divergence"). Only meaningful together with the interval scheduler above; a
+# minutes threshold under the old once-daily cadence would read stale always.
+RECONCILE_STALE_MINUTES = 45
+
+# HARD_CFM_RULE — the app NEVER generates orders to "fix" a divergence or an
+# unbalanced position. Reconciliation surfaces and freezes; a human acts at the
+# broker. Adopting an out-of-band broker execution into state is an explicit,
+# operator-confirmed action (economics taken verbatim from the broker record),
+# never an auto-generated remediation order. Asserted, not consulted-and-skipped.
+NO_AUTO_REMEDIATION = True
+
+# HARD_CFM_RULE — broker transaction records are the ONLY source for ingested
+# execution economics (fills, prices, fees, timestamps). Nothing is hand-entered
+# or synthesized: a matched fill confirms an app order from the broker record;
+# an out-of-band trade is adopted with every economic field copied from the
+# broker transaction. Ingestion appends executions; ledgers/positions/metrics
+# then recompute from state as usual — no derived value is patched directly.
+INGESTION_IS_GROUND_TRUTH = True
+
+# PROPOSED_DEFAULT — how many days back the transactions-ingestion job pulls from
+# the Schwab transactions endpoint on each run. Wide enough to catch a trade that
+# settled/reported late, narrow enough to keep the dedupe set small; dedupe by
+# transaction id makes re-pulling an overlapping window always idempotent.
+INGESTION_LOOKBACK_DAYS = 7
+
 # ---- Recommendation trust layer (v2.6, state schema v17) -------------------
 # The engine (recommendation_engine.py) commits to specific recommendations
 # BEFORE the operator acts; recompute_derived() then measures agreement

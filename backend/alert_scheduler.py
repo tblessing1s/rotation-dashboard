@@ -44,6 +44,10 @@ _last_maintenance: date | None = None
 # The morning run is the important one: assignments materialize overnight and
 # pre-market is when the operator can act calmly.
 _last_reconcile: date | None = None
+# Intraday reconcile + transaction-ingestion cadence (spec §4/§5) — last datetime
+# it ran. Rate-limited to RECONCILE_INTERVAL_MINUTES during market hours so the
+# minutes-based staleness clock has a cadence to be measured against.
+_last_interval_reconcile: datetime | None = None
 
 
 def enabled() -> bool:
@@ -177,6 +181,7 @@ def _tick() -> None:
     # close); the tiered poll adds batched intraday QUOTES + escalation on top.
     _maybe_hot_refresh(now)
     _maybe_tier_poll(now)
+    _maybe_interval_reconcile(now)
 
     due = due_slots(now)
     if not due:
@@ -266,6 +271,55 @@ def _maybe_morning_reconcile(now: datetime, due: list[str]) -> None:
                     report.get("status"), len(report.get("diffs", [])))
     except Exception as e:  # noqa: BLE001 — a failed reconcile must not kill the thread
         logger.error("pre-market reconciliation failed: %s", e)
+
+
+def reconcile_interval_enabled() -> bool:
+    """Intraday reconcile+ingest cadence on by default; CFM_RECONCILE_INTERVAL=0
+    turns it off (tests, CLI tools, or to fall back to the pre-market run alone)."""
+    return os.environ.get("CFM_RECONCILE_INTERVAL", "1").strip() not in ("0", "false", "no")
+
+
+def _reconcile_window(now: datetime) -> bool:
+    """Market hours plus a short post-close tail (through 16:30 ET) so the "once
+    after close" reconcile+ingest run (spec §4) happens on the same cadence gate."""
+    if now.weekday() >= 5:
+        return False
+    return "09:30" <= now.strftime("%H:%M") <= "16:30"
+
+
+def _maybe_interval_reconcile(now: datetime) -> None:
+    """During market hours (+ a post-close tail), run position reconciliation AND
+    transaction ingestion on the RECONCILE_INTERVAL_MINUTES cadence. Reconcile
+    surfaces divergence/freeze; ingestion pulls broker executions as ground truth
+    (confirming app fills, surfacing out-of-band trades for one-click adoption).
+    Best-effort — each is isolated and logged, never fatal to the tick. Requires
+    Schwab connected (read-only is enough) or demo mode."""
+    global _last_interval_reconcile
+    if not reconcile_interval_enabled() or not _reconcile_window(now):
+        return
+    import schwab_api
+    if not (schwab_api.configured() or config.demo_enabled()):
+        return
+    last = _last_interval_reconcile
+    if last is not None and (now - last).total_seconds() / 60.0 < float(
+            config.RECONCILE_INTERVAL_MINUTES):
+        return
+    _last_interval_reconcile = now
+    try:
+        import reconcile
+        report = reconcile.run_reconciliation()
+        logger.info("interval reconciliation: status=%s diffs=%d",
+                    report.get("status"), len(report.get("diffs", [])))
+    except Exception as e:  # noqa: BLE001 — a failed reconcile must not kill the thread
+        logger.error("interval reconciliation failed: %s", e)
+    try:
+        import transaction_ingest
+        ing = transaction_ingest.run_ingestion()
+        if ing.get("proposals") or ing.get("matched"):
+            logger.info("interval ingestion: %d matched, %d out-of-band proposal(s)",
+                        len(ing.get("matched") or []), len(ing.get("proposals") or []))
+    except Exception as e:  # noqa: BLE001 — a failed ingestion must not kill the thread
+        logger.error("interval transaction ingestion failed: %s", e)
 
 
 def _loop() -> None:
