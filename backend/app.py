@@ -1068,6 +1068,51 @@ def api_reconcile_acknowledge():
 
 
 # ---------------------------------------------------------------------------
+# Transaction ingestion (Schwab executions -> state, spec §4)
+# ---------------------------------------------------------------------------
+@app.route("/api/ingestion", methods=["GET", "POST"])
+def api_ingestion():
+    """GET: the last ingestion summary + open out-of-band adoption proposals.
+    POST: run ingestion now (pulls Schwab transactions; dedupe by transaction id).
+    Matched fills confirm app orders; out-of-band trades surface as proposals for
+    one-click adoption — never auto-booked (NO_AUTO_REMEDIATION)."""
+    if request.method == "POST":
+        try:
+            import transaction_ingest
+            return jsonify(transaction_ingest.run_ingestion())
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+    state = log.load_state()
+    return jsonify(state.get("ingestion") or {"last": None, "proposals": []})
+
+
+@app.route("/api/ingestion/adopt", methods=["POST"])
+def api_ingestion_adopt():
+    """Adopt one out-of-band broker trade (a proposal) into state.json, booking it
+    through the same builders app fills use — economics verbatim from the broker
+    record. Human-gated; the operator confirms the proposal."""
+    payload = request.get_json(silent=True) or {}
+    proposal_id = payload.get("proposal_id", "")
+    if not proposal_id:
+        return jsonify({"error": "proposal_id is required"}), 400
+    try:
+        return jsonify(executor.adopt_broker_trade(proposal_id, payload.get("stock_price")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/reconcile/freeze-status")
+def api_reconcile_freeze_status():
+    """The global reconciliation-freeze verdict (frozen tickers + reasons) plus the
+    market-hours minutes staleness degrade. Drives the divergence/freeze panel and
+    the 'last reconciled N minutes ago' heartbeat."""
+    import reconcile
+    return jsonify(reconcile.freeze_status(log.load_state()))
+
+
+# ---------------------------------------------------------------------------
 # State / config
 # ---------------------------------------------------------------------------
 @app.route("/api/state", methods=["GET", "POST"])
