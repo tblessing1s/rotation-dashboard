@@ -339,7 +339,9 @@ def test_override_rate_blocks_graduation():
 def test_v17_migration_adds_trust_stores_and_since_marker():
     old = {"schema_version": 16, "metadata": {}, "positions": [], "executions": []}
     out, changed = migrations.migrate(dict(old))
-    assert changed and out["schema_version"] == 17
+    # migrate() always walks to CURRENT_VERSION; the v16->v17 step (asserted below)
+    # still adds the trust stores en route.
+    assert changed and out["schema_version"] == migrations.CURRENT_VERSION
     assert out["recommendations"] == []
     assert out["recommendation_overrides"] == []
     assert out["order_fidelity"] == {}
@@ -354,7 +356,12 @@ def test_writers_persist_and_recompute(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "active_state_path",
                         lambda: str(tmp_path / "state.json"))
     import logging_handler as log
-    stored = log.append_recommendations([_rec("ignored_id_gets_kept")])
+    # The writer path derives open/resolved status against the REAL wall clock
+    # (recompute_derived reads datetime.now), so emit relative to real now — a
+    # fixture NOW pinned in the past would "expire" the rec once the suite runs
+    # after its validity window and spuriously read 0 open.
+    stored = log.append_recommendations(
+        [_rec("ignored_id_gets_kept", emitted=datetime.now(timezone.utc))])
     assert stored[0]["rec_id"] == "ignored_id_gets_kept"
     state = log.load_state()
     assert len(state["recommendations"]) == 1

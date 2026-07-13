@@ -519,6 +519,9 @@ SPREAD_BASELINE_MIN_SAMPLES = 5     # PROPOSED_DEFAULT — trailing spread sampl
 NO_MARKET_ORDERS_AT_OPEN = True     # HARD_CFM_RULE — inside the settle window market orders are refused for EVERY action, emergency included
 EMERGENCY_NEVER_FOR_ENTRY = True    # HARD_CFM_RULE — the gap-emergency path never applies to ENTRY or routine rolls
 CANCEL_NEVER_GATED = True           # HARD_CFM_RULE — canceling a resting order is allowed any time the broker accepts cancels
+# PROPOSED_DEFAULT — the operator's local timezone, shown alongside ET in window-aware
+# push copy ("executable 10:00 ET (9:00 CT)"). Override with CFM_OPERATOR_TZ.
+OPERATOR_TZ = (os.environ.get("CFM_OPERATOR_TZ") or "America/Chicago").strip() or "America/Chicago"
 
 # ---- Paper-fill slippage (mid-fill assumption) -----------------------------
 # Paper fills are booked at the quoted MIDPOINT, but deep-ITM options rarely fill

@@ -813,6 +813,7 @@ def api_alerts_settings():
 def api_recommendations():
     """Open (unresolved, unexpired) recommendations + the last pass summary."""
     import recommendation_runner
+    import recommendation_settle as settle
     import trust_derive
     from datetime import datetime, timezone
     try:
@@ -825,6 +826,11 @@ def api_recommendations():
         return jsonify({
             "open": open_recs,
             "open_actionable": [r for r in open_recs if r.get("action_type") != "NO_ACTION"],
+            # PENDING_SETTLE recs carry executable_at so the card can render a
+            # live countdown and a pre-approve toggle (the gate deferred the order;
+            # the alert already fired).
+            "pending_settle": settle.pending(state),
+            "gate_enforced": config.market_settle_gate_enabled(),
             "last_run": recommendation_runner.last_run(),
             "total": len(state.get("recommendations", [])),
         })
@@ -874,6 +880,31 @@ def api_recommendations_dismiss():
         stored = log.append_recommendation_override(
             {"rec_id": rec_id, "reason": reason, "note": note})
         return jsonify({"override": stored})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/recommendations/preapprove", methods=["POST"])
+def api_recommendations_preapprove():
+    """Toggle pre-approval on a PENDING_SETTLE recommendation. A pre-approved rec
+    auto-submits when its settle window opens — but ONLY if its trigger re-validates
+    at that moment (a filled gap self-cancels it). Body: {rec_id, approve?: bool}."""
+    import recommendation_settle as settle
+    from datetime import datetime, timezone
+    payload = request.get_json(silent=True) or {}
+    rec_id = str(payload.get("rec_id") or "")
+    approve = bool(payload.get("approve", True))
+    if not rec_id:
+        return jsonify({"error": "rec_id is required"}), 400
+    try:
+        with log._lock:
+            state = log.load_state()
+            rec = settle.set_pre_approved(state, rec_id, approve, datetime.now(timezone.utc))
+            if rec is None:
+                return jsonify({"error": f"{rec_id} is not a PENDING_SETTLE recommendation "
+                                         "(unknown, already released, or not deferred)"}), 404
+            log.save_state(state)
+        return jsonify({"rec_id": rec_id, "settle": rec.get("settle")})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
