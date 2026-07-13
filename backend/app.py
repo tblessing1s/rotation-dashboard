@@ -484,6 +484,22 @@ def api_execute():
         # per-session attempt cap is hit). In addition to the freeze/gate/kill-switch.
         return jsonify({"error": str(e), "resubmit_locked": True,
                         "intent": e.intent_key, "reason": e.reason}), 409
+    except executor.ExecutionWindowError as e:
+        # 409: the market-settle execution gate deferred the order (settle window /
+        # close blackout / off-hours). The UI stages it as PENDING_SETTLE and shows
+        # the countdown to executable_at; the alert already fired.
+        return jsonify({"error": str(e), "execution_deferred": True,
+                        "reason": e.reason, "ticker": e.ticker,
+                        "action": e.gate_action,
+                        "executable_at": (e.executable_at.isoformat()
+                                          if e.executable_at else None)}), 409
+    except executor.SpreadAckRequiredError as e:
+        # 409: spread abnormally wide vs the trailing baseline — the operator must
+        # acknowledge the estimated excess slippage (resend with spread_ack: true).
+        return jsonify({"error": str(e), "spread_ack_required": True,
+                        "ticker": e.ticker, "current_spread": e.current_spread,
+                        "baseline_spread": e.baseline_spread,
+                        "est_excess_slippage_usd": e.est_excess_slippage_usd}), 409
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001

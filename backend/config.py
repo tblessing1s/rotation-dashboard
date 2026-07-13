@@ -108,6 +108,19 @@ def set_live_trading_enabled(on: bool) -> None:
     os.replace(tmp, LIVE_TRADING_PATH)
 
 
+def market_settle_gate_enabled() -> bool:
+    """Whether the market-settle execution gate ENFORCES (blocks / defers orders
+    inside the settle window, close blackout, and off-hours). Off by default so the
+    gate rolls out deliberately — it changes *live execution timing*, exactly the
+    kind of behaviour change that wants an explicit ops opt-in (mirrors
+    CFM_LIVE_TRADING). ``CFM_MARKET_SETTLE_GATE=1`` turns enforcement on.
+
+    The gate's *verdict* is always computed and surfaced (so the PENDING_SETTLE
+    staging / countdown UI works regardless); this flag governs only whether a
+    blocked verdict actually refuses the order."""
+    return os.environ.get("CFM_MARKET_SETTLE_GATE", "").strip().lower() in ("1", "true", "yes")
+
+
 def active_state_path() -> str:
     """state.json path for the current mode (demo store stays separate)."""
     return DEMO_STATE_PATH if demo_enabled() else STATE_PATH
