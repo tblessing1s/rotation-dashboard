@@ -632,6 +632,142 @@ def resolve_expiry(diff_id: str) -> dict:
             "timestamp": stored["date"], "diff_id": diff_id, "execution": stored}
 
 
+def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
+    """Adopt one out-of-band broker trade (a transaction-ingestion proposal) into
+    state.json (spec §4, Option B). Human-gated: the operator confirms the
+    proposal; the app never auto-books it (NO_AUTO_REMEDIATION).
+
+    Every economic field (contracts, per-share fill price, expiry/strike) is taken
+    VERBATIM from the broker transaction record (INGESTION_IS_GROUND_TRUTH) — this
+    function synthesizes nothing but the intrinsic/extrinsic split (which needs an
+    underlying price; a cached close for the trade day is used when available, else
+    the split degrades to all-extrinsic without inventing a market datum). Each
+    ingested leg is appended as an immutable execution tagged ``source:
+    broker_manual`` + its Schwab ``transaction_id``, and the matching position
+    mutation is applied through the SAME builders the app's own fills use. The
+    transaction ids are then recorded in the dedupe ledger so re-running ingestion
+    never re-books them.
+    """
+    import transaction_ingest as ingest
+
+    state = log.load_state()
+    proposals = (state.get("ingestion") or {}).get("proposals") or []
+    proposal = next((p for p in proposals if p.get("proposal_id") == proposal_id), None)
+    if proposal is None:
+        raise ValueError(f"unknown or already-adopted ingestion proposal {proposal_id!r}")
+
+    ticker = proposal.get("ticker")
+    if not ticker:
+        raise ValueError(f"proposal {proposal_id} has no resolvable underlying — cannot adopt")
+    legs = proposal.get("legs") or []
+    # A multi-leg out-of-band order (e.g. a manual roll) is booked as one linked
+    # logical action so it lands in the roll ledger like an atomic roll.
+    roll_group_id = _next_roll_id(state) if len(legs) > 1 else None
+
+    # Close legs first so a roll's replacement short can recover the extrinsic it
+    # is replacing before the old leg is dropped (mirrors the atomic-roll order).
+    ordered = sorted(legs, key=lambda l: 0 if _leg_is_close(l) else 1)
+    stored_ids: list[str] = []
+    txn_ids: list[str] = []
+    for leg in ordered:
+        action = _adopt_action_for_leg(leg)
+        if action is None:
+            continue  # equity/assignment legs are surfaced but booked via adjustment, not here
+        payload = _adopt_payload_for_leg(leg, ticker, action, stock_price, roll_group_id, proposal)
+        strike = payload.get("strike")
+        contracts = int(payload.get("contracts") or 0)
+        px = payload.get("stock_price")
+        execution, position_update = _build_leg(payload, ticker, action, strike, contracts, px)
+        execution["mode"] = "live"  # it happened at the REAL account (just not app-transmitted)
+        execution["price_source"] = "broker_transaction"
+        execution["fill_assumption"] = "broker"
+        execution["source"] = ingest.SOURCE_BROKER_MANUAL
+        execution["transaction_id"] = leg.get("transaction_id")
+        execution["broker_order_id"] = proposal.get("order_id")
+        _stamp_roll_linkage(execution, payload)
+        stored = log.append_execution(execution)
+        stored_ids.append(stored["id"])
+        if leg.get("transaction_id"):
+            txn_ids.append(leg["transaction_id"])
+
+        state = log.load_state()
+        position = _ensure_position(state, ticker)
+        position_update(position)
+        log.recompute_derived(state)
+        log.save_state(state)
+
+    # Record the dedupe ledger + drop the adopted proposal, then re-run reconcile
+    # freeze evaluation (adoption may clear or reveal a divergence).
+    state = log.load_state()
+    for tid in txn_ids:
+        ingest.record_ingested(state, tid, source=ingest.SOURCE_BROKER_MANUAL,
+                               order_id=proposal.get("order_id"),
+                               execution_ids=stored_ids, proposal_id=proposal_id)
+    ing = state.setdefault("ingestion", {"last": None, "proposals": []})
+    ing["proposals"] = [p for p in (ing.get("proposals") or [])
+                        if p.get("proposal_id") != proposal_id]
+    log.save_state(state)
+    return {"success": True, "status": "adopted", "proposal_id": proposal_id,
+            "execution_ids": stored_ids, "transaction_ids": txn_ids,
+            "source": ingest.SOURCE_BROKER_MANUAL}
+
+
+def _leg_is_close(leg: dict) -> bool:
+    eff = (leg.get("position_effect") or "").upper()
+    if eff == "CLOSING":
+        return True
+    if eff == "OPENING":
+        return False
+    return (leg.get("amount") or 0) > 0  # BUY (positive) with no effect -> treat as a close (buyback)
+
+
+def _adopt_action_for_leg(leg: dict):
+    """Map one broker leg to an app action, or None for a leg not booked here."""
+    if leg.get("asset_type") != "OPTION":
+        return None
+    buying = (leg.get("amount") or 0) > 0
+    if _leg_is_close(leg):
+        return "close_short" if buying else "close_leap"
+    return "buy_leap" if buying else "sell_short"
+
+
+def _adopt_payload_for_leg(leg, ticker, action, stock_price, roll_group_id, proposal) -> dict:
+    """Build the commit payload for one adopted broker leg, economics verbatim
+    from the broker record. ``price`` is per-share for options; buy_leap/close_leap
+    store per-contract dollars, so those are ×100."""
+    import reconcile
+    contracts = int(abs(leg.get("amount") or 0))
+    price = float(leg.get("price") or 0)
+    strike = leg.get("strike")
+    expiry = leg.get("expiry")
+    # Best-effort underlying price for the intrinsic/extrinsic split (no new
+    # provider call): a cached close for the trade day, else the caller-supplied
+    # value, else None. Never hand-entered.
+    px = stock_price
+    if px is None and expiry:
+        try:
+            px = reconcile.cached_close_on(ticker, str(leg.get("time") or "")[:10])
+        except Exception:  # noqa: BLE001
+            px = None
+    payload: dict = {"ticker": ticker, "strike": strike, "contracts": contracts,
+                     "expiration": expiry, "stock_price": px}
+    if action == "sell_short":
+        payload["premium_per_share"] = price
+    elif action == "close_short":
+        payload["close_price_per_share"] = price
+    elif action == "buy_leap":
+        payload["execution_price"] = round(price * 100, 2)
+    elif action == "close_leap":
+        payload["close_price"] = round(price * 100, 2)
+        payload["exit_reason"] = "OPERATOR_DISCRETION"
+        payload["exit_note"] = "adopted out-of-band broker close (transaction ingestion)"
+    if roll_group_id is not None:
+        payload["roll_group_id"] = roll_group_id
+        payload["roll_leg"] = "close" if _leg_is_close(leg) else "open"
+        payload["roll_reason"] = "broker_manual_roll"
+    return payload
+
+
 def acknowledge_diff(diff_id: str, ack_reason: str) -> dict:
     """Acknowledge a reconciliation diff as a non-issue (typed reason required),
     logged onto the reconciliation record. Lifts the freeze once the position's
