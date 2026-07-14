@@ -558,8 +558,15 @@ def validate_payback(execs: list[dict]) -> list[dict]:
 
 
 def recompute_derived(state: dict) -> dict:
-    """Rebuild theta_ledger + extrinsic_payback from executions/positions."""
-    execs = state.get("executions", [])
+    """Rebuild theta_ledger + extrinsic_payback from executions/positions.
+
+    Executions annotated ``reversed_by`` (an adoption that was undone) and the
+    ``adoption_reversal`` markers themselves are excluded from the derived replay —
+    a reversed adoption must leave no trace in the ledgers, exactly as if it never
+    happened, while the immutable records of both the adoption and its reversal are
+    preserved on the log for the audit trail (append-only, never rewritten)."""
+    execs = [e for e in state.get("executions", [])
+             if not e.get("reversed_by") and not e.get("reverses_execution_id")]
     now = datetime.now(timezone.utc)
     cur_week = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]:02d}"
     cur_month = now.strftime("%Y-%m")

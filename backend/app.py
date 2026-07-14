@@ -1103,6 +1103,28 @@ def api_ingestion_adopt():
         return _err(e)
 
 
+@app.route("/api/ingestion/adoptions")
+def api_ingestion_adoptions():
+    """List broker_manual adoptions booked into state (for the Undo control)."""
+    return jsonify({"adoptions": executor.list_broker_manual_adoptions()})
+
+
+@app.route("/api/ingestion/reverse", methods=["POST"])
+def api_ingestion_reverse():
+    """Reverse (undo) one broker_manual adoption exactly — inverts each execution
+    it appended, restoring a removed LEAP leg with its original entry extrinsic."""
+    payload = request.get_json(silent=True) or {}
+    proposal_id = payload.get("proposal_id", "")
+    if not proposal_id:
+        return jsonify({"error": "proposal_id is required"}), 400
+    try:
+        return jsonify(executor.reverse_adoption(proposal_id, payload.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/reconcile/freeze-status")
 def api_reconcile_freeze_status():
     """The global reconciliation-freeze verdict (frozen tickers + reasons) plus the

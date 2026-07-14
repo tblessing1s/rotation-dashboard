@@ -264,6 +264,71 @@ def test_recompute_after_ingestion_is_stable(store):
     assert before == after
 
 
+def test_already_booked_fill_is_confirmed_not_proposed(store):
+    """Regression for the duplicate-leg defect: a broker fill the app ALREADY has
+    (same ticker/action/strike/expiry/contracts) but whose orderId doesn't link to
+    an app order must be CONFIRMED (source: app), never surfaced for adoption."""
+    state = log.load_state()
+    # The app already booked this short (via its normal fill path — no orderId link).
+    state["executions"].append({
+        "id": "exec_001", "ticker": "ABC", "action": "sell_short",
+        "strike": 110.0, "contracts": 2, "expiration": "2026-07-17",
+        "premium_per_share": 1.20, "mode": "live",
+    })
+    log.save_state(state)
+
+    # Broker reports the same fill with an orderId the app never recorded.
+    feed = [_sell_short_txn("T99", "UNKNOWN_ORDER", contracts=2, strike=110.0)]
+    report = ingest.run_ingestion(feed=feed)
+    assert not report["proposals"], "an already-booked fill must not be adoptable"
+    assert len(report["matched"]) == 1
+    assert report["matched"][0]["source"] == ingest.SOURCE_APP
+    assert "already booked" in report["matched"][0]["summary"]
+
+
+def test_group_already_booked_counts_are_consumed(store):
+    """Two identical booked shorts match two identical broker legs, but a THIRD
+    identical broker leg is genuinely new (not swallowed by the two)."""
+    state = log.load_state()
+    for i in (1, 2):
+        state["executions"].append({
+            "id": f"exec_00{i}", "ticker": "ABC", "action": "sell_short",
+            "strike": 110.0, "contracts": 1, "expiration": "2026-07-17", "mode": "live"})
+    keys = ingest.existing_execution_keys(state)
+    two = [{"asset_type": "OPTION", "amount": -1, "strike": 110.0, "expiry": "2026-07-17",
+            "position_effect": "OPENING", "underlying": "ABC", "put_call": reconcile.CALL} for _ in range(2)]
+    three = two + [dict(two[0])]
+    assert ingest._group_already_booked(two, keys) is True
+    assert ingest._group_already_booked(three, keys) is False
+
+
+def test_adopt_refuses_when_already_booked(store):
+    """Defense-in-depth: if state changed so the proposal is now already booked,
+    adoption refuses rather than double-booking."""
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "ABC", "status": "open", "short_calls": [], "shares": {"count": 0},
+        "leap_legs": [{"strike": 50.0, "contracts": 1, "expiration": "2027-01-15"}]})
+    # Stash a proposal directly, then also book the matching execution.
+    state["ingestion"]["proposals"] = [{
+        "proposal_id": "adopt_TOSX", "ticker": "ABC", "order_id": "TOSX",
+        "action": "sell_short",
+        "legs": [{"asset_type": "OPTION", "amount": -2, "price": 1.2, "strike": 110.0,
+                  "expiry": "2026-07-17", "position_effect": "OPENING",
+                  "underlying": "ABC", "put_call": reconcile.CALL, "transaction_id": "TX"}]}]
+    state["executions"].append({
+        "id": "exec_001", "ticker": "ABC", "action": "sell_short", "strike": 110.0,
+        "contracts": 2, "expiration": "2026-07-17", "mode": "live"})
+    log.save_state(state)
+
+    with pytest.raises(ValueError, match="already booked"):
+        executor.adopt_broker_trade("adopt_TOSX")
+    # No duplicate short leg created; stale proposal dropped.
+    state = log.load_state()
+    assert log.find_position(state, "ABC")["short_calls"] == []
+    assert not state["ingestion"]["proposals"]
+
+
 def test_fetch_failure_reports_error_and_touches_nothing(store, monkeypatch):
     def boom():
         raise RuntimeError("broker down")

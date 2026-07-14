@@ -660,6 +660,24 @@ def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
     if not ticker:
         raise ValueError(f"proposal {proposal_id} has no resolvable underlying — cannot adopt")
     legs = proposal.get("legs") or []
+
+    # Defense-in-depth against the duplicate-leg defect: state may have changed
+    # since the proposal was surfaced (a matching fill got booked, or the operator
+    # already reconciled). If every leg now corresponds to an execution the app
+    # already holds, this proposal is stale — refuse rather than double-book, and
+    # point at reconciliation (the broker-verified correction path).
+    if ingest._group_already_booked(legs, ingest.existing_execution_keys(state)):
+        # Drop the stale proposal so it stops being offered.
+        ing = state.setdefault("ingestion", {"last": None, "proposals": []})
+        ing["proposals"] = [p for p in (ing.get("proposals") or [])
+                            if p.get("proposal_id") != proposal_id]
+        for tid in {t for leg in legs for t in ([leg.get("transaction_id")] if leg.get("transaction_id") else [])}:
+            ingest.record_ingested(state, tid, source=ingest.SOURCE_APP,
+                                   order_id=proposal.get("order_id"))
+        log.save_state(state)
+        raise ValueError(
+            f"proposal {proposal_id} is already booked in state — refusing to duplicate it. "
+            "Run reconciliation to verify against the broker.")
     # A multi-leg out-of-band order (e.g. a manual roll) is booked as one linked
     # logical action so it lands in the roll ledger like an atomic roll.
     roll_group_id = _next_roll_id(state) if len(legs) > 1 else None
@@ -684,6 +702,10 @@ def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
         execution["source"] = ingest.SOURCE_BROKER_MANUAL
         execution["transaction_id"] = leg.get("transaction_id")
         execution["broker_order_id"] = proposal.get("order_id")
+        # Stamp the expiry on the adopted execution (the short builders don't carry
+        # it) so a later reversal / reconcile can match the exact leg.
+        if payload.get("expiration") and not execution.get("expiration"):
+            execution["expiration"] = payload["expiration"]
         _stamp_roll_linkage(execution, payload)
         stored = log.append_execution(execution)
         stored_ids.append(stored["id"])
@@ -766,6 +788,218 @@ def _adopt_payload_for_leg(leg, ticker, action, stock_price, roll_group_id, prop
         payload["roll_leg"] = "close" if _leg_is_close(leg) else "open"
         payload["roll_reason"] = "broker_manual_roll"
     return payload
+
+
+REVERSAL_ACTION = "adoption_reversal"
+
+
+def list_broker_manual_adoptions() -> list[dict]:
+    """Every broker_manual adoption booked into state, grouped by proposal, from the
+    dedupe ledger. Powers the "Undo adoption" UI so an accidental adoption can be
+    reversed exactly."""
+    state = log.load_state()
+    ledger = state.get("ingested_transactions") or {}
+    execs_by_id = {e.get("id"): e for e in state.get("executions") or []}
+    groups: dict[str, dict] = {}
+    for tid, rec in ledger.items():
+        if rec.get("source") != "broker_manual":
+            continue
+        # A reversed adoption drops out of the ledger, so anything here is still live.
+        pid = rec.get("proposal_id") or f"txn_{tid}"
+        g = groups.setdefault(pid, {"proposal_id": pid, "transaction_ids": [],
+                                    "execution_ids": [], "ingested_at": rec.get("ingested_at"),
+                                    "order_id": rec.get("order_id"), "legs": []})
+        g["transaction_ids"].append(tid)
+        for eid in rec.get("execution_ids") or []:
+            if eid not in g["execution_ids"]:
+                g["execution_ids"].append(eid)
+    for g in groups.values():
+        for eid in g["execution_ids"]:
+            e = execs_by_id.get(eid)
+            if e:
+                g["legs"].append({"execution_id": eid, "action": e.get("action"),
+                                  "strike": e.get("strike"), "contracts": e.get("contracts"),
+                                  "reversed": bool(e.get("reversed_by"))})
+        g["reversible"] = any(not l["reversed"] for l in g["legs"])
+    return list(groups.values())
+
+
+def reverse_adoption(proposal_id: str, reason: str | None = None) -> dict:
+    """Undo one broker_manual adoption exactly (append-only). Inverts the position
+    effect of each execution the adoption appended — removing an adopted short leg,
+    or RE-ADDING a leap/short leg the adoption's close removed, with the LEAP's true
+    extrinsic read back from the original immutable ``buy_leap`` record (never
+    hand-entered). Each reversal is booked as an immutable ``adoption_reversal``
+    execution linked to the record it reverses; the reversed executions are stamped
+    ``reversed_by`` (annotation, not a rewrite of their economics) and their
+    transaction ids are removed from the dedupe ledger so a corrected re-ingest is
+    possible. Derived ledgers/positions then recompute from the true executions.
+    """
+    import transaction_ingest as ingest
+
+    state = log.load_state()
+    ledger = state.get("ingested_transactions") or {}
+    txn_ids = [t for t, r in ledger.items()
+               if r.get("source") == "broker_manual" and r.get("proposal_id") == proposal_id]
+    if not txn_ids:
+        raise ValueError(f"no broker_manual adoption found for proposal {proposal_id!r}")
+    exec_ids: list[str] = []
+    for t in txn_ids:
+        for eid in ledger[t].get("execution_ids") or []:
+            if eid not in exec_ids:
+                exec_ids.append(eid)
+
+    execs_by_id = {e.get("id"): e for e in state.get("executions") or []}
+    targets = [execs_by_id[e] for e in exec_ids if e in execs_by_id]
+    live = [e for e in targets if not e.get("reversed_by")]
+    if not live:
+        raise ValueError(f"adoption {proposal_id} is already reversed")
+
+    reason = (reason or f"reverse accidental broker_manual adoption {proposal_id}").strip()
+    reversed_ids: list[str] = []
+    # Reverse in the OPPOSITE order they were applied so a roll unwinds cleanly.
+    for ex in reversed(live):
+        ticker = ex.get("ticker")
+        rev = {
+            "ticker": ticker, "action": REVERSAL_ACTION,
+            "reverses_execution_id": ex.get("id"),
+            "reverses_action": ex.get("action"),
+            "strike": ex.get("strike"), "contracts": ex.get("contracts"),
+            "source": ingest.SOURCE_BROKER_MANUAL, "reason": reason,
+            "mode": "live",
+        }
+        stored = log.append_execution(rev)
+        reversed_ids.append(stored["id"])
+
+        state = log.load_state()
+        position = _ensure_position(state, ticker)
+        _reverse_execution_effect(state, position, ex)
+        # Annotate the reversed execution (provenance only — economics untouched).
+        for e in state.get("executions") or []:
+            if e.get("id") == ex.get("id"):
+                e["reversed_by"] = stored["id"]
+        log.recompute_derived(state)
+        log.save_state(state)
+
+    # Drop the reversed transactions from the dedupe ledger.
+    state = log.load_state()
+    ledger = state.get("ingested_transactions") or {}
+    for t in txn_ids:
+        ledger.pop(t, None)
+    log.save_state(state)
+    return {"success": True, "status": "reversed", "proposal_id": proposal_id,
+            "reversed_execution_ids": reversed_ids, "transaction_ids": txn_ids}
+
+
+def _reverse_execution_effect(state: dict, position: dict, ex: dict) -> None:
+    """Invert the position mutation an adopted execution made.
+
+    sell_short / buy_leap ADDED a leg -> remove it. close_short / close_leap
+    REMOVED a leg -> re-add it, reconstructing a leap leg's cost basis + entry
+    extrinsic from the original immutable buy_leap so the extrinsic accounting is
+    exact, never zeroed."""
+    action = ex.get("action")
+    strike = ex.get("strike")
+    contracts = int(ex.get("contracts") or 0)
+    expiration = ex.get("expiration") or ex.get("expiry")
+    if action == "sell_short":
+        _remove_short_leg(position, strike, expiration, contracts)
+    elif action == "buy_leap":
+        _remove_leap_leg(position, strike, expiration, contracts)
+    elif action == "close_short":
+        _readd_short_leg(position, ex)
+    elif action == "close_leap":
+        _readd_leap_leg(state, position, ex)
+    if position.get("status") == "closed" and (
+            log.leap_legs(position) or position.get("short_calls")
+            or int((position.get("shares") or {}).get("count") or 0)):
+        position["status"] = "open"
+
+
+def _remove_short_leg(position, strike, expiration, contracts) -> None:
+    """Remove the short leg an adopted sell_short added. Matches on strike (and
+    expiration + contracts when known); the sell_short execution doesn't always
+    carry an expiration, so expiration is only required when present on both."""
+    def _exp_ok(sc):
+        return not expiration or _exp_eq(sc.get("expiration"), expiration)
+    shorts = position.get("short_calls") or []
+    # Tightest match first (strike + expiration + contract count), then loosen.
+    for want_exp, want_qty in ((True, True), (True, False), (False, False)):
+        for sc in list(shorts):
+            if not _strike_eq(sc.get("strike"), strike):
+                continue
+            if want_exp and not _exp_ok(sc):
+                continue
+            if want_qty and int(sc.get("contracts") or 0) != contracts:
+                continue
+            shorts.remove(sc)
+            return
+
+
+def _remove_leap_leg(position, strike, expiration, contracts) -> None:
+    legs = log.leap_legs(position)
+    for leg in list(legs):
+        if _strike_eq(leg.get("strike"), strike) and _exp_eq(leg.get("expiration"), expiration):
+            have = int(leg.get("contracts") or 0)
+            if have <= contracts:
+                legs.remove(leg)
+            else:
+                leg["contracts"] = have - contracts
+            position["leap_legs"] = legs
+            position["leap"] = legs[0] if legs else None
+            return
+
+
+def _readd_short_leg(position, ex) -> None:
+    position.setdefault("short_calls", []).append({
+        "strike": ex.get("strike"), "contracts": int(ex.get("contracts") or 0),
+        "open_date": str(ex.get("date") or log.utcnow())[:10],
+        "expiration": ex.get("expiration"),
+        "entry_extrinsic_per_share": ex.get("extrinsic_sold"),
+        "entry_premium_total": ex.get("close_total"),
+        "current_cost": ex.get("close_total"),
+        "restored": True,
+    })
+
+
+def _readd_leap_leg(state, position, ex) -> None:
+    """Re-add a leap leg a close_leap removed, restoring cost basis + entry
+    extrinsic from the ORIGINAL buy_leap in the immutable log (so the payback/burn
+    accounting is exact)."""
+    strike = ex.get("strike")
+    expiration = ex.get("expiration")
+    contracts = int(ex.get("contracts") or 0)
+    orig = _original_buy_leap(state, ex.get("ticker"), strike, expiration)
+    cost_basis = float(ex.get("cost_basis") or (orig.get("execution_total") if orig else 0) or 0)
+    per_contract_extrinsic = 0.0
+    if orig and int(orig.get("contracts") or 0):
+        per_contract_extrinsic = float(orig.get("extrinsic_captured") or 0) / int(orig["contracts"])
+    extrinsic_at_entry = round(per_contract_extrinsic * contracts, 2)
+    legs = log.leap_legs(position)
+    legs.append({
+        "strike": strike, "contracts": contracts, "cost_basis": round(cost_basis, 2),
+        "current_bid": round(cost_basis, 2), "expiration": expiration,
+        "entry_date": (str(orig.get("date"))[:10] if orig else log.utcnow()[:10]),
+        "extrinsic": extrinsic_at_entry, "extrinsic_at_entry": extrinsic_at_entry,
+        "extrinsic_collected_to_date": 0, "restored": True,
+    })
+    position["leap_legs"] = legs
+    position["leap"] = legs[0]
+
+
+def _original_buy_leap(state, ticker, strike, expiration) -> dict | None:
+    """The most recent immutable buy_leap for (ticker, strike, expiration) — the
+    authoritative source of a restored leap leg's entry economics."""
+    best = None
+    for e in state.get("executions") or []:
+        if e.get("action") == "buy_leap" and (e.get("ticker") or "").upper() == (ticker or "").upper() \
+                and _strike_eq(e.get("strike"), strike) and _exp_eq(e.get("expiration"), expiration):
+            best = e
+    return best
+
+
+def _exp_eq(a, b) -> bool:
+    return str(a or "")[:10] == str(b or "")[:10]
 
 
 def acknowledge_diff(diff_id: str, ack_reason: str) -> dict:
