@@ -142,13 +142,24 @@ def normalize_broker_position(node: dict) -> dict | None:
     if qty == 0:
         return None
     symbol = inst.get("symbol")
+    # Per-leg average trade price (LIVE_VERIFY field name) — used by the
+    # position-rebuild path to match each broker leg to its original execution
+    # when two legs share a strike but differ by expiry (e.g. two 179 weeklies).
+    try:
+        avg_price = float(node.get("averagePrice")) if node.get("averagePrice") is not None else None
+    except (TypeError, ValueError):
+        avg_price = None
     if asset == "OPTION":
         parsed = parse_option_symbol(symbol)
         underlying = (inst.get("underlyingSymbol") or parsed["underlying"]).upper()
-        return _instrument(symbol, underlying, OPTION, parsed["put_call"],
-                           parsed["strike"], parsed["expiry"], qty)
+        out = _instrument(symbol, underlying, OPTION, parsed["put_call"],
+                          parsed["strike"], parsed["expiry"], qty)
+        out["avg_price"] = avg_price
+        return out
     if asset in ("EQUITY", "COLLECTIVE_INVESTMENT", "ETF"):
-        return _instrument(symbol, (symbol or "").upper(), EQUITY, None, None, None, qty)
+        out = _instrument(symbol, (symbol or "").upper(), EQUITY, None, None, None, qty)
+        out["avg_price"] = avg_price
+        return out
     # Unknown/uninteresting asset type (e.g. MUTUAL_FUND, CASH_EQUIVALENT): skip.
     return None
 

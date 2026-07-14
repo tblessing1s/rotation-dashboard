@@ -123,6 +123,10 @@ export const api = {
   history: () => request("/api/history"),
   // Raw executions + live position legs, for the History validation table.
   executionsRaw: () => request("/api/executions/raw"),
+  // Rebuild a position's legs from the broker's actual holdings (ground truth).
+  // dry_run returns a proposal to review/edit; passing edited `legs` commits it.
+  rebuildPosition: (ticker, opts = {}) =>
+    request("/api/reconcile/rebuild-position", { method: "POST", body: JSON.stringify({ ticker, ...opts }) }),
   portfolioRisk: () => request("/api/portfolio-risk"),
   dataHealth: () => request("/api/data-health"),
   dataBudget: () => request("/api/data-budget"),
