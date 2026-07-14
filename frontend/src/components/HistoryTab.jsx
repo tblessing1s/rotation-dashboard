@@ -221,11 +221,11 @@ function CycleRow({ c }) {
 // short is obvious) + the append-only execution log with every field that feeds
 // the derived math. Read-only; nothing here mutates state.
 const EXEC_COLS = [
-  "id", "date", "action", "ticker", "strike", "contracts", "source",
-  "transaction_id", "roll_group_id", "roll_leg", "mode",
+  "id", "date", "action", "ticker", "strike", "contracts", "quantity_delta",
+  "source", "transaction_id", "roll_group_id", "roll_leg", "mode",
   "premium_per_share", "close_price_per_share", "execution_price",
   "extrinsic_captured", "entry_extrinsic_per_share", "extrinsic_sold",
-  "extrinsic_paid_back", "net_juice", "stock_price", "reversed_by", "reverses_action",
+  "extrinsic_paid_back", "net_juice", "stock_price", "reversed_by", "reverses_action", "reason",
 ];
 
 function cell(v) {
