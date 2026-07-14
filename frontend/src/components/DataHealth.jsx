@@ -295,24 +295,35 @@ function VetCandidates() {
 // the operator adopts it here — the app never auto-books it (NO_AUTO_REMEDIATION).
 function IngestionPanel() {
   const { data, reload } = useApi(api.ingestion, [], null);
+  const { data: adoptData, reload: reloadAdoptions } = useApi(api.adoptions, [], null);
   const [busy, setBusy] = React.useState(false);
   const [adopting, setAdopting] = React.useState(null);
+  const [reversing, setReversing] = React.useState(null);
   const [err, setErr] = React.useState(null);
 
   const run = async () => {
     setBusy(true); setErr(null);
-    try { await api.runIngestion(); await reload(); }
+    try { await api.runIngestion(); await reload(); await reloadAdoptions(); }
     catch (e) { setErr(String(e.message || e)); }
     finally { setBusy(false); }
   };
   const adopt = async (pid) => {
     setAdopting(pid); setErr(null);
-    try { await api.adoptBrokerTrade(pid); await reload(); }
+    try { await api.adoptBrokerTrade(pid); await reload(); await reloadAdoptions(); }
     catch (e) { setErr(String(e.message || e)); }
     finally { setAdopting(null); }
   };
+  const reverse = async (pid) => {
+    if (!window.confirm("Undo this adoption? It reverses exactly the executions it booked "
+      + "(restoring any removed LEAP leg with its original extrinsic). Append-only — nothing is deleted.")) return;
+    setReversing(pid); setErr(null);
+    try { await api.reverseAdoption(pid); await reload(); await reloadAdoptions(); }
+    catch (e) { setErr(String(e.message || e)); }
+    finally { setReversing(null); }
+  };
 
   const proposals = data?.proposals || [];
+  const adoptions = (adoptData?.adoptions || []).filter((a) => a.reversible);
   return (
     <div className="mt-4 border-t border-slate-800 pt-3">
       <div className="flex items-center justify-between">
@@ -352,6 +363,27 @@ function IngestionPanel() {
                 <p key={i} className="mt-0.5 font-mono text-[11px] text-slate-400">{s}</p>
               ))}
               {p.order_id && <p className="mt-0.5 text-[11px] text-slate-500">broker order {p.order_id}</p>}
+            </div>
+          ))}
+        </div>
+      )}
+      {adoptions.length > 0 && (
+        <div className="mt-3 border-t border-slate-800/60 pt-2">
+          <p className="text-xs uppercase tracking-wide text-slate-500">Adopted trades — undo</p>
+          <p className="mt-1 text-[11px] text-slate-500">
+            Reversing restores the exact legs an adoption changed (a removed LEAP comes back with its
+            original entry extrinsic). Append-only — nothing is deleted.
+          </p>
+          {adoptions.map((a) => (
+            <div key={a.proposal_id} className="mt-2 flex items-center justify-between gap-2 rounded-md border border-slate-800 bg-slate-900/40 p-2">
+              <span className="text-xs text-slate-300">
+                {(a.legs || []).map((l) => `${l.action} ${l.strike ?? ""}`).join(" · ") || a.proposal_id}
+                {a.ingested_at ? <span className="text-slate-500"> · {a.ingested_at.replace("T", " ").replace("Z", "")}</span> : null}
+              </span>
+              <button onClick={() => reverse(a.proposal_id)} disabled={reversing === a.proposal_id}
+                      className="rounded-full border border-rose-800 bg-rose-950/40 px-2.5 py-1 text-xs font-semibold text-rose-200 hover:bg-rose-900/50 disabled:opacity-50">
+                {reversing === a.proposal_id ? "Undoing…" : "Undo"}
+              </button>
             </div>
           ))}
         </div>

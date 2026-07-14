@@ -171,6 +171,10 @@ export const api = {
   // Adopt one out-of-band broker trade (a proposal) into state.json.
   adoptBrokerTrade: (proposalId) =>
     request("/api/ingestion/adopt", { method: "POST", body: JSON.stringify({ proposal_id: proposalId }) }),
+  // List booked broker_manual adoptions + reverse (undo) one exactly.
+  adoptions: () => request("/api/ingestion/adoptions"),
+  reverseAdoption: (proposalId) =>
+    request("/api/ingestion/reverse", { method: "POST", body: JSON.stringify({ proposal_id: proposalId }) }),
   alertSettings: (patch) =>
     request("/api/alerts/settings", { method: "POST", body: JSON.stringify(patch) }),
   pushVapidKey: () => request("/api/push/vapid-key"),
