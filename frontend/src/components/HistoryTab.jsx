@@ -255,16 +255,18 @@ function RawData() {
   };
   const editLeg = (i, key, val) => setProposal((p) => ({
     ...p, legs: p.legs.map((l, j) => j === i ? { ...l, [key]: val } : l) }));
-  // Step 2: commit the (possibly corrected) legs.
+  // Step 2: commit the (possibly corrected) legs. Extrinsic is computed server-
+  // side from the total premium and the entry price, so we send those.
   const commit = async () => {
     setCommitting(true); setMsg(null);
     try {
       const legs = proposal.legs.map((l) => ({
         ...l,
         contracts: Number(l.contracts),
+        entry_price: l.entry_price === "" || l.entry_price == null ? null : Number(l.entry_price),
         ...(l.leg_type === "short"
-          ? { premium_per_share: Number(l.premium_per_share), entry_extrinsic_per_share: Number(l.entry_extrinsic_per_share) }
-          : { cost_per_contract: Number(l.cost_per_contract), extrinsic_per_contract: Number(l.extrinsic_per_contract) }),
+          ? { premium_per_share: Number(l.premium_per_share) }
+          : { cost_per_contract: Number(l.cost_per_contract) }),
       }));
       const r = await api.rebuildPosition(proposal.ticker, { legs });
       setMsg(`Rebuilt ${proposal.ticker}: ${r.short_calls.length} short + ${r.leap_legs.length} LEAP leg(s). Run "Reconcile now" to confirm CLEAN.`);
@@ -297,37 +299,54 @@ function RawData() {
             <p className="text-xs font-semibold text-indigo-200">
               Proposed {proposal.ticker} legs (broker truth) — review & correct any entry extrinsic the log got wrong, then Confirm:
             </p>
+            <p className="mt-1 text-[11px] text-slate-500">
+              Extrinsic is computed from the total premium and the entry price of each move
+              (premium − max(entry − strike, 0)). Enter the underlying price at each trade.
+            </p>
             <div className="mt-2 overflow-x-auto">
               <table className="w-full whitespace-nowrap text-xs">
                 <thead><tr className="text-left uppercase tracking-wide text-slate-500">
-                  {["leg", "strike", "contracts", "expiration", "premium/cost", "extrinsic", "from"].map((h) =>
+                  {["leg", "strike", "contracts", "expiration", "premium/cost", "entry price", "extrinsic (computed)", "from"].map((h) =>
                     <th key={h} className="py-1 pr-3">{h}</th>)}
                 </tr></thead>
                 <tbody className="font-mono">
-                  {proposal.legs.map((l, i) => (
-                    <tr key={i} className="border-t border-slate-800/50">
-                      <td className={`py-1 pr-3 ${l.leg_type === "leap" ? "text-emerald-300" : "text-amber-300"}`}>{l.leg_type}</td>
-                      <td className="py-1 pr-3">{l.strike}</td>
-                      <td className="py-1 pr-3">
-                        <input value={l.contracts} onChange={(e) => editLeg(i, "contracts", e.target.value)}
-                               className="w-12 rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200" />
-                      </td>
-                      <td className="py-1 pr-3">{l.expiration || "—"}</td>
-                      <td className="py-1 pr-3">
-                        <input value={l.leg_type === "short" ? l.premium_per_share : l.cost_per_contract}
-                               onChange={(e) => editLeg(i, l.leg_type === "short" ? "premium_per_share" : "cost_per_contract", e.target.value)}
-                               className="w-20 rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200" />
-                      </td>
-                      <td className="py-1 pr-3">
-                        <input value={l.leg_type === "short" ? l.entry_extrinsic_per_share : l.extrinsic_per_contract}
-                               onChange={(e) => editLeg(i, l.leg_type === "short" ? "entry_extrinsic_per_share" : "extrinsic_per_contract", e.target.value)}
-                               className="w-20 rounded border border-amber-700 bg-slate-900/60 px-1 text-amber-200" />
-                      </td>
-                      <td className="py-1 pr-3 text-slate-500">{l.econ_source || "—"}</td>
-                    </tr>
-                  ))}
+                  {proposal.legs.map((l, i) => {
+                    const isShort = l.leg_type === "short";
+                    const price = Number(isShort ? l.premium_per_share : l.cost_per_contract);
+                    const entry = l.entry_price === "" || l.entry_price == null ? null : Number(l.entry_price);
+                    const perShareIntrinsic = entry == null ? null : Math.max(entry - Number(l.strike), 0);
+                    const ext = entry == null ? null
+                      : isShort ? Math.max(price - perShareIntrinsic, 0)
+                                : Math.max(price - perShareIntrinsic * 100, 0);
+                    return (
+                      <tr key={i} className="border-t border-slate-800/50">
+                        <td className={`py-1 pr-3 ${isShort ? "text-amber-300" : "text-emerald-300"}`}>{l.leg_type}</td>
+                        <td className="py-1 pr-3">{l.strike}</td>
+                        <td className="py-1 pr-3">
+                          <input value={l.contracts} onChange={(e) => editLeg(i, "contracts", e.target.value)}
+                                 className="w-12 rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200" />
+                        </td>
+                        <td className="py-1 pr-3">{l.expiration || "—"}</td>
+                        <td className="py-1 pr-3">
+                          <input value={isShort ? l.premium_per_share : l.cost_per_contract}
+                                 onChange={(e) => editLeg(i, isShort ? "premium_per_share" : "cost_per_contract", e.target.value)}
+                                 className="w-20 rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200" />
+                        </td>
+                        <td className="py-1 pr-3">
+                          <input value={l.entry_price ?? ""} placeholder="underlying"
+                                 onChange={(e) => editLeg(i, "entry_price", e.target.value)}
+                                 className="w-24 rounded border border-amber-700 bg-slate-900/60 px-1 text-amber-200" />
+                        </td>
+                        <td className={`py-1 pr-3 ${ext == null ? "text-rose-400" : "text-slate-300"}`}>
+                          {ext == null ? "enter entry price" : ext.toFixed(isShort ? 2 : 0)}
+                          {ext != null && !isShort ? "/ctr" : ext != null ? "/sh" : ""}
+                        </td>
+                        <td className="py-1 pr-3 text-slate-500">{l.econ_source || "—"}</td>
+                      </tr>
+                    );
+                  })}
                   {proposal.legs.length === 0 && (
-                    <tr><td colSpan={7} className="py-3 text-center font-sans text-slate-500">Broker holds no option legs for {proposal.ticker}.</td></tr>
+                    <tr><td colSpan={8} className="py-3 text-center font-sans text-slate-500">Broker holds no option legs for {proposal.ticker}.</td></tr>
                   )}
                 </tbody>
               </table>
