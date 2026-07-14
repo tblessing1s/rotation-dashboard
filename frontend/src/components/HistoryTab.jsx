@@ -249,8 +249,22 @@ function RawData() {
   // (reversed_by) — i.e. legs that didn't actually end up on the books.
   const FILL_ACTIONS = new Set(["buy_leap", "sell_short", "close_short", "close_leap", "resolve_expiry"]);
   const execs = fulfilledOnly
-    ? allExecs.filter((e) => FILL_ACTIONS.has(e.action) && !e.reversed_by)
+    ? allExecs.filter((e) => FILL_ACTIONS.has(e.action) && !e.reversed_by && !e.excluded)
     : allExecs;
+
+  const voidExec = async (e) => {
+    const isVoided = !!e.excluded;
+    if (!window.confirm(isVoided
+      ? `Restore ${e.id} back into the history and ledgers?`
+      : `Void ${e.id} (${e.action} ${e.strike ?? ""})? It drops out of history + derived ledgers `
+        + `but stays on the immutable log. Use for pre-trading/test entries.`)) return;
+    setMsg(null);
+    try {
+      if (isVoided) await api.restoreExecutions([e.id]);
+      else await api.voidExecutions([e.id], "pruned pre-trading/test entry");
+      await reload();
+    } catch (err) { setMsg(String(err.message || err)); }
+  };
 
   // Step 1: fetch the proposed legs (broker truth + log-matched economics) to review.
   const propose = async (ticker) => {
@@ -437,19 +451,30 @@ function RawData() {
           <table className="w-full whitespace-nowrap text-xs">
             <thead>
               <tr className="text-left uppercase tracking-wide text-slate-500">
+                {!fulfilledOnly && <th className="py-1.5 pr-3"></th>}
                 {EXEC_COLS.map((h) => <th key={h} className="py-1.5 pr-3">{h}</th>)}
               </tr>
             </thead>
             <tbody className="font-mono text-slate-300">
               {execs.map((e, i) => (
-                <tr key={e.id || i} className={`border-t border-slate-800/50 ${e.reversed_by ? "opacity-40" : ""} ${e.action === "adoption_reversal" ? "text-sky-300" : ""}`}>
+                <tr key={e.id || i} className={`border-t border-slate-800/50 ${e.reversed_by || e.excluded ? "opacity-40" : ""} ${e.excluded ? "line-through" : ""} ${e.action === "adoption_reversal" ? "text-sky-300" : ""}`}>
+                  {!fulfilledOnly && (
+                    <td className="py-1.5 pr-3 no-underline">
+                      <button onClick={() => voidExec(e)}
+                              className={`rounded border px-1.5 text-[10px] font-semibold ${e.excluded
+                                ? "border-emerald-800 bg-emerald-950/40 text-emerald-300"
+                                : "border-rose-800 bg-rose-950/40 text-rose-300"} hover:opacity-80`}>
+                        {e.excluded ? "restore" : "void"}
+                      </button>
+                    </td>
+                  )}
                   {EXEC_COLS.map((c) => (
                     <td key={c} className={`py-1.5 pr-3 ${c === "source" && e[c] === "broker_manual" ? "text-amber-300" : ""}`}>{cell(e[c])}</td>
                   ))}
                 </tr>
               ))}
               {execs.length === 0 && (
-                <tr><td colSpan={EXEC_COLS.length} className="py-6 text-center font-sans text-slate-500">No executions.</td></tr>
+                <tr><td colSpan={EXEC_COLS.length + 1} className="py-6 text-center font-sans text-slate-500">No executions.</td></tr>
               )}
             </tbody>
           </table>

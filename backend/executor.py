@@ -1266,6 +1266,54 @@ def _exp_eq(a, b) -> bool:
     return str(a or "")[:10] == str(b or "")[:10]
 
 
+def void_executions(ids, reason: str | None = None) -> dict:
+    """Mark executions EXCLUDED — an append-only 'soft delete'. Voided executions
+    drop out of the history views and the derived ledgers (recompute_derived skips
+    ``excluded``), while the immutable record is preserved for audit. Use it to
+    prune pre-trading test/setup entries so the history starts at the first real
+    trade. It does NOT remove a leg from a live position (positions are maintained
+    separately); if a voided execution had established a leg, follow with a
+    position rebuild. A voided execution can be restored (``restore=True``)."""
+    ids = {str(i) for i in (ids or [])}
+    if not ids:
+        raise ValueError("no execution ids to void")
+    reason = (reason or "voided pre-trading/test entry").strip()
+    state = log.load_state()
+    found, voided = set(), []
+    for e in state.get("executions") or []:
+        if e.get("id") in ids:
+            found.add(e["id"])
+            if not e.get("excluded"):
+                e["excluded"] = True
+                e["void_reason"] = reason
+                e["voided_at"] = log.utcnow()
+                voided.append(e["id"])
+    missing = ids - found
+    if missing:
+        raise ValueError(f"unknown execution id(s): {', '.join(sorted(missing))}")
+    log.recompute_derived(state)
+    log.save_state(state)
+    return {"success": True, "status": "voided", "voided": voided, "count": len(voided)}
+
+
+def restore_executions(ids) -> dict:
+    """Un-void previously excluded executions (clears the ``excluded`` flag)."""
+    ids = {str(i) for i in (ids or [])}
+    if not ids:
+        raise ValueError("no execution ids to restore")
+    state = log.load_state()
+    restored = []
+    for e in state.get("executions") or []:
+        if e.get("id") in ids and e.get("excluded"):
+            e["excluded"] = False
+            e.pop("void_reason", None)
+            e.pop("voided_at", None)
+            restored.append(e["id"])
+    log.recompute_derived(state)
+    log.save_state(state)
+    return {"success": True, "status": "restored", "restored": restored}
+
+
 def acknowledge_diff(diff_id: str, ack_reason: str) -> dict:
     """Acknowledge a reconciliation diff as a non-issue (typed reason required),
     logged onto the reconciliation record. Lifts the freeze once the position's

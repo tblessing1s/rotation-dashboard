@@ -267,3 +267,38 @@ def test_rebuild_position_from_broker_restores_economics(store):
     assert leaps[0]["cost_basis"] == 5680 and leaps[0]["extrinsic_at_entry"] == 567
     assert leaps[1]["cost_basis"] == 5305 and leaps[1]["extrinsic_at_entry"] == 649
     assert pos["short_calls"][0].get("rebuilt") is True
+
+
+# ---------------------------------------------------------------------------
+# Void / restore pre-trading test executions (append-only soft delete)
+# ---------------------------------------------------------------------------
+def test_void_execution_excludes_from_ledgers_and_restore(store):
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "exec_001", "action": "buy_leap", "ticker": "XLK", "strike": 135.0,
+         "contracts": 2, "execution_price": 5590, "extrinsic_captured": 1100,
+         "stock_price": 185.40, "mode": "logged"},   # pre-trading paper test entry
+        {"id": "exec_006", "action": "buy_leap", "ticker": "XLK", "strike": 137.5,
+         "contracts": 1, "execution_price": 5305, "extrinsic_captured": 649,
+         "stock_price": 184.06, "mode": "live"},      # first real trade
+    ]
+    log.save_state(state)
+
+    res = executor.void_executions(["exec_001"], "pre-trading test entry")
+    assert res["voided"] == ["exec_001"]
+    state = log.load_state()
+    e1 = next(e for e in state["executions"] if e["id"] == "exec_001")
+    assert e1["excluded"] is True and e1["void_reason"] == "pre-trading test entry"
+    # Immutable record preserved (still on the log), just flagged.
+    assert e1["execution_price"] == 5590
+    # recompute skips excluded executions.
+    kept = [e for e in state["executions"] if not e.get("excluded")]
+    assert [e["id"] for e in kept] == ["exec_006"]
+
+    # Unknown id is a loud error; restore un-voids.
+    import pytest
+    with pytest.raises(ValueError, match="unknown execution id"):
+        executor.void_executions(["exec_999"])
+    executor.restore_executions(["exec_001"])
+    e1 = next(e for e in log.load_state()["executions"] if e["id"] == "exec_001")
+    assert not e1.get("excluded")
