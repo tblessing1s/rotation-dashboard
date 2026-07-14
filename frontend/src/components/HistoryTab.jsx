@@ -240,9 +240,17 @@ function RawData() {
   const [proposal, setProposal] = React.useState(null); // {ticker, legs}
   const [committing, setCommitting] = React.useState(false);
   const [msg, setMsg] = React.useState(null);
+  const [fulfilledOnly, setFulfilledOnly] = React.useState(true);
   if (error) return <Card title="Raw data (validation)"><p className="text-sm text-rose-400">{error}</p></Card>;
   const positions = data?.positions || [];
-  const execs = data?.executions || [];
+  const allExecs = data?.executions || [];
+  // "Fulfilled orders only" = the actual broker fills, hiding bookkeeping noise:
+  // reversal / rebuild / adjustment markers and any execution that was undone
+  // (reversed_by) — i.e. legs that didn't actually end up on the books.
+  const FILL_ACTIONS = new Set(["buy_leap", "sell_short", "close_short", "close_leap", "resolve_expiry"]);
+  const execs = fulfilledOnly
+    ? allExecs.filter((e) => FILL_ACTIONS.has(e.action) && !e.reversed_by)
+    : allExecs;
 
   // Step 1: fetch the proposed legs (broker truth + log-matched economics) to review.
   const propose = async (ticker) => {
@@ -412,7 +420,19 @@ function RawData() {
         </div>
       </Card>
 
-      <Card title={`Raw execution log — ${data?.execution_count ?? 0} records (newest first)`}>
+      <Card title={`Raw execution log — ${execs.length}${fulfilledOnly ? " fulfilled" : ""} of ${data?.execution_count ?? 0}`}
+            right={
+              <label className="flex items-center gap-1.5 text-xs text-slate-400">
+                <input type="checkbox" checked={fulfilledOnly} onChange={(e) => setFulfilledOnly(e.target.checked)} />
+                Fulfilled orders only
+              </label>
+            }>
+        {fulfilledOnly && (
+          <p className="mb-2 text-[11px] text-slate-500">
+            Showing actual broker fills (buy/sell/close). Reversed adopt legs, undo/rebuild markers, and
+            adjustments are hidden — untick to see the full audit log.
+          </p>
+        )}
         <div className="overflow-x-auto">
           <table className="w-full whitespace-nowrap text-xs">
             <thead>
