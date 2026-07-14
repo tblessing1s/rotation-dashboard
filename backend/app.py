@@ -683,6 +683,24 @@ def api_history():
         return _err(e)
 
 
+@app.route("/api/positions/set-legs", methods=["POST"])
+def api_set_position_legs():
+    """Single-spot position editor: directly set a position's short_calls +
+    leap_legs from operator-entered legs (extrinsic computed from premium + entry
+    price). The simple way to make state match the real broker position."""
+    payload = request.get_json(silent=True) or {}
+    ticker = (payload.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify(executor.set_position_legs(ticker, payload.get("legs") or [],
+                                                  payload.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/executions/raw")
 def api_executions_raw():
     """Raw, unprocessed data for validation: the append-only execution log

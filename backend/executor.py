@@ -1055,6 +1055,80 @@ def _match_leap_econ(state: dict, ticker: str, strike, avg_price) -> dict:
             "stock_price": best.get("stock_price"), "source": best.get("id")}
 
 
+def set_position_legs(ticker: str, legs: list, reason: str | None = None) -> dict:
+    """THE single-spot editor: directly replace a position's short_calls + leap_legs
+    with the operator-provided legs. Each leg's extrinsic is computed from its total
+    premium and entry price (premium − intrinsic), the same math the builders use —
+    so the operator only enters what they actually see (strike, contracts, expiry,
+    premium/cost, entry price). Creates the position shell if none exists.
+    Append-only ``position_rebuild`` marker for audit; derived ledgers recompute."""
+    ticker = (ticker or "").upper()
+    if not ticker:
+        raise ValueError("ticker is required")
+    new_shorts, new_leaps = _legs_from_specs(legs or [])
+
+    state = log.load_state()
+    _ensure_position(state, ticker)  # create the shell if needed
+    log.save_state(state)
+
+    log.append_execution({
+        "ticker": ticker, "action": "position_rebuild", "mode": "live",
+        "reason": (reason or f"manual edit of {ticker} legs").strip(), "source": "manual_edit",
+        "detail": {"shorts": len(new_shorts), "leaps": len(new_leaps)}})
+
+    state = log.load_state()
+    position = _ensure_position(state, ticker)
+    position["short_calls"] = new_shorts
+    position["leap_legs"] = new_leaps
+    position["leap"] = new_leaps[0] if new_leaps else None
+    position["status"] = "open" if (new_leaps or new_shorts) else position.get("status", "open")
+    log.recompute_derived(state)
+    import reconcile
+    reconcile.reevaluate_freezes(state)
+    log.save_state(state)
+    return {"success": True, "status": "saved", "ticker": ticker,
+            "short_calls": new_shorts, "leap_legs": new_leaps}
+
+
+def _legs_from_specs(specs: list) -> tuple[list, list]:
+    """Build (short_calls, leap_legs) from operator leg specs. Each spec:
+    {leg_type: 'short'|'leap', strike, contracts, expiration, entry_price,
+     premium_per_share (short) | cost_per_contract (leap)}. Extrinsic is computed
+    from premium + entry price; a directly-supplied extrinsic is used only when no
+    entry price is given."""
+    new_shorts, new_leaps = [], []
+    for s in specs:
+        try:
+            c = int(round(float(s.get("contracts") or 0)))
+            strike = float(s.get("strike"))
+        except (TypeError, ValueError):
+            continue
+        if not c:
+            continue
+        entry_price = s.get("entry_price")
+        if (s.get("leg_type") or "").lower() == "short":
+            prem = float(s.get("premium_per_share") or 0)
+            ext = (_short_extrinsic(prem, entry_price, strike)
+                   if entry_price not in (None, "") else float(s.get("entry_extrinsic_per_share") or 0))
+            new_shorts.append({
+                "strike": strike, "contracts": c, "open_date": log.utcnow()[:10],
+                "expiration": s.get("expiration") or None, "entry_stock_price": entry_price,
+                "entry_extrinsic_per_share": round(ext, 4),
+                "entry_premium_total": round(prem * c * 100, 2),
+                "current_bid": prem, "current_cost": round(prem * c * 100, 2), "rebuilt": True})
+        else:
+            ppc = float(s.get("cost_per_contract") or 0)
+            epc = (_leap_extrinsic_pc(ppc, entry_price, strike)
+                   if entry_price not in (None, "") else float(s.get("extrinsic_per_contract") or 0))
+            new_leaps.append({
+                "strike": strike, "contracts": c, "cost_basis": round(ppc * c, 2),
+                "current_bid": round(ppc * c, 2), "expiration": s.get("expiration") or None,
+                "entry_stock_price": entry_price, "entry_date": log.utcnow()[:10],
+                "extrinsic": round(epc * c, 2), "extrinsic_at_entry": round(epc * c, 2),
+                "extrinsic_collected_to_date": 0, "rebuilt": True})
+    return new_shorts, new_leaps
+
+
 REVERSAL_ACTION = "adoption_reversal"
 
 

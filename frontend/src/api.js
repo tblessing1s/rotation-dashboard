@@ -123,6 +123,9 @@ export const api = {
   history: () => request("/api/history"),
   // Raw executions + live position legs, for the History validation table.
   executionsRaw: () => request("/api/executions/raw"),
+  // Single-spot position editor: directly set a position's legs.
+  setPositionLegs: (ticker, legs, reason) =>
+    request("/api/positions/set-legs", { method: "POST", body: JSON.stringify({ ticker, legs, reason }) }),
   // Void (soft-delete) or restore executions — prune pre-trading/test entries.
   voidExecutions: (ids, reason) =>
     request("/api/executions/void", { method: "POST", body: JSON.stringify({ ids, reason }) }),

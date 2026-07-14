@@ -329,3 +329,39 @@ def test_rebuild_skips_voided_buy_leap(store):
     assert leap["entry_price"] == 184.06
     assert leap["extrinsic_per_contract"] == 649       # 5305 − (184.06−137.5)*100
     assert leap["econ_source"] == "exec_006"
+
+
+# ---------------------------------------------------------------------------
+# Single-spot editor: directly set a position's legs
+# ---------------------------------------------------------------------------
+def test_set_position_legs_direct_edit(store):
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "XLK", "status": "open", "shares": {"count": 0},
+        "leap_legs": [{"strike": 137.5, "contracts": 1, "cost_basis": 5370,
+                       "extrinsic_at_entry": 664}],  # wrong (test-buy) economics
+        "short_calls": []})
+    log.save_state(state)
+
+    # Operator enters the real 4 legs in one spot; extrinsic computed from entry price.
+    legs = [
+        {"leg_type": "leap", "strike": 137.5, "contracts": 1, "expiration": "2027-01-15",
+         "cost_per_contract": 5305, "entry_price": 184.06},
+        {"leg_type": "leap", "strike": 135.0, "contracts": 1, "expiration": "2027-01-15",
+         "cost_per_contract": 5680, "entry_price": 186.13},
+        {"leg_type": "short", "strike": 179.0, "contracts": 1, "expiration": "2026-07-24",
+         "premium_per_share": 9.45, "entry_price": 186.20},
+        {"leg_type": "short", "strike": 179.0, "contracts": 1, "expiration": "2026-07-17",
+         "premium_per_share": 5.10, "entry_price": 182.27},
+    ]
+    res = executor.set_position_legs("XLK", legs)
+    assert res["status"] == "saved"
+
+    pos = log.find_position(log.load_state(), "XLK")
+    leaps = {l["strike"]: l for l in log.leap_legs(pos)}
+    assert leaps[137.5]["cost_basis"] == 5305 and leaps[137.5]["extrinsic_at_entry"] == 649
+    assert leaps[135.0]["cost_basis"] == 5680 and leaps[135.0]["extrinsic_at_entry"] == 567
+    shorts = {s["expiration"]: s for s in pos["short_calls"]}
+    assert shorts["2026-07-17"]["entry_extrinsic_per_share"] == 1.83
+    assert shorts["2026-07-24"]["entry_extrinsic_per_share"] == 2.25
+    assert shorts["2026-07-24"]["entry_premium_total"] == 945

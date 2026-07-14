@@ -234,6 +234,110 @@ function cell(v) {
   return String(v).length > 22 ? String(v).slice(0, 21) + "…" : String(v);
 }
 
+// Convert a position's live legs into editable rows for the single-spot editor.
+function legsToRows(position) {
+  const rows = [];
+  (position.short_calls || []).forEach((sc) => rows.push({
+    leg_type: "short", strike: sc.strike ?? "", contracts: sc.contracts ?? 1,
+    expiration: sc.expiration || "",
+    price: sc.entry_premium_total && sc.contracts ? +(sc.entry_premium_total / (sc.contracts * 100)).toFixed(2) : (sc.current_bid ?? ""),
+    entry_price: sc.entry_stock_price ?? "",
+    entry_extrinsic_per_share: sc.entry_extrinsic_per_share ?? "",
+  }));
+  (position.leap_legs || []).forEach((lg) => rows.push({
+    leg_type: "leap", strike: lg.strike ?? "", contracts: lg.contracts ?? 1,
+    expiration: lg.expiration || "",
+    price: lg.cost_basis && lg.contracts ? +(lg.cost_basis / lg.contracts).toFixed(2) : (lg.cost_basis ?? ""),
+    entry_price: lg.entry_stock_price ?? "",
+    extrinsic_per_contract: lg.contracts ? +((lg.extrinsic_at_entry ?? 0) / lg.contracts).toFixed(2) : "",
+  }));
+  return rows;
+}
+
+// THE single-spot editor: edit a position's legs directly and Save. Extrinsic is
+// computed live from premium/cost + entry price, so you enter only what you saw.
+function PositionLegsEditor({ ticker, initialRows, onSaved, onCancel }) {
+  const [rows, setRows] = React.useState(initialRows.length ? initialRows : [
+    { leg_type: "short", strike: "", contracts: 1, expiration: "", price: "", entry_price: "" }]);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  const set = (i, k, v) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, [k]: v } : r));
+  const add = () => setRows((rs) => [...rs, { leg_type: "short", strike: "", contracts: 1, expiration: "", price: "", entry_price: "" }]);
+  const del = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
+
+  const ext = (r) => {
+    const price = Number(r.price), strike = Number(r.strike);
+    const entry = r.entry_price === "" || r.entry_price == null ? null : Number(r.entry_price);
+    if (entry == null || isNaN(price) || isNaN(strike)) return null;
+    const intr = Math.max(entry - strike, 0);
+    return r.leg_type === "short" ? Math.max(price - intr, 0) : Math.max(price - intr * 100, 0);
+  };
+
+  const save = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const legs = rows.map((r) => ({
+        leg_type: r.leg_type, strike: Number(r.strike), contracts: Number(r.contracts),
+        expiration: r.expiration || null,
+        entry_price: r.entry_price === "" ? null : Number(r.entry_price),
+        ...(r.leg_type === "short" ? { premium_per_share: Number(r.price) } : { cost_per_contract: Number(r.price) }),
+      }));
+      await api.setPositionLegs(ticker, legs, "manual leg edit");
+      onSaved();
+    } catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+
+  const inp = "rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200";
+  return (
+    <div className="mb-3 rounded-md border border-emerald-800/60 bg-emerald-950/15 p-2">
+      <p className="text-xs font-semibold text-emerald-200">Editing {ticker} legs — set them to match your broker, then Save.</p>
+      <p className="mt-0.5 text-[11px] text-slate-500">
+        Enter premium/cost (per share for shorts, per contract for LEAPs) and the underlying price at entry;
+        extrinsic is computed for you. Short premium e.g. 5.10; LEAP cost e.g. 5305.
+      </p>
+      <div className="mt-2 overflow-x-auto">
+        <table className="w-full whitespace-nowrap text-xs">
+          <thead><tr className="text-left uppercase tracking-wide text-slate-500">
+            {["", "type", "strike", "qty", "expiration", "premium/cost", "entry price", "extrinsic", ""].map((h, i) =>
+              <th key={i} className="py-1 pr-2">{h}</th>)}
+          </tr></thead>
+          <tbody className="font-mono">
+            {rows.map((r, i) => {
+              const e = ext(r);
+              return (
+                <tr key={i} className="border-t border-slate-800/50">
+                  <td className="py-1 pr-2">{i + 1}</td>
+                  <td className="py-1 pr-2">
+                    <select value={r.leg_type} onChange={(ev) => set(i, "leg_type", ev.target.value)}
+                            className={`${inp}`}>
+                      <option value="short">short</option>
+                      <option value="leap">leap</option>
+                    </select>
+                  </td>
+                  <td className="py-1 pr-2"><input value={r.strike} onChange={(ev) => set(i, "strike", ev.target.value)} className={`${inp} w-16`} /></td>
+                  <td className="py-1 pr-2"><input value={r.contracts} onChange={(ev) => set(i, "contracts", ev.target.value)} className={`${inp} w-10`} /></td>
+                  <td className="py-1 pr-2"><input value={r.expiration} placeholder="YYYY-MM-DD" onChange={(ev) => set(i, "expiration", ev.target.value)} className={`${inp} w-28`} /></td>
+                  <td className="py-1 pr-2"><input value={r.price} onChange={(ev) => set(i, "price", ev.target.value)} className={`${inp} w-20`} /></td>
+                  <td className="py-1 pr-2"><input value={r.entry_price} placeholder="underlying" onChange={(ev) => set(i, "entry_price", ev.target.value)} className={`${inp} w-24 border-amber-700 text-amber-200`} /></td>
+                  <td className={`py-1 pr-2 ${e == null ? "text-rose-400" : "text-slate-300"}`}>{e == null ? "—" : e.toFixed(r.leg_type === "short" ? 2 : 0)}</td>
+                  <td className="py-1 pr-2"><button onClick={() => del(i)} className="rounded border border-rose-800 bg-rose-950/40 px-1.5 text-[10px] text-rose-300">✕</button></td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <button onClick={add} className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800">+ Add leg</button>
+        <button onClick={save} disabled={busy} className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-50">{busy ? "Saving…" : "Save legs"}</button>
+        <button onClick={onCancel} className="rounded-full border border-slate-700 bg-slate-800/60 px-3 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800">Cancel</button>
+      </div>
+      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
 function RawData() {
   const { data, error, reload } = useApi(api.executionsRaw, [], null);
   const [rebuilding, setRebuilding] = React.useState(null);
@@ -241,6 +345,7 @@ function RawData() {
   const [committing, setCommitting] = React.useState(false);
   const [msg, setMsg] = React.useState(null);
   const [fulfilledOnly, setFulfilledOnly] = React.useState(true);
+  const [editing, setEditing] = React.useState(null); // ticker being directly edited
   if (error) return <Card title="Raw data (validation)"><p className="text-sm text-rose-400">{error}</p></Card>;
   const positions = data?.positions || [];
   const allExecs = data?.executions || [];
@@ -309,13 +414,27 @@ function RawData() {
         </p>
         <div className="mb-3 flex flex-wrap gap-2">
           {positions.filter((p) => p.status !== "closed").map((p) => (
-            <button key={p.ticker} onClick={() => propose(p.ticker)} disabled={rebuilding === p.ticker}
-                    title={`Propose ${p.ticker}'s legs from the broker's actual holdings; review/correct economics before committing`}
-                    className="rounded-full border border-indigo-800 bg-indigo-950/40 px-2.5 py-1 text-xs font-semibold text-indigo-200 hover:bg-indigo-900/50 disabled:opacity-50">
-              {rebuilding === p.ticker ? `Proposing ${p.ticker}…` : `Rebuild ${p.ticker} from broker`}
-            </button>
+            <React.Fragment key={p.ticker}>
+              <button onClick={() => { setEditing(editing === p.ticker ? null : p.ticker); setProposal(null); }}
+                      className="rounded-full border border-emerald-800 bg-emerald-950/40 px-2.5 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/50">
+                {editing === p.ticker ? `Close ${p.ticker} editor` : `Edit ${p.ticker} legs`}
+              </button>
+              <button onClick={() => propose(p.ticker)} disabled={rebuilding === p.ticker}
+                      title={`Propose ${p.ticker}'s legs from the broker's actual holdings`}
+                      className="rounded-full border border-indigo-800 bg-indigo-950/40 px-2.5 py-1 text-xs font-semibold text-indigo-200 hover:bg-indigo-900/50 disabled:opacity-50">
+                {rebuilding === p.ticker ? `Proposing ${p.ticker}…` : `Rebuild ${p.ticker} from broker`}
+              </button>
+            </React.Fragment>
           ))}
         </div>
+        {editing && (
+          <PositionLegsEditor
+            ticker={editing}
+            initialRows={legsToRows(positions.find((p) => p.ticker === editing) || {})}
+            onSaved={() => { setEditing(null); setMsg(`Saved ${editing} legs.`); reload(); }}
+            onCancel={() => setEditing(null)}
+          />
+        )}
         {proposal && (
           <div className="mb-3 rounded-md border border-indigo-800/60 bg-indigo-950/20 p-2">
             <p className="text-xs font-semibold text-indigo-200">
