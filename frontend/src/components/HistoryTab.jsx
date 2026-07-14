@@ -217,6 +217,113 @@ function CycleRow({ c }) {
   );
 }
 
+// Raw-data validation tables: the LIVE position legs (so a duplicate/mis-booked
+// short is obvious) + the append-only execution log with every field that feeds
+// the derived math. Read-only; nothing here mutates state.
+const EXEC_COLS = [
+  "id", "date", "action", "ticker", "strike", "contracts", "source",
+  "transaction_id", "roll_group_id", "roll_leg", "mode",
+  "premium_per_share", "close_price_per_share", "execution_price",
+  "extrinsic_captured", "entry_extrinsic_per_share", "extrinsic_sold",
+  "extrinsic_paid_back", "net_juice", "stock_price", "reversed_by", "reverses_action",
+];
+
+function cell(v) {
+  if (v === null || v === undefined || v === "") return "—";
+  if (typeof v === "number") return Number.isInteger(v) ? v : v.toFixed(2);
+  return String(v).length > 22 ? String(v).slice(0, 21) + "…" : String(v);
+}
+
+function RawData() {
+  const { data, error, reload } = useApi(api.executionsRaw, [], null);
+  if (error) return <Card title="Raw data (validation)"><p className="text-sm text-rose-400">{error}</p></Card>;
+  const positions = data?.positions || [];
+  const execs = data?.executions || [];
+
+  return (
+    <>
+      <Card title="Live position legs — what state currently holds"
+            right={<button onClick={reload}
+              className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800">Refresh</button>}>
+        <p className="mb-2 text-xs text-slate-500">
+          One row per open leg. A short with a null/0 <span className="font-mono">entry_extrinsic</span> is a mis-booked leg;
+          two rows at the same strike + expiry means a duplicate.
+        </p>
+        <div className="overflow-x-auto">
+          <table className="w-full whitespace-nowrap text-xs">
+            <thead>
+              <tr className="text-left uppercase tracking-wide text-slate-500">
+                {["ticker", "leg", "strike", "contracts", "expiration", "entry_extrinsic/sh",
+                  "entry_premium_total", "cost_basis", "open/entry_date", "flags"].map((h) =>
+                  <th key={h} className="py-1.5 pr-3">{h}</th>)}
+              </tr>
+            </thead>
+            <tbody className="font-mono text-slate-300">
+              {positions.flatMap((p) => [
+                ...(p.short_calls || []).map((sc, i) => (
+                  <tr key={`${p.ticker}-s${i}`} className="border-t border-slate-800/50">
+                    <td className="py-1.5 pr-3 font-sans font-semibold text-slate-100">{p.ticker}</td>
+                    <td className="py-1.5 pr-3 text-amber-300">SHORT</td>
+                    <td className="py-1.5 pr-3">{cell(sc.strike)}</td>
+                    <td className="py-1.5 pr-3">{cell(sc.contracts)}</td>
+                    <td className="py-1.5 pr-3">{cell(sc.expiration)}</td>
+                    <td className={`py-1.5 pr-3 ${!sc.entry_extrinsic_per_share ? "text-rose-400" : ""}`}>{cell(sc.entry_extrinsic_per_share)}</td>
+                    <td className="py-1.5 pr-3">{cell(sc.entry_premium_total)}</td>
+                    <td className="py-1.5 pr-3">—</td>
+                    <td className="py-1.5 pr-3">{cell(sc.open_date)}</td>
+                    <td className="py-1.5 pr-3 text-slate-500">{sc.restored ? "restored" : ""}</td>
+                  </tr>
+                )),
+                ...(p.leap_legs || []).map((lg, i) => (
+                  <tr key={`${p.ticker}-l${i}`} className="border-t border-slate-800/50">
+                    <td className="py-1.5 pr-3 font-sans font-semibold text-slate-100">{p.ticker}</td>
+                    <td className="py-1.5 pr-3 text-emerald-300">LEAP</td>
+                    <td className="py-1.5 pr-3">{cell(lg.strike)}</td>
+                    <td className="py-1.5 pr-3">{cell(lg.contracts)}</td>
+                    <td className="py-1.5 pr-3">{cell(lg.expiration)}</td>
+                    <td className={`py-1.5 pr-3 ${!lg.extrinsic_at_entry ? "text-rose-400" : ""}`}>{cell(lg.extrinsic_at_entry)}</td>
+                    <td className="py-1.5 pr-3">—</td>
+                    <td className="py-1.5 pr-3">{cell(lg.cost_basis)}</td>
+                    <td className="py-1.5 pr-3">{cell(lg.entry_date)}</td>
+                    <td className="py-1.5 pr-3 text-slate-500">{lg.restored ? "restored" : ""}</td>
+                  </tr>
+                )),
+              ])}
+              {positions.every((p) => !(p.short_calls || []).length && !(p.leap_legs || []).length) && (
+                <tr><td colSpan={10} className="py-6 text-center font-sans text-slate-500">No open legs.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card title={`Raw execution log — ${data?.execution_count ?? 0} records (newest first)`}>
+        <div className="overflow-x-auto">
+          <table className="w-full whitespace-nowrap text-xs">
+            <thead>
+              <tr className="text-left uppercase tracking-wide text-slate-500">
+                {EXEC_COLS.map((h) => <th key={h} className="py-1.5 pr-3">{h}</th>)}
+              </tr>
+            </thead>
+            <tbody className="font-mono text-slate-300">
+              {execs.map((e, i) => (
+                <tr key={e.id || i} className={`border-t border-slate-800/50 ${e.reversed_by ? "opacity-40" : ""} ${e.action === "adoption_reversal" ? "text-sky-300" : ""}`}>
+                  {EXEC_COLS.map((c) => (
+                    <td key={c} className={`py-1.5 pr-3 ${c === "source" && e[c] === "broker_manual" ? "text-amber-300" : ""}`}>{cell(e[c])}</td>
+                  ))}
+                </tr>
+              ))}
+              {execs.length === 0 && (
+                <tr><td colSpan={EXEC_COLS.length} className="py-6 text-center font-sans text-slate-500">No executions.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </>
+  );
+}
+
 export default function HistoryTab() {
   const { data, error, loading } = useApi(api.history, [], null);
   const { data: theta } = useApi(api.thetaLedger, [], null);
@@ -293,6 +400,8 @@ export default function HistoryTab() {
           </table>
         </div>
       </Card>
+
+      <RawData />
     </div>
   );
 }

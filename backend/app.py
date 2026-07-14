@@ -683,6 +683,29 @@ def api_history():
         return _err(e)
 
 
+@app.route("/api/executions/raw")
+def api_executions_raw():
+    """Raw, unprocessed data for validation: the append-only execution log
+    (newest first, capped) plus each position's LIVE derived legs (short_calls /
+    leap_legs / shares). Read-only. Lets the operator eyeball exactly what state
+    holds — e.g. spot a duplicate short leg or a leg with no entry extrinsic."""
+    try:
+        state = log.load_state()
+        execs = list(reversed(state.get("executions", [])))[:300]
+        positions = [{
+            "ticker": p.get("ticker"),
+            "status": p.get("status"),
+            "needs_review": bool(p.get("needs_review")),
+            "short_calls": p.get("short_calls") or [],
+            "leap_legs": log.leap_legs(p),
+            "shares": p.get("shares") or {},
+        } for p in state.get("positions", [])]
+        return jsonify({"executions": execs, "positions": positions,
+                        "execution_count": len(state.get("executions", []))})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/export/juice-journal")
 def api_export_juice_journal():
     """The operator's off-system record (CFM 'juice journal' rule): weekly

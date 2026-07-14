@@ -121,6 +121,8 @@ export const api = {
   unmarkPayoutPaid: (month) =>
     request("/api/payouts/unmark-paid", { method: "POST", body: JSON.stringify({ month }) }),
   history: () => request("/api/history"),
+  // Raw executions + live position legs, for the History validation table.
+  executionsRaw: () => request("/api/executions/raw"),
   portfolioRisk: () => request("/api/portfolio-risk"),
   dataHealth: () => request("/api/data-health"),
   dataBudget: () => request("/api/data-budget"),
