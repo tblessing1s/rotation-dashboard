@@ -706,6 +706,25 @@ def api_executions_raw():
         return _err(e)
 
 
+@app.route("/api/executions/void", methods=["POST"])
+def api_executions_void():
+    """Void (exclude) or restore executions — an append-only soft delete for
+    pruning pre-trading test/setup entries. Voided executions drop out of history
+    + derived ledgers but stay on the immutable log."""
+    payload = request.get_json(silent=True) or {}
+    ids = payload.get("ids") or ([payload["id"]] if payload.get("id") else [])
+    if not ids:
+        return jsonify({"error": "ids is required"}), 400
+    try:
+        if payload.get("restore"):
+            return jsonify(executor.restore_executions(ids))
+        return jsonify(executor.void_executions(ids, payload.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/export/juice-journal")
 def api_export_juice_journal():
     """The operator's off-system record (CFM 'juice journal' rule): weekly

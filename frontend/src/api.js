@@ -123,6 +123,11 @@ export const api = {
   history: () => request("/api/history"),
   // Raw executions + live position legs, for the History validation table.
   executionsRaw: () => request("/api/executions/raw"),
+  // Void (soft-delete) or restore executions — prune pre-trading/test entries.
+  voidExecutions: (ids, reason) =>
+    request("/api/executions/void", { method: "POST", body: JSON.stringify({ ids, reason }) }),
+  restoreExecutions: (ids) =>
+    request("/api/executions/void", { method: "POST", body: JSON.stringify({ ids, restore: true }) }),
   // Rebuild a position's legs from the broker's actual holdings (ground truth).
   // dry_run returns a proposal to review/edit; passing edited `legs` commits it.
   rebuildPosition: (ticker, opts = {}) =>

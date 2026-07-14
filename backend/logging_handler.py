@@ -566,7 +566,8 @@ def recompute_derived(state: dict) -> dict:
     happened, while the immutable records of both the adoption and its reversal are
     preserved on the log for the audit trail (append-only, never rewritten)."""
     execs = [e for e in state.get("executions", [])
-             if not e.get("reversed_by") and not e.get("reverses_execution_id")]
+             if not e.get("reversed_by") and not e.get("reverses_execution_id")
+             and not e.get("excluded")]
     now = datetime.now(timezone.utc)
     cur_week = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]:02d}"
     cur_month = now.strftime("%Y-%m")
