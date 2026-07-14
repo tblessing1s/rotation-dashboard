@@ -302,3 +302,30 @@ def test_void_execution_excludes_from_ledgers_and_restore(store):
     executor.restore_executions(["exec_001"])
     e1 = next(e for e in log.load_state()["executions"] if e["id"] == "exec_001")
     assert not e1.get("excluded")
+
+
+def test_rebuild_skips_voided_buy_leap(store):
+    """A voided (test) buy_leap must NOT be matched by the rebuild — it should pick
+    the real one. Reproduces the 137.5 LEAP showing 5370/664 (test exec_003)
+    instead of 5305/649 (real exec_006)."""
+    import reconcile
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "exec_003", "action": "buy_leap", "ticker": "XLK", "strike": 137.5,
+         "contracts": 2, "execution_price": 5370, "stock_price": 184.56, "mode": "live",
+         "excluded": True},                                   # voided test buy
+        {"id": "exec_006", "action": "buy_leap", "ticker": "XLK", "strike": 137.5,
+         "contracts": 1, "execution_price": 5305, "stock_price": 184.06, "mode": "live"},
+    ]
+    state["positions"].append({"ticker": "XLK", "status": "open", "shares": {"count": 0},
+                               "leap_legs": [{"strike": 137.5, "contracts": 1}], "short_calls": []})
+    log.save_state(state)
+
+    broker = [{"instrument_type": reconcile.OPTION, "strike": 137.5, "quantity": 1,
+               "expiry": "2027-01-15", "avg_price": 53.05, "underlying": "XLK"}]
+    prop = executor.rebuild_position_from_broker("XLK", broker_legs=broker, dry_run=True)
+    leap = prop["legs"][0]
+    assert leap["cost_per_contract"] == 5305           # real buy, not the voided 5370
+    assert leap["entry_price"] == 184.06
+    assert leap["extrinsic_per_contract"] == 649       # 5305 − (184.06−137.5)*100
+    assert leap["econ_source"] == "exec_006"

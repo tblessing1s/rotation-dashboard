@@ -1016,14 +1016,14 @@ def _match_short_econ(state: dict, ticker: str, strike, avg_price) -> dict:
     the extrinsic (premium − intrinsic) rather than trusting a stored value."""
     cands = [e for e in state.get("executions") or []
              if e.get("action") == "sell_short" and (e.get("ticker") or "").upper() == ticker
-             and _strike_eq(e.get("strike"), strike)]
+             and _strike_eq(e.get("strike"), strike)
+             and not e.get("excluded") and not e.get("reversed_by")]  # voided/undone are not truth
     def score(e):
         prem = float(e.get("premium_per_share") or 0)
         near = abs(prem - float(avg_price)) if avg_price is not None else 0
         no_stock = 0 if e.get("stock_price") is not None else 1   # prefer legs with an entry price
         no_prem = 0 if prem else 1                                # and a real (non-zero) premium
-        reversed_pen = 1 if e.get("reversed_by") else 0
-        return near + no_stock * 0.01 + no_prem * 0.02 + reversed_pen * 0.0001
+        return near + no_stock * 0.01 + no_prem * 0.02
     best = min(cands, key=score) if cands else None
     if best is None:
         return {"premium_per_share": float(avg_price or 0), "stock_price": None,
@@ -1040,7 +1040,8 @@ def _match_leap_econ(state: dict, ticker: str, strike, avg_price) -> dict:
     caller computes the extrinsic (cost − intrinsic)."""
     cands = [e for e in state.get("executions") or []
              if e.get("action") == "buy_leap" and (e.get("ticker") or "").upper() == ticker
-             and _strike_eq(e.get("strike"), strike)]
+             and _strike_eq(e.get("strike"), strike)
+             and not e.get("excluded") and not e.get("reversed_by")]  # voided/undone are not truth
     target = float(avg_price) * 100 if avg_price is not None else None
     def score(e):
         ppc = float(e.get("execution_price") or 0)
