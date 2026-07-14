@@ -143,3 +143,52 @@ def test_list_broker_manual_adoptions(store):
     assert adoptions[0]["proposal_id"] == pid
     assert adoptions[0]["reversible"] is True
     assert any(l["action"] == "sell_short" for l in adoptions[0]["legs"])
+
+
+# ---------------------------------------------------------------------------
+# Manual (out-of-band) roll: record from captured fills + derived stock price
+# ---------------------------------------------------------------------------
+def test_derive_stock_price_from_call():
+    # 179 sold for 2.50 with 1.50 extrinsic -> intrinsic 1.00 -> stock 180.
+    assert executor.derive_stock_price_from_call(179.0, 2.50, 1.50) == 180.0
+    # ATM/OTM (premium == extrinsic) -> can't pin above strike -> returns strike.
+    assert executor.derive_stock_price_from_call(179.0, 0.80, 0.80) == 179.0
+
+
+def test_record_manual_roll_computes_both_extrinsics(store):
+    # Position holds the OLD 183 short (entry extrinsic 0.90) + a LEAP.
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "XLK", "status": "open", "shares": {"count": 0},
+        "leap_legs": [{"strike": 135.0, "contracts": 1, "expiration": "2027-01-15"}],
+        "short_calls": [{"strike": 183.0, "contracts": 1, "expiration": "2026-07-17",
+                         "entry_extrinsic_per_share": 0.90}]})
+    log.save_state(state)
+
+    # Roll executed in ToS at underlying 180: bought back 183 @ 0.40, sold 179 @ 2.50.
+    stock = executor.derive_stock_price_from_call(179.0, 2.50, 1.50)  # -> 180.0
+    res = executor.record_manual_roll(
+        "XLK", from_strike=183.0, buyback_per_share=0.40, to_strike=179.0,
+        premium_per_share=2.50, stock_price=stock, to_expiration="2026-07-24",
+        from_expiration="2026-07-17")
+    assert res["status"] == "recorded" and res["stock_price"] == 180.0
+
+    state = log.load_state()
+    pos = log.find_position(state, "XLK")
+    strikes = {sc["strike"] for sc in pos["short_calls"]}
+    assert strikes == {179.0}                      # 183 closed, 179 opened
+    new = next(sc for sc in pos["short_calls"] if sc["strike"] == 179.0)
+    # 179 entry extrinsic = 2.50 − max(180−179,0) = 1.50 (matches what the operator saw).
+    assert new["entry_extrinsic_per_share"] == 1.50
+
+    execs = state["executions"]
+    close = next(e for e in execs if e.get("action") == "close_short" and e.get("strike") == 183.0)
+    # 183 buyback extrinsic = 0.40 − max(180−183,0) = 0.40 (fully extrinsic, OTM).
+    assert close["extrinsic_paid_back"] == 0.40
+    # net juice on the 183 close = entry extrinsic 0.90 − paid back 0.40 = +0.50/sh.
+    assert close["net_juice"] == 0.50
+    # both legs linked as ONE roll.
+    gids = {e.get("roll_group_id") for e in execs if e.get("action") in ("close_short", "sell_short")}
+    assert len(gids) == 1 and None not in gids
+    assert all(e.get("source") == ingest.SOURCE_BROKER_MANUAL for e in execs
+               if e.get("action") in ("close_short", "sell_short"))

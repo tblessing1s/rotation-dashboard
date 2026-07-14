@@ -1125,6 +1125,34 @@ def api_ingestion_reverse():
         return _err(e)
 
 
+@app.route("/api/reconcile/record-manual-roll", methods=["POST"])
+def api_record_manual_roll():
+    """Record an already-executed out-of-band roll (buy-to-close + sell-to-open)
+    from the operator's captured fills + the roll-time underlying price. The app
+    computes both legs' extrinsic from stock_price — nothing hand-entered beyond
+    the fills. If stock_price is omitted but the new leg's premium + extrinsic are
+    given, it is derived (stock = strike + max(premium − extrinsic, 0))."""
+    p = request.get_json(silent=True) or {}
+    try:
+        stock_price = p.get("stock_price")
+        if stock_price is None and p.get("to_premium") is not None and p.get("to_extrinsic") is not None:
+            stock_price = executor.derive_stock_price_from_call(
+                p["to_strike"], p["to_premium"], p["to_extrinsic"])
+        return jsonify(executor.record_manual_roll(
+            p.get("ticker"), from_strike=p.get("from_strike"),
+            buyback_per_share=p.get("buyback_per_share"), to_strike=p.get("to_strike"),
+            premium_per_share=p.get("to_premium", p.get("premium_per_share")),
+            stock_price=stock_price, to_expiration=p.get("to_expiration"),
+            from_expiration=p.get("from_expiration"),
+            from_contracts=int(p.get("from_contracts") or 1),
+            to_contracts=int(p.get("to_contracts") or 1),
+            from_diff_id=p.get("from_diff_id"), to_diff_id=p.get("to_diff_id")))
+    except (ValueError, TypeError, KeyError) as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/reconcile/freeze-status")
 def api_reconcile_freeze_status():
     """The global reconciliation-freeze verdict (frozen tickers + reasons) plus the

@@ -388,6 +388,7 @@ function IngestionPanel() {
           ))}
         </div>
       )}
+      <ManualRollForm onDone={() => { reload(); reloadAdoptions(); }} />
       {data?.last && (
         <p className="mt-2 text-[11px] text-slate-500">
           Last ingest: {data.last.matched ?? 0} matched, {data.last.proposals ?? 0} proposed
@@ -396,6 +397,75 @@ function IngestionPanel() {
         </p>
       )}
       {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
+// Record an already-executed out-of-band roll (e.g. rolled in thinkorSwim). The
+// backend computes BOTH legs' extrinsic from the roll-time underlying price, so
+// only the fills are entered. Stock price can be derived from the new leg's
+// premium + extrinsic when it isn't known directly.
+function ManualRollForm({ onDone }) {
+  const [open, setOpen] = React.useState(false);
+  const [f, setF] = React.useState({
+    ticker: "", from_strike: "", buyback_per_share: "", to_strike: "",
+    to_premium: "", to_extrinsic: "", stock_price: "", to_expiration: "" });
+  const [busy, setBusy] = React.useState(false);
+  const [msg, setMsg] = React.useState(null);
+  const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
+
+  const derivedStock = (() => {
+    const p = parseFloat(f.to_premium), x = parseFloat(f.to_extrinsic), k = parseFloat(f.to_strike);
+    if (!isNaN(p) && !isNaN(x) && !isNaN(k)) return (k + Math.max(p - x, 0)).toFixed(2);
+    return null;
+  })();
+
+  const submit = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const body = {
+        ticker: f.ticker.trim().toUpperCase(),
+        from_strike: Number(f.from_strike), buyback_per_share: Number(f.buyback_per_share),
+        to_strike: Number(f.to_strike), to_premium: Number(f.to_premium),
+        to_expiration: f.to_expiration || null,
+      };
+      if (f.stock_price) body.stock_price = Number(f.stock_price);
+      else if (f.to_extrinsic) body.to_extrinsic = Number(f.to_extrinsic);
+      const res = await api.recordManualRoll(body);
+      setMsg(`Recorded roll ${f.from_strike}→${f.to_strike} at underlying ${res.stock_price}. Run "Reconcile now" to confirm CLEAN.`);
+      onDone && onDone();
+    } catch (e) { setMsg(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+
+  const inp = "w-full rounded border border-slate-700 bg-slate-900/60 px-2 py-1 text-sm text-slate-200";
+  return (
+    <div className="mt-3 border-t border-slate-800/60 pt-2">
+      <button onClick={() => setOpen((o) => !o)} className="text-xs uppercase tracking-wide text-slate-500 hover:text-slate-300">
+        {open ? "▾" : "▸"} Record a manual roll (executed elsewhere)
+      </button>
+      {open && (
+        <div className="mt-2 grid grid-cols-2 gap-2">
+          <label className="text-[11px] text-slate-500">Ticker<input className={inp} value={f.ticker} onChange={set("ticker")} placeholder="XLK" /></label>
+          <label className="text-[11px] text-slate-500">New expiry<input className={inp} value={f.to_expiration} onChange={set("to_expiration")} placeholder="2026-07-24" /></label>
+          <label className="text-[11px] text-slate-500">Closed strike (buy-to-close)<input className={inp} value={f.from_strike} onChange={set("from_strike")} placeholder="183" /></label>
+          <label className="text-[11px] text-slate-500">Buyback $/sh<input className={inp} value={f.buyback_per_share} onChange={set("buyback_per_share")} placeholder="0.40" /></label>
+          <label className="text-[11px] text-slate-500">New strike (sell-to-open)<input className={inp} value={f.to_strike} onChange={set("to_strike")} placeholder="179" /></label>
+          <label className="text-[11px] text-slate-500">New premium $/sh<input className={inp} value={f.to_premium} onChange={set("to_premium")} placeholder="2.50" /></label>
+          <label className="text-[11px] text-slate-500">New leg extrinsic $/sh (to derive price)<input className={inp} value={f.to_extrinsic} onChange={set("to_extrinsic")} placeholder="1.50" /></label>
+          <label className="text-[11px] text-slate-500">…or underlying price<input className={inp} value={f.stock_price} onChange={set("stock_price")} placeholder={derivedStock || "180.00"} /></label>
+          <div className="col-span-2 flex items-center justify-between">
+            <span className="text-[11px] text-slate-500">
+              {f.stock_price ? `using underlying ${f.stock_price}` : derivedStock ? `derived underlying ≈ ${derivedStock}` : "enter new-leg extrinsic or underlying price"}
+            </span>
+            <button onClick={submit} disabled={busy}
+                    className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-50">
+              {busy ? "Recording…" : "Record roll"}
+            </button>
+          </div>
+        </div>
+      )}
+      {msg && <p className="mt-1 text-[11px] text-slate-400">{msg}</p>}
     </div>
   );
 }
