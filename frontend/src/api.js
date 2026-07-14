@@ -163,6 +163,9 @@ export const api = {
     request("/api/reconcile/resolve-expiry", { method: "POST", body: JSON.stringify({ diff_id: diffId }) }),
   acknowledgeDiff: (diffId, ackReason) =>
     request("/api/reconcile/acknowledge", { method: "POST", body: JSON.stringify({ diff_id: diffId, ack_reason: ackReason }) }),
+  // Record an already-executed out-of-band roll from captured fills.
+  recordManualRoll: (body) =>
+    request("/api/reconcile/record-manual-roll", { method: "POST", body: JSON.stringify(body) }),
   // The global reconciliation-freeze verdict + minutes staleness (spec §5).
   freezeStatus: () => request("/api/reconcile/freeze-status"),
   // Execution ingestion from Schwab transactions (spec §4).

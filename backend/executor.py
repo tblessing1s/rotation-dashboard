@@ -790,6 +790,83 @@ def _adopt_payload_for_leg(leg, ticker, action, stock_price, roll_group_id, prop
     return payload
 
 
+def derive_stock_price_from_call(strike, premium_per_share, extrinsic_per_share) -> float:
+    """Back out the underlying price from a call's premium + extrinsic (spec: a
+    manual roll where the operator captured the new leg's premium and extrinsic).
+
+    premium = intrinsic + extrinsic, intrinsic = max(stock − strike, 0). So
+    intrinsic = premium − extrinsic and, when that is positive (the call was ITM),
+    stock = strike + intrinsic. An at/out-of-the-money call (intrinsic ≈ 0) can't
+    pin the underlying above the strike — it returns the strike as the best lower
+    bound (the caller is warned)."""
+    intrinsic = max(float(premium_per_share) - float(extrinsic_per_share), 0.0)
+    return round(float(strike) + intrinsic, 4)
+
+
+def record_manual_roll(ticker: str, from_strike, buyback_per_share, to_strike,
+                       premium_per_share, stock_price, *, to_expiration=None,
+                       from_expiration=None, from_contracts: int = 1, to_contracts: int = 1,
+                       from_diff_id: str | None = None, to_diff_id: str | None = None,
+                       reason: str | None = None) -> dict:
+    """Record an already-executed out-of-band roll (buy-to-close ``from_strike`` +
+    sell-to-open ``to_strike``) into state, economics from the operator's captured
+    fills + the roll-time underlying price. The builders compute BOTH legs'
+    extrinsic from ``stock_price`` (extrinsic = fill − max(stock − strike, 0)), so
+    nothing is hand-entered beyond the fills you saw at the broker. Booked as one
+    linked roll, tagged ``source: broker_manual``, mode ``live`` (it happened at the
+    real account) but NEVER transmitted. Optionally clears the reconcile diffs it
+    resolves."""
+    import reconcile
+    import transaction_ingest as ingest
+
+    if stock_price is None:
+        raise ValueError("stock_price is required (derive it from the new leg via "
+                         "derive_stock_price_from_call, or read it off the broker)")
+    state = log.load_state()
+    roll_group_id = _next_roll_id(state)
+    reason = (reason or f"manual (out-of-band) roll {from_strike}->{to_strike} recorded from broker fills").strip()
+
+    legs = [
+        ("close_short", {"ticker": ticker, "strike": from_strike, "contracts": int(from_contracts),
+                         "close_price_per_share": float(buyback_per_share), "stock_price": float(stock_price),
+                         "expiration": from_expiration, "roll_group_id": roll_group_id,
+                         "roll_leg": "close", "roll_reason": "broker_manual_roll"}),
+        ("sell_short", {"ticker": ticker, "strike": to_strike, "contracts": int(to_contracts),
+                        "premium_per_share": float(premium_per_share), "stock_price": float(stock_price),
+                        "expiration": to_expiration, "roll_group_id": roll_group_id,
+                        "roll_leg": "open", "roll_reason": "broker_manual_roll"}),
+    ]
+    stored_ids: list[str] = []
+    for action, payload in legs:  # close first so the open can't be dropped by the close
+        execution, apply = _build_leg(payload, ticker, action, payload["strike"],
+                                      payload["contracts"], payload["stock_price"])
+        execution["mode"] = "live"
+        execution["price_source"] = "broker_manual_roll"
+        execution["fill_assumption"] = "broker"
+        execution["source"] = ingest.SOURCE_BROKER_MANUAL
+        execution["reason"] = reason
+        _stamp_roll_linkage(execution, payload)
+        stored = log.append_execution(execution)
+        stored_ids.append(stored["id"])
+        state = log.load_state()
+        position = _ensure_position(state, ticker)
+        apply(position)
+        log.recompute_derived(state)
+        log.save_state(state)
+
+    # Clear the reconcile diffs this roll resolves (if the caller linked them).
+    state = log.load_state()
+    for diff_id, exec_id in ((from_diff_id, stored_ids[0]), (to_diff_id, stored_ids[-1])):
+        if diff_id:
+            try:
+                reconcile.mark_diff_resolved(state, diff_id, "manual_roll", {"execution_id": exec_id})
+            except ValueError:
+                pass
+    log.save_state(state)
+    return {"success": True, "status": "recorded", "roll_group_id": roll_group_id,
+            "execution_ids": stored_ids, "stock_price": float(stock_price)}
+
+
 REVERSAL_ACTION = "adoption_reversal"
 
 
