@@ -192,3 +192,73 @@ def test_record_manual_roll_computes_both_extrinsics(store):
     assert len(gids) == 1 and None not in gids
     assert all(e.get("source") == ingest.SOURCE_BROKER_MANUAL for e in execs
                if e.get("action") in ("close_short", "sell_short"))
+
+
+# ---------------------------------------------------------------------------
+# Rebuild a tangled position from broker truth (the XLK cleanup)
+# ---------------------------------------------------------------------------
+def test_rebuild_position_from_broker_restores_economics(store):
+    import reconcile
+    # Immutable log carries the real economics for each leg (as in the incident).
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "exec_a", "action": "buy_leap", "ticker": "XLK", "strike": 135.0,
+         "contracts": 1, "execution_price": 5680, "extrinsic_captured": 567, "mode": "live"},
+        {"id": "exec_b", "action": "buy_leap", "ticker": "XLK", "strike": 137.5,
+         "contracts": 1, "execution_price": 5305, "extrinsic_captured": 649, "mode": "live"},
+        {"id": "exec_c", "action": "sell_short", "ticker": "XLK", "strike": 179.0,
+         "contracts": 1, "premium_per_share": 9.45, "entry_extrinsic_per_share": 2.25, "mode": "live"},
+        {"id": "exec_d", "action": "sell_short", "ticker": "XLK", "strike": 179.0,
+         "contracts": 1, "premium_per_share": 5.10, "entry_extrinsic_per_share": 5.10, "mode": "live"},
+    ]
+    # A tangled current position (duplicate/phantom legs, $0 economics).
+    state["positions"].append({
+        "ticker": "XLK", "status": "open", "shares": {"count": 0},
+        "leap_legs": [{"strike": 135.0, "contracts": 1}],  # 137.5 missing
+        "short_calls": [
+            {"strike": 179.0, "contracts": 2, "entry_extrinsic_per_share": 0},  # spurious
+            {"strike": 183.0, "contracts": 1, "entry_extrinsic_per_share": 0}]})  # phantom
+    log.save_state(state)
+
+    # Broker ground truth: two 179 weeklies (5.10 / 9.45) + two LEAPs.
+    broker_legs = [
+        {"instrument_type": reconcile.OPTION, "strike": 179.0, "quantity": -1,
+         "expiry": "2026-07-17", "avg_price": 5.10, "underlying": "XLK"},
+        {"instrument_type": reconcile.OPTION, "strike": 179.0, "quantity": -1,
+         "expiry": "2026-07-24", "avg_price": 9.45, "underlying": "XLK"},
+        {"instrument_type": reconcile.OPTION, "strike": 135.0, "quantity": 1,
+         "expiry": "2027-01-15", "avg_price": 56.80, "underlying": "XLK"},
+        {"instrument_type": reconcile.OPTION, "strike": 137.5, "quantity": 1,
+         "expiry": "2027-01-15", "avg_price": 53.05, "underlying": "XLK"},
+    ]
+    # Step 1 — dry run proposes legs from broker truth + log-matched economics.
+    prop = executor.rebuild_position_from_broker("XLK", broker_legs=broker_legs, dry_run=True)
+    assert prop["status"] == "proposed"
+    by_exp = {l["expiration"]: l for l in prop["legs"] if l["leg_type"] == "short"}
+    assert by_exp["2026-07-24"]["entry_extrinsic_per_share"] == 2.25   # from exec_c
+    assert by_exp["2026-07-17"]["entry_extrinsic_per_share"] == 5.10   # log match (WRONG value)
+
+    # Step 2 — operator corrects the 179 07-17 entry extrinsic to the real 1.83,
+    # then confirms. The correction wins over the log.
+    edited = []
+    for l in prop["legs"]:
+        l = dict(l)
+        if l.get("leg_type") == "short" and l.get("expiration") == "2026-07-17":
+            l["entry_extrinsic_per_share"] = 1.83
+        edited.append(l)
+    res = executor.rebuild_position_from_broker("XLK", legs=edited)
+    assert res["status"] == "rebuilt"
+
+    pos = log.find_position(log.load_state(), "XLK")
+    # Exactly the broker legs, no phantom 183.
+    shorts = sorted(pos["short_calls"], key=lambda s: s["expiration"])
+    assert [(s["strike"], s["contracts"], s["expiration"]) for s in shorts] == [
+        (179.0, 1, "2026-07-17"), (179.0, 1, "2026-07-24")]
+    by_exp = {s["expiration"]: s for s in shorts}
+    assert by_exp["2026-07-17"]["entry_extrinsic_per_share"] == 1.83   # operator correction won
+    assert by_exp["2026-07-24"]["entry_extrinsic_per_share"] == 2.25   # from exec_c
+    leaps = sorted(log.leap_legs(pos), key=lambda l: l["strike"])
+    assert [(l["strike"], l["contracts"]) for l in leaps] == [(135.0, 1), (137.5, 1)]
+    assert leaps[0]["cost_basis"] == 5680 and leaps[0]["extrinsic_at_entry"] == 567
+    assert leaps[1]["cost_basis"] == 5305 and leaps[1]["extrinsic_at_entry"] == 649
+    assert pos["short_calls"][0].get("rebuilt") is True

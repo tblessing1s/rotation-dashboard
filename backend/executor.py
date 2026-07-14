@@ -867,6 +867,158 @@ def record_manual_roll(ticker: str, from_strike, buyback_per_share, to_strike,
             "execution_ids": stored_ids, "stock_price": float(stock_price)}
 
 
+def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
+                                 legs: list | None = None, dry_run: bool = False,
+                                 reason: str | None = None) -> dict:
+    """Reconciliation repair: REPLACE a position's derived short_calls + leap_legs
+    with the broker's actual holdings (ground truth), restoring each leg's
+    economics (entry extrinsic / cost basis) from the immutable execution log —
+    matched by strike and, when two legs share a strike, by nearest trade price
+    (e.g. two 179 weeklies at 5.10 vs 9.45). This is the clean way out of an
+    accumulated tangle: instead of stacking more adjustments, set the legs to what
+    the broker holds and pull the real economics back from the log. Append-only
+    ``position_rebuild`` marker for audit; derived ledgers then recompute.
+
+    ``broker_legs`` may be supplied (offline tests / a captured view); otherwise
+    the live broker positions are fetched for ``ticker``."""
+    import reconcile
+
+    ticker = (ticker or "").upper()
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if position is None:
+        raise ValueError(f"no {ticker} position in state to rebuild")
+
+    # 1) Determine the proposed legs — either the operator's edited legs (confirm
+    #    step, authoritative) or a proposal computed from broker truth + the log.
+    if legs is not None:
+        proposal = [dict(s) for s in legs]
+    else:
+        if broker_legs is None:
+            accounts = (reconcile._demo_broker_accounts() if config.demo_enabled()
+                        else reconcile.data_handler_client_accounts())
+            broker_legs = [i for i in reconcile.parse_broker_positions(accounts)
+                           if (i.get("underlying") or "").upper() == ticker]
+        if not broker_legs:
+            raise ValueError(f"broker holds no {ticker} legs — nothing to rebuild "
+                             "(if you expected legs, confirm Schwab is connected)")
+        proposal = []
+        for leg in broker_legs:
+            if leg["instrument_type"] != reconcile.OPTION:
+                continue  # equity/assignment handled separately; never invented here
+            strike = leg["strike"]
+            qty = int(round(float(leg["quantity"])))
+            expiry = leg.get("expiry")
+            avg = leg.get("avg_price")
+            if qty < 0:  # short call
+                econ = _match_short_econ(state, ticker, strike, avg)
+                proposal.append({"leg_type": "short", "strike": strike, "contracts": abs(qty),
+                                 "expiration": expiry, "premium_per_share": econ["premium_per_share"],
+                                 "entry_extrinsic_per_share": econ["entry_extrinsic_per_share"],
+                                 "econ_source": econ.get("source")})
+            elif qty > 0:  # long call (LEAP)
+                econ = _match_leap_econ(state, ticker, strike, avg)
+                proposal.append({"leg_type": "leap", "strike": strike, "contracts": qty,
+                                 "expiration": expiry, "cost_per_contract": econ["price_per_contract"],
+                                 "extrinsic_per_contract": econ["extrinsic_per_contract"],
+                                 "econ_source": econ.get("source")})
+
+    # 2) Dry run: return the proposal for the operator to review/correct (e.g. an
+    #    entry extrinsic the log recorded wrong). NOTHING is written.
+    if dry_run:
+        return {"success": True, "status": "proposed", "ticker": ticker, "legs": proposal}
+
+    # 3) Confirm: build the stored legs from the (possibly edited) proposal.
+    new_shorts, new_leaps = [], []
+    for s in proposal:
+        c = int(s.get("contracts") or 0)
+        if not c:
+            continue
+        if s.get("leg_type") == "short":
+            prem = float(s.get("premium_per_share") or 0)
+            ext = float(s.get("entry_extrinsic_per_share") or 0)
+            new_shorts.append({
+                "strike": s["strike"], "contracts": c, "open_date": log.utcnow()[:10],
+                "expiration": s.get("expiration"),
+                "entry_extrinsic_per_share": round(ext, 4),
+                "entry_premium_total": round(prem * c * 100, 2),
+                "current_bid": prem, "current_cost": round(prem * c * 100, 2), "rebuilt": True})
+        else:
+            ppc = float(s.get("cost_per_contract") or 0)
+            epc = float(s.get("extrinsic_per_contract") or 0)
+            new_leaps.append({
+                "strike": s["strike"], "contracts": c, "cost_basis": round(ppc * c, 2),
+                "current_bid": round(ppc * c, 2), "expiration": s.get("expiration"),
+                "entry_date": log.utcnow()[:10], "extrinsic": round(epc * c, 2),
+                "extrinsic_at_entry": round(epc * c, 2), "extrinsic_collected_to_date": 0,
+                "rebuilt": True})
+
+    prior = {"short_calls": position.get("short_calls"), "leap_legs": log.leap_legs(position)}
+    reason = (reason or f"rebuild {ticker} legs from broker truth").strip()
+    log.append_execution({
+        "ticker": ticker, "action": "position_rebuild", "mode": "live",
+        "reason": reason, "source": "reconcile",
+        "detail": {"shorts": [(s["strike"], s["contracts"], s["expiration"]) for s in new_shorts],
+                   "leaps": [(l["strike"], l["contracts"], l["expiration"]) for l in new_leaps],
+                   "prior_short_count": len(prior["short_calls"] or []),
+                   "prior_leap_count": len(prior["leap_legs"] or [])}})
+    state = log.load_state()  # re-load so the marker's recompute sees the new legs
+    position = log.find_position(state, ticker)
+    position["short_calls"] = new_shorts
+    position["leap_legs"] = new_leaps
+    position["leap"] = new_leaps[0] if new_leaps else None
+    log.recompute_derived(state)
+    import reconcile as _rec
+    _rec.reevaluate_freezes(state)
+    log.save_state(state)
+    return {"success": True, "status": "rebuilt", "ticker": ticker,
+            "short_calls": new_shorts, "leap_legs": new_leaps}
+
+
+def _match_short_econ(state: dict, ticker: str, strike, avg_price) -> dict:
+    """Best entry economics for a broker short at ``strike`` from the immutable
+    sell_short log: prefer the execution whose premium is nearest the broker's
+    trade price and whose entry extrinsic is recorded (non-zero, non-reversed).
+    Falls back to the broker trade price with zero extrinsic if nothing matches."""
+    cands = [e for e in state.get("executions") or []
+             if e.get("action") == "sell_short" and (e.get("ticker") or "").upper() == ticker
+             and _strike_eq(e.get("strike"), strike)]
+    def score(e):
+        prem = float(e.get("premium_per_share") or 0)
+        near = abs(prem - float(avg_price)) if avg_price is not None else 0
+        has_extr = 0 if float(e.get("entry_extrinsic_per_share") or 0) else 1  # prefer non-zero
+        reversed_pen = 1 if e.get("reversed_by") else 0
+        return (near + has_extr * 0.001 + reversed_pen * 0.0001)
+    best = min(cands, key=score) if cands else None
+    if best is None:
+        return {"premium_per_share": float(avg_price or 0), "entry_extrinsic_per_share": 0,
+                "date": log.utcnow(), "source": "no log match — verify"}
+    return {"premium_per_share": float(best.get("premium_per_share") or avg_price or 0),
+            "entry_extrinsic_per_share": float(best.get("entry_extrinsic_per_share") or 0),
+            "date": best.get("date", log.utcnow()), "source": best.get("id")}
+
+
+def _match_leap_econ(state: dict, ticker: str, strike, avg_price) -> dict:
+    """Best entry economics for a broker LEAP at ``strike`` from the immutable
+    buy_leap log: the execution whose per-contract cost is nearest the broker's
+    trade price (×100). Returns per-contract cost + per-contract entry extrinsic."""
+    cands = [e for e in state.get("executions") or []
+             if e.get("action") == "buy_leap" and (e.get("ticker") or "").upper() == ticker
+             and _strike_eq(e.get("strike"), strike)]
+    target = float(avg_price) * 100 if avg_price is not None else None
+    def score(e):
+        ppc = float(e.get("execution_price") or 0)
+        return abs(ppc - target) if target is not None else 0
+    best = min(cands, key=score) if cands else None
+    if best is None:
+        return {"price_per_contract": float(avg_price or 0) * 100, "extrinsic_per_contract": 0,
+                "date": log.utcnow(), "source": "no log match — verify"}
+    n = int(best.get("contracts") or 1) or 1
+    return {"price_per_contract": float(best.get("execution_price") or (target or 0)),
+            "extrinsic_per_contract": float(best.get("extrinsic_captured") or 0) / n,
+            "date": best.get("date", log.utcnow()), "source": best.get("id")}
+
+
 REVERSAL_ACTION = "adoption_reversal"
 
 
