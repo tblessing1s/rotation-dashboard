@@ -1176,6 +1176,25 @@ def api_record_manual_roll():
         return _err(e)
 
 
+@app.route("/api/reconcile/rebuild-position", methods=["POST"])
+def api_rebuild_position():
+    """Rebuild one position's legs from the broker's actual holdings (ground
+    truth), restoring economics from the immutable execution log. The clean repair
+    for an accumulated reconciliation tangle — replaces stacking adjustments."""
+    payload = request.get_json(silent=True) or {}
+    ticker = (payload.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify(executor.rebuild_position_from_broker(
+            ticker, broker_legs=payload.get("broker_legs"), legs=payload.get("legs"),
+            dry_run=bool(payload.get("dry_run")), reason=payload.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/reconcile/freeze-status")
 def api_reconcile_freeze_status():
     """The global reconciliation-freeze verdict (frozen tickers + reasons) plus the

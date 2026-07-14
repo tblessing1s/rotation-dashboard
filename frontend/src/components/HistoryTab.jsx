@@ -221,11 +221,11 @@ function CycleRow({ c }) {
 // short is obvious) + the append-only execution log with every field that feeds
 // the derived math. Read-only; nothing here mutates state.
 const EXEC_COLS = [
-  "id", "date", "action", "ticker", "strike", "contracts", "source",
-  "transaction_id", "roll_group_id", "roll_leg", "mode",
+  "id", "date", "action", "ticker", "strike", "contracts", "quantity_delta",
+  "source", "transaction_id", "roll_group_id", "roll_leg", "mode",
   "premium_per_share", "close_price_per_share", "execution_price",
   "extrinsic_captured", "entry_extrinsic_per_share", "extrinsic_sold",
-  "extrinsic_paid_back", "net_juice", "stock_price", "reversed_by", "reverses_action",
+  "extrinsic_paid_back", "net_juice", "stock_price", "reversed_by", "reverses_action", "reason",
 ];
 
 function cell(v) {
@@ -236,9 +236,43 @@ function cell(v) {
 
 function RawData() {
   const { data, error, reload } = useApi(api.executionsRaw, [], null);
+  const [rebuilding, setRebuilding] = React.useState(null);
+  const [proposal, setProposal] = React.useState(null); // {ticker, legs}
+  const [committing, setCommitting] = React.useState(false);
+  const [msg, setMsg] = React.useState(null);
   if (error) return <Card title="Raw data (validation)"><p className="text-sm text-rose-400">{error}</p></Card>;
   const positions = data?.positions || [];
   const execs = data?.executions || [];
+
+  // Step 1: fetch the proposed legs (broker truth + log-matched economics) to review.
+  const propose = async (ticker) => {
+    setRebuilding(ticker); setMsg(null); setProposal(null);
+    try {
+      const r = await api.rebuildPosition(ticker, { dry_run: true });
+      setProposal({ ticker, legs: r.legs || [] });
+    } catch (e) { setMsg(`${ticker}: ${String(e.message || e)}`); }
+    finally { setRebuilding(null); }
+  };
+  const editLeg = (i, key, val) => setProposal((p) => ({
+    ...p, legs: p.legs.map((l, j) => j === i ? { ...l, [key]: val } : l) }));
+  // Step 2: commit the (possibly corrected) legs.
+  const commit = async () => {
+    setCommitting(true); setMsg(null);
+    try {
+      const legs = proposal.legs.map((l) => ({
+        ...l,
+        contracts: Number(l.contracts),
+        ...(l.leg_type === "short"
+          ? { premium_per_share: Number(l.premium_per_share), entry_extrinsic_per_share: Number(l.entry_extrinsic_per_share) }
+          : { cost_per_contract: Number(l.cost_per_contract), extrinsic_per_contract: Number(l.extrinsic_per_contract) }),
+      }));
+      const r = await api.rebuildPosition(proposal.ticker, { legs });
+      setMsg(`Rebuilt ${proposal.ticker}: ${r.short_calls.length} short + ${r.leap_legs.length} LEAP leg(s). Run "Reconcile now" to confirm CLEAN.`);
+      setProposal(null);
+      await reload();
+    } catch (e) { setMsg(String(e.message || e)); }
+    finally { setCommitting(false); }
+  };
 
   return (
     <>
@@ -247,8 +281,70 @@ function RawData() {
               className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800">Refresh</button>}>
         <p className="mb-2 text-xs text-slate-500">
           One row per open leg. A short with a null/0 <span className="font-mono">entry_extrinsic</span> is a mis-booked leg;
-          two rows at the same strike + expiry means a duplicate.
+          two rows at the same strike <em>and</em> expiry means a duplicate (different expiries are separate weeklies).
         </p>
+        <div className="mb-3 flex flex-wrap gap-2">
+          {positions.filter((p) => p.status !== "closed").map((p) => (
+            <button key={p.ticker} onClick={() => propose(p.ticker)} disabled={rebuilding === p.ticker}
+                    title={`Propose ${p.ticker}'s legs from the broker's actual holdings; review/correct economics before committing`}
+                    className="rounded-full border border-indigo-800 bg-indigo-950/40 px-2.5 py-1 text-xs font-semibold text-indigo-200 hover:bg-indigo-900/50 disabled:opacity-50">
+              {rebuilding === p.ticker ? `Proposing ${p.ticker}…` : `Rebuild ${p.ticker} from broker`}
+            </button>
+          ))}
+        </div>
+        {proposal && (
+          <div className="mb-3 rounded-md border border-indigo-800/60 bg-indigo-950/20 p-2">
+            <p className="text-xs font-semibold text-indigo-200">
+              Proposed {proposal.ticker} legs (broker truth) — review & correct any entry extrinsic the log got wrong, then Confirm:
+            </p>
+            <div className="mt-2 overflow-x-auto">
+              <table className="w-full whitespace-nowrap text-xs">
+                <thead><tr className="text-left uppercase tracking-wide text-slate-500">
+                  {["leg", "strike", "contracts", "expiration", "premium/cost", "extrinsic", "from"].map((h) =>
+                    <th key={h} className="py-1 pr-3">{h}</th>)}
+                </tr></thead>
+                <tbody className="font-mono">
+                  {proposal.legs.map((l, i) => (
+                    <tr key={i} className="border-t border-slate-800/50">
+                      <td className={`py-1 pr-3 ${l.leg_type === "leap" ? "text-emerald-300" : "text-amber-300"}`}>{l.leg_type}</td>
+                      <td className="py-1 pr-3">{l.strike}</td>
+                      <td className="py-1 pr-3">
+                        <input value={l.contracts} onChange={(e) => editLeg(i, "contracts", e.target.value)}
+                               className="w-12 rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200" />
+                      </td>
+                      <td className="py-1 pr-3">{l.expiration || "—"}</td>
+                      <td className="py-1 pr-3">
+                        <input value={l.leg_type === "short" ? l.premium_per_share : l.cost_per_contract}
+                               onChange={(e) => editLeg(i, l.leg_type === "short" ? "premium_per_share" : "cost_per_contract", e.target.value)}
+                               className="w-20 rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200" />
+                      </td>
+                      <td className="py-1 pr-3">
+                        <input value={l.leg_type === "short" ? l.entry_extrinsic_per_share : l.extrinsic_per_contract}
+                               onChange={(e) => editLeg(i, l.leg_type === "short" ? "entry_extrinsic_per_share" : "extrinsic_per_contract", e.target.value)}
+                               className="w-20 rounded border border-amber-700 bg-slate-900/60 px-1 text-amber-200" />
+                      </td>
+                      <td className="py-1 pr-3 text-slate-500">{l.econ_source || "—"}</td>
+                    </tr>
+                  ))}
+                  {proposal.legs.length === 0 && (
+                    <tr><td colSpan={7} className="py-3 text-center font-sans text-slate-500">Broker holds no option legs for {proposal.ticker}.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="mt-2 flex gap-2">
+              <button onClick={commit} disabled={committing || !proposal.legs.length}
+                      className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-50">
+                {committing ? "Committing…" : "Confirm rebuild"}
+              </button>
+              <button onClick={() => setProposal(null)}
+                      className="rounded-full border border-slate-700 bg-slate-800/60 px-3 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+        {msg && <p className="mb-2 text-xs text-slate-300">{msg}</p>}
         <div className="overflow-x-auto">
           <table className="w-full whitespace-nowrap text-xs">
             <thead>
