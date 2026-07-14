@@ -912,15 +912,21 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
             avg = leg.get("avg_price")
             if qty < 0:  # short call
                 econ = _match_short_econ(state, ticker, strike, avg)
+                premium = float(avg) if avg is not None else econ["premium_per_share"]
+                entry_price = econ.get("stock_price")
                 proposal.append({"leg_type": "short", "strike": strike, "contracts": abs(qty),
-                                 "expiration": expiry, "premium_per_share": econ["premium_per_share"],
-                                 "entry_extrinsic_per_share": econ["entry_extrinsic_per_share"],
+                                 "expiration": expiry, "premium_per_share": round(premium, 4),
+                                 "entry_price": entry_price,
+                                 "entry_extrinsic_per_share": _short_extrinsic(premium, entry_price, strike),
                                  "econ_source": econ.get("source")})
             elif qty > 0:  # long call (LEAP)
                 econ = _match_leap_econ(state, ticker, strike, avg)
+                cost_pc = float(avg) * 100 if avg is not None else econ["price_per_contract"]
+                entry_price = econ.get("stock_price")
                 proposal.append({"leg_type": "leap", "strike": strike, "contracts": qty,
-                                 "expiration": expiry, "cost_per_contract": econ["price_per_contract"],
-                                 "extrinsic_per_contract": econ["extrinsic_per_contract"],
+                                 "expiration": expiry, "cost_per_contract": round(cost_pc, 2),
+                                 "entry_price": entry_price,
+                                 "extrinsic_per_contract": _leap_extrinsic_pc(cost_pc, entry_price, strike),
                                  "econ_source": econ.get("source")})
 
     # 2) Dry run: return the proposal for the operator to review/correct (e.g. an
@@ -934,24 +940,30 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
         c = int(s.get("contracts") or 0)
         if not c:
             continue
+        entry_price = s.get("entry_price")
         if s.get("leg_type") == "short":
             prem = float(s.get("premium_per_share") or 0)
-            ext = float(s.get("entry_extrinsic_per_share") or 0)
+            # Extrinsic is COMPUTED from the total premium and the entry price
+            # (premium − intrinsic), the same way the app's builders derive it; a
+            # directly-supplied extrinsic is used only when no entry price is given.
+            ext = (_short_extrinsic(prem, entry_price, s["strike"])
+                   if entry_price not in (None, "") else float(s.get("entry_extrinsic_per_share") or 0))
             new_shorts.append({
                 "strike": s["strike"], "contracts": c, "open_date": log.utcnow()[:10],
-                "expiration": s.get("expiration"),
+                "expiration": s.get("expiration"), "entry_stock_price": entry_price,
                 "entry_extrinsic_per_share": round(ext, 4),
                 "entry_premium_total": round(prem * c * 100, 2),
                 "current_bid": prem, "current_cost": round(prem * c * 100, 2), "rebuilt": True})
         else:
             ppc = float(s.get("cost_per_contract") or 0)
-            epc = float(s.get("extrinsic_per_contract") or 0)
+            epc = (_leap_extrinsic_pc(ppc, entry_price, s["strike"])
+                   if entry_price not in (None, "") else float(s.get("extrinsic_per_contract") or 0))
             new_leaps.append({
                 "strike": s["strike"], "contracts": c, "cost_basis": round(ppc * c, 2),
                 "current_bid": round(ppc * c, 2), "expiration": s.get("expiration"),
-                "entry_date": log.utcnow()[:10], "extrinsic": round(epc * c, 2),
-                "extrinsic_at_entry": round(epc * c, 2), "extrinsic_collected_to_date": 0,
-                "rebuilt": True})
+                "entry_stock_price": entry_price, "entry_date": log.utcnow()[:10],
+                "extrinsic": round(epc * c, 2), "extrinsic_at_entry": round(epc * c, 2),
+                "extrinsic_collected_to_date": 0, "rebuilt": True})
 
     prior = {"short_calls": position.get("short_calls"), "leap_legs": log.leap_legs(position)}
     reason = (reason or f"rebuild {ticker} legs from broker truth").strip()
@@ -975,48 +987,71 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
             "short_calls": new_shorts, "leap_legs": new_leaps}
 
 
+def _short_extrinsic(premium, entry_price, strike) -> float:
+    """A short call's entry extrinsic = total premium − intrinsic, where intrinsic
+    = max(entry_price − strike, 0). With no entry price the premium can't be split,
+    so it degrades to all-extrinsic (the operator supplies the entry price to fix
+    it). This is the same derivation the sell_short builder uses."""
+    if entry_price in (None, ""):
+        return round(float(premium), 4)
+    intrinsic = max(float(entry_price) - float(strike), 0.0)
+    return round(max(float(premium) - intrinsic, 0.0), 4)
+
+
+def _leap_extrinsic_pc(cost_per_contract, entry_price, strike) -> float:
+    """A LEAP's entry extrinsic PER CONTRACT = per-contract cost − intrinsic, where
+    intrinsic = max(entry_price − strike, 0) × 100 (per-share × 100). Mirrors the
+    buy_leap builder."""
+    if entry_price in (None, ""):
+        return round(float(cost_per_contract), 2)
+    intrinsic = max(float(entry_price) - float(strike), 0.0) * 100
+    return round(max(float(cost_per_contract) - intrinsic, 0.0), 2)
+
+
 def _match_short_econ(state: dict, ticker: str, strike, avg_price) -> dict:
-    """Best entry economics for a broker short at ``strike`` from the immutable
+    """Best entry inputs for a broker short at ``strike`` from the immutable
     sell_short log: prefer the execution whose premium is nearest the broker's
-    trade price and whose entry extrinsic is recorded (non-zero, non-reversed).
-    Falls back to the broker trade price with zero extrinsic if nothing matches."""
+    trade price AND that carries an entry stock price (so the extrinsic can be
+    computed). Returns the premium + the entry stock price; the caller computes
+    the extrinsic (premium − intrinsic) rather than trusting a stored value."""
     cands = [e for e in state.get("executions") or []
              if e.get("action") == "sell_short" and (e.get("ticker") or "").upper() == ticker
              and _strike_eq(e.get("strike"), strike)]
     def score(e):
         prem = float(e.get("premium_per_share") or 0)
         near = abs(prem - float(avg_price)) if avg_price is not None else 0
-        has_extr = 0 if float(e.get("entry_extrinsic_per_share") or 0) else 1  # prefer non-zero
+        no_stock = 0 if e.get("stock_price") is not None else 1   # prefer legs with an entry price
+        no_prem = 0 if prem else 1                                # and a real (non-zero) premium
         reversed_pen = 1 if e.get("reversed_by") else 0
-        return (near + has_extr * 0.001 + reversed_pen * 0.0001)
+        return near + no_stock * 0.01 + no_prem * 0.02 + reversed_pen * 0.0001
     best = min(cands, key=score) if cands else None
     if best is None:
-        return {"premium_per_share": float(avg_price or 0), "entry_extrinsic_per_share": 0,
-                "date": log.utcnow(), "source": "no log match — verify"}
+        return {"premium_per_share": float(avg_price or 0), "stock_price": None,
+                "source": "no log match — enter the entry price"}
     return {"premium_per_share": float(best.get("premium_per_share") or avg_price or 0),
-            "entry_extrinsic_per_share": float(best.get("entry_extrinsic_per_share") or 0),
-            "date": best.get("date", log.utcnow()), "source": best.get("id")}
+            "stock_price": best.get("stock_price"),
+            "source": best.get("id")}
 
 
 def _match_leap_econ(state: dict, ticker: str, strike, avg_price) -> dict:
-    """Best entry economics for a broker LEAP at ``strike`` from the immutable
+    """Best entry inputs for a broker LEAP at ``strike`` from the immutable
     buy_leap log: the execution whose per-contract cost is nearest the broker's
-    trade price (×100). Returns per-contract cost + per-contract entry extrinsic."""
+    trade price (×100). Returns per-contract cost + the entry stock price; the
+    caller computes the extrinsic (cost − intrinsic)."""
     cands = [e for e in state.get("executions") or []
              if e.get("action") == "buy_leap" and (e.get("ticker") or "").upper() == ticker
              and _strike_eq(e.get("strike"), strike)]
     target = float(avg_price) * 100 if avg_price is not None else None
     def score(e):
         ppc = float(e.get("execution_price") or 0)
-        return abs(ppc - target) if target is not None else 0
+        no_stock = 0 if e.get("stock_price") is not None else 1
+        return (abs(ppc - target) if target is not None else 0) + no_stock * 0.01
     best = min(cands, key=score) if cands else None
     if best is None:
-        return {"price_per_contract": float(avg_price or 0) * 100, "extrinsic_per_contract": 0,
-                "date": log.utcnow(), "source": "no log match — verify"}
-    n = int(best.get("contracts") or 1) or 1
+        return {"price_per_contract": float(avg_price or 0) * 100, "stock_price": None,
+                "source": "no log match — enter the entry price"}
     return {"price_per_contract": float(best.get("execution_price") or (target or 0)),
-            "extrinsic_per_contract": float(best.get("extrinsic_captured") or 0) / n,
-            "date": best.get("date", log.utcnow()), "source": best.get("id")}
+            "stock_price": best.get("stock_price"), "source": best.get("id")}
 
 
 REVERSAL_ACTION = "adoption_reversal"
