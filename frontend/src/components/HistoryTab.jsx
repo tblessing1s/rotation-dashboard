@@ -338,6 +338,130 @@ function PositionLegsEditor({ ticker, initialRows, onSaved, onCancel }) {
   );
 }
 
+// The one editable transaction table (ToS-like). Each fulfilled execution is a
+// row; edit strike/qty/expiry/price and the linked entry-stock-price <-> extrinsic
+// pair (edit either, the other computes). Save applies the edits AND derives the
+// open position from the transactions — the transactions are the source of truth.
+const _FILL = new Set(["buy_leap", "sell_short", "close_short", "close_leap"]);
+function _price(e) {
+  return e.action === "buy_leap" ? e.execution_price
+    : e.action === "sell_short" ? e.premium_per_share
+    : e.action === "close_short" ? e.close_price_per_share : e.close_price;
+}
+function _extr(e) {
+  return e.action === "buy_leap" ? e.extrinsic_captured
+    : e.action === "sell_short" ? e.entry_extrinsic_per_share : null;
+}
+function _toRow(e) {
+  return {
+    id: e.id, date: (e.date || "").slice(0, 10), action: e.action,
+    isLeap: e.action === "buy_leap" || e.action === "close_leap",
+    isOpen: e.action === "buy_leap" || e.action === "sell_short",
+    source: e.source, roll: e.roll_group_id,
+    strike: e.strike ?? "", contracts: e.contracts ?? 1, expiration: e.expiration || "",
+    price: _price(e) ?? "", stock_price: e.stock_price ?? "", extrinsic: _extr(e) ?? "",
+  };
+}
+function _calcExt(r, stock) {
+  const price = Number(r.price), strike = Number(r.strike), c = Number(r.contracts) || 1;
+  if (stock === "" || isNaN(Number(stock)) || isNaN(price) || isNaN(strike)) return "";
+  const perShare = r.isLeap ? price / 100 : price;
+  const extPs = Math.max(perShare - Math.max(Number(stock) - strike, 0), 0);
+  return r.isLeap ? +(extPs * 100 * c).toFixed(0) : +extPs.toFixed(4);
+}
+function _calcStock(r, ext) {
+  const price = Number(r.price), strike = Number(r.strike), c = Number(r.contracts) || 1;
+  if (ext === "" || isNaN(Number(ext)) || isNaN(price) || isNaN(strike)) return "";
+  const extPs = r.isLeap ? Number(ext) / (100 * c) : Number(ext);
+  const perShare = r.isLeap ? price / 100 : price;
+  return +(strike + Math.max(perShare - extPs, 0)).toFixed(2);
+}
+
+function TransactionEditor() {
+  const { data, reload } = useApi(api.executionsRaw, [], null);
+  const [rows, setRows] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [msg, setMsg] = React.useState(null);
+  const loadedRef = React.useRef(null);
+
+  React.useEffect(() => {
+    if (data && loadedRef.current !== data) {
+      loadedRef.current = data;
+      const fills = (data.executions || []).filter((e) => _FILL.has(e.action) && !e.reversed_by && !e.excluded);
+      setRows(fills.slice().reverse().map(_toRow));  // oldest first, like a trade log
+    }
+  }, [data]);
+
+  if (rows === null) return <Card title="Transactions (editable)"><Loading /></Card>;
+
+  const set = (i, k, v) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, [k]: v } : r));
+  const onStock = (i, v) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, stock_price: v, extrinsic: _calcExt(r, v) } : r));
+  const onExt = (i, v) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, extrinsic: v, stock_price: _calcStock(r, v) } : r));
+
+  const save = async () => {
+    setBusy(true); setMsg(null);
+    try {
+      const edits = rows.map((r) => ({
+        id: r.id, strike: Number(r.strike), contracts: Number(r.contracts),
+        expiration: r.expiration || null, price: r.price === "" ? null : Number(r.price),
+        stock_price: r.stock_price === "" ? null : Number(r.stock_price),
+        extrinsic: r.extrinsic === "" ? null : Number(r.extrinsic),
+      }));
+      const res = await api.saveTransactions(edits);
+      setMsg(`Saved ${res.edited} transaction(s); position derived for ${(res.tickers || []).join(", ") || "—"}.`);
+      loadedRef.current = null;   // allow reseed from fresh data
+      await reload();
+    } catch (e) { setMsg(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+
+  const inp = "rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200";
+  return (
+    <Card title="Transactions (editable) — the source of truth"
+          right={<button onClick={save} disabled={busy}
+            className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-50">
+            {busy ? "Saving…" : "Save transactions"}</button>}>
+      <p className="mb-2 text-xs text-slate-500">
+        One row per fill. App-ordered fills come pre-filled; for a trade done in ToS you usually only
+        need the <span className="text-amber-300">entry stock price</span> or <span className="text-amber-300">extrinsic</span> —
+        edit either and the other is computed. Set the <span className="font-mono">expiration</span> so same-strike weeklies stay separate.
+        Save derives your open position from these transactions.
+      </p>
+      <div className="overflow-x-auto">
+        <table className="w-full whitespace-nowrap text-xs">
+          <thead><tr className="text-left uppercase tracking-wide text-slate-500">
+            {["date", "action", "strike", "qty", "expiration", "price", "entry stock", "extrinsic", "roll"].map((h) =>
+              <th key={h} className="py-1.5 pr-2">{h}</th>)}
+          </tr></thead>
+          <tbody className="font-mono text-slate-300">
+            {rows.map((r, i) => (
+              <tr key={r.id} className="border-t border-slate-800/50">
+                <td className="py-1 pr-2 font-sans text-slate-500">{r.date}</td>
+                <td className={`py-1 pr-2 ${r.isLeap ? "text-emerald-300" : "text-amber-300"}`}>{r.action}</td>
+                <td className="py-1 pr-2"><input value={r.strike} onChange={(e) => set(i, "strike", e.target.value)} className={`${inp} w-16`} /></td>
+                <td className="py-1 pr-2"><input value={r.contracts} onChange={(e) => set(i, "contracts", e.target.value)} className={`${inp} w-10`} /></td>
+                <td className="py-1 pr-2"><input value={r.expiration} placeholder="YYYY-MM-DD" onChange={(e) => set(i, "expiration", e.target.value)} className={`${inp} w-28`} /></td>
+                <td className="py-1 pr-2"><input value={r.price} onChange={(e) => set(i, "price", e.target.value)} className={`${inp} w-20`} /></td>
+                <td className="py-1 pr-2">
+                  <input value={r.stock_price} placeholder={r.isOpen ? "underlying" : "—"} disabled={!r.isOpen}
+                         onChange={(e) => onStock(i, e.target.value)} className={`${inp} w-24 ${r.isOpen ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
+                </td>
+                <td className="py-1 pr-2">
+                  <input value={r.extrinsic} placeholder={r.isOpen ? "extrinsic" : "—"} disabled={!r.isOpen}
+                         onChange={(e) => onExt(i, e.target.value)} className={`${inp} w-24 ${r.isOpen ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
+                </td>
+                <td className="py-1 pr-2 font-sans text-slate-600">{r.roll || ""}</td>
+              </tr>
+            ))}
+            {rows.length === 0 && <tr><td colSpan={9} className="py-6 text-center font-sans text-slate-500">No transactions.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+      {msg && <p className="mt-2 text-xs text-slate-300">{msg}</p>}
+    </Card>
+  );
+}
+
 function RawData() {
   const { data, error, reload } = useApi(api.executionsRaw, [], null);
   const [rebuilding, setRebuilding] = React.useState(null);
@@ -680,6 +804,7 @@ export default function HistoryTab() {
         </div>
       </Card>
 
+      <TransactionEditor />
       <RawData />
     </div>
   );

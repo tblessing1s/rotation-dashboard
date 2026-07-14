@@ -126,6 +126,9 @@ export const api = {
   // Single-spot position editor: directly set a position's legs.
   setPositionLegs: (ticker, legs, reason) =>
     request("/api/positions/set-legs", { method: "POST", body: JSON.stringify({ ticker, legs, reason }) }),
+  // Editable transaction table: apply per-transaction edits + derive position.
+  saveTransactions: (edits, ticker) =>
+    request("/api/transactions/save", { method: "POST", body: JSON.stringify({ edits, ticker }) }),
   // Void (soft-delete) or restore executions — prune pre-trading/test entries.
   voidExecutions: (ids, reason) =>
     request("/api/executions/void", { method: "POST", body: JSON.stringify({ ids, reason }) }),

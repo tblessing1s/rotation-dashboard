@@ -701,6 +701,21 @@ def api_set_position_legs():
         return _err(e)
 
 
+@app.route("/api/transactions/save", methods=["POST"])
+def api_transactions_save():
+    """Editable transaction table save: apply per-transaction economic edits (with
+    linked stock price <-> extrinsic), then derive the open position from the
+    transactions. The one-table source of truth."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(executor.save_transactions(payload.get("edits") or [],
+                                                  payload.get("ticker")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/executions/raw")
 def api_executions_raw():
     """Raw, unprocessed data for validation: the append-only execution log

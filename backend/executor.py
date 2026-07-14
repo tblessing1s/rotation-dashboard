@@ -1132,6 +1132,166 @@ def _legs_from_specs(specs: list) -> tuple[list, list]:
 REVERSAL_ACTION = "adoption_reversal"
 
 
+def _ff(v):
+    if v in (None, ""):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def save_transactions(edits: list, ticker: str | None = None) -> dict:
+    """Editable-transaction-table save. Applies per-transaction economic edits to
+    the execution log, then DERIVES the open position for each touched ticker from
+    those transactions (opens − closes) — so the one table is the source of truth
+    and the position falls out of it.
+
+    Entry stock price and extrinsic are LINKED (premium = intrinsic + extrinsic,
+    intrinsic = max(stock − strike, 0)): whichever the operator edits, the other is
+    computed and both are stored consistently. Recompute + freeze re-eval."""
+    by_id = {str(ed.get("id")): ed for ed in (edits or []) if ed.get("id")}
+    state = log.load_state()
+    tickers, touched = set(), 0
+    for e in state.get("executions") or []:
+        ed = by_id.get(e.get("id"))
+        if ed:
+            _apply_txn_edit(e, ed)
+            touched += 1
+            tickers.add((e.get("ticker") or "").upper())
+    if ticker:
+        tickers.add(ticker.upper())
+    for t in filter(None, tickers):
+        _set_derived_open_legs(state, t)
+    log.recompute_derived(state)
+    import reconcile
+    reconcile.reevaluate_freezes(state)
+    log.save_state(state)
+    return {"success": True, "status": "saved", "edited": touched, "tickers": sorted(filter(None, tickers))}
+
+
+def _apply_txn_edit(e: dict, ed: dict) -> None:
+    """Apply one transaction's edits, linking stock price <-> extrinsic. ``price``
+    is per-share for shorts, per-contract for LEAPs; ``extrinsic`` matches
+    (per-share for shorts, total for LEAPs)."""
+    a = e.get("action")
+    if ed.get("strike") not in (None, ""):
+        e["strike"] = float(ed["strike"])
+    if ed.get("contracts") not in (None, ""):
+        e["contracts"] = int(round(float(ed["contracts"])))
+    if "expiration" in ed:
+        e["expiration"] = ed["expiration"] or None
+    c = int(e.get("contracts") or 1) or 1
+    strike = float(e.get("strike") or 0)
+    is_leap = a in ("buy_leap", "close_leap")
+    price = _ff(ed.get("price"))
+    stock = _ff(ed.get("stock_price"))
+    ext = _ff(ed.get("extrinsic"))
+    # Per-share premium for the intrinsic math (LEAP price is per-contract).
+    per_share = (price / 100.0 if is_leap else price) if price is not None else _existing_per_share(e)
+    ext_ps = (ext / (100 * c) if is_leap else ext) if ext is not None else None
+
+    # Link the two: compute whichever is missing from the other.
+    if per_share is not None:
+        if stock is not None and ext_ps is None:
+            ext_ps = max(per_share - max(stock - strike, 0.0), 0.0)
+        elif ext_ps is not None and stock is None:
+            stock = strike + max(per_share - ext_ps, 0.0)
+
+    if stock is not None:
+        e["stock_price"] = round(stock, 4)
+    if a == "buy_leap":
+        if price is not None:
+            e["execution_price"] = round(price, 2)
+            e["execution_total"] = round(price * c, 2)
+        if ext_ps is not None:
+            e["extrinsic_captured"] = round(ext_ps * 100 * c, 2)   # per-share -> per-contract -> total
+    elif a == "sell_short":
+        if price is not None:
+            e["premium_per_share"] = round(price, 4)
+            e["premium_total"] = round(price * c * 100, 2)
+        if ext_ps is not None:
+            e["entry_extrinsic_per_share"] = round(ext_ps, 4)
+    elif a == "close_short":
+        if price is not None:
+            e["close_price_per_share"] = round(price, 4)
+    elif a == "close_leap":
+        if price is not None:
+            e["close_price"] = round(price, 2)
+
+
+def _existing_per_share(e: dict):
+    """The leg's current price expressed PER SHARE (LEAP prices are stored
+    per-contract, so ÷100)."""
+    a = e.get("action")
+    if a == "buy_leap":
+        v = _ff(e.get("execution_price"))
+        return v / 100.0 if v is not None else None
+    if a == "sell_short":
+        return _ff(e.get("premium_per_share"))
+    if a == "close_short":
+        return _ff(e.get("close_price_per_share"))
+    if a == "close_leap":
+        v = _ff(e.get("close_price"))
+        return v / 100.0 if v is not None else None
+    return None
+
+
+def _set_derived_open_legs(state: dict, ticker: str) -> None:
+    """Derive a ticker's OPEN legs by replaying its fulfilled transactions (opens
+    minus closes, matched by strike + expiry), and set them on the position. LEAP
+    cost/extrinsic accumulate across buys; a short leg's entry extrinsic is its
+    open transaction's value. Voided/undone executions are ignored."""
+    leaps: dict = {}
+    shorts: dict = {}
+    for e in state.get("executions") or []:
+        if e.get("excluded") or e.get("reversed_by") or e.get("reverses_execution_id"):
+            continue
+        if (e.get("ticker") or "").upper() != ticker.upper():
+            continue
+        a = e.get("action")
+        try:
+            strike = float(e.get("strike"))
+        except (TypeError, ValueError):
+            continue
+        c = int(e.get("contracts") or 0)
+        k = (round(strike, 4), str(e.get("expiration") or "")[:10])
+        if a == "buy_leap":
+            leg = leaps.setdefault(k, {"strike": strike, "contracts": 0, "cost_basis": 0.0,
+                                       "extrinsic_at_entry": 0.0, "expiration": e.get("expiration"),
+                                       "entry_stock_price": e.get("stock_price"), "current_bid": 0.0,
+                                       "entry_date": str(e.get("date") or "")[:10],
+                                       "extrinsic_collected_to_date": 0})
+            leg["contracts"] += c
+            leg["cost_basis"] += float(e.get("execution_total") or (_ff(e.get("execution_price")) or 0) * c)
+            leg["extrinsic_at_entry"] += float(e.get("extrinsic_captured") or 0)
+            leg["current_bid"] = round(leg["cost_basis"], 2)
+            leg["extrinsic"] = round(leg["extrinsic_at_entry"], 2)
+        elif a == "close_leap":
+            if k in leaps:
+                leaps[k]["contracts"] -= c
+        elif a == "sell_short":
+            leg = shorts.setdefault(k, {"strike": strike, "contracts": 0, "expiration": e.get("expiration"),
+                                        "entry_extrinsic_per_share": float(e.get("entry_extrinsic_per_share") or 0),
+                                        "entry_premium_total": 0.0, "current_cost": 0.0,
+                                        "open_date": str(e.get("date") or "")[:10],
+                                        "entry_stock_price": e.get("stock_price"),
+                                        "current_bid": _ff(e.get("premium_per_share")) or 0})
+            leg["contracts"] += c
+            leg["entry_premium_total"] += float(e.get("premium_total") or (_ff(e.get("premium_per_share")) or 0) * c * 100)
+            leg["current_cost"] = round(leg["entry_premium_total"], 2)
+            leg["entry_extrinsic_per_share"] = float(e.get("entry_extrinsic_per_share") or 0)
+        elif a == "close_short":
+            if k in shorts:
+                shorts[k]["contracts"] -= c
+    pos = _ensure_position(state, ticker)
+    pos["short_calls"] = [s for s in shorts.values() if s["contracts"] > 0]
+    pos["leap_legs"] = [l for l in leaps.values() if l["contracts"] > 0]
+    pos["leap"] = pos["leap_legs"][0] if pos["leap_legs"] else None
+    if pos["leap_legs"] or pos["short_calls"]:
+        pos["status"] = "open"
+
+
 def list_broker_manual_adoptions() -> list[dict]:
     """Every broker_manual adoption booked into state, grouped by proposal, from the
     dedupe ledger. Powers the "Undo adoption" UI so an accidental adoption can be
