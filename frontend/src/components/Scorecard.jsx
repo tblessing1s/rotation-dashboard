@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Spinner, ErrorState, fmt, pct, useApi } from "./ui.jsx";
+import { Card, Pill, Spinner, ErrorState, StockLights, fmt, pct, useApi } from "./ui.jsx";
 
 // The numeric CFM scorecard: one row per holding, a single composite verdict,
 // no chart-reading required. Grouped by sector, filterable by verdict, sortable
@@ -11,9 +11,28 @@ const VERDICT_STATUS = { GO: "go", CAUTION: "caution", AVOID: "avoid" };
 // Columns: key -> how to render. `num` columns are sortable numerically.
 const COLUMNS = [
   { key: "ticker", label: "Ticker", num: false },
+  {
+    // The per-name Genius four lights + the right-spot gate — the SAME indicator
+    // system as the market regime, at a glance. The verdict (green/yellow/red) is
+    // the four lights + vetoes; the right-spot check is separate (a dot).
+    key: "lights", label: "Lights", num: false,
+    render: (r) => (
+      <span className="inline-flex items-center gap-2">
+        <StockLights lights={r.lights} />
+        {r.right_spot ? (
+          <span
+            title={`Right spot: ${r.right_spot.pass ? "in spot" : (r.right_spot.blocked_by || []).join(", ") || "blocked"}`}
+            className={`text-[10px] uppercase ${r.right_spot.pass ? "text-emerald-400" : "text-rose-400"}`}
+          >
+            {r.right_spot.pass ? "spot✓" : "spot✗"}
+          </span>
+        ) : null}
+      </span>
+    ),
+  },
   { key: "price", label: "Price", num: true, render: (r) => fmt(r.price, 2) },
-  { key: "rs3m_vs_spy", label: "RS vs SPY", num: true, render: (r) => pct(r.rs3m_vs_spy) },
-  { key: "rs3m_vs_sector", label: "RS vs Sec", num: true, render: (r) => pct(r.rs3m_vs_sector) },
+  { key: "rs3m_vs_spy", label: "RS3M SPY", num: true, render: (r) => pct(r.rs3m_vs_spy) },
+  { key: "rs3m_vs_sector", label: "RS3M Sec", num: true, render: (r) => pct(r.rs3m_vs_sector) },
   { key: "pct_above_ma21", label: "%>MA21", num: true, render: (r) => pct(r.pct_above_ma21) },
   { key: "atr_extension", label: "ATR ext", num: true, render: (r) => fmt(r.atr_extension, 2) },
   { key: "mfi", label: "MFI", num: true, render: (r) => fmt(r.mfi, 0) },

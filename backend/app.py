@@ -201,6 +201,11 @@ def api_scan_ready():
                      "juice_weekly_pct": r.get("juice_weekly_pct"),
                      "net_juice_weekly_pct": r.get("net_juice_weekly_pct"),
                      "earnings_date": r.get("earnings_date"), "level5": l5,
+                     # Per-name Genius lights so the shortlist can show the four-light
+                     # row + verdict + right-spot at a glance (same data as the gate).
+                     "lights": r.get("lights"), "stock_greens": r.get("stock_greens"),
+                     "stock_verdict": r.get("stock_verdict"),
+                     "stock_vetoes": r.get("stock_vetoes"), "right_spot": r.get("right_spot"),
                      "stale": blocked, "stale_inputs": stale_inputs}
             if blocked:
                 stale_blocked.append(entry)
