@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Light, Loading, fmt } from "./ui.jsx";
+import { Card, Pill, Light, Loading, GENIUS_LIGHT_ORDER, GENIUS_LIGHT_LABELS, fmt } from "./ui.jsx";
 import OptionChainModal from "./OptionChainModal.jsx";
 import { useToast } from "./Toast.jsx";
 import { submitOrder } from "../orderFlow.js";
@@ -15,15 +15,7 @@ function checkValue(v) {
 
 // The per-name Genius four-light row — mirrors the market regime's FourLights UI
 // (Overview.jsx), applied to a single stock. One indicator system, fractal across
-// market and stock.
-const STOCK_LIGHT_ORDER = ["close_vs_ma", "fast_vs_slow", "sar", "momentum"];
-const STOCK_LIGHT_LABELS = {
-  close_vs_ma: "Close > MA",
-  fast_vs_slow: "Fast > Slow",
-  sar: "SAR",
-  momentum: "Momentum",
-};
-
+// market and stock. Uses the shared light order/labels from ui.jsx.
 function StockFourLights({ lights, greens, verdict }) {
   if (!lights) return null;
   return (
@@ -36,10 +28,10 @@ function StockFourLights({ lights, greens, verdict }) {
         </span>
       </div>
       <div className="grid grid-cols-4 gap-2">
-        {STOCK_LIGHT_ORDER.map((k) => (
+        {GENIUS_LIGHT_ORDER.map((k) => (
           <div key={k} className="flex flex-col items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-2">
             <Light status={lights[k]?.signal || "unknown"} size="h-4 w-4" />
-            <span className="text-center text-[10px] leading-tight text-slate-400">{STOCK_LIGHT_LABELS[k]}</span>
+            <span className="text-center text-[10px] leading-tight text-slate-400">{GENIUS_LIGHT_LABELS[k]}</span>
           </div>
         ))}
       </div>

@@ -320,6 +320,17 @@ def _round_row(metrics: dict) -> dict:
     return out
 
 
+def _gate_level_detail(gate: dict | None, level: int) -> dict:
+    """The ``detail`` dict for one entry-gate level (or {} when absent). Used to
+    lift the stock lights / right-spot off the gate onto the scorecard row."""
+    if not gate:
+        return {}
+    for lv in gate.get("levels") or []:
+        if lv.get("level") == level:
+            return lv.get("detail") or {}
+    return {}
+
+
 def _failed_stock_gate_level(gate: dict | None) -> int | None:
     """First failing stock-level gate leg (Level 3, then 4), or None.
 
@@ -397,6 +408,17 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["has_weeklies"] = has_weeklies
     if gate is not None:
         row["gate_cleared_level"] = gate.get("cleared_level", 0)
+        # Surface the per-name Genius lights + verdict + right-spot from the gate so
+        # the Scorecard and Ready-to-Enter can render the four-light row at a glance
+        # (they're already computed in the entry gate's Level 3/4 detail — no
+        # recompute). None-safe for the synthetic gate dicts used in tests.
+        l3 = _gate_level_detail(gate, 3)
+        l4 = _gate_level_detail(gate, 4)
+        row["lights"] = l3.get("lights")
+        row["stock_greens"] = l3.get("greens")
+        row["stock_verdict"] = l3.get("verdict")
+        row["stock_vetoes"] = l3.get("vetoes")
+        row["right_spot"] = l4.get("right_spot") or l3.get("right_spot")
 
     # Juice adequacy (history-implied weekly extrinsic / LEAP cost) + next
     # earnings — so weak-premium and earnings-soon names are visible BEFORE the

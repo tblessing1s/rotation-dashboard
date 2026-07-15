@@ -47,6 +47,29 @@ export function Light({ status, size = "h-3 w-3" }) {
   return <span className={`inline-block rounded-full ${size} ${c} shadow`} />;
 }
 
+// The per-name Genius four lights, in vote order — the SAME indicator system as
+// the market regime, applied per name. Compact colored dots (no labels) for use
+// in table cells and list rows; the tooltip names each one.
+export const GENIUS_LIGHT_ORDER = ["close_vs_ma", "fast_vs_slow", "sar", "momentum"];
+export const GENIUS_LIGHT_LABELS = {
+  close_vs_ma: "Close > MA",
+  fast_vs_slow: "Fast > Slow",
+  sar: "SAR",
+  momentum: "Momentum",
+};
+
+export function StockLights({ lights, size = "h-3 w-3", className = "" }) {
+  if (!lights) return <span className="text-slate-600">—</span>;
+  return (
+    <span className={`inline-flex items-center gap-1 ${className}`}
+          title={GENIUS_LIGHT_ORDER.map((k) => GENIUS_LIGHT_LABELS[k]).join(" · ")}>
+      {GENIUS_LIGHT_ORDER.map((k) => (
+        <Light key={k} status={lights[k]?.signal || "unknown"} size={size} />
+      ))}
+    </span>
+  );
+}
+
 export function Card({ title, right, children, className = "" }) {
   return (
     // min-w-0: when a Card is a flex/grid item, let it shrink to its track so a
