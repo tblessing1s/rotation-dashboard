@@ -99,6 +99,33 @@ def test_history_and_payouts_reconcile_for_rolled_closes(isolated_state, monkeyp
     assert all(w["week"] != log.UNDATED for w in weeks)
 
 
+def test_reversed_and_excluded_closes_dont_leak_into_payouts(isolated_state, monkeypatch):
+    # The reported bug: Payouts totalled net juice that the History per-week table
+    # never showed. The theta ledger drops reversed/excluded executions from the
+    # derived replay; Payouts iterated the raw log and counted them, so a reversed
+    # adoption or a manually-excluded fill inflated (or, with big buybacks, tanked)
+    # the payout while History stayed correct. Both views must now key off the same
+    # filtered executions.
+    import logging_handler as log
+    execs = [
+        _close("XLK", "2026-07-08T15:00:00Z", 253.0),                    # counts
+        {**_close("XLK", "2026-07-09T15:00:00Z", -517.0),                # reversed adoption
+         "reversed_by": "rev-1"},
+        {**_close("XLK", "2026-07-10T15:00:00Z", 999.0), "excluded": True},  # operator-excluded
+        {"action": "adoption_reversal", "ticker": "XLK",                 # the reversal marker itself
+         "date": "2026-07-09T16:00:00Z", "reverses_execution_id": "abc"},
+    ]
+    state = _seed(monkeypatch, execs)
+    by_month = payouts.monthly_net_juice(state)
+    assert by_month == {"2026-07": {"net_juice": 253.0, "closes": 1}}
+
+    # And it reconciles with the theta ledger the History table renders.
+    log.recompute_derived(state)
+    history_july = sum(w["net_juice"] for w in state["theta_ledger"]["weeks"]
+                       if w["week"] != log.UNDATED)
+    assert payouts.view(state)["current"]["net_juice"] == history_july == 253.0
+
+
 def test_view_current_estimate_previous_final(isolated_state, monkeypatch):
     state = _seed(monkeypatch, [
         _close("AA", "2026-06-05T15:00:00Z", 510.0),

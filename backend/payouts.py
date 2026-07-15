@@ -95,7 +95,7 @@ def monthly_net_juice(state: dict) -> dict[str, dict]:
     closes are absent.
     """
     buckets: dict[str, dict] = {}
-    for e in state.get("executions", []):
+    for e in log.derived_executions(state):
         if e.get("action") != "close_short":
             continue
         # Same date->expiration bucketing the theta ledger uses, so a close can't
@@ -124,7 +124,7 @@ def monthly_intrinsic_melt(state: dict) -> dict[str, float]:
     then attributes each close's melt to the month it CLOSED in (same bucketing as
     the juice), so the repayment lines up with the juice it's netted against.
     """
-    execs = state.get("executions", [])
+    execs = log.derived_executions(state)
     melt_by_idx = log.intrinsic_melt_by_close(execs)  # {close index -> melted $}
     buckets: dict[str, float] = {}
     for idx, melted in melt_by_idx.items():

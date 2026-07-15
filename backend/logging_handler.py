@@ -667,6 +667,23 @@ def validate_payback(execs: list[dict]) -> list[dict]:
     return issues
 
 
+def derived_executions(state: dict) -> list[dict]:
+    """The executions that feed the DERIVED views — the theta ledger AND the payout
+    view — with the ones that must leave no trace filtered out:
+
+    * ``reversed_by`` — an adoption that was later undone, and
+    * ``reverses_execution_id`` — the ``adoption_reversal`` marker itself, and
+    * ``excluded`` — a fill the operator has manually excluded.
+
+    A reversed/excluded execution must read the same everywhere: absent from the
+    per-week theta ledger AND absent from the monthly payout, so History and Payouts
+    can't disagree about it. Its immutable record stays on the log for the audit
+    trail (append-only, never rewritten)."""
+    return [e for e in state.get("executions", [])
+            if not e.get("reversed_by") and not e.get("reverses_execution_id")
+            and not e.get("excluded")]
+
+
 def recompute_derived(state: dict) -> dict:
     """Rebuild theta_ledger + extrinsic_payback from executions/positions.
 
@@ -675,9 +692,7 @@ def recompute_derived(state: dict) -> dict:
     a reversed adoption must leave no trace in the ledgers, exactly as if it never
     happened, while the immutable records of both the adoption and its reversal are
     preserved on the log for the audit trail (append-only, never rewritten)."""
-    execs = [e for e in state.get("executions", [])
-             if not e.get("reversed_by") and not e.get("reverses_execution_id")
-             and not e.get("excluded")]
+    execs = derived_executions(state)
     now = datetime.now(timezone.utc)
     cur_week = f"{now.isocalendar()[0]}-W{now.isocalendar()[1]:02d}"
     cur_month = now.strftime("%Y-%m")
