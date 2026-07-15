@@ -567,6 +567,11 @@ def api_theta_ledger():
     period = request.args.get("period")  # week | month | ytd
     try:
         state = log.load_state()
+        # Rebuild derived state from the immutable executions first: the persisted
+        # theta_ledger can lag the executions (a write path that didn't recompute),
+        # which is what makes the per-week closes disagree with the live Payouts
+        # view. Deriving on read keeps the two reconciled by construction.
+        log.recompute_derived(state)
         ledger = state.get("theta_ledger", {})
         weeks = ledger.get("weeks", [])
         if ticker:
@@ -678,7 +683,12 @@ def api_history():
     """Closed-cycle records + aggregate stats + the weekly net-juice chart."""
     try:
         import history
-        return jsonify(history.view(log.load_state()))
+        # Rebuild the derived ledgers from the immutable executions before serving,
+        # so the per-week / cycle views can never show a stale persisted derivation
+        # (which is how History could disagree with the always-live Payouts view).
+        state = log.load_state()
+        log.recompute_derived(state)
+        return jsonify(history.view(state))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

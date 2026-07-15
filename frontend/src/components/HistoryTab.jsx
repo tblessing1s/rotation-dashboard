@@ -79,20 +79,39 @@ function ThetaLedgerCards({ theta }) {
                 <th className="py-2 pr-3">Ticker</th>
                 <th className="py-2 pr-3">Extrinsic sold</th>
                 <th className="py-2 pr-3">Paid back</th>
+                <th className="py-2 pr-3">Intrinsic</th>
                 <th className="py-2 pr-3">Net juice</th>
               </tr>
             </thead>
             <tbody>
-              {weeks.map((w, i) => (
-                <tr key={i} className="border-t border-slate-800">
-                  <td className="py-2 pr-3 text-slate-300">{w.week}</td>
-                  <td className="py-2 pr-3 font-semibold text-slate-100">{w.ticker}</td>
-                  <td className="py-2 pr-3">{money(w.extrinsic_sold)}</td>
-                  <td className="py-2 pr-3">{money(w.extrinsic_paid_back)}</td>
-                  <td className="py-2 pr-3 text-emerald-300">{money(w.net_juice)}</td>
-                </tr>
-              ))}
-              {weeks.length === 0 && <tr><td colSpan={5} className="py-6 text-center text-slate-500">No closes logged yet.</td></tr>}
+              {weeks.map((w, i) => {
+                // When a short went ITM→OTM, the LEAP gave back that intrinsic, so
+                // it must be covered before the week's extrinsic is income. Net
+                // juice here is after that coverage (can go negative); the raw
+                // extrinsic capture stays w.net_juice for the other metrics.
+                const covered = Number(w.intrinsic_covered || 0);
+                const net = w.net_juice_after_intrinsic != null
+                  ? w.net_juice_after_intrinsic : w.net_juice;
+                return (
+                  <tr key={i} className="border-t border-slate-800">
+                    <td className="py-2 pr-3 text-slate-300">{w.week}</td>
+                    <td className="py-2 pr-3 font-semibold text-slate-100">{w.ticker}</td>
+                    <td className="py-2 pr-3">{money(w.extrinsic_sold)}</td>
+                    <td className="py-2 pr-3">{money(w.extrinsic_paid_back)}</td>
+                    <td className="py-2 pr-3 text-amber-300/80"
+                        title={covered > 0
+                          ? "Intrinsic the covering LEAP gave back when this short went ITM→OTM — covered before the juice counts as income"
+                          : "No ITM→OTM intrinsic to cover this week"}>
+                      {covered > 0 ? `−${money(covered)}` : "—"}
+                    </td>
+                    <td className={`py-2 pr-3 ${net < 0 ? "text-rose-300" : "text-emerald-300"}`}
+                        title={covered > 0 ? `${money(w.net_juice)} extrinsic − ${money(covered)} intrinsic` : undefined}>
+                      {money(net)}
+                    </td>
+                  </tr>
+                );
+              })}
+              {weeks.length === 0 && <tr><td colSpan={6} className="py-6 text-center text-slate-500">No closes logged yet.</td></tr>}
             </tbody>
           </table>
         </div>

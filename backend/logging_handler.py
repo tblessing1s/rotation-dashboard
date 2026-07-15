@@ -499,6 +499,95 @@ def _iso_week(date_str: str) -> str:
     return f"{dt.isocalendar()[0]}-W{dt.isocalendar()[1]:02d}" if dt else UNDATED
 
 
+def _strike_key(strike):
+    """Normalize a strike for FIFO short-leg pairing (float-safe, str/None tolerant)."""
+    try:
+        return round(float(strike), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def close_economics(e: dict) -> tuple[float, float, float]:
+    """(extrinsic_sold_ps, extrinsic_paid_back_ps, net_juice_total) for a
+    close_short, DERIVED from its stored facts — close price, underlying, strike,
+    entry extrinsic — so net juice can never go stale against the editable stock
+    price (the bug where a close whose stock was later set OTM still showed the
+    buyback as $0 paid back, booking full extrinsic as juice).
+
+    extrinsic paid back = close price − intrinsic at the close (0 when OTM);
+    net juice = (entry extrinsic − extrinsic paid back) × contracts × 100. Falls
+    back to the stored fields when the facts needed to derive aren't all present
+    (legacy/partial rows), so nothing regresses."""
+    c = int(e.get("contracts") or 0)
+    sold_ps = float(e.get("extrinsic_sold") or 0)
+    cps = e.get("close_price_per_share")
+    stock = e.get("stock_price")
+    strike = e.get("strike")
+    if (e.get("extrinsic_sold") is not None and cps is not None
+            and stock is not None and strike is not None and c):
+        paid_ps = max(float(cps) - max(float(stock) - float(strike), 0.0), 0.0)
+        return sold_ps, round(paid_ps, 4), round((sold_ps - paid_ps) * c * 100, 2)
+    return sold_ps, float(e.get("extrinsic_paid_back") or 0), float(e.get("net_juice_total") or 0)
+
+
+def intrinsic_melt_by_close(execs: list[dict]) -> dict[int, float]:
+    """The intrinsic that melted per ``close_short``, keyed by the close's index in
+    ``execs`` — the ONE source of truth the theta ledger AND the payout view both
+    call, so a close's intrinsic can never read one way in History and another in
+    Payouts.
+
+    A short sold ITM (entry stock above the strike) hedges the covering LEAP: the
+    short's intrinsic offsets the LEAP's dollar-for-dollar as the stock moves. If
+    the stock then falls THROUGH the strike and the short closes OTM, the part of
+    the drop BELOW the strike is no longer hedged — the LEAP kept losing intrinsic
+    but the (now-worthless) short stopped offsetting it. That unhedged loss is
+    ``max(strike − exit_stock, 0) × contracts × 100`` — how far past the strike the
+    stock closed — and net juice must cover it before it's income.
+
+    Only counts when the short was ITM at entry (paired FIFO from the matching
+    ``sell_short`` per (ticker, strike)) AND closed OTM: a leg sold OTM never had a
+    hedge to lose, and a leg that closed still ITM hasn't given anything back. A
+    close with no pairable open or no exit stock contributes 0."""
+    open_shorts: dict[tuple, list[list]] = {}   # (ticker,strike) -> [[entry_stock, contracts], ...]
+    out: dict[int, float] = {}
+    for i, e in enumerate(execs):
+        action = e.get("action")
+        ticker = e.get("ticker")
+        sk = _strike_key(e.get("strike"))
+        if action == "sell_short":
+            if sk is None:
+                continue
+            n = int(e.get("contracts") or 0)
+            if n > 0:
+                open_shorts.setdefault((ticker, sk), []).append([e.get("stock_price"), n])
+            continue
+        if action != "close_short" or sk is None:
+            continue
+        strike = float(sk)
+        exit_stock = e.get("stock_price")
+        # OTM at close, and how far past the strike it landed (the unhedged part).
+        otm = exit_stock is not None and float(exit_stock) < strike
+        overshoot = (strike - float(exit_stock)) if otm else 0.0
+        need = int(e.get("contracts") or 0)
+        queue = open_shorts.get((ticker, sk)) or []
+        melted = 0.0
+        while need > 0 and queue:
+            entry_stock, avail = queue[0]
+            take = min(need, avail)
+            # Was ITM at entry (a hedge existed) and closed OTM (gave it back).
+            if otm and entry_stock is not None and float(entry_stock) > strike:
+                melted += overshoot * take * 100
+            avail -= take
+            need -= take
+            if avail <= 0:
+                queue.pop(0)
+            else:
+                queue[0][1] = avail
+        if melted > 0:
+            out[i] = round(melted, 2)
+    return out
+
+
 def validate_payback(execs: list[dict]) -> list[dict]:
     """Integrity check on the cycle-scoped payback state machine's INPUTS, so a
     corrupt/mislabeled execution log can't silently produce a plausible-but-wrong
@@ -597,7 +686,13 @@ def recompute_derived(state: dict) -> dict:
     weeks: dict[tuple[str, str], dict] = {}
     totals = {"this_week": 0.0, "this_month": 0.0, "ytd": 0.0}
 
-    for e in execs:
+    # Per-close melted intrinsic (ITM→OTM), shared with the payout view so the two
+    # tabs agree line for line. Gated by config so the whole feature toggles as one.
+    import config as _config
+    melt_by_idx = (intrinsic_melt_by_close(execs)
+                   if getattr(_config, "PAYOUT_INTRINSIC_REPAYMENT", True) else {})
+
+    for idx, e in enumerate(execs):
         if e.get("action") != "close_short":
             continue
         ticker = e.get("ticker", "")
@@ -606,15 +701,24 @@ def recompute_derived(state: dict) -> dict:
         # than being silently counted as this week's juice.
         when = bucket_datetime(e)
         wk = f"{when.isocalendar()[0]}-W{when.isocalendar()[1]:02d}" if when else UNDATED
-        net = float(e.get("net_juice_total") or 0)
+        # Re-derive the close economics from its stored facts so a stale stored
+        # net juice (e.g. a roll whose buyback booked as $0 paid back) can't leak
+        # into the ledger — the editable stock price is the source of truth.
+        sold_ps, paid_ps, net = close_economics(e)
+        c = int(e.get("contracts") or 0)
         key = (wk, ticker)
         row = weeks.setdefault(key, {"week": wk, "ticker": ticker,
-                                     "extrinsic_sold": 0.0, "extrinsic_paid_back": 0.0, "net_juice": 0.0})
-        sold = float(e.get("extrinsic_sold") or 0) * int(e.get("contracts") or 0) * 100
-        paid = float(e.get("extrinsic_paid_back") or 0) * int(e.get("contracts") or 0) * 100
-        row["extrinsic_sold"] += sold
-        row["extrinsic_paid_back"] += paid
+                                     "extrinsic_sold": 0.0, "extrinsic_paid_back": 0.0,
+                                     "net_juice": 0.0, "intrinsic_covered": 0.0,
+                                     "net_juice_after_intrinsic": 0.0})
+        row["extrinsic_sold"] += sold_ps * c * 100
+        row["extrinsic_paid_back"] += paid_ps * c * 100
         row["net_juice"] += net
+        # When this short went ITM→OTM, the melted intrinsic must be covered before
+        # the week's extrinsic juice is income — so the per-week net juice nets it
+        # out (can go negative). net_juice itself stays the raw extrinsic capture so
+        # coverage/target metrics elsewhere are unaffected.
+        row["intrinsic_covered"] += melt_by_idx.get(idx, 0.0)
 
         # Live totals count only fills we can place in time (same date->expiration
         # rule), so they stay consistent with the payout view.
@@ -631,6 +735,10 @@ def recompute_derived(state: dict) -> dict:
     totals["pct_deployed"] = round(totals["ytd"] / deployed, 4) if deployed else 0
     for k in ("this_week", "this_month", "ytd"):
         totals[k] = round(totals[k], 2)
+    for row in weeks.values():
+        row["intrinsic_covered"] = round(row["intrinsic_covered"], 2)
+        # The per-week bottom line after covering ITM→OTM intrinsic (may be < 0).
+        row["net_juice_after_intrinsic"] = round(row["net_juice"] - row["intrinsic_covered"], 2)
     state["theta_ledger"] = {
         "weeks": sorted(weeks.values(), key=lambda r: (r["week"], r["ticker"])),
         "totals": totals,
