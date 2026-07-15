@@ -807,6 +807,15 @@ BURN_DIVERGENCE_WARN_PCT = 25
 # recompute (burn/week rises as the window slides down the curve — the point).
 EXTENSION_STEP_WEEKS = 1
 
+# PROPOSED_DEFAULT — when a short call that was sold ITM later closes OTM, the
+# intrinsic premium it was sold for has melted away and the covering LEAP has
+# given back the matching intrinsic (a real capital drawdown). With this on, that
+# melted intrinsic becomes a debt the monthly net juice pays back BEFORE any
+# leftover is takeable — the leftover only resumes once the intrinsic is repaid.
+# The debt carries forward across months until fully repaid. Off => the payout is
+# the plain juice − LEAP extrinsic burn leftover, as before.
+PAYOUT_INTRINSIC_REPAYMENT = True
+
 
 # ---- Whipsaw circuit breaker (cumulative defend guard) ---------------------
 # The defend engine's individual roll-downs are each correct, but the WHIPSAW —

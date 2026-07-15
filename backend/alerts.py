@@ -933,16 +933,22 @@ def check_payout_ready(state: dict) -> list[dict]:
                if pending["reason"] == "last_short_closed"
                else "the month has closed")
     burn = pending.get("leap_burn") or 0
-    breakdown = (f" (${pending['net_juice']:,.2f} juice − ${burn:,.2f} LEAP burn)"
-                 if burn else "")
+    repaid = pending.get("intrinsic_repaid") or 0
+    parts = []
+    if burn:
+        parts.append(f"${burn:,.2f} LEAP burn")
+    if repaid:
+        parts.append(f"${repaid:,.2f} intrinsic repaid")
+    breakdown = (f" (${pending['net_juice']:,.2f} juice − " + " − ".join(parts) + ")"
+                 if parts else "")
     a = _alert(
         "PAYOUT_READY", None,
         (f"{pending['label']} payout ready: ${pending['net_payout']:,.2f} leftover"
          f"{breakdown} — {trigger}. Finalize it and withdraw."),
         "Open Payouts to finalize this month and mark it paid.",
         {"month": pending["month"], "net_juice": pending["net_juice"],
-         "leap_burn": burn, "net_payout": pending["net_payout"],
-         "reason": pending["reason"]},
+         "leap_burn": burn, "intrinsic_repaid": repaid,
+         "net_payout": pending["net_payout"], "reason": pending["reason"]},
         key=pending["month"])
     a["action_url"] = _payout_action_url()
     return [a]

@@ -47,6 +47,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import config
 import logging_handler as log
 
 ET = ZoneInfo("America/New_York")
@@ -112,6 +113,107 @@ def monthly_net_juice(state: dict) -> dict[str, dict]:
     return buckets
 
 
+def _strike_key(strike) -> float | None:
+    """Normalize a strike for FIFO pairing (float-safe, tolerant of str/None)."""
+    try:
+        return round(float(strike), 4)
+    except (TypeError, ValueError):
+        return None
+
+
+def monthly_intrinsic_melt(state: dict) -> dict[str, float]:
+    """Per-month intrinsic that melted when a short went ITM→OTM ('YYYY-MM' ->
+    whole-position $), derived from the immutable executions — nothing stored.
+
+    A short sold ITM is sold for intrinsic + extrinsic; the intrinsic is banked
+    against the covering LEAP's intrinsic (a hedge). If the stock then falls and
+    the short closes OTM, that banked intrinsic has fully melted and the LEAP has
+    given back the matching intrinsic — a real capital drawdown. The melted amount
+    is the entry intrinsic ``max(entry_stock − strike, 0) × contracts × 100``,
+    attributed to the month the short CLOSED (same bucketing as the juice), so the
+    repayment lines up with the juice it's netted against.
+
+    Entry stock comes from the matching ``sell_short`` execution, paired FIFO per
+    (ticker, strike) so partial closes and rolls (each leg carries its own entry
+    stock) attribute correctly. A close with no pairable open, no exit stock, or
+    that closed still ITM contributes nothing (the transition isn't observable /
+    didn't complete) — the feature degrades cleanly to no reservation.
+    """
+    open_shorts: dict[tuple, list[list]] = {}  # (ticker,strike) -> [[entry_stock, contracts], ...]
+    buckets: dict[str, float] = {}
+    for e in state.get("executions", []):
+        action = e.get("action")
+        ticker = e.get("ticker")
+        sk = _strike_key(e.get("strike"))
+        if action == "sell_short":
+            if sk is None:
+                continue
+            entry_stock = e.get("stock_price")
+            n = int(e.get("contracts") or 0)
+            if n <= 0:
+                continue
+            open_shorts.setdefault((ticker, sk), []).append(
+                [entry_stock, n])
+            continue
+        if action != "close_short" or sk is None:
+            continue
+        strike = float(sk)
+        exit_stock = e.get("stock_price")
+        need = int(e.get("contracts") or 0)
+        queue = open_shorts.get((ticker, sk)) or []
+        # Consume matching open contracts FIFO, summing the intrinsic each paired
+        # chunk melts IF this close is OTM (exit stock at/under the strike).
+        melted = 0.0
+        otm = exit_stock is not None and float(exit_stock) <= strike
+        while need > 0 and queue:
+            entry_stock, avail = queue[0]
+            take = min(need, avail)
+            if otm and entry_stock is not None:
+                entry_intrinsic_ps = max(float(entry_stock) - strike, 0.0)
+                melted += entry_intrinsic_ps * take * 100
+            avail -= take
+            need -= take
+            if avail <= 0:
+                queue.pop(0)
+            else:
+                queue[0][1] = avail
+        if melted <= 0:
+            continue
+        when = log.bucket_datetime(e)
+        mk = when.strftime("%Y-%m") if when else None
+        if not mk:
+            continue
+        buckets[mk] = buckets.get(mk, 0.0) + melted
+    return {k: round(v, 2) for k, v in buckets.items()}
+
+
+def intrinsic_repayment_schedule(months: list[str], net_by_month: dict,
+                                 burn_by_month: dict,
+                                 melt_by_month: dict) -> dict[str, dict]:
+    """Walk the months oldest→newest, netting each month's leftover (juice − LEAP
+    extrinsic burn) against the outstanding melted-intrinsic debt.
+
+    The debt carries forward: a month's melted intrinsic is added to the running
+    balance, then this month's positive leftover pays it down (never more than is
+    owed, never a negative repayment). Leftover only resumes once the debt is
+    cleared. Returns month -> {intrinsic_lost, intrinsic_repaid, intrinsic_debt}
+    where ``intrinsic_debt`` is the balance still owed after that month."""
+    carry = 0.0
+    out: dict[str, dict] = {}
+    for m in sorted(months):
+        juice = float((net_by_month.get(m) or {}).get("net_juice") or 0)
+        burn = float(burn_by_month.get(m) or 0)
+        lost = float(melt_by_month.get(m) or 0)
+        gross_leftover = juice - burn
+        debt_before = carry + lost
+        repaid = min(max(gross_leftover, 0.0), debt_before)
+        carry = round(debt_before - repaid, 2)
+        out[m] = {"intrinsic_lost": round(lost, 2),
+                  "intrinsic_repaid": round(repaid, 2),
+                  "intrinsic_debt": carry}
+    return out
+
+
 def _short_expiry_month(sc: dict) -> str | None:
     """The 'YYYY-MM' a short leg expires in. Uses the stored expiration; falls
     back to open_date + dte (weeklies default to 5) when the expiration wasn't
@@ -174,9 +276,25 @@ def monthly_leap_burn() -> dict[str, float]:
         return {}
 
 
-def _net_payout(net_juice: float, leap_burn: float | None) -> float:
-    """The leftover: juice minus LEAP burn (burn treated as 0 when untracked)."""
-    return round(float(net_juice) - float(leap_burn or 0), 2)
+def _net_payout(net_juice: float, leap_burn: float | None,
+                intrinsic_repaid: float | None = 0) -> float:
+    """The leftover the operator can actually take: juice minus the LEAP extrinsic
+    burn (burn treated as 0 when untracked) minus any net juice diverted this month
+    to repay melted intrinsic (ITM→OTM capital drawdown; 0 when the feature is off
+    or nothing melted)."""
+    return round(float(net_juice) - float(leap_burn or 0) - float(intrinsic_repaid or 0), 2)
+
+
+def _repayment_for(state: dict, net_by_month: dict,
+                   burn_by_month: dict) -> tuple[dict, dict]:
+    """(schedule, melt_by_month) for the given derived inputs. The schedule maps
+    month -> {intrinsic_lost, intrinsic_repaid, intrinsic_debt} with the debt
+    carried forward. Empty melt (=> zero repayment everywhere) when the feature is
+    disabled, so every caller degrades to the plain juice − burn leftover."""
+    melt_by_month = monthly_intrinsic_melt(state) if config.PAYOUT_INTRINSIC_REPAYMENT else {}
+    months = sorted(set(net_by_month) | set(burn_by_month) | set(melt_by_month))
+    return intrinsic_repayment_schedule(months, net_by_month, burn_by_month,
+                                        melt_by_month), melt_by_month
 
 
 def _records(state: dict) -> dict[str, dict]:
@@ -207,24 +325,35 @@ def _status(month: str, net: float, record: dict, finalizable: bool,
 
 
 def _month_entry(month: str, net: dict | None, record: dict | None,
-                 leap_burn: float | None, state: dict, cur: str) -> dict:
-    """One month's row for the view: derived income (juice − LEAP burn = leftover)
-    merged with the finalize/paid bookkeeping."""
+                 leap_burn: float | None, state: dict, cur: str,
+                 intrinsic: dict | None = None) -> dict:
+    """One month's row for the view: derived income (juice − LEAP burn − intrinsic
+    repayment = leftover) merged with the finalize/paid bookkeeping."""
     net = net or {"net_juice": 0.0, "closes": 0}
     record = record or {}
+    intrinsic = intrinsic or {}
     net_juice = round(float(net.get("net_juice") or 0), 2)
     burn_tracked = leap_burn is not None
     burn = round(float(leap_burn or 0), 2)
-    net_payout = _net_payout(net_juice, burn)
+    intrinsic_lost = round(float(intrinsic.get("intrinsic_lost") or 0), 2)
+    intrinsic_repaid = round(float(intrinsic.get("intrinsic_repaid") or 0), 2)
+    intrinsic_debt = round(float(intrinsic.get("intrinsic_debt") or 0), 2)
+    net_payout = _net_payout(net_juice, burn, intrinsic_repaid)
     finalizable = is_finalizable(state, month, {month: net}, cur)
     return {
         "month": month,
         "label": month_label(month),
         # The income breakdown: juice collected, the LEAP burn reserved against it,
-        # and the leftover the operator can actually take.
+        # the melted intrinsic repaid out of it, and the leftover actually takeable.
         "net_juice": net_juice,
         "leap_burn": burn,
         "burn_tracked": burn_tracked,
+        # ITM→OTM intrinsic accounting: what melted this month, what juice repaid,
+        # and the debt still carried forward to future months.
+        "intrinsic_lost": intrinsic_lost,
+        "intrinsic_repaid": intrinsic_repaid,
+        "intrinsic_debt": intrinsic_debt,
+        "intrinsic_repayment_on": bool(config.PAYOUT_INTRINSIC_REPAYMENT),
         "net_payout": net_payout,
         "closes": int(net.get("closes") or 0),
         # A month still in progress shows an ESTIMATE; finalized months are locked.
@@ -236,6 +365,7 @@ def _month_entry(month: str, net: dict | None, record: dict | None,
         "finalized_amount": record.get("finalized_amount"),
         "finalized_juice": record.get("finalized_juice"),
         "finalized_burn": record.get("finalized_burn"),
+        "finalized_intrinsic_repaid": record.get("finalized_intrinsic_repaid"),
         "paid": bool(record.get("paid")),
         "paid_at": record.get("paid_at"),
         "paid_amount": record.get("paid_amount"),
@@ -251,15 +381,22 @@ def view(state: dict | None = None) -> dict:
     state = state if state is not None else log.load_state()
     net_by_month = monthly_net_juice(state)
     burn_by_month = monthly_leap_burn()
+    melt_by_month = monthly_intrinsic_melt(state) if config.PAYOUT_INTRINSIC_REPAYMENT else {}
     records = _records(state)
     cur = _cur_month()
     prev = _prev_month(cur)
 
-    # Union of every month that has income, burn, OR a payout record, newest first.
-    months = sorted(set(net_by_month) | set(burn_by_month) | set(records) | {cur, prev},
-                    reverse=True)
+    # Union of every month that has income, burn, melted intrinsic, OR a payout
+    # record. Build the carry-forward repayment schedule over the FULL set (ascending)
+    # so the outstanding debt propagates through months with no activity, then render
+    # newest-first.
+    all_months = set(net_by_month) | set(burn_by_month) | set(melt_by_month) \
+        | set(records) | {cur, prev}
+    schedule = intrinsic_repayment_schedule(sorted(all_months), net_by_month,
+                                            burn_by_month, melt_by_month)
+    months = sorted(all_months, reverse=True)
     history = [_month_entry(m, net_by_month.get(m), records.get(m),
-                            burn_by_month.get(m), state, cur)
+                            burn_by_month.get(m), state, cur, schedule.get(m))
                for m in months]
     by_month = {h["month"]: h for h in history}
 
@@ -270,8 +407,13 @@ def view(state: dict | None = None) -> dict:
     in_year = [h for h in history if h["month"][:4] == year]
     ytd_juice = round(sum(h["net_juice"] for h in in_year), 2)
     ytd_burn = round(sum(h["leap_burn"] for h in in_year), 2)
-    ytd = round(ytd_juice - ytd_burn, 2)  # leftover, year to date
+    ytd_intrinsic_repaid = round(sum(h["intrinsic_repaid"] for h in in_year), 2)
+    ytd = round(ytd_juice - ytd_burn - ytd_intrinsic_repaid, 2)  # leftover, year to date
     all_time = round(sum(h["net_payout"] for h in history), 2)
+    # Melted intrinsic still owed (juice earmarked but not yet earned): the debt
+    # carried past the newest month.
+    intrinsic_debt = round(float((schedule.get(max(months)) or {}).get("intrinsic_debt") or 0), 2) \
+        if months else 0.0
     paid_out = round(sum(h["payout_amount"] for h in history if h["paid"]), 2)
     # Leftover that's yours but not withdrawn yet: finalized-unpaid + months that
     # could be finalized now (last short closed / month ended).
@@ -286,9 +428,13 @@ def view(state: dict | None = None) -> dict:
             "ytd": ytd,
             "ytd_juice": ytd_juice,
             "ytd_burn": ytd_burn,
+            "ytd_intrinsic_repaid": ytd_intrinsic_repaid,
             "all_time": all_time,
             "paid_out": paid_out,
             "awaiting": awaiting,
+            # Melted intrinsic still to be repaid out of future juice.
+            "intrinsic_debt": intrinsic_debt,
+            "intrinsic_repayment_on": bool(config.PAYOUT_INTRINSIC_REPAYMENT),
             "year": year,
         },
     }
@@ -314,11 +460,15 @@ def finalize(month: str, amount: float | None = None,
         raise ValueError(
             f"{month_label(month)} can't be finalized yet — it's still earning "
             f"juice (an open short still expires this month).")
+    burn_by_month = monthly_leap_burn()
     net = float((net_by_month.get(month) or {}).get("net_juice") or 0)
-    burn = float(monthly_leap_burn().get(month) or 0)
-    leftover = _net_payout(net, burn)
-    # The finalized payout is the leftover (juice − LEAP burn); an explicit amount
-    # overrides it. Snapshot the breakdown so the record survives later marks.
+    burn = float(burn_by_month.get(month) or 0)
+    schedule, _melt = _repayment_for(state, net_by_month, burn_by_month)
+    repaid = float((schedule.get(month) or {}).get("intrinsic_repaid") or 0)
+    leftover = _net_payout(net, burn, repaid)
+    # The finalized payout is the leftover (juice − LEAP burn − intrinsic repaid);
+    # an explicit amount overrides it. Snapshot the breakdown so the record
+    # survives later marks.
     snapshot = float(amount) if amount is not None else leftover
     payouts = state.setdefault("payouts", {"records": {}})
     rec = payouts.setdefault("records", {}).setdefault(month, {"month": month})
@@ -328,6 +478,7 @@ def finalize(month: str, amount: float | None = None,
         "finalized_amount": round(snapshot, 2),
         "finalized_juice": round(net, 2),
         "finalized_burn": round(burn, 2),
+        "finalized_intrinsic_repaid": round(repaid, 2),
         "net_juice_at_finalize": round(net, 2),
     })
     if note is not None:
@@ -344,8 +495,8 @@ def unfinalize(month: str) -> dict:
     rec = _records(state).get(month)
     if rec:
         for k in ("finalized", "finalized_at", "finalized_amount", "finalized_juice",
-                  "finalized_burn", "net_juice_at_finalize", "paid", "paid_at",
-                  "paid_amount"):
+                  "finalized_burn", "finalized_intrinsic_repaid",
+                  "net_juice_at_finalize", "paid", "paid_at", "paid_amount"):
             rec.pop(k, None)
         log.save_state(state)
     return view(state)
@@ -365,9 +516,12 @@ def mark_paid(month: str, note: str | None = None,
         raise ValueError(
             f"{month_label(month)} can't be paid yet — finalize it once its last "
             f"short of the month has closed.")
+    burn_by_month = monthly_leap_burn()
     net = float((net_by_month.get(month) or {}).get("net_juice") or 0)
-    burn = float(monthly_leap_burn().get(month) or 0)
-    leftover = _net_payout(net, burn)
+    burn = float(burn_by_month.get(month) or 0)
+    schedule, _melt = _repayment_for(state, net_by_month, burn_by_month)
+    repaid = float((schedule.get(month) or {}).get("intrinsic_repaid") or 0)
+    leftover = _net_payout(net, burn, repaid)
     payouts = state.setdefault("payouts", {"records": {}})
     rec = payouts.setdefault("records", {}).setdefault(month, {"month": month})
     now = log.utcnow()
@@ -376,6 +530,7 @@ def mark_paid(month: str, note: str | None = None,
                     "finalized_amount": round(leftover, 2),
                     "finalized_juice": round(net, 2),
                     "finalized_burn": round(burn, 2),
+                    "finalized_intrinsic_repaid": round(repaid, 2),
                     "net_juice_at_finalize": round(net, 2)})
     snapshot = (float(amount) if amount is not None
                 else float(rec.get("finalized_amount") if rec.get("finalized_amount")
@@ -409,6 +564,7 @@ def pending_finalization(state: dict) -> dict | None:
     cur = _cur_month()
     net_by_month = monthly_net_juice(state)
     burn_by_month = monthly_leap_burn()
+    schedule, _melt = _repayment_for(state, net_by_month, burn_by_month)
     records = _records(state)
     for month, reason in ((cur, "last_short_closed"), (_prev_month(cur), "month_ended")):
         if records.get(month, {}).get("finalized"):
@@ -416,7 +572,9 @@ def pending_finalization(state: dict) -> dict | None:
         if is_finalizable(state, month, net_by_month, cur):
             net = float(net_by_month[month]["net_juice"])
             burn = burn_by_month.get(month)
+            repaid = float((schedule.get(month) or {}).get("intrinsic_repaid") or 0)
             return {"month": month, "label": month_label(month),
                     "net_juice": net, "leap_burn": round(float(burn or 0), 2),
-                    "net_payout": _net_payout(net, burn), "reason": reason}
+                    "intrinsic_repaid": round(repaid, 2),
+                    "net_payout": _net_payout(net, burn, repaid), "reason": reason}
     return None
