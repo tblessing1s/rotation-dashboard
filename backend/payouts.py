@@ -95,7 +95,13 @@ def monthly_net_juice(state: dict) -> dict[str, dict]:
     for e in state.get("executions", []):
         if e.get("action") != "close_short":
             continue
-        mk = _month_key(e.get("date", ""))
+        # Same date->expiration bucketing the theta ledger uses, so a close can't
+        # show up as juice in History yet vanish from the monthly payout. A close
+        # with neither a parseable date nor expiration is left out (it surfaces as
+        # an 'undated' row in the History per-week table) rather than guessed into
+        # a month.
+        when = log.bucket_datetime(e)
+        mk = when.strftime("%Y-%m") if when else None
         if not mk:
             continue
         row = buckets.setdefault(mk, {"net_juice": 0.0, "closes": 0})

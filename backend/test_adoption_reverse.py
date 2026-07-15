@@ -418,3 +418,28 @@ def test_save_transactions_links_stock_extrinsic_and_derives_position(store):
     assert set(shorts) == {"2026-07-17", "2026-07-24"}          # 183 closed, two 179s open
     assert shorts["2026-07-17"]["entry_extrinsic_per_share"] == 1.83
     assert shorts["2026-07-24"]["entry_extrinsic_per_share"] == 2.25
+
+
+def test_save_transactions_recomputes_close_net_juice(store):
+    # Editing a close's price used to update only close_price_per_share and leave
+    # net_juice_total stale — so the History/Payouts juice never reflected the fix.
+    # Now the close economics are re-derived from the edited price + underlying.
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "c1", "action": "close_short", "ticker": "XLK", "strike": 180.0,
+         "contracts": 2, "close_price_per_share": 5.0, "stock_price": 178.0,
+         "extrinsic_sold": 3.0, "extrinsic_paid_back": 99.0, "net_juice_total": -99.0,
+         "mode": "live"},
+    ]
+    state["positions"].append({"ticker": "XLK", "status": "open", "shares": {"count": 0},
+                               "leap_legs": [], "short_calls": []})
+    log.save_state(state)
+
+    # Correct the buyback price to 1.10; stock 178 < strike 180 -> all extrinsic.
+    executor.save_transactions([{"id": "c1", "price": 1.10}], ticker="XLK")
+
+    c1 = next(e for e in log.load_state()["executions"] if e["id"] == "c1")
+    assert c1["close_price_per_share"] == 1.10
+    assert c1["extrinsic_paid_back"] == 1.10            # OTM -> whole price is time value
+    assert c1["net_juice"] == round(3.0 - 1.10, 4)      # sold - paid, per share
+    assert c1["net_juice_total"] == round((3.0 - 1.10) * 2 * 100, 2)  # * contracts * 100
