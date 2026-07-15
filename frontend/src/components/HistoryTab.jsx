@@ -343,10 +343,13 @@ function PositionLegsEditor({ ticker, initialRows, onSaved, onCancel }) {
 // pair (edit either, the other computes). Save applies the edits AND derives the
 // open position from the transactions — the transactions are the source of truth.
 const _FILL = new Set(["buy_leap", "sell_short", "close_short", "close_leap"]);
+// LEAP prices are stored per-contract (execution_price / close_price); show them
+// per-share (÷100) so the PRICE column reads the same units as the shorts.
 function _price(e) {
-  return e.action === "buy_leap" ? e.execution_price
+  const ps = (v) => (v === null || v === undefined ? v : v / 100);
+  return e.action === "buy_leap" ? ps(e.execution_price)
     : e.action === "sell_short" ? e.premium_per_share
-    : e.action === "close_short" ? e.close_price_per_share : e.close_price;
+    : e.action === "close_short" ? e.close_price_per_share : ps(e.close_price);
 }
 function _extr(e) {
   return e.action === "buy_leap" ? e.extrinsic_captured
@@ -363,17 +366,16 @@ function _toRow(e) {
   };
 }
 function _calcExt(r, stock) {
-  const price = Number(r.price), strike = Number(r.strike), c = Number(r.contracts) || 1;
-  if (stock === "" || isNaN(Number(stock)) || isNaN(price) || isNaN(strike)) return "";
-  const perShare = r.isLeap ? price / 100 : price;
+  // price is per-share for both types here (LEAPs are displayed ÷100).
+  const perShare = Number(r.price), strike = Number(r.strike), c = Number(r.contracts) || 1;
+  if (stock === "" || isNaN(Number(stock)) || isNaN(perShare) || isNaN(strike)) return "";
   const extPs = Math.max(perShare - Math.max(Number(stock) - strike, 0), 0);
   return r.isLeap ? +(extPs * 100 * c).toFixed(0) : +extPs.toFixed(4);
 }
 function _calcStock(r, ext) {
-  const price = Number(r.price), strike = Number(r.strike), c = Number(r.contracts) || 1;
-  if (ext === "" || isNaN(Number(ext)) || isNaN(price) || isNaN(strike)) return "";
+  const perShare = Number(r.price), strike = Number(r.strike), c = Number(r.contracts) || 1;
+  if (ext === "" || isNaN(Number(ext)) || isNaN(perShare) || isNaN(strike)) return "";
   const extPs = r.isLeap ? Number(ext) / (100 * c) : Number(ext);
-  const perShare = r.isLeap ? price / 100 : price;
   return +(strike + Math.max(perShare - extPs, 0)).toFixed(2);
 }
 
@@ -403,7 +405,10 @@ function TransactionEditor() {
     try {
       const edits = rows.map((r) => ({
         id: r.id, strike: Number(r.strike), contracts: Number(r.contracts),
-        expiration: r.expiration || null, price: r.price === "" ? null : Number(r.price),
+        expiration: r.expiration || null,
+        // The backend stores LEAP prices per-contract; the table edits them
+        // per-share, so scale LEAPs back up by 100 on the way out.
+        price: r.price === "" ? null : (r.isLeap ? Number(r.price) * 100 : Number(r.price)),
         stock_price: r.stock_price === "" ? null : Number(r.stock_price),
         extrinsic: r.extrinsic === "" ? null : Number(r.extrinsic),
       }));
@@ -425,6 +430,7 @@ function TransactionEditor() {
         One row per fill. App-ordered fills come pre-filled; for a trade done in ToS you usually only
         need the <span className="text-amber-300">entry stock price</span> or <span className="text-amber-300">extrinsic</span> —
         edit either and the other is computed. Set the <span className="font-mono">expiration</span> so same-strike weeklies stay separate.
+        Prices are <span className="text-slate-400">per share</span> (LEAPs too — a $53.05 LEAP shows as 53.05, not 5305).
         Save derives your open position from these transactions.
       </p>
       <div className="overflow-x-auto">
