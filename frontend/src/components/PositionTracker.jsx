@@ -712,11 +712,15 @@ function ShortCalls({ p, shorts, setRolling, onOpenTicket }) {
                  <div className="flex items-center justify-between text-[11px]">
                    <span
                      className="text-slate-500"
-                     title="Extrinsic (time value) sold at entry is the target; capturing all of it is max profit on the short."
+                     title="Extrinsic (time value) sold at entry is the target; capturing all of it is max profit on the short. When the current time value has risen ABOVE what you sold (an IV event), there's nothing captured yet and the leg is underwater — the figure shown is what it's worth now, not what's left to collect."
                    >
                      extrinsic captured {money(sc.extrinsic_captured_total)} / {money(sc.entry_extrinsic_total)}
                      {sc.extrinsic_remaining_total != null && (
-                       <span className="text-slate-600"> · {money(sc.extrinsic_remaining_total)} left</span>
+                       sc.extrinsic_above_entry ? (
+                         <span className="text-amber-400/80"> · now worth {money(sc.extrinsic_remaining_total)} (rose above the {money(sc.entry_extrinsic_total)} sold)</span>
+                       ) : (
+                         <span className="text-slate-600"> · {money(sc.extrinsic_remaining_total)} left</span>
+                       )
                      )}
                    </span>
                    {sc.extrinsic_above_entry ? (
@@ -784,26 +788,64 @@ function shortCapturePct(shorts) {
 
 // (1) Intrinsic balance — the LEAP orange beside whether the LEAP's intrinsic
 // (asset) still covers the shorts' intrinsic (liability), so a stock move washes out.
-function IntrinsicBalance({ p }) {
+function IntrinsicBalance({ p, onRepaired }) {
   const pulp = pulpOf(p);
   const bal = balanceOf(p, (p.short_calls || []).map((sc) => ({ sc })));
   const hasBal = bal.longIntrinsic != null;
   const covered = bal.covered;
+  // A LEAP whose cost basis was stored per-share reads ~100× too small, so the
+  // intrinsic-vs-cost ratio (the orange %) is absurd (e.g. 8,584%). Backend flags
+  // it; keep a client-side fallback (coverage > 1000% is impossible for a bought
+  // LEAP) so a stale payload without the flag still doesn't show the bad number.
+  const suspect = !!(p.leap_totals?.cost_basis_suspect) || (pulp.pct != null && pulp.pct > 1000);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  const fix = async () => {
+    setBusy(true); setErr(null);
+    try {
+      await api.repairLeapCost(p.ticker);
+      onRepaired && onRepaired();
+    } catch (e) { setErr(String(e.message || e)); setBusy(false); }
+  };
   return (
     <div className="flex items-center gap-3">
-      <Orange uid={`bal-${p.ticker}`} pct={pulp.pct} maintenance={p.leap_health?.maintenance_status || "unknown"}
-              maintained={pulp.pct != null && pulp.pct >= 100} />
+      <Orange uid={`bal-${p.ticker}`} pct={suspect ? null : pulp.pct} maintenance={p.leap_health?.maintenance_status || "unknown"}
+              maintained={!suspect && pulp.pct != null && pulp.pct >= 100} />
       <div className="min-w-0">
         <div className="mb-1 flex items-center gap-1.5">
           <span className="text-[10px] uppercase tracking-wide text-slate-500">Intrinsic balance</span>
-          {hasBal && (
+          {hasBal && !suspect && (
             <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
               covered ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300" : "border-rose-500/40 bg-rose-500/15 text-rose-300"}`}>
               {covered ? "balanced" : "unbalanced"}
             </span>
           )}
+          {suspect && (
+            <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-amber-300">
+              cost basis off
+            </span>
+          )}
         </div>
-        {hasBal ? (
+        {suspect ? (
+          <>
+            {bal.longIntrinsic != null && (
+              <div className="text-sm text-slate-300">
+                LEAP intrinsic <span className="font-semibold text-slate-100">{money(bal.longIntrinsic)}</span>
+              </div>
+            )}
+            <div className="text-xs text-amber-300/90">
+              This LEAP's cost basis looks stored per-share (~100× too small), so the coverage % is unreliable.
+            </div>
+            <div className="mt-1.5 flex items-center gap-2">
+              <button onClick={fix} disabled={busy}
+                      className="rounded-lg border border-amber-600 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/20 disabled:opacity-50">
+                {busy ? "Fixing…" : "Fix cost basis (×100)"}
+              </button>
+              <span className="text-[10px] text-slate-500">or re-enter it under “Edit legs” in History</span>
+            </div>
+            {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+          </>
+        ) : hasBal ? (
           <>
             <div className="text-sm text-slate-300">
               LEAP <span className="font-semibold text-slate-100">{money(bal.longIntrinsic)}</span>
@@ -1005,7 +1047,7 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
 
           {/* (1) intrinsic balance + (2) extrinsic burn-off */}
           <div className="grid gap-4 rounded-xl border border-slate-800 bg-slate-900/40 p-4 sm:grid-cols-2">
-            <IntrinsicBalance p={p} />
+            <IntrinsicBalance p={p} onRepaired={afterResolve} />
             <div className="sm:border-l sm:border-slate-800 sm:pl-4">
               <ExtrinsicBurnoff ticker={p.ticker} payback={payback} />
             </div>

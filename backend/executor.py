@@ -1090,6 +1090,68 @@ def set_position_legs(ticker: str, legs: list, reason: str | None = None) -> dic
             "short_calls": new_shorts, "leap_legs": new_leaps}
 
 
+def repair_leap_cost_scale(ticker: str, reason: str | None = None) -> dict:
+    """One-click fix for a LEAP whose ``cost_basis`` was stored PER SHARE instead
+    of the full per-contract-total dollars (the ~100× understatement that makes
+    the intrinsic-vs-cost orange read e.g. 8,584%). Surgically multiplies each
+    mis-scaled leg's cost basis by 100 and recomputes its entry extrinsic from the
+    corrected cost + entry price (the same ``_leap_extrinsic_pc`` the builders use)
+    — shorts are left untouched, so DTE/decay history is preserved. Append-only
+    ``position_rebuild`` marker for audit; derived ledgers recompute. No-op (and no
+    marker) when nothing looks mis-scaled, so it is safe to call repeatedly."""
+    import position_manager as pm
+
+    ticker = (ticker or "").upper()
+    if not ticker:
+        raise ValueError("ticker is required")
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if not position:
+        raise ValueError(f"no position for {ticker}")
+
+    try:
+        price = pm._stock_price(ticker)
+    except Exception:  # noqa: BLE001 — detection has an entry-based path that needs no quote
+        price = None
+
+    legs = log.leap_legs(position)
+    fixed = []
+    for lg in legs:
+        if not pm.leap_cost_suspect(lg, price):
+            continue
+        contracts = int(lg.get("contracts") or 0)
+        old_cb = float(lg.get("cost_basis") or 0)
+        new_cb = round(old_cb * 100, 2)
+        cost_pc = new_cb / contracts if contracts else 0.0
+        epc = _leap_extrinsic_pc(cost_pc, lg.get("entry_stock_price"), lg.get("strike"))
+        lg["cost_basis"] = new_cb
+        lg["current_bid"] = new_cb  # the builders store the per-contract-total here
+        lg["extrinsic"] = round(epc * contracts, 2)
+        lg["extrinsic_at_entry"] = round(epc * contracts, 2)
+        fixed.append({"strike": lg.get("strike"), "contracts": contracts,
+                      "old_cost_basis": old_cb, "new_cost_basis": new_cb})
+
+    if not fixed:
+        return {"success": True, "status": "noop", "ticker": ticker, "fixed": []}
+
+    position["leap_legs"] = legs
+    position["leap"] = legs[0] if legs else position.get("leap")
+    log.save_state(state)
+
+    log.append_execution({
+        "ticker": ticker, "action": "position_rebuild", "mode": "live",
+        "reason": (reason or f"repair per-share LEAP cost basis ({len(fixed)} leg)").strip(),
+        "source": "cost_scale_repair",
+        "detail": {"fixed": fixed}})
+
+    state = log.load_state()
+    log.recompute_derived(state)
+    import reconcile
+    reconcile.reevaluate_freezes(state)
+    log.save_state(state)
+    return {"success": True, "status": "repaired", "ticker": ticker, "fixed": fixed}
+
+
 def _legs_from_specs(specs: list) -> tuple[list, list]:
     """Build (short_calls, leap_legs) from operator leg specs. Each spec:
     {leg_type: 'short'|'leap', strike, contracts, expiration, entry_price,

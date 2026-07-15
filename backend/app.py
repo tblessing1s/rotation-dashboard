@@ -716,6 +716,23 @@ def api_transactions_save():
         return _err(e)
 
 
+@app.route("/api/positions/repair-leap-cost", methods=["POST"])
+def api_repair_leap_cost():
+    """One-click fix for a LEAP whose cost basis was stored per-share (~100× too
+    small), which makes the intrinsic-vs-cost orange read absurdly high. Corrects
+    only the mis-scaled LEAP legs (×100 + recomputed extrinsic); shorts untouched."""
+    payload = request.get_json(silent=True) or {}
+    ticker = (payload.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify(executor.repair_leap_cost_scale(ticker, payload.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/executions/raw")
 def api_executions_raw():
     """Raw, unprocessed data for validation: the append-only execution log
