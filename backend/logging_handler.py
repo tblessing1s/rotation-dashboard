@@ -507,21 +507,47 @@ def _strike_key(strike):
         return None
 
 
+def close_economics(e: dict) -> tuple[float, float, float]:
+    """(extrinsic_sold_ps, extrinsic_paid_back_ps, net_juice_total) for a
+    close_short, DERIVED from its stored facts — close price, underlying, strike,
+    entry extrinsic — so net juice can never go stale against the editable stock
+    price (the bug where a close whose stock was later set OTM still showed the
+    buyback as $0 paid back, booking full extrinsic as juice).
+
+    extrinsic paid back = close price − intrinsic at the close (0 when OTM);
+    net juice = (entry extrinsic − extrinsic paid back) × contracts × 100. Falls
+    back to the stored fields when the facts needed to derive aren't all present
+    (legacy/partial rows), so nothing regresses."""
+    c = int(e.get("contracts") or 0)
+    sold_ps = float(e.get("extrinsic_sold") or 0)
+    cps = e.get("close_price_per_share")
+    stock = e.get("stock_price")
+    strike = e.get("strike")
+    if (e.get("extrinsic_sold") is not None and cps is not None
+            and stock is not None and strike is not None and c):
+        paid_ps = max(float(cps) - max(float(stock) - float(strike), 0.0), 0.0)
+        return sold_ps, round(paid_ps, 4), round((sold_ps - paid_ps) * c * 100, 2)
+    return sold_ps, float(e.get("extrinsic_paid_back") or 0), float(e.get("net_juice_total") or 0)
+
+
 def intrinsic_melt_by_close(execs: list[dict]) -> dict[int, float]:
     """The intrinsic that melted per ``close_short``, keyed by the close's index in
     ``execs`` — the ONE source of truth the theta ledger AND the payout view both
     call, so a close's intrinsic can never read one way in History and another in
     Payouts.
 
-    A short sold ITM (entry stock above the strike) banks intrinsic against the
-    covering LEAP's intrinsic (a hedge). If the stock then falls and the short
-    closes OTM, that banked intrinsic has fully melted and the LEAP gave back the
-    matching intrinsic — a realized capital drawdown of
-    ``max(entry_stock − strike, 0) × contracts × 100``. Entry stock is paired FIFO
-    from the matching ``sell_short`` per (ticker, strike), so partial closes and
-    rolls (each leg carries its own entry stock) attribute correctly. A close with
-    no pairable open, no exit stock, or that closed still ITM contributes 0 (the
-    transition isn't observable / didn't complete)."""
+    A short sold ITM (entry stock above the strike) hedges the covering LEAP: the
+    short's intrinsic offsets the LEAP's dollar-for-dollar as the stock moves. If
+    the stock then falls THROUGH the strike and the short closes OTM, the part of
+    the drop BELOW the strike is no longer hedged — the LEAP kept losing intrinsic
+    but the (now-worthless) short stopped offsetting it. That unhedged loss is
+    ``max(strike − exit_stock, 0) × contracts × 100`` — how far past the strike the
+    stock closed — and net juice must cover it before it's income.
+
+    Only counts when the short was ITM at entry (paired FIFO from the matching
+    ``sell_short`` per (ticker, strike)) AND closed OTM: a leg sold OTM never had a
+    hedge to lose, and a leg that closed still ITM hasn't given anything back. A
+    close with no pairable open or no exit stock contributes 0."""
     open_shorts: dict[tuple, list[list]] = {}   # (ticker,strike) -> [[entry_stock, contracts], ...]
     out: dict[int, float] = {}
     for i, e in enumerate(execs):
@@ -539,15 +565,18 @@ def intrinsic_melt_by_close(execs: list[dict]) -> dict[int, float]:
             continue
         strike = float(sk)
         exit_stock = e.get("stock_price")
-        otm = exit_stock is not None and float(exit_stock) <= strike
+        # OTM at close, and how far past the strike it landed (the unhedged part).
+        otm = exit_stock is not None and float(exit_stock) < strike
+        overshoot = (strike - float(exit_stock)) if otm else 0.0
         need = int(e.get("contracts") or 0)
         queue = open_shorts.get((ticker, sk)) or []
         melted = 0.0
         while need > 0 and queue:
             entry_stock, avail = queue[0]
             take = min(need, avail)
-            if otm and entry_stock is not None:
-                melted += max(float(entry_stock) - strike, 0.0) * take * 100
+            # Was ITM at entry (a hedge existed) and closed OTM (gave it back).
+            if otm and entry_stock is not None and float(entry_stock) > strike:
+                melted += overshoot * take * 100
             avail -= take
             need -= take
             if avail <= 0:
@@ -672,16 +701,18 @@ def recompute_derived(state: dict) -> dict:
         # than being silently counted as this week's juice.
         when = bucket_datetime(e)
         wk = f"{when.isocalendar()[0]}-W{when.isocalendar()[1]:02d}" if when else UNDATED
-        net = float(e.get("net_juice_total") or 0)
+        # Re-derive the close economics from its stored facts so a stale stored
+        # net juice (e.g. a roll whose buyback booked as $0 paid back) can't leak
+        # into the ledger — the editable stock price is the source of truth.
+        sold_ps, paid_ps, net = close_economics(e)
+        c = int(e.get("contracts") or 0)
         key = (wk, ticker)
         row = weeks.setdefault(key, {"week": wk, "ticker": ticker,
                                      "extrinsic_sold": 0.0, "extrinsic_paid_back": 0.0,
                                      "net_juice": 0.0, "intrinsic_covered": 0.0,
                                      "net_juice_after_intrinsic": 0.0})
-        sold = float(e.get("extrinsic_sold") or 0) * int(e.get("contracts") or 0) * 100
-        paid = float(e.get("extrinsic_paid_back") or 0) * int(e.get("contracts") or 0) * 100
-        row["extrinsic_sold"] += sold
-        row["extrinsic_paid_back"] += paid
+        row["extrinsic_sold"] += sold_ps * c * 100
+        row["extrinsic_paid_back"] += paid_ps * c * 100
         row["net_juice"] += net
         # When this short went ITM→OTM, the melted intrinsic must be covered before
         # the week's extrinsic juice is income — so the per-week net juice nets it

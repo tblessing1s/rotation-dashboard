@@ -88,9 +88,11 @@ def _prev_month(month: str) -> str:
 def monthly_net_juice(state: dict) -> dict[str, dict]:
     """Per-month income derived from the close_short executions.
 
-    Returns month -> {"net_juice", "closes"} where ``net_juice`` sums
-    ``net_juice_total`` (the same figure the theta ledger keys off) and ``closes``
-    counts the contributing close_short tickets. Months with no closes are absent.
+    Returns month -> {"net_juice", "closes"} where ``net_juice`` sums each close's
+    net juice — re-derived from its stored facts via ``log.close_economics`` (the
+    SAME figure the theta ledger keys off, so History and Payouts can't disagree)
+    — and ``closes`` counts the contributing close_short tickets. Months with no
+    closes are absent.
     """
     buckets: dict[str, dict] = {}
     for e in state.get("executions", []):
@@ -106,7 +108,7 @@ def monthly_net_juice(state: dict) -> dict[str, dict]:
         if not mk:
             continue
         row = buckets.setdefault(mk, {"net_juice": 0.0, "closes": 0})
-        row["net_juice"] += float(e.get("net_juice_total") or 0)
+        row["net_juice"] += log.close_economics(e)[2]
         row["closes"] += 1
     for row in buckets.values():
         row["net_juice"] = round(row["net_juice"], 2)
