@@ -365,3 +365,56 @@ def test_set_position_legs_direct_edit(store):
     assert shorts["2026-07-17"]["entry_extrinsic_per_share"] == 1.83
     assert shorts["2026-07-24"]["entry_extrinsic_per_share"] == 2.25
     assert shorts["2026-07-24"]["entry_premium_total"] == 945
+
+
+# ---------------------------------------------------------------------------
+# Editable transaction table: edit transactions -> derive open position
+# ---------------------------------------------------------------------------
+def test_save_transactions_links_stock_extrinsic_and_derives_position(store):
+    state = log.load_state()
+    # The real XLK transactions (some mis-recorded: roll_003 opens 179 @ 0).
+    state["executions"] += [
+        {"id": "t_leap137", "action": "buy_leap", "ticker": "XLK", "strike": 137.5,
+         "contracts": 1, "execution_price": 5305, "expiration": "2027-01-15", "mode": "live"},
+        {"id": "t_leap135", "action": "buy_leap", "ticker": "XLK", "strike": 135.0,
+         "contracts": 1, "execution_price": 5680, "expiration": "2027-01-15", "mode": "live"},
+        {"id": "t_179a", "action": "sell_short", "ticker": "XLK", "strike": 179.0,
+         "contracts": 1, "premium_per_share": 9.45, "mode": "live"},   # 24 JUL
+        {"id": "t_183", "action": "sell_short", "ticker": "XLK", "strike": 183.0,
+         "contracts": 1, "premium_per_share": 6.0, "mode": "live"},
+        {"id": "t_close183", "action": "close_short", "ticker": "XLK", "strike": 183.0,
+         "contracts": 1, "close_price_per_share": 0, "mode": "live"},   # roll_003, wrong
+        {"id": "t_179b", "action": "sell_short", "ticker": "XLK", "strike": 179.0,
+         "contracts": 1, "premium_per_share": 0, "mode": "live"},       # roll_003 open, wrong
+    ]
+    state["positions"].append({"ticker": "XLK", "status": "open", "shares": {"count": 0},
+                               "leap_legs": [], "short_calls": []})
+    log.save_state(state)
+
+    # Operator edits: set expirations, fix the 7/13 roll economics, and for the
+    # opens supply the ENTRY STOCK PRICE — extrinsic is computed (linked).
+    edits = [
+        {"id": "t_leap137", "expiration": "2027-01-15", "stock_price": 184.06},   # -> extr 649
+        {"id": "t_leap135", "expiration": "2027-01-15", "stock_price": 186.13},   # -> extr 567
+        {"id": "t_179a", "expiration": "2026-07-24", "stock_price": 186.20},      # -> extr 2.25
+        {"id": "t_183", "expiration": "2026-07-17"},                              # match the close
+        {"id": "t_close183", "expiration": "2026-07-17", "price": 2.66},
+        {"id": "t_179b", "expiration": "2026-07-17", "price": 5.10, "extrinsic": 1.83},  # edit extrinsic -> stock computed
+    ]
+    res = executor.save_transactions(edits, ticker="XLK")
+    assert res["status"] == "saved"
+
+    # Editing extrinsic back-computed the entry stock price (179 @ 5.10, extr 1.83 -> 182.27).
+    e179b = next(e for e in log.load_state()["executions"] if e["id"] == "t_179b")
+    assert e179b["entry_extrinsic_per_share"] == 1.83
+    assert e179b["stock_price"] == 182.27
+
+    # Position DERIVED from the transactions: exactly the open 4 legs.
+    pos = log.find_position(log.load_state(), "XLK")
+    leaps = {l["strike"]: l for l in log.leap_legs(pos)}
+    assert leaps[137.5]["cost_basis"] == 5305 and leaps[137.5]["extrinsic_at_entry"] == 649
+    assert leaps[135.0]["extrinsic_at_entry"] == 567
+    shorts = {s["expiration"]: s for s in pos["short_calls"]}
+    assert set(shorts) == {"2026-07-17", "2026-07-24"}          # 183 closed, two 179s open
+    assert shorts["2026-07-17"]["entry_extrinsic_per_share"] == 1.83
+    assert shorts["2026-07-24"]["entry_extrinsic_per_share"] == 2.25
