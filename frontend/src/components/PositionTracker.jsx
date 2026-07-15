@@ -418,8 +418,8 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
           </ul>
           <div className="mt-1 text-slate-400">
             {(t.order_type || "").replaceAll("_", " ")}
-            {" · "}limit {t.limit_price != null ? `$${Number(t.limit_price).toFixed(2)}` : "unpriced"}
-            {t.min_acceptable_net_credit != null && <> · min net ${Number(t.min_acceptable_net_credit).toFixed(2)}</>}
+            {" · "}limit {t.limit_price != null ? `$${Number(t.limit_price).toFixed(2)}/sh` : "unpriced"}
+            {t.min_acceptable_net_credit != null && <> · min net ${Number(t.min_acceptable_net_credit).toFixed(2)}/sh</>}
             {t.max_slippage_pct_of_mid != null && <> · max slip {t.max_slippage_pct_of_mid}% of mid</>}
             {t.price_source && <> · priced from {t.price_source}</>}
           </div>
