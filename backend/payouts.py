@@ -113,73 +113,20 @@ def monthly_net_juice(state: dict) -> dict[str, dict]:
     return buckets
 
 
-def _strike_key(strike) -> float | None:
-    """Normalize a strike for FIFO pairing (float-safe, tolerant of str/None)."""
-    try:
-        return round(float(strike), 4)
-    except (TypeError, ValueError):
-        return None
-
-
 def monthly_intrinsic_melt(state: dict) -> dict[str, float]:
     """Per-month intrinsic that melted when a short went ITM→OTM ('YYYY-MM' ->
     whole-position $), derived from the immutable executions — nothing stored.
 
-    A short sold ITM is sold for intrinsic + extrinsic; the intrinsic is banked
-    against the covering LEAP's intrinsic (a hedge). If the stock then falls and
-    the short closes OTM, that banked intrinsic has fully melted and the LEAP has
-    given back the matching intrinsic — a real capital drawdown. The melted amount
-    is the entry intrinsic ``max(entry_stock − strike, 0) × contracts × 100``,
-    attributed to the month the short CLOSED (same bucketing as the juice), so the
-    repayment lines up with the juice it's netted against.
-
-    Entry stock comes from the matching ``sell_short`` execution, paired FIFO per
-    (ticker, strike) so partial closes and rolls (each leg carries its own entry
-    stock) attribute correctly. A close with no pairable open, no exit stock, or
-    that closed still ITM contributes nothing (the transition isn't observable /
-    didn't complete) — the feature degrades cleanly to no reservation.
+    Uses ``logging_handler.intrinsic_melt_by_close`` (the shared per-close pairing
+    the History per-week table also keys off, so the two views can't disagree),
+    then attributes each close's melt to the month it CLOSED in (same bucketing as
+    the juice), so the repayment lines up with the juice it's netted against.
     """
-    open_shorts: dict[tuple, list[list]] = {}  # (ticker,strike) -> [[entry_stock, contracts], ...]
+    execs = state.get("executions", [])
+    melt_by_idx = log.intrinsic_melt_by_close(execs)  # {close index -> melted $}
     buckets: dict[str, float] = {}
-    for e in state.get("executions", []):
-        action = e.get("action")
-        ticker = e.get("ticker")
-        sk = _strike_key(e.get("strike"))
-        if action == "sell_short":
-            if sk is None:
-                continue
-            entry_stock = e.get("stock_price")
-            n = int(e.get("contracts") or 0)
-            if n <= 0:
-                continue
-            open_shorts.setdefault((ticker, sk), []).append(
-                [entry_stock, n])
-            continue
-        if action != "close_short" or sk is None:
-            continue
-        strike = float(sk)
-        exit_stock = e.get("stock_price")
-        need = int(e.get("contracts") or 0)
-        queue = open_shorts.get((ticker, sk)) or []
-        # Consume matching open contracts FIFO, summing the intrinsic each paired
-        # chunk melts IF this close is OTM (exit stock at/under the strike).
-        melted = 0.0
-        otm = exit_stock is not None and float(exit_stock) <= strike
-        while need > 0 and queue:
-            entry_stock, avail = queue[0]
-            take = min(need, avail)
-            if otm and entry_stock is not None:
-                entry_intrinsic_ps = max(float(entry_stock) - strike, 0.0)
-                melted += entry_intrinsic_ps * take * 100
-            avail -= take
-            need -= take
-            if avail <= 0:
-                queue.pop(0)
-            else:
-                queue[0][1] = avail
-        if melted <= 0:
-            continue
-        when = log.bucket_datetime(e)
+    for idx, melted in melt_by_idx.items():
+        when = log.bucket_datetime(execs[idx])
         mk = when.strftime("%Y-%m") if when else None
         if not mk:
             continue

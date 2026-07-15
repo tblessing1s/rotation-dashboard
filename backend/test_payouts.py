@@ -334,6 +334,25 @@ def test_intrinsic_melt_fifo_partial_close(isolated_state, monkeypatch):
     assert payouts.monthly_intrinsic_melt(state) == {"2026-07": 600.0}
 
 
+def test_shared_melt_matches_theta_ledger_and_payouts(isolated_state, monkeypatch):
+    # The per-week closes (theta ledger) and the monthly payout melt must derive
+    # from the SAME per-close pairing so they can never disagree.
+    execs = [
+        _sell("AA", 100, 103, 1),                                   # ITM entry ($3/sh)
+        _close_full("AA", 100, 98, "2026-07-08T15:00:00Z", 50.0),   # OTM close -> $300 melt
+    ]
+    state = _seed(monkeypatch, execs)
+    by_idx = log.intrinsic_melt_by_close(execs)
+    assert by_idx == {1: 300.0}                       # the close is index 1
+    assert payouts.monthly_intrinsic_melt(state) == {"2026-07": 300.0}
+    # And recompute_derived surfaces it on the week row, netting the per-week juice.
+    log.recompute_derived(state)
+    wk = next(w for w in state["theta_ledger"]["weeks"] if w["ticker"] == "AA")
+    assert wk["net_juice"] == 50.0                     # raw extrinsic capture unchanged
+    assert wk["intrinsic_covered"] == 300.0
+    assert wk["net_juice_after_intrinsic"] == -250.0   # covers intrinsic first
+
+
 def test_finalize_snapshots_intrinsic_repaid(isolated_state, monkeypatch):
     _seed(monkeypatch, [
         _sell("AA", 100, 103, 1),
