@@ -63,6 +63,42 @@ def test_monthly_net_juice_buckets_close_shorts(isolated_state, monkeypatch):
     assert set(by_month) == {"2026-05", "2026-06", "2026-07"}
 
 
+def test_close_with_bad_date_falls_back_to_expiration(isolated_state, monkeypatch):
+    # A rolled/expiry close whose `date` isn't a parseable YYYY-MM-DD used to be
+    # DROPPED from the payout (its juice vanished) while the History per-week table
+    # relabelled it to 'today'. Both now bucket by the expiration month instead.
+    state = _seed(monkeypatch, [
+        {"action": "close_short", "ticker": "XLK", "date": "NoneT20:00:00Z",
+         "expiration": "2026-07-10", "net_juice_total": 253.0},
+    ])
+    by_month = payouts.monthly_net_juice(state)
+    assert by_month == {"2026-07": {"net_juice": 253.0, "closes": 1}}
+
+
+def test_history_and_payouts_reconcile_for_rolled_closes(isolated_state, monkeypatch):
+    # The reported bug: History showed net juice that Payouts never counted. With
+    # shared date->expiration bucketing the two views must sum to the same figure.
+    import logging_handler as log
+    execs = [
+        {"action": "close_short", "ticker": "XLK", "date": "2026-07-08",
+         "expiration": "2026-07-10", "net_juice_total": 253.0,
+         "extrinsic_sold": 0.57, "extrinsic_paid_back": 0.317, "contracts": 1},
+        {"action": "close_short", "ticker": "XLK", "date": "bad-date",
+         "expiration": "2026-07-17", "net_juice_total": 281.0,
+         "extrinsic_sold": 0.281, "extrinsic_paid_back": 0.0, "contracts": 1},
+    ]
+    state = _seed(monkeypatch, execs)
+    payout_july = payouts.monthly_net_juice(state)["2026-07"]["net_juice"]
+
+    log.recompute_derived(state)
+    weeks = state["theta_ledger"]["weeks"]
+    history_july = sum(w["net_juice"] for w in weeks
+                       if w["week"] != log.UNDATED and w["week"][:4] == "2026")
+    assert payout_july == history_july == 534.0
+    # And nothing silently landed in an 'undated' bucket.
+    assert all(w["week"] != log.UNDATED for w in weeks)
+
+
 def test_view_current_estimate_previous_final(isolated_state, monkeypatch):
     state = _seed(monkeypatch, [
         _close("AA", "2026-06-05T15:00:00Z", 510.0),

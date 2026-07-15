@@ -469,13 +469,34 @@ def save_order_lock(intent_key: str, lock: dict) -> None:
 # ---------------------------------------------------------------------------
 # Derived ledgers (theta ledger + extrinsic payback)
 # ---------------------------------------------------------------------------
-def _iso_week(date_str: str) -> str:
+UNDATED = "undated"  # week/period label for a fill whose date can't be parsed
+
+
+def _parse_ymd(date_str) -> datetime | None:
+    """Parse a ``YYYY-MM-DD`` prefix to a datetime, or None when it isn't one.
+    Strict on purpose: it never substitutes a fallback date, so an undated fill
+    stays visibly undated instead of being silently attributed to today."""
     try:
-        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
-    except ValueError:
-        dt = datetime.now(timezone.utc)
-    y, w, _ = dt.isocalendar()
-    return f"{y}-W{w:02d}"
+        return datetime.strptime(str(date_str or "")[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+
+
+def bucket_datetime(e: dict) -> datetime | None:
+    """The datetime an execution is bucketed under for the week/month ledgers: its
+    stamped ``date``, falling back to its option ``expiration`` (a close belongs to
+    the period it expired in), else None when neither parses. The theta ledger AND
+    the payout view both key off this one helper, so they can never disagree about
+    which period a fill lands in."""
+    return _parse_ymd(e.get("date")) or _parse_ymd(e.get("expiration"))
+
+
+def _iso_week(date_str: str) -> str:
+    """ISO ``YYYY-Www`` for a date string, or ``UNDATED`` when it can't be parsed.
+    For executions prefer ``bucket_datetime(e)`` so the date->expiration fallback
+    applies; this raw-string form has no fallback."""
+    dt = _parse_ymd(date_str)
+    return f"{dt.isocalendar()[0]}-W{dt.isocalendar()[1]:02d}" if dt else UNDATED
 
 
 def validate_payback(execs: list[dict]) -> list[dict]:
@@ -580,7 +601,11 @@ def recompute_derived(state: dict) -> dict:
         if e.get("action") != "close_short":
             continue
         ticker = e.get("ticker", "")
-        wk = _iso_week(e.get("date", ""))
+        # Bucket by the fill's date, falling back to its expiration; an undated
+        # close lands in the UNDATED bucket (visible in the per-week table) rather
+        # than being silently counted as this week's juice.
+        when = bucket_datetime(e)
+        wk = f"{when.isocalendar()[0]}-W{when.isocalendar()[1]:02d}" if when else UNDATED
         net = float(e.get("net_juice_total") or 0)
         key = (wk, ticker)
         row = weeks.setdefault(key, {"week": wk, "ticker": ticker,
@@ -591,13 +616,15 @@ def recompute_derived(state: dict) -> dict:
         row["extrinsic_paid_back"] += paid
         row["net_juice"] += net
 
-        d = e.get("date", "")[:10]
-        if wk == cur_week:
-            totals["this_week"] += net
-        if d[:7] == cur_month:
-            totals["this_month"] += net
-        if d[:4] == cur_year:
-            totals["ytd"] += net
+        # Live totals count only fills we can place in time (same date->expiration
+        # rule), so they stay consistent with the payout view.
+        if when:
+            if wk == cur_week:
+                totals["this_week"] += net
+            if when.strftime("%Y-%m") == cur_month:
+                totals["this_month"] += net
+            if when.strftime("%Y") == cur_year:
+                totals["ytd"] += net
 
     import position_manager  # deferred: derive deployed from open positions
     deployed = position_manager.deployed_capital(state)

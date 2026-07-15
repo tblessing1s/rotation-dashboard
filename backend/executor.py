@@ -1277,6 +1277,18 @@ def _apply_txn_edit(e: dict, ed: dict) -> None:
     elif a == "close_short":
         if price is not None:
             e["close_price_per_share"] = round(price, 4)
+        # Re-derive the close economics from the (possibly edited) close price,
+        # underlying, and strike so net juice never goes stale after an edit —
+        # mirrors _close_short: extrinsic paid back = close price - intrinsic,
+        # net juice = what we sold at entry - what we paid to buy back.
+        cps = _ff(e.get("close_price_per_share"))
+        stk = _ff(e.get("stock_price"))
+        if cps is not None and stk is not None:
+            paid_ps = max(cps - max(stk - strike, 0.0), 0.0)
+            sold_ps = float(e.get("extrinsic_sold") or 0)
+            e["extrinsic_paid_back"] = round(paid_ps, 4)
+            e["net_juice"] = round(sold_ps - paid_ps, 4)
+            e["net_juice_total"] = round((sold_ps - paid_ps) * c * 100, 2)
     elif a == "close_leap":
         if price is not None:
             e["close_price"] = round(price, 2)
