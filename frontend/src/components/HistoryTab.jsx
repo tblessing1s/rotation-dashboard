@@ -247,7 +247,7 @@ function legsToRows(position) {
   (position.leap_legs || []).forEach((lg) => rows.push({
     leg_type: "leap", strike: lg.strike ?? "", contracts: lg.contracts ?? 1,
     expiration: lg.expiration || "",
-    price: lg.cost_basis && lg.contracts ? +(lg.cost_basis / lg.contracts).toFixed(2) : (lg.cost_basis ?? ""),
+    price: lg.cost_basis && lg.contracts ? +(lg.cost_basis / lg.contracts / 100).toFixed(2) : (lg.cost_basis ?? ""),
     entry_price: lg.entry_stock_price ?? "",
     extrinsic_per_contract: lg.contracts ? +((lg.extrinsic_at_entry ?? 0) / lg.contracts).toFixed(2) : "",
   }));
@@ -265,12 +265,13 @@ function PositionLegsEditor({ ticker, initialRows, onSaved, onCancel }) {
   const add = () => setRows((rs) => [...rs, { leg_type: "short", strike: "", contracts: 1, expiration: "", price: "", entry_price: "" }]);
   const del = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
 
+  // Price is per-share for both leg types, so extrinsic is per-share too.
   const ext = (r) => {
     const price = Number(r.price), strike = Number(r.strike);
     const entry = r.entry_price === "" || r.entry_price == null ? null : Number(r.entry_price);
     if (entry == null || isNaN(price) || isNaN(strike)) return null;
     const intr = Math.max(entry - strike, 0);
-    return r.leg_type === "short" ? Math.max(price - intr, 0) : Math.max(price - intr * 100, 0);
+    return Math.max(price - intr, 0);
   };
 
   const save = async () => {
@@ -280,7 +281,8 @@ function PositionLegsEditor({ ticker, initialRows, onSaved, onCancel }) {
         leg_type: r.leg_type, strike: Number(r.strike), contracts: Number(r.contracts),
         expiration: r.expiration || null,
         entry_price: r.entry_price === "" ? null : Number(r.entry_price),
-        ...(r.leg_type === "short" ? { premium_per_share: Number(r.price) } : { cost_per_contract: Number(r.price) }),
+        // Table edits LEAP cost per-share; backend wants per-contract, so ×100.
+        ...(r.leg_type === "short" ? { premium_per_share: Number(r.price) } : { cost_per_contract: Number(r.price) * 100 }),
       }));
       await api.setPositionLegs(ticker, legs, "manual leg edit");
       onSaved();
@@ -293,8 +295,8 @@ function PositionLegsEditor({ ticker, initialRows, onSaved, onCancel }) {
     <div className="mb-3 rounded-md border border-emerald-800/60 bg-emerald-950/15 p-2">
       <p className="text-xs font-semibold text-emerald-200">Editing {ticker} legs — set them to match your broker, then Save.</p>
       <p className="mt-0.5 text-[11px] text-slate-500">
-        Enter premium/cost (per share for shorts, per contract for LEAPs) and the underlying price at entry;
-        extrinsic is computed for you. Short premium e.g. 5.10; LEAP cost e.g. 5305.
+        Enter premium/cost per share (LEAPs too) and the underlying price at entry;
+        extrinsic is computed for you. Short premium e.g. 5.10; LEAP cost e.g. 53.05.
       </p>
       <div className="mt-2 overflow-x-auto">
         <table className="w-full whitespace-nowrap text-xs">
@@ -320,7 +322,7 @@ function PositionLegsEditor({ ticker, initialRows, onSaved, onCancel }) {
                   <td className="py-1 pr-2"><input value={r.expiration} placeholder="YYYY-MM-DD" onChange={(ev) => set(i, "expiration", ev.target.value)} className={`${inp} w-28`} /></td>
                   <td className="py-1 pr-2"><input value={r.price} onChange={(ev) => set(i, "price", ev.target.value)} className={`${inp} w-20`} /></td>
                   <td className="py-1 pr-2"><input value={r.entry_price} placeholder="underlying" onChange={(ev) => set(i, "entry_price", ev.target.value)} className={`${inp} w-24 border-amber-700 text-amber-200`} /></td>
-                  <td className={`py-1 pr-2 ${e == null ? "text-rose-400" : "text-slate-300"}`}>{e == null ? "—" : e.toFixed(r.leg_type === "short" ? 2 : 0)}</td>
+                  <td className={`py-1 pr-2 ${e == null ? "text-rose-400" : "text-slate-300"}`}>{e == null ? "—" : e.toFixed(2)}</td>
                   <td className="py-1 pr-2"><button onClick={() => del(i)} className="rounded border border-rose-800 bg-rose-950/40 px-1.5 text-[10px] text-rose-300">✕</button></td>
                 </tr>
               );
@@ -512,7 +514,10 @@ function RawData() {
     setRebuilding(ticker); setMsg(null); setProposal(null);
     try {
       const r = await api.rebuildPosition(ticker, { dry_run: true });
-      setProposal({ ticker, legs: r.legs || [] });
+      // Edit LEAP cost per-share (÷100) to match the shorts; convert back on commit.
+      const legs = (r.legs || []).map((l) => l.leg_type === "short" || l.cost_per_contract == null
+        ? l : { ...l, cost_per_contract: +(Number(l.cost_per_contract) / 100).toFixed(2) });
+      setProposal({ ticker, legs });
     } catch (e) { setMsg(`${ticker}: ${String(e.message || e)}`); }
     finally { setRebuilding(null); }
   };
@@ -529,7 +534,7 @@ function RawData() {
         entry_price: l.entry_price === "" || l.entry_price == null ? null : Number(l.entry_price),
         ...(l.leg_type === "short"
           ? { premium_per_share: Number(l.premium_per_share) }
-          : { cost_per_contract: Number(l.cost_per_contract) }),
+          : { cost_per_contract: Number(l.cost_per_contract) * 100 }),   // per-share -> per-contract
       }));
       const r = await api.rebuildPosition(proposal.ticker, { legs });
       setMsg(`Rebuilt ${proposal.ticker}: ${r.short_calls.length} short + ${r.leap_legs.length} LEAP leg(s). Run "Reconcile now" to confirm CLEAN.`);
@@ -589,12 +594,11 @@ function RawData() {
                 <tbody className="font-mono">
                   {proposal.legs.map((l, i) => {
                     const isShort = l.leg_type === "short";
+                    // price is per-share for both leg types (LEAP cost was ÷100 on load).
                     const price = Number(isShort ? l.premium_per_share : l.cost_per_contract);
                     const entry = l.entry_price === "" || l.entry_price == null ? null : Number(l.entry_price);
                     const perShareIntrinsic = entry == null ? null : Math.max(entry - Number(l.strike), 0);
-                    const ext = entry == null ? null
-                      : isShort ? Math.max(price - perShareIntrinsic, 0)
-                                : Math.max(price - perShareIntrinsic * 100, 0);
+                    const ext = entry == null ? null : Math.max(price - perShareIntrinsic, 0);
                     return (
                       <tr key={i} className="border-t border-slate-800/50">
                         <td className={`py-1 pr-3 ${isShort ? "text-amber-300" : "text-emerald-300"}`}>{l.leg_type}</td>
@@ -615,8 +619,8 @@ function RawData() {
                                  className="w-24 rounded border border-amber-700 bg-slate-900/60 px-1 text-amber-200" />
                         </td>
                         <td className={`py-1 pr-3 ${ext == null ? "text-rose-400" : "text-slate-300"}`}>
-                          {ext == null ? "enter entry price" : ext.toFixed(isShort ? 2 : 0)}
-                          {ext != null && !isShort ? "/ctr" : ext != null ? "/sh" : ""}
+                          {ext == null ? "enter entry price" : ext.toFixed(2)}
+                          {ext != null ? "/sh" : ""}
                         </td>
                         <td className="py-1 pr-3 text-slate-500">{l.econ_source || "—"}</td>
                       </tr>
@@ -673,7 +677,7 @@ function RawData() {
                     <td className="py-1.5 pr-3">{cell(lg.strike)}</td>
                     <td className="py-1.5 pr-3">{cell(lg.contracts)}</td>
                     <td className="py-1.5 pr-3">{cell(lg.expiration)}</td>
-                    <td className={`py-1.5 pr-3 ${!lg.extrinsic_at_entry ? "text-rose-400" : ""}`}>{cell(lg.extrinsic_at_entry)}</td>
+                    <td className={`py-1.5 pr-3 ${!lg.extrinsic_at_entry ? "text-rose-400" : ""}`}>{cell(lg.extrinsic_at_entry != null && lg.contracts ? lg.extrinsic_at_entry / (100 * lg.contracts) : lg.extrinsic_at_entry)}</td>
                     <td className="py-1.5 pr-3">—</td>
                     <td className="py-1.5 pr-3">{cell(lg.cost_basis)}</td>
                     <td className="py-1.5 pr-3">{cell(lg.entry_date)}</td>
