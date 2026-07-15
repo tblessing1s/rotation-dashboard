@@ -126,6 +126,9 @@ export const api = {
   // Single-spot position editor: directly set a position's legs.
   setPositionLegs: (ticker, legs, reason) =>
     request("/api/positions/set-legs", { method: "POST", body: JSON.stringify({ ticker, legs, reason }) }),
+  // Fix a LEAP whose cost basis was stored per-share (~100× too small).
+  repairLeapCost: (ticker) =>
+    request("/api/positions/repair-leap-cost", { method: "POST", body: JSON.stringify({ ticker }) }),
   // Editable transaction table: apply per-transaction edits + derive position.
   saveTransactions: (edits, ticker) =>
     request("/api/transactions/save", { method: "POST", body: JSON.stringify({ edits, ticker }) }),

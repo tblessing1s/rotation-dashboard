@@ -46,6 +46,44 @@ def _live_short_marks(ticker: str, shorts: list[dict]) -> dict[tuple, float]:
     return out
 
 
+def leap_cost_suspect(leg: dict, stock_price: float | None) -> bool:
+    """True when a LEAP leg's ``cost_basis`` looks stored PER SHARE instead of the
+    full per-contract-total dollars (a ~100× understatement — e.g. 53.05 where
+    5305 was meant). A LEAP's per-contract cost can NEVER be below its intrinsic
+    (you can't pay less than the in-the-money value), so a cost that sits under
+    the intrinsic at entry — or ~20× under the live intrinsic — is a mis-scale,
+    not a cheap buy. Purely a shape check on stored numbers; no live quote needed
+    for the entry test. Powers the display guard + the one-click repair."""
+    try:
+        contracts = int(leg.get("contracts") or 0)
+        strike = float(leg.get("strike"))
+    except (TypeError, ValueError):
+        return False
+    if not contracts:
+        return False
+    try:
+        cost_pc = float(leg.get("cost_basis") or 0) / contracts
+    except (TypeError, ValueError, ZeroDivisionError):
+        return False
+    if cost_pc <= 0:
+        return False
+    entry = leg.get("entry_stock_price")
+    if entry not in (None, ""):
+        try:
+            entry_intrinsic_pc = max(float(entry) - strike, 0.0) * 100
+            # Paid materially less than intrinsic → physically impossible.
+            if entry_intrinsic_pc > cost_pc * 1.05:
+                return True
+        except (TypeError, ValueError):
+            pass
+    if stock_price is not None:
+        cur_intrinsic_pc = max(float(stock_price) - strike, 0.0) * 100
+        # Live intrinsic 20× the recorded cost → cost is off by ~100×, not a win.
+        if cur_intrinsic_pc > cost_pc * 20:
+            return True
+    return False
+
+
 def enrich_leap(leap: dict, stock_price: float | None) -> dict:
     """Re-split a LEAP's current value into intrinsic/extrinsic.
 
@@ -63,6 +101,9 @@ def enrich_leap(leap: dict, stock_price: float | None) -> dict:
         current = leap.get("current_bid")
         if current is not None:
             out["extrinsic"] = round(float(current) - intrinsic, 2)
+    # Flag a per-share-scaled cost basis so the UI can warn + offer a repair
+    # instead of rendering an absurd intrinsic-vs-cost ratio (e.g. 8,584%).
+    out["cost_basis_suspect"] = leap_cost_suspect(leap, stock_price)
     return out
 
 
@@ -339,6 +380,9 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
             "current_value": _sum("current_bid"),
             "intrinsic": _sum("intrinsic"),
             "extrinsic": _sum("extrinsic"),
+            # True when any leg's cost basis is mis-scaled (stored per-share), so
+            # the aggregate ratio the orange shows would read absurdly high.
+            "cost_basis_suspect": any(l.get("cost_basis_suspect") for l in enriched_legs),
         }
 
         # LEAP long-leg health: DTE, extrinsic runway, juice-vs-burn, delta
