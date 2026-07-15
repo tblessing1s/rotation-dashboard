@@ -768,6 +768,10 @@ def recompute_derived(state: dict) -> dict:
     # against only the current LEAP's entry extrinsic. See docs/leap-lifecycle.md.
     cycle_collected: dict[str, float] = {}
     cycle_target: dict[str, float] = {}
+    # The individual close_short fills that make up cycle_collected, so the payback
+    # meter is auditable line by line (same lifecycle as cycle_collected: carried
+    # across rolls/adds, reset on a fresh cycle or a true exit).
+    cycle_closes: dict[str, list] = {}
     _pending_close_roll: dict[str, str] = {}
     for e in execs:
         t = e.get("ticker", "")
@@ -782,13 +786,27 @@ def recompute_derived(state: dict) -> dict:
                 # the payback target grows by the new extrinsic bought; collected
                 # juice carries — the cycle is continuous, exactly like a roll.
                 cycle_collected.setdefault(t, 0.0)
+                cycle_closes.setdefault(t, [])
                 cycle_target[t] = cycle_target.get(t, 0.0) + extr
             else:
                 cycle_collected[t] = 0.0                            # fresh cycle
+                cycle_closes[t] = []
                 cycle_target[t] = extr
             _pending_close_roll.pop(t, None)
         elif a == "close_short":
-            cycle_collected[t] = cycle_collected.get(t, 0.0) + float(e.get("net_juice_total") or 0)
+            # Re-derive from the close's stored facts (close_economics) — the SAME
+            # source of truth the theta ledger above uses — so the payback meter and
+            # the ledger can never disagree on one close's realized juice (a stale
+            # stored net_juice_total, e.g. from a defensive roll, cannot leak in).
+            net = close_economics(e)[2]
+            cycle_collected[t] = cycle_collected.get(t, 0.0) + net
+            when = bucket_datetime(e)
+            cycle_closes.setdefault(t, []).append({
+                "date": when.date().isoformat() if when else None,
+                "strike": e.get("strike"),
+                "contracts": int(e.get("contracts") or 0),
+                "net_juice": round(net, 2),
+            })
         elif a == "close_leap":
             rid = e.get("leap_roll_id")
             if rid:
@@ -801,6 +819,7 @@ def recompute_derived(state: dict) -> dict:
             else:
                 cycle_collected.pop(t, None)     # true exit — cycle ends, juice does not carry
                 cycle_target.pop(t, None)
+                cycle_closes.pop(t, None)
                 _pending_close_roll.pop(t, None)
 
     # Extrinsic payback meter per position: how much of the LEAP's entry
@@ -818,6 +837,14 @@ def recompute_derived(state: dict) -> dict:
             "collected_to_date": round(collected, 2),
             "remaining_to_payback": round(remaining, 2),
             "pct_complete": round(collected / at_entry * 100, 1) if at_entry else 0,
+            # Realized extrinsic left over once the LEAP's entry extrinsic (its burn
+            # cost) has been paid back: collected - at_entry. Negative while still
+            # recovering, positive = booked income above the burn ("the rest is
+            # gravy"). This is the leftover-realized figure the position view surfaces.
+            "realized_net_extrinsic": round(collected - at_entry, 2),
+            # The individual close_short fills that sum to collected_to_date this
+            # cycle, so the meter can be checked line by line against the log.
+            "contributions": cycle_closes.get(ticker, []),
         }
         # keep the position's own running tally in sync
         if leap:

@@ -125,6 +125,54 @@ def test_payback_carries_across_leap_roll(store):
     assert pb["leap_extrinsic_at_entry"] == pytest.approx(24500.0)  # 2000 + 22500
 
 
+def test_payback_collected_derives_from_close_facts_and_lists_contributions(store):
+    """The payback meter's collected juice must (a) re-derive each close via
+    close_economics — the SAME source of truth the theta ledger uses, so a stale
+    stored net_juice_total can't leak in — and (b) expose the per-close
+    contributions that sum to it, plus the realized leftover (collected - target)."""
+    state = log.load_state()
+    state["positions"] = [{"ticker": "NVDA", "status": "active",
+                           "leap": {"strike": 80, "contracts": 5, "extrinsic_at_entry": 1000},
+                           "delta_history": []}]
+    state["executions"] = [
+        _exec("buy_leap", "NVDA", "2025-01-06T00:00:00Z", extrinsic_captured=1000),
+        # Full facts present: close_economics re-derives net juice (sold 1.00/sh,
+        # closed 0.40/sh OTM -> net (1.00-0.40)*5*100 = 300) and IGNORES the wildly
+        # stale stored net_juice_total.
+        _exec("close_short", "NVDA", "2025-01-10T00:00:00Z", net_juice_total=999999,
+              extrinsic_sold=1.0, close_price_per_share=0.4, stock_price=79, strike=80, contracts=5),
+        # Facts absent -> falls back to the stored net_juice_total (250).
+        _exec("close_short", "NVDA", "2025-01-17T00:00:00Z", net_juice_total=250, strike=82, contracts=5),
+    ]
+    log.recompute_derived(state)
+    pb = state["extrinsic_payback"]["NVDA"]
+    assert pb["collected_to_date"] == pytest.approx(550.0)          # 300 (derived) + 250 (stored)
+    assert pb["realized_net_extrinsic"] == pytest.approx(-450.0)    # 550 - 1000
+    contribs = pb["contributions"]
+    assert [c["net_juice"] for c in contribs] == [300.0, 250.0]
+    assert sum(c["net_juice"] for c in contribs) == pytest.approx(pb["collected_to_date"])
+    assert contribs[0]["date"] == "2025-01-10"
+    assert contribs[0]["strike"] == 80 and contribs[0]["contracts"] == 5
+
+
+def test_payback_contributions_reset_on_true_exit(store):
+    """The contributions list follows the same cycle lifecycle as collected: a true
+    exit (legs_remaining=0) clears it so a re-entry starts from an empty list."""
+    state = log.load_state()
+    state["positions"] = [{"ticker": "NVDA", "status": "active",
+                           "leap": {"strike": 80, "contracts": 5, "extrinsic_at_entry": 0},
+                           "delta_history": []}]
+    state["executions"] = [
+        _exec("buy_leap", "NVDA", "2025-01-06T00:00:00Z", extrinsic_captured=2000),
+        _exec("close_short", "NVDA", "2025-01-10T00:00:00Z", net_juice_total=350, contracts=5),
+        _exec("close_leap", "NVDA", "2025-01-20T00:00:00Z", realized_pnl=100),   # true exit
+    ]
+    log.recompute_derived(state)
+    pb = state["extrinsic_payback"]["NVDA"]
+    assert pb["collected_to_date"] == pytest.approx(0.0)
+    assert pb["contributions"] == []
+
+
 def _full_cycle_execs():
     """One realistic full cycle from the execution log (R5):
     multi-tranche LEAP entry -> weekly short closes -> defensive short roll ->

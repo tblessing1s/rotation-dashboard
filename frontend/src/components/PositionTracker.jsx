@@ -786,6 +786,125 @@ function shortCapturePct(shorts) {
   return entry > 0 ? (captured / entry) * 100 : 0;
 }
 
+// Exact dollars-and-cents for the validation breakdowns. money() rounds to whole
+// dollars for the headline tiles; reconciling a figure against a broker statement
+// needs the cents, so the "show the math" panels use these instead.
+function dollars(n) {
+  if (n == null) return "—";
+  return "$" + Number(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+function signedDollars(n) {
+  if (n == null) return "—";
+  return `${n < 0 ? "−" : "+"}${dollars(Math.abs(Number(n)))}`;
+}
+
+// A collapsible "show the math" disclosure: the derivation of a headline number —
+// its inputs and the arithmetic — laid out so the operator can validate it line by
+// line against the account instead of trusting the rolled-up figure. The three
+// numbers that matter for maintaining a position (intrinsic balance, extrinsic
+// burn-off, leftover realized) each get one.
+function ShowMath({ children, label = "Show the math" }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="mt-2">
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen((v) => !v); }}
+        aria-expanded={open}
+        className="text-[11px] font-medium text-sky-400/90 hover:text-sky-300"
+      >
+        {open ? "Hide the math ▲" : `${label} ▾`}
+      </button>
+      {open && (
+        <div className="mt-1.5 space-y-1 rounded-lg border border-slate-800 bg-slate-950/60 p-2.5 font-mono text-[11px] leading-relaxed text-slate-400">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One derivation line: a label on the left, the arithmetic and/or result on the right.
+function MathRow({ label, value, strong = false, tone = "" }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="whitespace-pre text-slate-500">{label}</span>
+      <span className={`text-right ${strong ? "font-semibold text-slate-200" : "text-slate-300"} ${tone}`}>{value}</span>
+    </div>
+  );
+}
+
+// Derivation of the intrinsic balance: each LEAP leg's intrinsic (the asset) and
+// each short's intrinsic (the liability), max(spot − strike,0) × contracts × 100,
+// netting to the cushion. Per-line results are the payload's own enriched fields,
+// so the pieces shown sum exactly to the totals above them.
+function IntrinsicBalanceMath({ p, bal }) {
+  const spot = p.stock_price;
+  const legs = p.leap_legs && p.leap_legs.length ? p.leap_legs : (p.leap ? [p.leap] : []);
+  const shorts = p.short_calls || [];
+  return (
+    <>
+      <MathRow label="Spot price" value={fmt(spot, 2)} strong />
+      <div className="pt-1 text-slate-500">LEAP intrinsic (asset) = max(spot − strike, 0) × contracts × 100</div>
+      {legs.map((leg, i) => (
+        <MathRow key={`l${i}`}
+          label={`  ${leg.contracts || 0}×${fmt(leg.strike, 0)}C`}
+          value={`max(${fmt(spot, 2)} − ${fmt(leg.strike, 2)}, 0) × ${leg.contracts || 0} × 100 = ${dollars(leg.intrinsic)}`} />
+      ))}
+      <MathRow label="  = LEAP intrinsic" value={dollars(bal.longIntrinsic)} strong />
+      <div className="pt-1 text-slate-500">Short intrinsic (liability) = max(spot − strike, 0) × contracts × 100</div>
+      {shorts.length === 0 && <div className="text-slate-600">  (no open shorts — liability $0)</div>}
+      {shorts.map((sc, i) => (
+        <MathRow key={`s${i}`}
+          label={`  ${sc.contracts || 0}×${fmt(sc.strike, 0)}C`}
+          value={`max(${fmt(spot, 2)} − ${fmt(sc.strike, 2)}, 0) × ${sc.contracts || 0} × 100 = ${dollars(sc.current_intrinsic_total)}`} />
+      ))}
+      <MathRow label="  = short intrinsic" value={dollars(bal.shortIntrinsic)} strong />
+      <div className="border-t border-slate-800 pt-1" />
+      <MathRow label="Net cushion = LEAP − short"
+        value={`${dollars(bal.longIntrinsic)} − ${dollars(bal.shortIntrinsic)} = ${signedDollars(bal.net)}`}
+        strong tone={bal.covered ? "text-emerald-300" : "text-rose-300"} />
+      <div className="text-slate-600">{bal.covered
+        ? "≥ 0 → covered: a stock move changes both legs together and washes out."
+        : "< 0 → uncovered: the short's intrinsic has outrun the LEAP's."}</div>
+    </>
+  );
+}
+
+// Derivation of the extrinsic burn-off + the leftover realized: the LEAP extrinsic
+// bought this cycle (the burn to repay), the realized short juice broken out per
+// close so it sums to collected, then paid-back %, remaining, and the leftover
+// (collected − target) — the realized extrinsic once the burn is covered.
+function ExtrinsicBurnoffMath({ pb }) {
+  const contribs = pb.contributions || [];
+  const target = pb.leap_extrinsic_at_entry;
+  const collected = pb.collected_to_date;
+  const realized = pb.realized_net_extrinsic != null ? pb.realized_net_extrinsic : (collected - target);
+  return (
+    <>
+      <MathRow label="LEAP extrinsic bought this cycle (the burn)" value={dollars(target)} strong />
+      <div className="pt-1 text-slate-500">Realized short juice collected this cycle (net per close):</div>
+      {contribs.length === 0 && <div className="text-slate-600">  (no closed shorts yet — collected $0)</div>}
+      {contribs.map((c, i) => (
+        <MathRow key={i}
+          label={`  ${c.date || "—"} · ${c.contracts || 0}×${c.strike != null ? `${fmt(c.strike, 0)}C` : "—"}`}
+          value={signedDollars(c.net_juice)} />
+      ))}
+      <MathRow label="  = collected (Σ closes)" value={dollars(collected)} strong />
+      <div className="border-t border-slate-800 pt-1" />
+      <MathRow label="Paid back = collected ÷ target"
+        value={`${dollars(collected)} ÷ ${dollars(target)} = ${fmt(pb.pct_complete, 1)}%`} />
+      <MathRow label="Remaining = target − collected"
+        value={`${dollars(target)} − ${dollars(collected)} = ${dollars(pb.remaining_to_payback)}`} />
+      <MathRow label="Leftover realized = collected − target"
+        value={`${dollars(collected)} − ${dollars(target)} = ${signedDollars(realized)}`}
+        strong tone={realized >= 0 ? "text-emerald-300" : "text-slate-400"} />
+      <div className="text-slate-600">{realized >= 0
+        ? "≥ 0 → the burn is repaid; the rest is booked extrinsic income."
+        : "< 0 → still recovering the LEAP's extrinsic before income is realized."}</div>
+    </>
+  );
+}
+
 // (1) Intrinsic balance — the LEAP orange beside whether the LEAP's intrinsic
 // (asset) still covers the shorts' intrinsic (liability), so a stock move washes out.
 function IntrinsicBalance({ p, onRepaired }) {
@@ -855,6 +974,7 @@ function IntrinsicBalance({ p, onRepaired }) {
               {covered ? `${money(bal.net)} cushion — a stock move washes out`
                        : `short intrinsic outruns the LEAP by ${money(-bal.net)}`}
             </div>
+            <ShowMath><IntrinsicBalanceMath p={p} bal={bal} /></ShowMath>
           </>
         ) : <div className="text-xs text-slate-500">No mark yet — intrinsic balance pending.</div>}
       </div>
@@ -867,6 +987,11 @@ function ExtrinsicBurnoff({ ticker, payback }) {
   const pb = payback || {};
   const has = pb.leap_extrinsic_at_entry != null && pb.leap_extrinsic_at_entry > 0;
   const done = has && pb.pct_complete >= 100;
+  // Leftover realized extrinsic = collected − target: negative while still
+  // recovering the burn, positive once the burn is repaid (booked income).
+  const realized = pb.realized_net_extrinsic != null
+    ? pb.realized_net_extrinsic
+    : (has ? pb.collected_to_date - pb.leap_extrinsic_at_entry : null);
   return (
     <div className="flex items-center gap-3">
       {has && <PaybackTank uid={ticker} pct={pb.pct_complete} />}
@@ -877,9 +1002,11 @@ function ExtrinsicBurnoff({ ticker, payback }) {
             <div className={`text-2xl font-semibold leading-none ${done ? "text-emerald-300" : "text-slate-100"}`}>{fmt(pb.pct_complete, 0)}%</div>
             <div className="mt-1.5 text-xs text-slate-500">{money(pb.collected_to_date)} of {money(pb.leap_extrinsic_at_entry)} recovered</div>
             <div className="text-xs">
-              {done ? <span className="text-emerald-300">fully paid back — the rest is gravy</span>
-                    : <span className="text-slate-500">{money(pb.remaining_to_payback)} still to earn back</span>}
+              {realized >= 0
+                ? <span className="text-emerald-300">leftover realized {signedDollars(realized)} — burn repaid, the rest is booked income</span>
+                : <span className="text-slate-500">{money(pb.remaining_to_payback)} still to earn back before income is realized</span>}
             </div>
+            <ShowMath><ExtrinsicBurnoffMath pb={pb} /></ShowMath>
           </>
         ) : <div className="text-xs text-slate-500">No entry extrinsic recorded — nothing to pay back.</div>}
       </div>
