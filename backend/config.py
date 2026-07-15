@@ -212,8 +212,13 @@ VIX_ELEVATED_THRESHOLD = 25    # PROPOSED_DEFAULT — VIX above this is flagged 
 REGIME_HISTORY_DAYS = 400      # PROPOSED_DEFAULT — ~1.5 trading years of daily regime records
 
 # ---- Sector gate (Level 2) -------------------------------------------------
-SECTOR_RS3M_MIN = 10.0         # sector RS3M vs SPY must clear +10%
+SECTOR_RS3M_MIN = 10.0         # sector RS3M vs SPY must clear +10% (legacy; kept for display)
 SECTOR_BREADTH_MIN = 60.0     # % of sector constituents above 50-DMA
+# The sector gate now bars on RS1M vs SPY (a fresher 1-month read) plus breadth,
+# replacing the RS3M vs SPY bar — RS3M is a laggy 3-month figure that keeps a
+# rolled-over sector "strong" for weeks. RS1M > 0 means the sector is leading SPY
+# right now; SECTOR_BREADTH_MIN (above) still gates participation.
+SECTOR_RS1M_MIN = 0.0          # PROPOSED_DEFAULT — sector RS1M vs SPY must be > this (leading SPY)
 
 # ---- Stock gate (Levels 3 & 4) ---------------------------------------------
 STOCK_RS_VS_SPY_MIN = 5.0      # stock RS3M vs SPY > +5% (growth-leader bar)
@@ -233,8 +238,32 @@ def rs_vs_spy_min(is_etf: bool = False) -> float:
 CONSOLIDATION_ATR_PCT_MAX = 5.0   # daily ATR% of price below this = consolidating
 CONSOLIDATION_MA21_DIST_MAX = 4.0  # within this % of MA21 = near the mean
 
+# ---- Per-name Genius lights (stock_lights.py) ------------------------------
+# The SAME four Genius lights as the market regime (GENIUS_* above), applied per
+# name — one indicator system, fractal across market and stock. There are NO new
+# per-stock indicator constants: lights reuse SMA50 / EMA21 / SAR / ROC10. Only
+# the VERDICT mapping differs from the market (stock: 4/4 green = GREEN, exactly
+# 3 = YELLOW watchlist, <=2 or any veto = RED) and the market's yellow dwell is
+# NOT applied at stock level in v1. SAR is seeded from each name's earliest bar
+# (canonical-start), so a name needs at least this many bars before its lights
+# are trusted (SMA50 is the binding warm-up); inside the warm-up they read
+# insufficient and never GREEN, which keeps fixtures/backfill reproducible.
+STOCK_LIGHTS_WARMUP_BARS = GENIUS_SLOW_MA   # HARD — canonical-start SAR warm-up window
+
+# ---- Right-spot gate (separate, AFTER the lights; blocking) ----------------
+# Consolidation / "right spot" checks are NOT lights — they gate entry after a
+# GREEN light verdict. atr_pct reuses CONSOLIDATION_ATR_PCT_MAX above.
+SPOT_ATR_EXTENSION_MAX = 1.5   # PROPOSED_DEFAULT — extension above MA21 must be <= this many ATRs
+SPOT_ATR_MOMENTUM_MAX = 1.0    # PROPOSED_DEFAULT — ATR/ATR_5EMA <= this = contracting or flat
+
+# ---- Stock-lights vetoes (any one -> RED, evaluated before the vote) -------
+# rs3m_vs_sector < 0 (stocks only) reuses indicators.rs3m; close < ma200 reuses
+# the MA200 trend line. The volatility veto pairs an expanding ATR with a rich IV.
+VETO_IVR_PERCENTILE_MIN = 90.0  # PROPOSED_DEFAULT — ATR expanding AND IVR percentile >= this vetoes
+
 # ---- Indicator calibration (matches thinkorswim daily studies) -------------
 RS3M_LOOKBACK = 63            # ~3 months of trading days
+RS1M_LOOKBACK = 21           # ~1 month of trading days (ranking within GREENs + sector gate)
 ATR_WINDOW = 9               # CFM uses a 9-day ATR for strike spacing
 RSI_WINDOW = 14
 MA_WINDOW = 21

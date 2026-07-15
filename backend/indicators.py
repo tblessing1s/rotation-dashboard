@@ -116,6 +116,56 @@ def atr_expanding(df: pd.DataFrame, window: int = config.ATR_WINDOW, lookback: i
     return bool(now > then)
 
 
+def _atr_series(df: pd.DataFrame, window: int = config.ATR_WINDOW) -> pd.Series:
+    """Wilder ATR as a full series (its last value equals ``atr``). Shared by the
+    right-spot gate's ATR-momentum / ATR-extension reads so they can't disagree
+    with the scorecard's identically-computed figures."""
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    close = df["Close"].astype(float)
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    return tr.ewm(alpha=1 / window, min_periods=window, adjust=False).mean()
+
+
+def atr_5ema(df: pd.DataFrame | None, window: int = config.ATR_WINDOW) -> float | None:
+    """5-period EMA of the Wilder ATR — the smoothed volatility baseline the
+    right-spot gate compares today's ATR against (contracting vs expanding)."""
+    if df is None or df.empty:
+        return None
+    valid = _atr_series(df, window).dropna()
+    return None if valid.empty else float(valid.ewm(span=5, adjust=False).mean().iloc[-1])
+
+
+def atr_momentum(df: pd.DataFrame | None, window: int = config.ATR_WINDOW) -> float | None:
+    """ATR / ATR_5EMA. <= 1 = volatility contracting or flat (a right-spot pass);
+    > 1 = expanding. Same ratio the scorecard's ``atr_momentum`` reports."""
+    a = atr(df, window) if df is not None else None
+    base = atr_5ema(df, window)
+    if a is None or base is None or base == 0:
+        return None
+    return a / base
+
+
+def atr_extension(df: pd.DataFrame | None, ma_window: int = 21,
+                  atr_window: int = config.ATR_WINDOW) -> float | None:
+    """How stretched the close is above its MA21, in ATR units: (close-ma21)/atr.
+    The right-spot 'is it extended' number — ATR units, not percent. Same figure
+    the scorecard reports (MA21 = SMA21, ATR = 9-day Wilder)."""
+    if df is None or df.empty:
+        return None
+    px = last(df)
+    ma21 = sma(df, ma_window)
+    a = atr(df, atr_window)
+    if px is None or ma21 is None or a is None or a == 0:
+        return None
+    return (px - ma21) / a
+
+
 def hist_vol(df: pd.DataFrame, window: int = 20) -> float | None:
     """Annualized realized (historical) volatility over `window` daily bars, as a
     percent — the yardstick for judging whether an option's IV is rich or cheap.
@@ -139,12 +189,15 @@ def pct_from_ma(df: pd.DataFrame, window: int = config.MA_WINDOW) -> float | Non
     return round((px / ma - 1) * 100, 2)
 
 
-def rs3m(df: pd.DataFrame, bench: pd.DataFrame, lookback: int = config.RS3M_LOOKBACK) -> float | None:
+def relative_strength(df: pd.DataFrame, bench: pd.DataFrame, lookback: int) -> float | None:
     """Relative strength vs a benchmark over `lookback` bars, as a percent.
 
-    ratio = symbol_close / bench_close, aligned on date. RS3M is the percent
-    change of that ratio over the lookback window: (ratio_now/ratio_then - 1)*100.
-    Positive = the symbol outran the benchmark over the period.
+    ratio = symbol_close / bench_close, aligned on date. RS is the percent change
+    of that ratio over the lookback window: (ratio_now/ratio_then - 1)*100.
+    Positive = the symbol outran the benchmark over the period. This is the single
+    RS core; ``rs3m`` (63-day) and ``rs1m`` (21-day) are thin lookback wrappers so
+    the 3-month kill-switch/display figure and the 1-month ranking/sector-gate
+    figure can never diverge in their math.
     """
     if df is None or bench is None or df.empty or bench.empty:
         return None
@@ -159,6 +212,18 @@ def rs3m(df: pd.DataFrame, bench: pd.DataFrame, lookback: int = config.RS3M_LOOK
     # and downstream comparisons would then yield numpy.bool_ (not JSON
     # serializable). np.float64 serializes fine, but the booleans it spawns do not.
     return float(round((now / then - 1) * 100, 2))
+
+
+def rs3m(df: pd.DataFrame, bench: pd.DataFrame, lookback: int = config.RS3M_LOOKBACK) -> float | None:
+    """3-month relative strength vs a benchmark, as a percent (kill switch +
+    display). See ``relative_strength``."""
+    return relative_strength(df, bench, lookback)
+
+
+def rs1m(df: pd.DataFrame, bench: pd.DataFrame, lookback: int = config.RS1M_LOOKBACK) -> float | None:
+    """1-month relative strength vs a benchmark, as a percent — the ranking key
+    within GREENs and the sector gate's vs-SPY bar. See ``relative_strength``."""
+    return relative_strength(df, bench, lookback)
 
 
 def above_ma(df: pd.DataFrame, window: int = config.BREADTH_MA_WINDOW) -> bool | None:

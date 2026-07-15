@@ -1013,90 +1013,84 @@ def test_entry_gate_is_json_serializable(monkeypatch):
     assert all(isinstance(lv["pass"], bool) for lv in gate["levels"])
 
 
-def test_entry_gate_level3_splits_spy_and_sector_legs(monkeypatch):
-    # The user's scenario: a stock beats its sector (+3) but not SPY by enough
-    # (+2 <= +5). Level 3 must FAIL overall, yet the sector sub-check must show
-    # PASS — so the UI never reads a SPY-leg miss as "not beating the sector".
+def test_entry_gate_level3_is_the_stock_lights_verdict(monkeypatch):
+    # Level 3 is now the per-name Genius lights: it passes iff the stock verdict is
+    # GREEN (4/4 lights + no veto). Its sub-checks are the four lights, and a
+    # YELLOW (exactly 3 green) name does NOT clear it — a watchlist state, never
+    # enterable.
     import screening
     screening._results.clear()
     monkeypatch.setattr(screening, "regime",
-                        lambda: {"status": "green", "breadth": 70, "vix": 15, "spy_trend": "up"})
+                        lambda: {"status": "green", "breadth": 70, "vix": 15})
     monkeypatch.setattr(screening, "sectors",
-                        lambda: {"XLK": {"name": "Technology", "rs3m": 20, "breadth": 70,
-                                         "atr_expanding": True, "status": "green"}})
+                        lambda: {"XLK": {"name": "Technology", "rs1m": 5.0, "rs3m": 20,
+                                         "breadth": 70, "atr_expanding": True, "status": "green"}})
+    lights = {"close_vs_ma": {"signal": "green"}, "fast_vs_slow": {"signal": "green"},
+              "sar": {"signal": "green"}, "momentum": {"signal": "red"}}   # 3 green -> YELLOW
     monkeypatch.setattr(screening, "_stock_row", lambda *a, **k: {
-        "ticker": "NVDA", "sector": "XLK", "rs3m_vs_spy": 2.0, "rs3m_vs_sector": 3.0,
-        "atr_pct": 3.0, "consolidating": True, "status": "wait"})
+        "ticker": "NVDA", "sector": "XLK", "lights": lights, "greens": 3,
+        "verdict": "yellow", "atr_pct": 3.0, "consolidating": True,
+        "right_spot": {"pass": True, "checks": [], "blocked_by": []}, "status": "wait"})
 
     gate = screening.entry_gate("NVDA")
     l3 = next(l for l in gate["levels"] if l["level"] == 3)
-    spy_check, sector_check = l3["checks"]
-    assert l3["pass"] is False         # combined fails
-    assert spy_check["pass"] is False  # vs SPY +2 is not > +5
-    assert sector_check["pass"] is True  # vs Sector +3 IS > 0 — the leg that confused the user
+    assert l3["pass"] is False                    # YELLOW verdict does not clear L3
+    assert len(l3["checks"]) == 4                  # the four Genius lights as sub-checks
+    assert [c["pass"] for c in l3["checks"]] == [True, True, True, False]
 
 
-def test_stock_row_waives_self_sector_leg_for_a_sector_etf(monkeypatch):
-    # XLK entered as its own CFM candidate has no distinct peer sector to beat
-    # — comparing it to itself would otherwise compute to a tautological 0
-    # every time, permanently failing the "beats sector" leg. That leg must be
-    # waived (N/A), not scored as a fail, and rs3m_vs_sector shown as None
-    # rather than a misleading 0.00%.
+def test_stock_row_sector_etf_has_no_vs_sector_rs(monkeypatch):
+    # XLK entered as its own CFM candidate has no distinct peer sector — its
+    # rs3m/rs1m vs Sector are N/A (None, not a misleading 0), and the vs-sector
+    # veto is waived (an ETF has no growth-leader peer). The lights run identically.
     import data_handler
     import screening
 
-    df = _frame([100.0] * 70)
+    df = _frame([100 + i * 0.08 for i in range(230)])   # gentle uptrend -> 4 green + right spot
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
-    monkeypatch.setattr(ind, "rs3m", lambda d, b, **k: 8.0)  # direct RS = 8 either way
-    monkeypatch.setattr(ind, "atr_pct", lambda d, **k: 2.0)
-    monkeypatch.setattr(ind, "consolidating", lambda d: True)
 
-    # _stock_row now takes the sector FRAME (direct rs3m(stock, sector_etf)); the
-    # sector-ETF-as-own-position guard still yields None regardless of the frame.
     row = screening._stock_row("XLK", df, df, "XLK", regime_green=True, sector_strong=True)
     assert row["is_sector_etf"] is True
+    assert row["is_etf"] is True
     assert row["rs3m_vs_sector"] is None
-    assert row["stock_strong"] is True    # waived, not failed
-    assert "stock" not in row["blocked_by"]
+    assert row["rs1m_vs_sector"] is None
+    # The vs-sector veto is waived for the ETF (not applicable), never tripped.
+    veto = next(v for v in row["vetoes"] if v["id"] == "rs3m_vs_sector")
+    assert veto["applicable"] is False and veto["tripped"] is False
+    assert row["verdict"] == "green"
     assert row["status"] == "ready"
 
-    # A regular constituent (ticker != sector_etf) gets the DIRECT rs3m(stock,
-    # sector) figure — here the mock returns 8.0 for that call.
-    normal = screening._stock_row("NVDA", df, df, "XLK", regime_green=True, sector_strong=True)
-    assert normal["is_sector_etf"] is False
-    assert normal["rs3m_vs_sector"] == 8.0  # direct rs3m(stock, sector), not a difference
 
-
-def test_entry_gate_level3_waives_sector_leg_for_a_sector_etf(monkeypatch):
+def test_entry_gate_level4_is_the_right_spot_gate(monkeypatch):
+    # Level 4 is the SEPARATE right-spot gate (not a light). A 4/4-green but
+    # EXTENDED name clears Level 3 (lights green) yet fails Level 4 on extension.
     import data_handler
     import screening
     screening._results.clear()
 
     n = 260
     spy = _frame([100.0] * n)
-    xlk = _frame([100 + i * 0.6 for i in range(n)])  # trending, consolidating-ish
+    breakout = _frame([100 + i * 0.5 for i in range(n)])   # steep -> green lights, but extended
 
     def fake_get_daily(symbol, force=False):
-        return spy if symbol.upper() == "SPY" else xlk
+        return spy if symbol.upper() == "SPY" else breakout
 
     monkeypatch.setattr(data_handler, "get_daily", fake_get_daily)
-    monkeypatch.setattr(data_handler, "get_many", lambda syms, force=False: {s.upper(): xlk for s in syms})
+    monkeypatch.setattr(data_handler, "get_many", lambda syms, force=False: {s.upper(): breakout for s in syms})
     monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
     monkeypatch.setattr(screening, "regime",
-                        lambda: {"status": "green", "breadth": 70, "vix": 15, "spy_trend": "up"})
+                        lambda: {"status": "green", "breadth": 70, "vix": 15})
     monkeypatch.setattr(screening, "sectors",
-                        lambda: {"XLK": {"name": "Technology", "rs3m": 20, "breadth": 70,
-                                         "atr_expanding": False, "status": "green"}})
+                        lambda: {"XLK": {"name": "Technology", "rs1m": 5.0, "rs3m": 20,
+                                         "breadth": 70, "atr_expanding": False, "status": "green"}})
 
     gate = screening.entry_gate("XLK")
     l3 = next(l for l in gate["levels"] if l["level"] == 3)
-    spy_check, sector_check = l3["checks"]
-    assert sector_check["pass"] is True            # waived, not a real fail
-    assert "N/A" in sector_check["label"]
-    assert spy_check["pass"] is True                # XLK genuinely beats SPY here
-    assert l3["pass"] is True
-    assert l3["detail"]["is_sector_etf"] is True
-    assert l3["detail"]["rs3m_vs_sector"] is None
+    l4 = next(l for l in gate["levels"] if l["level"] == 4)
+    assert l3["pass"] is True                       # lights are all green...
+    assert l4["pass"] is False                       # ...but it's extended (right spot blocks)
+    assert any(not c["pass"] for c in l4["checks"])
+    assert l4["detail"]["right_spot"]["pass"] is False
 
 
 def test_rs_vs_spy_min_uses_a_lower_bar_for_etfs():
@@ -1106,93 +1100,24 @@ def test_rs_vs_spy_min_uses_a_lower_bar_for_etfs():
     assert config.STOCK_RS_VS_SPY_MIN_ETF < config.STOCK_RS_VS_SPY_MIN
 
 
-def test_etf_clears_level3_spy_leg_on_the_lower_income_sleeve_bar(monkeypatch):
-    # An ETF that merely leads SPY (+2%, below the +5% growth bar) must now clear
-    # the Level 3 "beats SPY" leg — it runs as an income sleeve, not a growth
-    # leader — while a regular stock at the same +2% still fails that leg.
+def test_stock_and_etf_get_identical_lights_and_right_spot(monkeypatch):
+    # Evaluation is IDENTICAL for stocks and ETFs on the same series: same lights,
+    # same right-spot verdict. Only the vs-sector veto applicability differs (waived
+    # for ETFs), which doesn't change the outcome when no sector frame is supplied.
     import data_handler
     import screening
-    screening._results.clear()
+    import sector_data
 
-    n = 260
-    spy = _frame([100.0] * n)
-    trend = _frame([100 + i * 0.3 for i in range(n)])
-    monkeypatch.setattr(data_handler, "get_daily",
-                        lambda s, force=False: spy if s.upper() == "SPY" else trend)
-    monkeypatch.setattr(data_handler, "get_many", lambda syms, force=False: {s.upper(): trend for s in syms})
-    monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
-    monkeypatch.setattr(ind, "rs3m", lambda d, b, **k: 2.0)  # +2% vs SPY for everything
-    monkeypatch.setattr(ind, "atr_pct", lambda d, **k: 2.0)
-    monkeypatch.setattr(ind, "consolidating", lambda d: True)
-    monkeypatch.setattr(screening, "regime",
-                        lambda: {"status": "green", "breadth": 70, "vix": 15, "spy_trend": "up"})
-    monkeypatch.setattr(screening, "sectors",
-                        lambda: {"XLK": {"name": "Technology", "rs3m": 20, "breadth": 70,
-                                         "atr_expanding": False, "status": "green"}})
+    df = _frame([100 + i * 0.08 for i in range(230)])
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
 
-    # XLK (an ETF) clears the SPY leg on the >0% bar; the label reflects it.
-    etf_l3 = next(l for l in screening.entry_gate("XLK")["levels"] if l["level"] == 3)
-    spy_check = etf_l3["checks"][0]
-    assert spy_check["pass"] is True
-    assert "+0%" in spy_check["label"]
-
-    # NVDA (a stock) at the same +2% still fails — the growth bar is unchanged.
-    stock_l3 = next(l for l in screening.entry_gate("NVDA")["levels"] if l["level"] == 3)
-    stock_spy_check = stock_l3["checks"][0]
-    assert stock_spy_check["pass"] is False
-    assert "+5%" in stock_spy_check["label"]
-
-
-def test_entry_gate_level3_waives_sector_leg_for_a_curated_etf(monkeypatch):
-    # A curated (non-header) ETF like SMH that leads SPY but LAGS its assigned
-    # broad sector (XLK) must still clear Level 3 — an income-sleeve ETF isn't
-    # required to outrun its sector — while a stock in the same spot fails on it.
-    import data_handler
-    import screening
-    screening._results.clear()
-
-    n = 260
-    spy = _frame([100.0] * n)
-    xlk = _frame([100 + i * 0.6 for i in range(n)])   # the assigned sector
-    other = _frame([100 + i * 0.3 for i in range(n)])  # SMH / the stock
-
-    def fake_get_daily(symbol, force=False):
-        u = symbol.upper()
-        return spy if u == "SPY" else xlk if u == "XLK" else other
-
-    monkeypatch.setattr(data_handler, "get_daily", fake_get_daily)
-    monkeypatch.setattr(data_handler, "get_many", lambda syms, force=False: {s.upper(): other for s in syms})
-    monkeypatch.setattr(data_handler, "prefetch", lambda syms, force=False: None)
-    # SMH / the stock lead SPY by +2%, but the DIRECT rs3m(stock, XLK) is -8%
-    # (lagging the assigned sector). The vs-SPY leg keys on the frame; the direct
-    # vs-sector leg keys on the sector-ETF frame being the benchmark.
-    def _fake_rs3m(d, b, **k):
-        if b is xlk:            # direct rs3m(stock, sector) — the vs-sector leg
-            return -8.0
-        return 10.0 if d is xlk else 2.0   # vs-SPY
-    monkeypatch.setattr(ind, "rs3m", _fake_rs3m)
-    monkeypatch.setattr(ind, "atr_pct", lambda d, **k: 2.0)
-    monkeypatch.setattr(ind, "consolidating", lambda d: True)
-    monkeypatch.setattr(screening, "regime",
-                        lambda: {"status": "green", "breadth": 70, "vix": 15, "spy_trend": "up"})
-    monkeypatch.setattr(screening, "sectors",
-                        lambda: {"XLK": {"name": "Technology", "rs3m": 20, "breadth": 70,
-                                         "atr_expanding": False, "status": "green"}})
-
-    # SMH (a curated ETF) clears Level 3: the SPY leg passes on the >0% bar and
-    # the beats-sector leg is waived (N/A) even though it lags XLK by 8%.
-    etf_l3 = next(l for l in screening.entry_gate("SMH")["levels"] if l["level"] == 3)
-    etf_spy, etf_sector = etf_l3["checks"]
-    assert etf_spy["pass"] is True
-    assert etf_sector["pass"] is True and "N/A" in etf_sector["label"]
-    assert etf_l3["pass"] is True
-    assert etf_l3["detail"]["is_sector_etf"] is False   # curated, not a header
-    assert etf_l3["detail"]["rs3m_vs_sector"] == -8.0   # still shown, just not gated
-
-    # NVDA (a stock) in the same spot fails Level 3 — both legs bite.
-    stock_l3 = next(l for l in screening.entry_gate("NVDA")["levels"] if l["level"] == 3)
-    assert stock_l3["pass"] is False
-    assert stock_l3["checks"][1]["pass"] is False        # beats-sector NOT waived
+    monkeypatch.setattr(sector_data, "is_etf", lambda t: False)
+    as_stock = screening._stock_row("NVDA", df, None, "XLK", regime_green=True, sector_strong=True)
+    monkeypatch.setattr(sector_data, "is_etf", lambda t: True)
+    as_etf = screening._stock_row("QQQ", df, None, "XLK", regime_green=True, sector_strong=True)
+    assert as_stock["lights"] == as_etf["lights"]
+    assert as_stock["verdict"] == as_etf["verdict"]
+    assert as_stock["right_spot"]["pass"] == as_etf["right_spot"]["pass"]
 
 
 def test_stock_filter_includes_the_sector_etf_alongside_constituents(monkeypatch):
@@ -1218,25 +1143,22 @@ def test_stock_filter_includes_the_sector_etf_alongside_constituents(monkeypatch
 
 
 def test_filter_ready_requires_regime_and_sector(monkeypatch):
-    # A stock can be strong + consolidating (gate Levels 3/4) yet not entry-ready
-    # because the market regime or its sector isn't green. The filter's "ready"
-    # must agree with the gate's READY TO ENTER, naming what blocks it.
+    # A stock can be lights-GREEN + in the right spot (gate Levels 3/4) yet not
+    # entry-ready because the market regime or its sector isn't green. The filter's
+    # "ready" must agree with the gate's READY TO ENTER, naming what blocks it.
     import data_handler
-    import indicators
     import screening
 
-    df = _frame([100.0] * 70)
+    df = _frame([100 + i * 0.08 for i in range(230)])   # 4 green + right spot
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
-    monkeypatch.setattr(indicators, "rs3m", lambda d, b, **k: 12.0)   # stock vs SPY +12
-    monkeypatch.setattr(indicators, "atr_pct", lambda d, **k: 2.0)
-    monkeypatch.setattr(indicators, "consolidating", lambda d: True)
 
-    # rs_vs_sector = 12 - 2 = +10 (> 0); stock leg passes, consolidating passes.
-    weak_regime = screening._stock_row("NVDA", df, 2.0, "XLK", regime_green=False, sector_strong=True)
-    assert weak_regime["stock_strong"] is True
-    assert weak_regime["status"] == "wait"
+    # A weak regime blocks even a lights-GREEN, in-the-right-spot name.
+    weak_regime = screening._stock_row("NVDA", df, None, "XLK", regime_green=False, sector_strong=True)
+    assert weak_regime["verdict"] == "green"
+    assert weak_regime["enterable"] is True            # the stock itself is enterable...
+    assert weak_regime["status"] == "wait"             # ...but the pipeline isn't ready
     assert "regime" in weak_regime["blocked_by"]
 
-    all_green = screening._stock_row("NVDA", df, 2.0, "XLK", regime_green=True, sector_strong=True)
+    all_green = screening._stock_row("NVDA", df, None, "XLK", regime_green=True, sector_strong=True)
     assert all_green["status"] == "ready"
     assert all_green["blocked_by"] == []

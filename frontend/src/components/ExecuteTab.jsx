@@ -13,7 +13,90 @@ function checkValue(v) {
   return fmt(v, 1);
 }
 
+// The per-name Genius four-light row — mirrors the market regime's FourLights UI
+// (Overview.jsx), applied to a single stock. One indicator system, fractal across
+// market and stock.
+const STOCK_LIGHT_ORDER = ["close_vs_ma", "fast_vs_slow", "sar", "momentum"];
+const STOCK_LIGHT_LABELS = {
+  close_vs_ma: "Close > MA",
+  fast_vs_slow: "Fast > Slow",
+  sar: "SAR",
+  momentum: "Momentum",
+};
+
+function StockFourLights({ lights, greens, verdict }) {
+  if (!lights) return null;
+  return (
+    <div className="mt-2">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-400">Stock lights</span>
+        <span className="flex items-center gap-2 text-xs text-slate-400">
+          {greens != null ? `${greens}/4 green` : ""}
+          {verdict ? <Pill status={verdict}>{verdict}</Pill> : null}
+        </span>
+      </div>
+      <div className="grid grid-cols-4 gap-2">
+        {STOCK_LIGHT_ORDER.map((k) => (
+          <div key={k} className="flex flex-col items-center gap-1 rounded-lg border border-slate-700 bg-slate-800/40 px-2 py-2">
+            <Light status={lights[k]?.signal || "unknown"} size="h-4 w-4" />
+            <span className="text-center text-[10px] leading-tight text-slate-400">{STOCK_LIGHT_LABELS[k]}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Veto banners — any tripped veto forces the stock verdict to RED, independent of
+// the lights. Shows every veto that fired, worst-signal-wins.
+const VETO_LABELS = {
+  rs3m_vs_sector: "RS3M vs Sector negative (weaker than its own sector)",
+  atr_expanding_high_ivr: "ATR expanding into rich IV (IVR ≥ threshold)",
+  close_below_ma200: "Close below MA200 (trend broken)",
+};
+
+function VetoBanners({ vetoes }) {
+  const tripped = (vetoes || []).filter((v) => v.tripped);
+  if (!tripped.length) return null;
+  return (
+    <div className="mt-2 space-y-1">
+      {tripped.map((v) => (
+        <div key={v.id} className="flex items-center gap-2 rounded-md border border-rose-500/40 bg-rose-500/10 px-2 py-1 text-xs text-rose-300">
+          <span className="font-semibold uppercase tracking-wide">Veto</span>
+          <span>{VETO_LABELS[v.id] || v.id}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// The separate "Right Spot" card — the consolidation gate that runs AFTER the
+// lights (not a light). Blocking; identical for stocks and ETFs.
+function RightSpotCard({ spot }) {
+  if (!spot) return null;
+  return (
+    <div className="mt-2 rounded-lg border border-slate-700 bg-slate-800/30 px-3 py-2">
+      <div className="mb-1 flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-400">Right Spot</span>
+        <Pill status={spot.pass ? "ready" : "no"}>{spot.pass ? "IN SPOT" : "BLOCKED"}</Pill>
+      </div>
+      <div className="space-y-0.5">
+        {(spot.checks || []).map((c) => (
+          <div key={c.id} className="flex items-center gap-2 text-xs">
+            <span className={c.pass ? "text-emerald-400" : "text-rose-400"}>{c.pass ? "✓" : "✗"}</span>
+            <span className="text-slate-400">{c.id}</span>
+            <span className="text-slate-500">({checkValue(c.value)})</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function GateLevel({ lv }) {
+  const d = lv.detail || {};
+  const isStockLights = lv.level === 3;
+  const isRightSpot = lv.level === 4;
   return (
     <div className="flex items-start gap-3 border-t border-slate-800 py-2">
       <Light status={lv.pass ? "green" : "red"} />
@@ -34,6 +117,15 @@ function GateLevel({ lv }) {
             ))}
           </div>
         ) : null}
+        {/* Level 3 = the per-name Genius lights + verdict pill + veto banners. */}
+        {isStockLights && (
+          <>
+            <StockFourLights lights={d.lights} greens={d.greens} verdict={d.verdict} />
+            <VetoBanners vetoes={d.vetoes} />
+          </>
+        )}
+        {/* Level 4 = the separate Right Spot gate card. */}
+        {isRightSpot && <RightSpotCard spot={d.right_spot} />}
       </div>
       <Pill status={lv.pass ? "ready" : "no"}>{lv.pass ? "PASS" : "FAIL"}</Pill>
     </div>

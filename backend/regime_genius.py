@@ -11,6 +11,13 @@ then holds a YELLOW condition for a minimum dwell so it can't flap:
 
     vote:  >=3 GREEN -> GREEN ; 2 GREEN / 2 RED -> YELLOW ; >=3 RED -> RED   [HARD]
 
+The four lights and the raw vote now live in the SHARED engine ``genius_lights``
+(one indicator system, fractal across market and stock). This module owns ONLY
+the market-specific layers on top — the yellow dwell and the secondary
+indicators — and re-exports the shared light functions so existing callers /
+tests keep their ``regime_genius.*`` names. There is zero duplicated light logic:
+``compute_trace`` calls ``genius_lights.compute_lights`` + ``genius_lights.vote``.
+
 Dwell (HARD_CFM_RULE): once the *published* regime becomes YELLOW it stays YELLOW
 for a minimum of ``GENIUS_YELLOW_DWELL_DAYS`` consecutive TRADING days (the entry
 day counts as day 1), regardless of the raw vote — the course's anti-flap rule.
@@ -30,11 +37,23 @@ parameter sets. Persistence lives in ``regime_history.py``; the live recompose
 from __future__ import annotations
 
 import config
-import indicators
+import genius_lights
 
-GREEN = "green"
-YELLOW = "yellow"
-RED = "red"
+# Re-export the shared light engine's colors + light math under the historical
+# ``regime_genius`` names (callers and tests import ``rg.light_sar`` etc.). These
+# ARE the shared functions — no wrapping, so the market regime and the stock
+# lights compute the four lights identically, byte for byte.
+GREEN = genius_lights.GREEN
+YELLOW = genius_lights.YELLOW
+RED = genius_lights.RED
+
+_signal = genius_lights._signal
+light_close_vs_ma = genius_lights.light_close_vs_ma
+light_fast_vs_slow = genius_lights.light_fast_vs_slow
+light_sar = genius_lights.light_sar
+light_momentum = genius_lights.light_momentum
+compute_lights = genius_lights.compute_lights
+vote = genius_lights.vote
 
 
 # ---------------------------------------------------------------------------
@@ -44,14 +63,10 @@ def default_params() -> dict:
     """The provenance-tagged Genius parameter set from config. A calibration
     sweep passes a modified copy of this into ``compute_trace`` — nothing here
     reads config directly past this point, so an alternative parameter set fully
-    determines the output."""
+    determines the output. This is a SUPERSET of ``genius_lights.default_params``:
+    the shared light + vote keys plus the market-only dwell / breadth / VIX keys."""
     return {
-        "slow_ma": config.GENIUS_SLOW_MA,
-        "fast_ma": config.GENIUS_FAST_MA,
-        "sar_af_step": config.GENIUS_SAR_AF_STEP,
-        "sar_af_max": config.GENIUS_SAR_AF_MAX,
-        "roc_window": config.GENIUS_MOMENTUM_ROC,
-        "vote_green_min": config.GENIUS_VOTE_GREEN_MIN,
+        **genius_lights.default_params(),
         "dwell_days": config.GENIUS_YELLOW_DWELL_DAYS,
         "breadth_confirm_min": config.BREADTH_CONFIRM_MIN_PCT,
         "vix_elevated": config.VIX_ELEVATED_THRESHOLD,
@@ -63,84 +78,6 @@ def _params(overrides: dict | None) -> dict:
     if overrides:
         p.update(overrides)
     return p
-
-
-# ---------------------------------------------------------------------------
-# The four lights — each returns its signal (GREEN/RED, or None on missing data)
-# plus the underlying values, for UI + snapshot provenance.
-# ---------------------------------------------------------------------------
-def _signal(is_green: bool | None) -> str | None:
-    if is_green is None:
-        return None
-    return GREEN if is_green else RED
-
-
-def light_close_vs_ma(close: float | None, slow_ma: float | None) -> dict:
-    """Light 1 — close above the slow MA is a GREEN light."""
-    green = None if close is None or slow_ma is None else close > slow_ma
-    return {"signal": _signal(green), "close": close, "slow_ma": slow_ma}
-
-
-def light_fast_vs_slow(fast_ma: float | None, slow_ma: float | None) -> dict:
-    """Light 2 — fast MA above slow MA (primary trend up) is a GREEN light."""
-    green = None if fast_ma is None or slow_ma is None else fast_ma > slow_ma
-    return {"signal": _signal(green), "fast_ma": fast_ma, "slow_ma": slow_ma}
-
-
-def light_sar(close: float | None, sar: float | None) -> dict:
-    """Light 3 — Parabolic SAR under price (dots below the bar) is a GREEN light."""
-    green = None if close is None or sar is None else sar < close
-    return {"signal": _signal(green), "sar": sar, "close": close}
-
-
-def light_momentum(roc: float | None) -> dict:
-    """Light 4 — momentum (ROC) above zero is a GREEN light."""
-    green = None if roc is None else roc > 0
-    return {"signal": _signal(green), "roc": roc}
-
-
-def compute_lights(df, params: dict | None = None) -> dict:
-    """The four lights for the latest bar of `df` (an ascending OHLCV frame).
-    Every indicator is computed here from `df` alone — no clock, no I/O."""
-    p = _params(params)
-    close = indicators.last(df)
-    slow = indicators.sma(df, p["slow_ma"]) if df is not None else None
-    fast = indicators.ema(df, p["fast_ma"])
-    sar = indicators.parabolic_sar_last(df, p["sar_af_step"], p["sar_af_max"])
-    roc = indicators.roc(df, p["roc_window"])
-    return {
-        "close_vs_ma": light_close_vs_ma(close, slow),
-        "fast_vs_slow": light_fast_vs_slow(fast, slow),
-        "sar": light_sar(close, sar),
-        "momentum": light_momentum(roc),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Vote (HARD_CFM_RULE)
-# ---------------------------------------------------------------------------
-def vote(lights: dict, params: dict | None = None) -> dict:
-    """Vote the four lights to a raw condition. >=vote_green_min GREEN -> GREEN;
-    a 2/2 split -> YELLOW; >=vote_green_min RED -> RED. If any light is missing
-    (insufficient history) the vote can't be trusted, so it degrades to YELLOW
-    and flags ``insufficient`` — real SPY always has all four."""
-    p = _params(params)
-    signals = [lights[k]["signal"] for k in ("close_vs_ma", "fast_vs_slow", "sar", "momentum")]
-    green = sum(1 for s in signals if s == GREEN)
-    red = sum(1 for s in signals if s == RED)
-    insufficient = any(s is None for s in signals)
-    green_min = p["vote_green_min"]
-    # Canon: >=green_min GREEN -> GREEN; >=green_min RED -> RED; else YELLOW.
-    if insufficient:
-        condition = YELLOW
-    elif green >= green_min:
-        condition = GREEN
-    elif red >= green_min:
-        condition = RED
-    else:
-        condition = YELLOW
-    return {"raw_condition": condition, "green_count": green, "red_count": red,
-            "insufficient": insufficient}
 
 
 # ---------------------------------------------------------------------------

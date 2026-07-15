@@ -87,10 +87,39 @@ def v_bottom_whipsaw() -> pd.DataFrame:
     return _ohlcv(list(closes), highs=highs, lows=lows)
 
 
+def xlk_july6_rollover() -> pd.DataFrame:
+    """An XLK-shaped ETF tape: a long calm advance that ROLLS OVER hard into a
+    sharp multi-day selloff at the tail (the 'July 6' analog bar is the last one).
+    Two INDEPENDENT layers must reject it as a CFM entry, which the test asserts
+    separately:
+
+      * the four-light vote — the selloff flips Parabolic SAR above price and
+        drives ROC(10) negative, so the last bar is <= 2 green => verdict != GREEN;
+        and
+      * the volatility veto — the wide selloff bars EXPAND ATR, so paired with a
+        rich IVR (>= config.VETO_IVR_PERCENTILE_MIN, supplied by the test) the
+        atr-expanding/high-IVR veto fires => RED.
+
+    Run through the ETF path the rs3m-vs-sector veto is waived (an ETF has no peer
+    sector to beat), so the ATR/IVR veto is the one that must catch it — the point
+    of the two-layer assertion. Deterministic: fixed arrays, no RNG."""
+    up = 150 + np.linspace(0, 70, 190)                 # long calm advance (tight ranges)
+    sell = up[-1] - np.linspace(0, 70, 18)             # sharp, steady selloff at the tail
+    closes = np.concatenate([up, sell[1:]]).astype(float)
+    highs = closes + 0.3
+    lows = closes - 0.3
+    # Widen the true range on the selloff leg so ATR expands vs 10 bars earlier.
+    for i in range(len(up), len(closes)):
+        highs[i] = closes[i] + 3.0
+        lows[i] = closes[i] - 4.0
+    return _ohlcv(list(closes), highs=highs, lows=lows, start="2025-09-15")
+
+
 FIXTURES = {
     "sustained_green": sustained_green,
     "distribution_rollover": distribution_rollover,
     "v_bottom_whipsaw": v_bottom_whipsaw,
+    "xlk_july6_rollover": xlk_july6_rollover,
 }
 
 

@@ -14,6 +14,7 @@ import indicators
 import regime_genius
 import regime_history
 import sector_data
+import stock_lights
 
 # Short-TTL memoization so the expensive full-universe scans run once and are
 # reused by repeated polls and by the entry gate, instead of recomputing on
@@ -236,15 +237,21 @@ def _compute_sectors() -> dict:
     out = {}
     for etf in sector_data.sector_etfs():
         df = data_handler.get_daily(etf)
-        rs = indicators.rs3m(df, spy) if df is not None else None
+        # The sector gate now bars on RS1M vs SPY (a fresher 1-month read) plus
+        # breadth. RS3M vs SPY is a laggy 3-month figure that keeps a rolled-over
+        # sector "strong" for weeks after it turns down, so it is kept for DISPLAY
+        # only — the gate keys off rs1m > SECTOR_RS1M_MIN.
+        rs1m = indicators.rs1m(df, spy) if df is not None else None
+        rs3m = indicators.rs3m(df, spy) if df is not None else None
         bdth = _sector_breadth(etf)
         expanding = indicators.atr_expanding(df) if df is not None else None
-        strong = (rs is not None and rs >= config.SECTOR_RS3M_MIN
+        strong = (rs1m is not None and rs1m > config.SECTOR_RS1M_MIN
                   and bdth is not None and bdth >= config.SECTOR_BREADTH_MIN)
-        status = "green" if strong else "red" if (rs is not None and rs < 0) else "yellow"
+        status = "green" if strong else "red" if (rs1m is not None and rs1m < 0) else "yellow"
         out[etf] = {
             "name": sector_data.sectors()[etf].name,
-            "rs3m": rs,
+            "rs1m": rs1m,        # the GATE bar (vs SPY, 1-month)
+            "rs3m": rs3m,        # display only (vs SPY, 3-month)
             "breadth": bdth,
             "atr_expanding": expanding,
             "status": status,
@@ -258,63 +265,86 @@ def _compute_sectors() -> dict:
 def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
                regime_green: bool = False, sector_strong: bool = False) -> dict:
     df = data_handler.get_daily(ticker)
-    rs_vs_spy = indicators.rs3m(df, spy) if df is not None else None
-    # RS3M vs Sector is the DIRECT rs3m(stock, sector_etf) ratio over the same
-    # 63-day lookback — the true relative strength against the sector, not the
-    # vs-SPY difference approximation. Same figure the kill switch consumes, so
-    # the entry gate and the exit rule agree on what "beating the sector" means.
-    # A sector ETF entered as its own candidate has no distinct peer sector to
-    # beat — comparing it to itself is tautologically zero every time, so that
-    # leg is waived (not applicable) rather than scored as a fail.
     is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
     is_etf = sector_data.is_etf(ticker)
-    rs_vs_sector = None
-    if not is_sector_etf and df is not None and sector_df is not None:
-        rs_vs_sector = indicators.rs3m(df, sector_df)
+
+    # RS3M (3-month) is DISPLAY / kill-switch only now — kept on the row so the UI
+    # and snapshot still show it, but it no longer gates entry. A sector ETF has
+    # no distinct peer sector to beat (tautologically itself), so its vs-sector RS
+    # is N/A.
+    rs3m_vs_spy = indicators.rs3m(df, spy) if df is not None else None
+    rs3m_vs_sector = (indicators.rs3m(df, sector_df)
+                      if (not is_sector_etf and df is not None and sector_df is not None) else None)
+    # RS1M (1-month) is the RANKING key within GREENs: rs1m_vs_sector desc for
+    # stocks, rs1m_vs_spy desc for ETFs (item F).
+    rs1m_vs_spy = indicators.rs1m(df, spy) if df is not None else None
+    rs1m_vs_sector = (indicators.rs1m(df, sector_df)
+                      if (not is_sector_etf and df is not None and sector_df is not None) else None)
     atrp = indicators.atr_pct(df) if df is not None else None
-    cons = indicators.consolidating(df) if df is not None else None
 
-    # Stock-level legs (gate Levels 3 & 4). The "beats SPY" leg uses the lower
-    # ETF bar for any ETF (income sleeve, not a growth leader); the "beats sector"
-    # leg is waived for ANY ETF — a sector header IS its sector, and a curated ETF
-    # runs as an income sleeve, not a growth name required to outrun its assigned
-    # broad sector. rs3m_vs_sector stays computed/shown for a curated ETF
-    # (informational), it's just not gated on.
-    spy_min = config.rs_vs_spy_min(is_etf)
-    beats = (rs_vs_spy is not None and rs_vs_spy > spy_min
-             and (is_etf
-                  or (rs_vs_sector is not None and rs_vs_sector > config.STOCK_RS_VS_SECTOR_MIN)))
+    # The per-name Genius lights + vetoes + right-spot gate. The vs-sector veto is
+    # waived for ETFs inside stock_lights (an ETF has no growth-leader peer). IVR
+    # for the volatility veto is read from the local IV history file.
+    try:
+        import iv_history
+        ivr_percentile = (iv_history.iv_rank(ticker) or {}).get("iv_percentile")
+    except Exception:  # noqa: BLE001
+        ivr_percentile = None
+    sl = stock_lights.compute(df, sector_df=(None if is_etf else sector_df),
+                              ivr_percentile=ivr_percentile, is_etf=is_etf)
+    stock_green = sl["verdict"] == stock_lights.GREEN
+    spot = sl["right_spot"]
 
-    # "ready" means the FULL gate would pass, so it matches the entry gate's
-    # READY TO ENTER verdict — regime + sector must also be green, not just the
-    # stock's own strength. blocked_by names what's missing so a strong stock
-    # that isn't entry-ready explains why.
+    # "ready" means the FULL pipeline would pass (worst-signal-wins): regime green
+    # -> sector strong -> stock lights GREEN -> right-spot -> (Level 5 checked
+    # separately). blocked_by names every failing stage so a strong name that is
+    # not entry-ready explains why. The right-spot gate contributes its own
+    # spot:<check> reasons.
     blocked_by = []
     if not regime_green:
         blocked_by.append("regime")
     if not sector_strong:
         blocked_by.append("sector")
-    if not beats:
-        blocked_by.append("stock")
-    if not cons:
-        blocked_by.append("consolidation")
+    if not stock_green:
+        blocked_by.append("lights")
+    blocked_by.extend(spot["blocked_by"])
+    # Vetoes already force the verdict to RED (folded into "lights"); surface them
+    # explicitly too so the reason is legible.
+    blocked_by.extend(sl["veto_reasons"])
 
     if not blocked_by:
         status = "ready"
-    elif rs_vs_sector is not None and rs_vs_sector < 0:
+    elif sl["verdict"] == stock_lights.RED and sl["vetoed"]:
         status = "no"
     else:
         status = "wait"
     return {
         "ticker": ticker,
         "sector": sector_etf,
-        "rs3m_vs_spy": rs_vs_spy,
-        "rs3m_vs_sector": rs_vs_sector,
+        "rs3m_vs_spy": rs3m_vs_spy,
+        "rs3m_vs_sector": rs3m_vs_sector,
+        "rs1m_vs_spy": rs1m_vs_spy,
+        "rs1m_vs_sector": rs1m_vs_sector,
         "is_sector_etf": is_sector_etf,
+        "is_etf": is_etf,
         "atr_pct": atrp,
-        "consolidating": cons,
-        "stock_strong": beats,
+        # Per-name Genius light block (mirrors the market regime's four lights).
+        "lights": sl["lights"],
+        "greens": sl["greens"],
+        "verdict": sl["verdict"],
+        "insufficient": sl["insufficient"],
+        "vetoes": sl["vetoes"],
+        "vetoed": sl["vetoed"],
+        "veto_reasons": sl["veto_reasons"],
+        "right_spot": spot,
+        "enterable": sl["enterable"],
+        "stock_green": stock_green,
+        # Back-compat: `consolidating` now means "in the right spot" (the gate that
+        # replaced the old single consolidating flag).
+        "consolidating": spot["pass"],
         "blocked_by": blocked_by,
+        # Ranking key within GREENs (rs1m_vs_sector for stocks, rs1m_vs_spy for ETFs).
+        "rank_key": (rs1m_vs_spy if is_etf else rs1m_vs_sector),
         "status": status,
     }
 
@@ -347,8 +377,10 @@ def _compute_stock_filter(sector: str | None = None) -> list[dict]:
         for ticker in sector_data.constituents(etf):
             rows.append(_stock_row(ticker, spy, sector_df, etf,
                                    regime_green=regime_green, sector_strong=sector_strong))
-    # Sort by RS3M vs Sector descending (best fit first); None last.
-    rows.sort(key=lambda r: (r["rs3m_vs_sector"] is None, -(r["rs3m_vs_sector"] or 0)))
+    # Ranking (item F): GREENs first, then by the RS1M rank key descending
+    # (rs1m_vs_sector for stocks, rs1m_vs_spy for ETFs); None last within a group.
+    rows.sort(key=lambda r: (r.get("verdict") != stock_lights.GREEN,
+                             r.get("rank_key") is None, -(r.get("rank_key") or 0)))
     return rows
 
 
@@ -396,54 +428,63 @@ def entry_gate(ticker: str) -> dict:
     levels.append({"level": 1, "name": "Market regime green", "pass": regime_green,
                    "checks": l1_checks, "detail": reg})
 
-    # Level 2 — sector strong
+    # Level 2 — sector strong. The gate now bars on RS1M vs SPY (fresher 1-month
+    # read) + breadth, replacing the laggy RS3M vs SPY bar. RS3M is shown for
+    # context but no longer gated on.
     sec = sectors().get(sector_etf, {}) if sector_etf else {}
     l2_checks = [
-        _check(f"Sector RS3M ≥ +{config.SECTOR_RS3M_MIN:g}%", sec.get("rs3m"),
-               sec.get("rs3m") is not None and sec.get("rs3m") >= config.SECTOR_RS3M_MIN),
+        _check(f"Sector RS1M vs SPY > {config.SECTOR_RS1M_MIN:g}%", sec.get("rs1m"),
+               sec.get("rs1m") is not None and sec.get("rs1m") > config.SECTOR_RS1M_MIN),
         _check(f"Sector breadth ≥ {config.SECTOR_BREADTH_MIN:g}%", sec.get("breadth"),
                sec.get("breadth") is not None and sec.get("breadth") >= config.SECTOR_BREADTH_MIN),
     ]
     levels.append({"level": 2, "name": "Sector strong", "pass": _all(l2_checks),
                    "checks": l2_checks, "detail": {"sector": sector_etf, **sec}})
 
-    # Levels 3 & 4 — stock beating peers + consolidating
+    # Level 3 — stock lights GREEN. The SAME four Genius lights as the market
+    # regime, applied per name (stock_lights). Level 3 passes iff the stock verdict
+    # is GREEN (4/4 lights green AND no veto). The four lights are shown as
+    # sub-checks; a veto (folded into the verdict) or an insufficient light both
+    # drop the verdict below GREEN. YELLOW (exactly 3 green) is a watchlist state,
+    # never enterable, so it does NOT pass this level.
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_df = data_handler.get_daily(sector_etf) if sector_etf else None
-    # Pass the regime/sector verdicts so the row's status matches this gate's.
     row = _stock_row(ticker, spy, sector_df, sector_etf or "",
                      regime_green=regime_green, sector_strong=_all(l2_checks))
+    row_lights = row.get("lights") or {}
 
-    # The two legs are checked separately: "beats SPY" and "beats its sector"
-    # are distinct conditions, so the UI can show exactly which one failed. The
-    # beats-sector leg is waived for ANY ETF (N/A, not a fail): a sector header
-    # entered as its own candidate has no peer sector to beat (tautologically
-    # itself), and a curated ETF runs as an income sleeve, not a growth name
-    # required to outrun its assigned broad sector.
-    rs_spy, rs_sec = row["rs3m_vs_spy"], row["rs3m_vs_sector"]
-    is_sector_etf = row.get("is_sector_etf", False)
-    is_etf = sector_data.is_etf(ticker)
-    # Any ETF beats SPY on the lower income-sleeve bar and waives the beats-sector
-    # leg; the label says which kind of waiver applies.
-    spy_min = config.rs_vs_spy_min(is_etf)
-    sector_note = (" (N/A — is the sector)" if is_sector_etf
-                   else " (N/A — ETF sleeve)" if is_etf else "")
+    def _row_light_check(label: str, key: str) -> dict:
+        sig = (row_lights.get(key) or {}).get("signal")
+        return _check(label, sig, sig == "green")
+
     l3_checks = [
-        _check(f"RS3M vs SPY > +{spy_min:g}%", rs_spy,
-               rs_spy is not None and rs_spy > spy_min),
-        _check(f"RS3M vs Sector > {config.STOCK_RS_VS_SECTOR_MIN:g}%" + sector_note,
-               rs_sec, is_etf or (rs_sec is not None and rs_sec > config.STOCK_RS_VS_SECTOR_MIN)),
+        _row_light_check(f"Close > {config.GENIUS_SLOW_MA} SMA", "close_vs_ma"),
+        _row_light_check(f"EMA{config.GENIUS_FAST_MA} > SMA{config.GENIUS_SLOW_MA}", "fast_vs_slow"),
+        _row_light_check("Parabolic SAR below price", "sar"),
+        _row_light_check(f"ROC({config.GENIUS_MOMENTUM_ROC}) > 0", "momentum"),
     ]
-    levels.append({"level": 3, "name": "Stock beating peers", "pass": _all(l3_checks),
+    stock_green = row.get("verdict") == stock_lights.GREEN
+    levels.append({"level": 3, "name": "Stock lights green", "pass": stock_green,
                    "checks": l3_checks, "detail": row})
 
+    # Level 4 — right spot. A SEPARATE, blocking gate applied AFTER the lights (the
+    # consolidation "right spot" checks are NOT lights). Identical for stocks/ETFs.
+    spot = row.get("right_spot") or {"checks": [], "pass": False}
+    spot_by_id = {c["id"]: c for c in spot.get("checks") or []}
     l4_checks = [
-        _check(f"ATR% ≤ {config.CONSOLIDATION_ATR_PCT_MAX:g}", row["atr_pct"],
-               row["atr_pct"] is not None and row["atr_pct"] <= config.CONSOLIDATION_ATR_PCT_MAX),
-        _check("Near MA21 (consolidating)", row["consolidating"], bool(row["consolidating"])),
+        _check(f"ATR% ≤ {config.CONSOLIDATION_ATR_PCT_MAX:g}",
+               (spot_by_id.get("atr_pct") or {}).get("value"),
+               (spot_by_id.get("atr_pct") or {}).get("pass")),
+        _check(f"ATR contracting/flat (≤ {config.SPOT_ATR_MOMENTUM_MAX:g})",
+               (spot_by_id.get("atr_5d_ema") or {}).get("value"),
+               (spot_by_id.get("atr_5d_ema") or {}).get("pass")),
+        _check(f"Extension ≤ {config.SPOT_ATR_EXTENSION_MAX:g} ATR above MA21",
+               (spot_by_id.get("extension") or {}).get("value"),
+               (spot_by_id.get("extension") or {}).get("pass")),
     ]
-    levels.append({"level": 4, "name": "Consolidating, not breaking", "pass": _all(l4_checks),
-                   "checks": l4_checks, "detail": {"atr_pct": row["atr_pct"], "consolidating": row["consolidating"]}})
+    levels.append({"level": 4, "name": "Right spot (not extended)", "pass": bool(spot.get("pass")),
+                   "checks": l4_checks, "detail": {"atr_pct": row["atr_pct"],
+                                                   "right_spot": spot, "consolidating": row["consolidating"]}})
 
     # Stop-on-fail: the cleared level is the highest contiguous pass from 1.
     cleared = 0
