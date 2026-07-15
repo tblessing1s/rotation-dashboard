@@ -66,6 +66,41 @@ const COLUMNS = [
   { key: "verdict", label: "Verdict", num: false, render: (r) => <Pill status={VERDICT_STATUS[r.verdict] || "unknown"}>{r.verdict}</Pill> },
 ];
 
+// Per-column help — what the column is AND what the value levels mean. Shown as a
+// hover tooltip on the header (with a small ⓘ affordance). Kept out of the COLUMNS
+// definitions so the render logic stays terse.
+const COLUMN_HELP = {
+  ticker:
+    "The symbol. Click the row (▸) to expand its verdict reasons. ETF / no-weeklies tags flag special handling.",
+  lights:
+    "The four Genius lights (Close > MA50 · EMA21 > MA50 · SAR below price · ROC10 > 0) plus the separate right-spot gate.\n" +
+    "4 green = GREEN · exactly 3 = YELLOW (watchlist, not enterable) · ≤2 or any veto = RED.\n" +
+    "SPOT✓ = in a good entry spot · SPOT✗ = extended or too volatile.",
+  price: "Latest daily close, or a live quote after ↻.",
+  rs3m_vs_spy:
+    "3-month relative strength vs SPY, %. Display / kill-switch only now — it no longer gates entry. >0 = outrunning SPY.",
+  rs3m_vs_sector:
+    "3-month relative strength vs its own sector ETF, %. The kill-switch line: <0 = weaker than its sector (exit signal, and an entry veto for stocks). N/A for a sector ETF.",
+  pct_above_ma21:
+    "Price distance above/below its 21-day MA, %. Context only — the right-spot gate uses the ATR-normalized ATR ext, not raw %.",
+  atr_extension:
+    "How far price sits above MA21, measured in ATRs. Right-spot extension check: ≤ 1.5 = in the pocket · > 1.5 = extended (blocks the spot gate).",
+  mfi:
+    "Money Flow Index (0–100), a volume-weighted momentum read. Extremes raise a CAUTION; the mid-band is healthy. Waived for ETFs.",
+  volume_ratio:
+    "Today's volume ÷ its 20-day average. Below ~1 = thin participation (a CAUTION for stocks). Waived for ETFs.",
+  atr_momentum:
+    "ATR ÷ its 5-day average. ≤ 1 = volatility contracting or flat (good, coiling) · > 1 = expanding (breaking out). The right-spot volatility check.",
+  obv_above_ema:
+    "On-Balance Volume vs its 20-EMA. ↑ = accumulation (buyers), ↓ = distribution (sellers).",
+  juice_weekly_pct:
+    "History-implied weekly extrinsic ÷ LEAP cost — the CFM payoff. Green = meets the weekly target · red = below it.",
+  earnings_days:
+    "Days to next earnings. ≤ 7d is flagged amber — roll the short deep-ITM or avoid entering into the report.",
+  verdict:
+    "The roll-up: GO (clears the stock legs + CFM rules) · CAUTION (soft flags) · AVOID (a hard rail failed). A non-green market regime can still block a GO — see the banner above.",
+};
+
 const VERDICT_ORDER = { AVOID: 0, CAUTION: 1, GO: 2 };
 
 // When the market regime isn't green, the gate's Level 1 is the headline risk —
@@ -345,7 +380,9 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
         </label>
       </div>
       {error && <ErrorState error={error} onRetry={reload} />}
-      <div className="overflow-x-auto">
+      {/* Own vertical scroll (max-h) so the header can stick to the top of THIS
+          container — independent of the page/navbar, which is a dynamic height. */}
+      <div className="max-h-[70vh] overflow-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-xs uppercase tracking-wide text-slate-500">
@@ -353,10 +390,13 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
                 <th
                   key={c.key}
                   onClick={() => toggleSort(c.key)}
-                  className="cursor-pointer select-none py-2 pr-3 hover:text-slate-300"
-                  title="Sort"
+                  className="sticky top-0 z-10 cursor-pointer select-none bg-slate-900 py-2 pr-3 hover:text-slate-300"
+                  title={COLUMN_HELP[c.key] ? `${COLUMN_HELP[c.key]}\n\n(click to sort)` : "Sort"}
                 >
-                  {c.label}
+                  <span className="inline-flex items-center gap-1">
+                    {c.label}
+                    {COLUMN_HELP[c.key] && <span aria-hidden className="text-[10px] text-slate-600">ⓘ</span>}
+                  </span>
                   {sort.key === c.key ? (sort.dir === "asc" ? " ▲" : " ▼") : ""}
                 </th>
               ))}
