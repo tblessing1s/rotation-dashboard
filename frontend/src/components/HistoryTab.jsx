@@ -234,195 +234,6 @@ function cell(v) {
   return String(v).length > 22 ? String(v).slice(0, 21) + "…" : String(v);
 }
 
-// ---- Bidirectional extrinsic ⇄ entry-price math ---------------------------
-// The editors quote everything PER SHARE (LEAP cost is ÷100 on load, ×100 back
-// on save), so the intrinsic split is the same for both leg types: extrinsic =
-// premium − max(entry − strike, 0). Whichever field the operator edits, the
-// other is derived here identically to what the backend will recompute from the
-// entry price we send (executor._short_extrinsic / _leap_extrinsic_pc).
-const _num = (v) => (v === "" || v == null || isNaN(Number(v)) ? null : Number(v));
-const _round = (v, dp) => {
-  const m = 10 ** dp;
-  return Math.round(v * m) / m;
-};
-
-// extrinsic (per share) = premium per share − intrinsic per share.
-function extrinsicFromEntry(price, strike, entry) {
-  const p = _num(price), k = _num(strike), e = _num(entry);
-  if (p == null || k == null || e == null) return null;
-  return _round(Math.max(p - Math.max(e - k, 0), 0), 2);
-}
-
-// Inverse: the underlying entry price implied by an extrinsic value. At/out of
-// the money the intrinsic is 0, so entry isn't uniquely determined — we pin it
-// at the strike (the ITM boundary), which is what the extrinsic math assumes.
-function entryFromExtrinsic(price, strike, extrinsic) {
-  const p = _num(price), k = _num(strike), ext = _num(extrinsic);
-  if (p == null || k == null || ext == null) return null;
-  return _round(k + Math.max(p - ext, 0), 2);
-}
-
-// Given a row/leg with a `driver` ("entry" | "extrinsic"), recompute the OTHER
-// (derived) field from the current per-share premium/strike. The driver field is
-// left as the operator typed it; only the derived one changes.
-function reconcileExtrinsic(row, price) {
-  if (row.driver === "extrinsic") {
-    const entry = entryFromExtrinsic(price, row.strike, row.extrinsic);
-    return { ...row, entry_price: entry == null ? row.entry_price : entry };
-  }
-  const ext = extrinsicFromEntry(price, row.strike, row.entry_price);
-  return { ...row, extrinsic: ext == null ? "" : ext };
-}
-
-// Which field should drive the derived one on load: prefer a captured entry
-// stock price (the app-ordered / auto-populated case); fall back to a stored
-// extrinsic when only that survived (a TOS-manual leg the operator set directly).
-function seedDriver(entry, extrinsic) {
-  if (entry !== "" && entry != null) return "entry";
-  if (extrinsic !== "" && extrinsic != null && Number(extrinsic) > 0) return "extrinsic";
-  return "entry";
-}
-
-// Convert a position's live legs into editable rows for the single-spot editor.
-// `price` and `extrinsic` are both per share (LEAPs too, to match the shorts);
-// whichever of entry/extrinsic is known becomes the driver.
-function legsToRows(position) {
-  const rows = [];
-  (position.short_calls || []).forEach((sc) => {
-    const entry_price = sc.entry_stock_price ?? "";
-    const extrinsic = sc.entry_extrinsic_per_share ?? "";
-    rows.push({
-      leg_type: "short", strike: sc.strike ?? "", contracts: sc.contracts ?? 1,
-      expiration: sc.expiration || "",
-      price: sc.entry_premium_total && sc.contracts ? +(sc.entry_premium_total / (sc.contracts * 100)).toFixed(2) : (sc.current_bid ?? ""),
-      entry_price, extrinsic, driver: seedDriver(entry_price, extrinsic),
-    });
-  });
-  (position.leap_legs || []).forEach((lg) => {
-    const entry_price = lg.entry_stock_price ?? "";
-    // extrinsic_at_entry is per-contract-dollars × contracts; the editor quotes
-    // per share, so ÷contracts (→ per contract) then ÷100 (→ per share).
-    const extrinsic = lg.contracts ? +((lg.extrinsic_at_entry ?? 0) / lg.contracts / 100).toFixed(2) : "";
-    rows.push({
-      leg_type: "leap", strike: lg.strike ?? "", contracts: lg.contracts ?? 1,
-      expiration: lg.expiration || "",
-      // Editor edits LEAP cost per share (cost_basis is total; ÷contracts ÷100).
-      price: lg.cost_basis && lg.contracts ? +(lg.cost_basis / lg.contracts / 100).toFixed(2) : (lg.cost_basis ?? ""),
-      entry_price, extrinsic, driver: seedDriver(entry_price, extrinsic),
-    });
-  });
-  return rows;
-}
-
-const BLANK_LEG = { leg_type: "short", strike: "", contracts: 1, expiration: "", price: "", entry_price: "", extrinsic: "", driver: "entry" };
-
-// THE single-spot editor: edit a position's legs directly and Save. Entry price
-// and extrinsic are two views of the same fact — edit EITHER and the other is
-// computed live (premium − intrinsic ⇄ strike + intrinsic), so an app-ordered
-// leg auto-populates both while a TOS-manual leg lets you set whichever you have.
-function PositionLegsEditor({ ticker, initialRows, onSaved, onCancel }) {
-  const [rows, setRows] = React.useState(initialRows.length ? initialRows : [{ ...BLANK_LEG }]);
-  const [busy, setBusy] = React.useState(false);
-  const [err, setErr] = React.useState(null);
-  // Update a field, then re-derive the paired field. Editing entry/extrinsic
-  // also makes that field the driver; editing price/strike/type re-derives from
-  // whichever driver is already active.
-  const set = (i, k, v) => setRows((rs) => rs.map((r, j) => {
-    if (j !== i) return r;
-    let nr = { ...r, [k]: v };
-    if (k === "entry_price") nr.driver = "entry";
-    else if (k === "extrinsic") nr.driver = "extrinsic";
-    return reconcileExtrinsic(nr, nr.price);
-  }));
-  const add = () => setRows((rs) => [...rs, { ...BLANK_LEG }]);
-  const del = (i) => setRows((rs) => rs.filter((_, j) => j !== i));
-
-  const save = async () => {
-    setBusy(true); setErr(null);
-    try {
-      const legs = rows.map((r) => {
-        // Always send the canonical entry_price so the backend recomputes the
-        // extrinsic identically (single source of truth). When the operator drove
-        // by extrinsic, entry_price is the value we derived from it (pinned to the
-        // strike at the at/OTM boundary, where the extrinsic still resolves right).
-        const entry = reconcileExtrinsic(r, r.price).entry_price;
-        return {
-          leg_type: r.leg_type, strike: Number(r.strike), contracts: Number(r.contracts),
-          expiration: r.expiration || null,
-          entry_price: entry === "" || entry == null ? null : Number(entry),
-          // Editor edits LEAP cost per share; backend wants per contract, so ×100.
-          ...(r.leg_type === "short" ? { premium_per_share: Number(r.price) } : { cost_per_contract: Number(r.price) * 100 }),
-        };
-      });
-      await api.setPositionLegs(ticker, legs, "manual leg edit");
-      onSaved();
-    } catch (e) { setErr(String(e.message || e)); }
-    finally { setBusy(false); }
-  };
-
-  const inp = "rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200";
-  // The driven field is highlighted (amber, what you typed); the derived field
-  // is dimmed (what we computed) but still editable to flip which one leads.
-  const driverCls = (r, field) => r.driver === field
-    ? "border-amber-600 bg-amber-950/20 text-amber-200"
-    : "border-slate-700 text-slate-400 italic";
-  return (
-    <div className="mb-3 rounded-md border border-emerald-800/60 bg-emerald-950/15 p-2">
-      <p className="text-xs font-semibold text-emerald-200">Editing {ticker} legs — set them to match your broker, then Save.</p>
-      <p className="mt-0.5 text-[11px] text-slate-500">
-        Enter premium/cost per share (LEAPs too), then set
-        <span className="text-amber-300"> either</span> the entry price
-        <span className="text-amber-300"> or</span> the extrinsic — the other is computed, and the one you're driving is highlighted amber.
-        Short premium e.g. 5.10; LEAP cost e.g. 53.05.
-      </p>
-      <div className="mt-2 overflow-x-auto">
-        <table className="w-full whitespace-nowrap text-xs">
-          <thead><tr className="text-left uppercase tracking-wide text-slate-500">
-            {["", "type", "strike", "qty", "expiration", "premium/cost", "entry price", "extrinsic", ""].map((h, i) =>
-              <th key={i} className="py-1 pr-2">{h}</th>)}
-          </tr></thead>
-          <tbody className="font-mono">
-            {rows.map((r, i) => {
-              const overPremium = r.extrinsic !== "" && Number(r.extrinsic) > Number(r.price) + 1e-9;
-              return (
-                <tr key={i} className="border-t border-slate-800/50">
-                  <td className="py-1 pr-2">{i + 1}</td>
-                  <td className="py-1 pr-2">
-                    <select value={r.leg_type} onChange={(ev) => set(i, "leg_type", ev.target.value)}
-                            className={`${inp}`}>
-                      <option value="short">short</option>
-                      <option value="leap">leap</option>
-                    </select>
-                  </td>
-                  <td className="py-1 pr-2"><input value={r.strike} onChange={(ev) => set(i, "strike", ev.target.value)} className={`${inp} w-16`} /></td>
-                  <td className="py-1 pr-2"><input value={r.contracts} onChange={(ev) => set(i, "contracts", ev.target.value)} className={`${inp} w-10`} /></td>
-                  <td className="py-1 pr-2"><input value={r.expiration} placeholder="YYYY-MM-DD" onChange={(ev) => set(i, "expiration", ev.target.value)} className={`${inp} w-28`} /></td>
-                  <td className="py-1 pr-2"><input value={r.price} onChange={(ev) => set(i, "price", ev.target.value)} className={`${inp} w-20`} /></td>
-                  <td className="py-1 pr-2"><input value={r.entry_price} placeholder="underlying" title={r.driver === "entry" ? "driving — extrinsic is computed from this" : "computed from extrinsic — type here to drive by entry price"}
-                             onChange={(ev) => set(i, "entry_price", ev.target.value)} className={`rounded border bg-slate-900/60 px-1 w-24 ${driverCls(r, "entry")}`} /></td>
-                  <td className="py-1 pr-2"><input value={r.extrinsic} placeholder="ext/sh" title={r.driver === "extrinsic" ? "driving — entry price is computed from this" : "computed from entry price — type here to drive by extrinsic"}
-                             onChange={(ev) => set(i, "extrinsic", ev.target.value)}
-                             className={`rounded border bg-slate-900/60 px-1 w-20 ${overPremium ? "border-rose-600 text-rose-300" : driverCls(r, "extrinsic")}`} /></td>
-                  <td className="py-1 pr-2"><button onClick={() => del(i)} className="rounded border border-rose-800 bg-rose-950/40 px-1.5 text-[10px] text-rose-300">✕</button></td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-      {rows.some((r) => r.extrinsic !== "" && Number(r.extrinsic) > Number(r.price) + 1e-9) && (
-        <p className="mt-1 text-[11px] text-rose-400">Extrinsic can't exceed the premium/cost — it will be capped at the premium (entry pinned to the strike) on save.</p>
-      )}
-      <div className="mt-2 flex items-center gap-2">
-        <button onClick={add} className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800">+ Add leg</button>
-        <button onClick={save} disabled={busy} className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-50">{busy ? "Saving…" : "Save legs"}</button>
-        <button onClick={onCancel} className="rounded-full border border-slate-700 bg-slate-800/60 px-3 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800">Cancel</button>
-      </div>
-      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
-    </div>
-  );
-}
-
 // The one editable transaction table (ToS-like). Each fulfilled execution is a
 // row; edit strike/qty/expiry/price and the linked entry-stock-price <-> extrinsic
 // pair (edit either, the other computes). Save applies the edits AND derives the
@@ -561,14 +372,9 @@ function TransactionEditor() {
 
 function RawData() {
   const { data, error, reload } = useApi(api.executionsRaw, [], null);
-  const [rebuilding, setRebuilding] = React.useState(null);
-  const [proposal, setProposal] = React.useState(null); // {ticker, legs}
-  const [committing, setCommitting] = React.useState(false);
   const [msg, setMsg] = React.useState(null);
   const [fulfilledOnly, setFulfilledOnly] = React.useState(true);
-  const [editing, setEditing] = React.useState(null); // ticker being directly edited
-  if (error) return <Card title="Raw data (validation)"><p className="text-sm text-rose-400">{error}</p></Card>;
-  const positions = data?.positions || [];
+  if (error) return <Card title="Raw execution log"><p className="text-sm text-rose-400">{error}</p></Card>;
   const allExecs = data?.executions || [];
   // "Fulfilled orders only" = the actual broker fills, hiding bookkeeping noise:
   // reversal / rebuild / adjustment markers and any execution that was undone
@@ -592,264 +398,54 @@ function RawData() {
     } catch (err) { setMsg(String(err.message || err)); }
   };
 
-  // Per-leg premium/cost accessor — both per share here (LEAP cost was ÷100 on
-  // load), so the same intrinsic split applies to shorts and LEAPs alike.
-  const legPrice = (l) => (l.leg_type === "short" ? l.premium_per_share : l.cost_per_contract);
-  // Step 1: fetch the proposed legs (broker truth + log-matched economics) to
-  // review. Seed each leg's editable extrinsic + which field drives it (a leg
-  // that matched an entry stock price drives by entry; one that didn't lets the
-  // operator set the extrinsic directly).
-  const propose = async (ticker) => {
-    setRebuilding(ticker); setMsg(null); setProposal(null);
-    try {
-      const r = await api.rebuildPosition(ticker, { dry_run: true });
-      const legs = (r.legs || []).map((l) => {
-        // Edit LEAP cost per share (÷100) to match the shorts; convert back on commit.
-        const ps = l.leg_type === "short" || l.cost_per_contract == null
-          ? l : { ...l, cost_per_contract: +(Number(l.cost_per_contract) / 100).toFixed(2) };
-        const hasEntry = ps.entry_price !== "" && ps.entry_price != null;
-        const extrinsic = hasEntry ? extrinsicFromEntry(legPrice(ps), ps.strike, ps.entry_price) : "";
-        return { ...ps, extrinsic: extrinsic == null ? "" : extrinsic, driver: hasEntry ? "entry" : "extrinsic" };
-      });
-      setProposal({ ticker, legs });
-    } catch (e) { setMsg(`${ticker}: ${String(e.message || e)}`); }
-    finally { setRebuilding(null); }
-  };
-  const editLeg = (i, key, val) => setProposal((p) => ({
-    ...p, legs: p.legs.map((l, j) => {
-      if (j !== i) return l;
-      let nl = { ...l, [key]: val };
-      if (key === "entry_price") nl.driver = "entry";
-      else if (key === "extrinsic") nl.driver = "extrinsic";
-      return reconcileExtrinsic(nl, legPrice(nl));
-    }) }));
-  // Step 2: commit the (possibly corrected) legs. Extrinsic is computed server-
-  // side from the total premium and the entry price, so we send the canonical
-  // entry price — derived from the extrinsic when the operator drove by that.
-  const commit = async () => {
-    setCommitting(true); setMsg(null);
-    try {
-      const legs = proposal.legs.map((l) => {
-        // Send the canonical entry price (derived from the extrinsic when that's
-        // the driver); the backend recomputes the stored extrinsic from it.
-        const entry = reconcileExtrinsic(l, legPrice(l)).entry_price;
-        return {
-          ...l,
-          contracts: Number(l.contracts),
-          entry_price: entry === "" || entry == null ? null : Number(entry),
-          ...(l.leg_type === "short"
-            ? { premium_per_share: Number(l.premium_per_share) }
-            : { cost_per_contract: Number(l.cost_per_contract) * 100 }),   // per-share -> per-contract
-        };
-      });
-      const r = await api.rebuildPosition(proposal.ticker, { legs });
-      setMsg(`Rebuilt ${proposal.ticker}: ${r.short_calls.length} short + ${r.leap_legs.length} LEAP leg(s). Run "Reconcile now" to confirm CLEAN.`);
-      setProposal(null);
-      await reload();
-    } catch (e) { setMsg(String(e.message || e)); }
-    finally { setCommitting(false); }
-  };
-
   return (
-    <>
-      <Card title="Live position legs — what state currently holds"
-            right={<button onClick={reload}
-              className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800">Refresh</button>}>
-        <p className="mb-2 text-xs text-slate-500">
-          One row per open leg. A short with a null/0 <span className="font-mono">entry_extrinsic</span> is a mis-booked leg;
-          two rows at the same strike <em>and</em> expiry means a duplicate (different expiries are separate weeklies).
+    <Card title={`Raw execution log — ${execs.length}${fulfilledOnly ? " fulfilled" : ""} of ${data?.execution_count ?? 0}`}
+          right={
+            <label className="flex items-center gap-1.5 text-xs text-slate-400">
+              <input type="checkbox" checked={fulfilledOnly} onChange={(e) => setFulfilledOnly(e.target.checked)} />
+              Fulfilled orders only
+            </label>
+          }>
+      {fulfilledOnly && (
+        <p className="mb-2 text-[11px] text-slate-500">
+          Showing actual broker fills (buy/sell/close). Reversed adopt legs, undo/rebuild markers, and
+          adjustments are hidden — untick to see the full audit log.
         </p>
-        <div className="mb-3 flex flex-wrap gap-2">
-          {positions.filter((p) => p.status !== "closed").map((p) => (
-            <React.Fragment key={p.ticker}>
-              <button onClick={() => { setEditing(editing === p.ticker ? null : p.ticker); setProposal(null); }}
-                      className="rounded-full border border-emerald-800 bg-emerald-950/40 px-2.5 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/50">
-                {editing === p.ticker ? `Close ${p.ticker} editor` : `Edit ${p.ticker} legs`}
-              </button>
-              <button onClick={() => propose(p.ticker)} disabled={rebuilding === p.ticker}
-                      title={`Propose ${p.ticker}'s legs from the broker's actual holdings`}
-                      className="rounded-full border border-indigo-800 bg-indigo-950/40 px-2.5 py-1 text-xs font-semibold text-indigo-200 hover:bg-indigo-900/50 disabled:opacity-50">
-                {rebuilding === p.ticker ? `Proposing ${p.ticker}…` : `Rebuild ${p.ticker} from broker`}
-              </button>
-            </React.Fragment>
-          ))}
-        </div>
-        {editing && (
-          <PositionLegsEditor
-            ticker={editing}
-            initialRows={legsToRows(positions.find((p) => p.ticker === editing) || {})}
-            onSaved={() => { setEditing(null); setMsg(`Saved ${editing} legs.`); reload(); }}
-            onCancel={() => setEditing(null)}
-          />
-        )}
-        {proposal && (
-          <div className="mb-3 rounded-md border border-indigo-800/60 bg-indigo-950/20 p-2">
-            <p className="text-xs font-semibold text-indigo-200">
-              Proposed {proposal.ticker} legs (broker truth) — set the entry price <span className="text-amber-300">or</span> the extrinsic on any leg, then Confirm:
-            </p>
-            <p className="mt-1 text-[11px] text-slate-500">
-              Entry price and extrinsic are two views of one fact (premium − max(entry − strike, 0)):
-              edit <span className="text-amber-300">either</span> and the other is computed. The field you're driving is highlighted amber.
-            </p>
-            <div className="mt-2 overflow-x-auto">
-              <table className="w-full whitespace-nowrap text-xs">
-                <thead><tr className="text-left uppercase tracking-wide text-slate-500">
-                  {["leg", "strike", "contracts", "expiration", "premium/cost", "entry price", "extrinsic", "from"].map((h) =>
-                    <th key={h} className="py-1 pr-3">{h}</th>)}
-                </tr></thead>
-                <tbody className="font-mono">
-                  {proposal.legs.map((l, i) => {
-                    const isShort = l.leg_type === "short";
-                    // price is per-share for both leg types (LEAP cost was ÷100 on load).
-                    const price = Number(isShort ? l.premium_per_share : l.cost_per_contract);
-                    const overPremium = l.extrinsic !== "" && l.extrinsic != null && Number(l.extrinsic) > price + 1e-9;
-                    const driverCls = (field) => l.driver === field
-                      ? "border-amber-600 bg-amber-950/20 text-amber-200"
-                      : "border-slate-700 text-slate-400 italic";
-                    return (
-                      <tr key={i} className="border-t border-slate-800/50">
-                        <td className={`py-1 pr-3 ${isShort ? "text-amber-300" : "text-emerald-300"}`}>{l.leg_type}</td>
-                        <td className="py-1 pr-3">{l.strike}</td>
-                        <td className="py-1 pr-3">
-                          <input value={l.contracts} onChange={(e) => editLeg(i, "contracts", e.target.value)}
-                                 className="w-12 rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200" />
-                        </td>
-                        <td className="py-1 pr-3">{l.expiration || "—"}</td>
-                        <td className="py-1 pr-3">
-                          <input value={isShort ? l.premium_per_share : l.cost_per_contract}
-                                 onChange={(e) => editLeg(i, isShort ? "premium_per_share" : "cost_per_contract", e.target.value)}
-                                 className="w-20 rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200" />
-                        </td>
-                        <td className="py-1 pr-3">
-                          <input value={l.entry_price ?? ""} placeholder="underlying"
-                                 title={l.driver === "entry" ? "driving — extrinsic computed from this" : "computed from extrinsic — type to drive by entry price"}
-                                 onChange={(e) => editLeg(i, "entry_price", e.target.value)}
-                                 className={`w-24 rounded border bg-slate-900/60 px-1 ${driverCls("entry")}`} />
-                        </td>
-                        <td className="py-1 pr-3">
-                          <input value={l.extrinsic ?? ""} placeholder="per share"
-                                 title={l.driver === "extrinsic" ? "driving — entry price computed from this" : "computed from entry price — type to drive by extrinsic"}
-                                 onChange={(e) => editLeg(i, "extrinsic", e.target.value)}
-                                 className={`w-24 rounded border bg-slate-900/60 px-1 ${overPremium ? "border-rose-600 text-rose-300" : driverCls("extrinsic")}`} />
-                        </td>
-                        <td className="py-1 pr-3 text-slate-500">{l.econ_source || "—"}</td>
-                      </tr>
-                    );
-                  })}
-                  {proposal.legs.length === 0 && (
-                    <tr><td colSpan={8} className="py-3 text-center font-sans text-slate-500">Broker holds no option legs for {proposal.ticker}.</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <div className="mt-2 flex gap-2">
-              <button onClick={commit} disabled={committing || !proposal.legs.length}
-                      className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-50">
-                {committing ? "Committing…" : "Confirm rebuild"}
-              </button>
-              <button onClick={() => setProposal(null)}
-                      className="rounded-full border border-slate-700 bg-slate-800/60 px-3 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800">
-                Cancel
-              </button>
-            </div>
-          </div>
-        )}
-        {msg && <p className="mb-2 text-xs text-slate-300">{msg}</p>}
-        <div className="overflow-x-auto">
-          <table className="w-full whitespace-nowrap text-xs">
-            <thead>
-              <tr className="text-left uppercase tracking-wide text-slate-500">
-                {["ticker", "leg", "strike", "contracts", "expiration", "entry_extrinsic/sh",
-                  "entry_premium_total", "cost_basis", "open/entry_date", "flags"].map((h) =>
-                  <th key={h} className="py-1.5 pr-3">{h}</th>)}
+      )}
+      {msg && <p className="mb-2 text-xs text-slate-300">{msg}</p>}
+      <div className="overflow-x-auto">
+        <table className="w-full whitespace-nowrap text-xs">
+          <thead>
+            <tr className="text-left uppercase tracking-wide text-slate-500">
+              {!fulfilledOnly && <th className="py-1.5 pr-3"></th>}
+              {EXEC_COLS.map((h) => <th key={h} className="py-1.5 pr-3">{h}</th>)}
+            </tr>
+          </thead>
+          <tbody className="font-mono text-slate-300">
+            {execs.map((e, i) => (
+              <tr key={e.id || i} className={`border-t border-slate-800/50 ${e.reversed_by || e.excluded ? "opacity-40" : ""} ${e.excluded ? "line-through" : ""} ${e.action === "adoption_reversal" ? "text-sky-300" : ""}`}>
+                {!fulfilledOnly && (
+                  <td className="py-1.5 pr-3 no-underline">
+                    <button onClick={() => voidExec(e)}
+                            className={`rounded border px-1.5 text-[10px] font-semibold ${e.excluded
+                              ? "border-emerald-800 bg-emerald-950/40 text-emerald-300"
+                              : "border-rose-800 bg-rose-950/40 text-rose-300"} hover:opacity-80`}>
+                      {e.excluded ? "restore" : "void"}
+                    </button>
+                  </td>
+                )}
+                {EXEC_COLS.map((c) => (
+                  <td key={c} className={`py-1.5 pr-3 ${c === "source" && e[c] === "broker_manual" ? "text-amber-300" : ""}`}>{cell(e[c])}</td>
+                ))}
               </tr>
-            </thead>
-            <tbody className="font-mono text-slate-300">
-              {positions.flatMap((p) => [
-                ...(p.short_calls || []).map((sc, i) => (
-                  <tr key={`${p.ticker}-s${i}`} className="border-t border-slate-800/50">
-                    <td className="py-1.5 pr-3 font-sans font-semibold text-slate-100">{p.ticker}</td>
-                    <td className="py-1.5 pr-3 text-amber-300">SHORT</td>
-                    <td className="py-1.5 pr-3">{cell(sc.strike)}</td>
-                    <td className="py-1.5 pr-3">{cell(sc.contracts)}</td>
-                    <td className="py-1.5 pr-3">{cell(sc.expiration)}</td>
-                    <td className={`py-1.5 pr-3 ${!sc.entry_extrinsic_per_share ? "text-rose-400" : ""}`}>{cell(sc.entry_extrinsic_per_share)}</td>
-                    <td className="py-1.5 pr-3">{cell(sc.entry_premium_total)}</td>
-                    <td className="py-1.5 pr-3">—</td>
-                    <td className="py-1.5 pr-3">{cell(sc.open_date)}</td>
-                    <td className="py-1.5 pr-3 text-slate-500">{sc.restored ? "restored" : ""}</td>
-                  </tr>
-                )),
-                ...(p.leap_legs || []).map((lg, i) => (
-                  <tr key={`${p.ticker}-l${i}`} className="border-t border-slate-800/50">
-                    <td className="py-1.5 pr-3 font-sans font-semibold text-slate-100">{p.ticker}</td>
-                    <td className="py-1.5 pr-3 text-emerald-300">LEAP</td>
-                    <td className="py-1.5 pr-3">{cell(lg.strike)}</td>
-                    <td className="py-1.5 pr-3">{cell(lg.contracts)}</td>
-                    <td className="py-1.5 pr-3">{cell(lg.expiration)}</td>
-                    <td className={`py-1.5 pr-3 ${!lg.extrinsic_at_entry ? "text-rose-400" : ""}`}>{cell(lg.extrinsic_at_entry != null && lg.contracts ? lg.extrinsic_at_entry / (100 * lg.contracts) : lg.extrinsic_at_entry)}</td>
-                    <td className="py-1.5 pr-3">—</td>
-                    <td className="py-1.5 pr-3">{cell(lg.cost_basis)}</td>
-                    <td className="py-1.5 pr-3">{cell(lg.entry_date)}</td>
-                    <td className="py-1.5 pr-3 text-slate-500">{lg.restored ? "restored" : ""}</td>
-                  </tr>
-                )),
-              ])}
-              {positions.every((p) => !(p.short_calls || []).length && !(p.leap_legs || []).length) && (
-                <tr><td colSpan={10} className="py-6 text-center font-sans text-slate-500">No open legs.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      <Card title={`Raw execution log — ${execs.length}${fulfilledOnly ? " fulfilled" : ""} of ${data?.execution_count ?? 0}`}
-            right={
-              <label className="flex items-center gap-1.5 text-xs text-slate-400">
-                <input type="checkbox" checked={fulfilledOnly} onChange={(e) => setFulfilledOnly(e.target.checked)} />
-                Fulfilled orders only
-              </label>
-            }>
-        {fulfilledOnly && (
-          <p className="mb-2 text-[11px] text-slate-500">
-            Showing actual broker fills (buy/sell/close). Reversed adopt legs, undo/rebuild markers, and
-            adjustments are hidden — untick to see the full audit log.
-          </p>
-        )}
-        <div className="overflow-x-auto">
-          <table className="w-full whitespace-nowrap text-xs">
-            <thead>
-              <tr className="text-left uppercase tracking-wide text-slate-500">
-                {!fulfilledOnly && <th className="py-1.5 pr-3"></th>}
-                {EXEC_COLS.map((h) => <th key={h} className="py-1.5 pr-3">{h}</th>)}
-              </tr>
-            </thead>
-            <tbody className="font-mono text-slate-300">
-              {execs.map((e, i) => (
-                <tr key={e.id || i} className={`border-t border-slate-800/50 ${e.reversed_by || e.excluded ? "opacity-40" : ""} ${e.excluded ? "line-through" : ""} ${e.action === "adoption_reversal" ? "text-sky-300" : ""}`}>
-                  {!fulfilledOnly && (
-                    <td className="py-1.5 pr-3 no-underline">
-                      <button onClick={() => voidExec(e)}
-                              className={`rounded border px-1.5 text-[10px] font-semibold ${e.excluded
-                                ? "border-emerald-800 bg-emerald-950/40 text-emerald-300"
-                                : "border-rose-800 bg-rose-950/40 text-rose-300"} hover:opacity-80`}>
-                        {e.excluded ? "restore" : "void"}
-                      </button>
-                    </td>
-                  )}
-                  {EXEC_COLS.map((c) => (
-                    <td key={c} className={`py-1.5 pr-3 ${c === "source" && e[c] === "broker_manual" ? "text-amber-300" : ""}`}>{cell(e[c])}</td>
-                  ))}
-                </tr>
-              ))}
-              {execs.length === 0 && (
-                <tr><td colSpan={EXEC_COLS.length + 1} className="py-6 text-center font-sans text-slate-500">No executions.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-    </>
+            ))}
+            {execs.length === 0 && (
+              <tr><td colSpan={EXEC_COLS.length + 1} className="py-6 text-center font-sans text-slate-500">No executions.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </Card>
   );
 }
 
