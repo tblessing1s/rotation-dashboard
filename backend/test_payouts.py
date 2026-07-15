@@ -229,6 +229,124 @@ def test_monthly_realized_burn_from_marks(monkeypatch):
     assert by_month["2026-07"] == 50.0                 # the +30 week clamped to 0
 
 
+# --- ITM→OTM intrinsic repayment -------------------------------------------
+def _sell(ticker, strike, stock, contracts=1):
+    return {"action": "sell_short", "ticker": ticker, "strike": strike,
+            "contracts": contracts, "stock_price": stock}
+
+
+def _close_full(ticker, strike, stock, date, net, contracts=1):
+    return {"action": "close_short", "ticker": ticker, "strike": strike,
+            "contracts": contracts, "stock_price": stock, "date": date,
+            "net_juice_total": net}
+
+
+def test_intrinsic_melt_counts_itm_entry_closed_otm(isolated_state, monkeypatch):
+    # Sold ITM (stock 103 > strike 100 => $3/sh intrinsic) and closed OTM
+    # (stock 98 <= 100): the $3/sh × 1 × 100 = $300 intrinsic has melted.
+    state = _seed(monkeypatch, [
+        _sell("AA", 100, 103, 1),
+        _close_full("AA", 100, 98, "2026-07-08T15:00:00Z", 50.0, 1),
+    ])
+    assert payouts.monthly_intrinsic_melt(state) == {"2026-07": 300.0}
+
+
+def test_intrinsic_melt_ignores_still_itm_and_otm_entry(isolated_state, monkeypatch):
+    state = _seed(monkeypatch, [
+        # Sold ITM but closed STILL ITM (105 > 100) — intrinsic hasn't melted.
+        _sell("AA", 100, 103, 1),
+        _close_full("AA", 100, 105, "2026-07-08T15:00:00Z", 50.0, 1),
+        # Sold OTM (90 < 100) then closed OTM — no intrinsic was ever banked.
+        _sell("BB", 100, 90, 1),
+        _close_full("BB", 100, 88, "2026-07-09T15:00:00Z", 40.0, 1),
+    ])
+    assert payouts.monthly_intrinsic_melt(state) == {}
+
+
+def test_intrinsic_repayment_carries_forward(isolated_state, monkeypatch):
+    # June: $300 melted, $100 juice -> repays $100, $200 debt carried, $0 leftover.
+    # July: $250 juice, no new melt -> repays the $200 carried, $50 leftover.
+    state = _seed(monkeypatch, [
+        _sell("AA", 100, 103, 1),                                   # ITM entry
+        _close_full("AA", 100, 98, "2026-06-05T15:00:00Z", 100.0),  # OTM close -> $300 melt
+        _sell("AA", 100, 90, 1),                                    # OTM entry
+        _close_full("AA", 100, 88, "2026-07-02T15:00:00Z", 250.0),  # no melt
+    ])
+    v = payouts.view(state)
+    june, july = v["previous"], v["current"]
+    assert june["intrinsic_lost"] == 300.0
+    assert june["intrinsic_repaid"] == 100.0
+    assert june["intrinsic_debt"] == 200.0
+    assert june["net_payout"] == 0.0            # all juice went to repayment
+    assert july["intrinsic_repaid"] == 200.0    # carried debt repaid
+    assert july["intrinsic_debt"] == 0.0
+    assert july["net_payout"] == 50.0           # 250 − 200 leftover
+    assert v["totals"]["ytd_intrinsic_repaid"] == 300.0
+    assert v["totals"]["ytd"] == 50.0           # 350 juice − 300 repaid
+    assert v["totals"]["intrinsic_debt"] == 0.0
+    assert v["totals"]["all_time"] == 50.0
+
+
+def test_intrinsic_debt_outstanding_when_juice_short(isolated_state, monkeypatch):
+    # $300 melted but only $100 juice all-time -> $200 still owed, leftover floored.
+    state = _seed(monkeypatch, [
+        _sell("AA", 100, 103, 1),
+        _close_full("AA", 100, 98, "2026-07-02T15:00:00Z", 100.0),
+    ])
+    v = payouts.view(state)
+    assert v["current"]["net_payout"] == 0.0
+    assert v["current"]["intrinsic_debt"] == 200.0
+    assert v["totals"]["intrinsic_debt"] == 200.0
+
+
+def test_intrinsic_debt_carries_through_empty_current_month(isolated_state, monkeypatch):
+    # June left $200 owed; July (current) has no activity — the debt must still
+    # surface on the current card and in totals, not read as $0.
+    state = _seed(monkeypatch, [
+        _sell("AA", 100, 103, 1),
+        _close_full("AA", 100, 98, "2026-06-05T15:00:00Z", 100.0),  # $300 melt, $100 juice
+    ])
+    v = payouts.view(state)
+    assert v["previous"]["intrinsic_debt"] == 200.0
+    assert v["current"]["intrinsic_debt"] == 200.0      # carried into an empty July
+    assert v["totals"]["intrinsic_debt"] == 200.0
+
+
+def test_intrinsic_repayment_flag_off_degrades_to_juice(isolated_state, monkeypatch):
+    monkeypatch.setattr(config, "PAYOUT_INTRINSIC_REPAYMENT", False)
+    state = _seed(monkeypatch, [
+        _sell("AA", 100, 103, 1),
+        _close_full("AA", 100, 98, "2026-07-02T15:00:00Z", 100.0),
+    ])
+    v = payouts.view(state)
+    assert v["current"]["intrinsic_repaid"] == 0.0
+    assert v["current"]["net_payout"] == 100.0   # plain juice, no reservation
+
+
+def test_intrinsic_melt_fifo_partial_close(isolated_state, monkeypatch):
+    # Two ITM lots (2 + 1 contracts) at $3/sh; a 2-contract OTM close consumes the
+    # first lot FIFO -> $3 × 2 × 100 = $600 melted, the 1-contract lot still open.
+    state = _seed(monkeypatch, [
+        _sell("AA", 100, 103, 2),
+        _sell("AA", 100, 103, 1),
+        _close_full("AA", 100, 97, "2026-07-08T15:00:00Z", 80.0, 2),
+    ])
+    assert payouts.monthly_intrinsic_melt(state) == {"2026-07": 600.0}
+
+
+def test_finalize_snapshots_intrinsic_repaid(isolated_state, monkeypatch):
+    _seed(monkeypatch, [
+        _sell("AA", 100, 103, 1),
+        _close_full("AA", 100, 98, "2026-06-05T15:00:00Z", 250.0),
+    ])
+    v = payouts.finalize("2026-06")
+    prev = v["previous"]
+    # $300 melt, $250 juice -> repays $250, $0 leftover finalized.
+    assert prev["finalized_intrinsic_repaid"] == 250.0
+    assert prev["finalized_amount"] == 0.0
+    assert prev["intrinsic_debt"] == 50.0
+
+
 # --- finalize / mark paid --------------------------------------------------
 def test_finalize_snapshots_amount(isolated_state, monkeypatch):
     _seed(monkeypatch, [_close("AA", "2026-06-05T15:00:00Z", 510.0)])

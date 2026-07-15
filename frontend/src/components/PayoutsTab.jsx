@@ -46,9 +46,12 @@ function subline(m) {
   return "No income this month";
 }
 
-// The juice − LEAP burn = leftover breakdown line under a headline payout.
+// The juice − LEAP burn − intrinsic repaid = leftover breakdown line under a
+// headline payout.
 function BurnBreakdown({ m }) {
   if (!m || (m.status === "none")) return null;
+  const repaid = Number(m.intrinsic_repaid || 0);
+  const debt = Number(m.intrinsic_debt || 0);
   return (
     <div className="mt-1 text-xs text-slate-500">
       {cash(m.net_juice)} juice
@@ -62,8 +65,22 @@ function BurnBreakdown({ m }) {
           LEAP burn n/a
         </span>
       )}
+      {repaid > 0 && (
+        <>
+          {" − "}
+          <span className="text-amber-300/80" title="Net juice diverted this month to pay back intrinsic that melted when a short went ITM→OTM (the covering LEAP gave back that intrinsic)">
+            {cash(repaid)} intrinsic repaid
+          </span>
+        </>
+      )}
       {" = "}
       <span className="font-semibold text-slate-300">{cash(m.net_payout)} leftover</span>
+      {debt > 0 && (
+        <div className="mt-0.5 text-amber-300/70"
+             title="Melted intrinsic still owed — future net juice keeps paying it back before any leftover resumes">
+          {cash(debt)} intrinsic still to repay (carried forward)
+        </div>
+      )}
     </div>
   );
 }
@@ -163,8 +180,11 @@ export default function PayoutsTab() {
           <BurnBreakdown m={cur} />
           <p className="mt-3 text-xs text-slate-500">
             Leftover = juice booked this month minus the LEAP's weekly extrinsic
-            burn (reserved to maintain the LEAP). It's an estimate while shorts are
-            open — once the last short of the month closes, you can finalize it.
+            burn (reserved to maintain the LEAP) minus any intrinsic repaid — when a
+            short goes ITM→OTM the covering LEAP gives back that intrinsic, so net
+            juice pays it back first (carried forward until repaid). It's an estimate
+            while shorts are open — once the last short of the month closes, you can
+            finalize it.
           </p>
           <div className="mt-3"><PayoutActions m={cur} {...actions} /></div>
         </Card>
@@ -197,14 +217,20 @@ export default function PayoutsTab() {
       <Card title="Totals">
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
           <Stat label={`${totals.year || ""} leftover`} value={cash(totals.ytd)} tone={tone(totals.ytd)}
-                sub={`${cash(totals.ytd_juice)} juice − ${cash(totals.ytd_burn)} LEAP burn`} />
+                sub={`${cash(totals.ytd_juice)} juice − ${cash(totals.ytd_burn)} LEAP burn` +
+                     (totals.ytd_intrinsic_repaid > 0 ? ` − ${cash(totals.ytd_intrinsic_repaid)} intrinsic` : "")} />
           <Stat label="All-time leftover" value={cash(totals.all_time)} tone={tone(totals.all_time)}
-                sub="juice minus LEAP burn, every month" />
+                sub="juice minus LEAP burn & intrinsic, every month" />
           <Stat label="Paid out" value={cash(totals.paid_out)}
                 sub="withdrawn across all months" />
           <Stat label="Awaiting payout" value={cash(totals.awaiting)}
                 tone={totals.awaiting > 0 ? "text-amber-300" : "text-slate-100"}
                 sub="finalizable or finalized, not yet paid" />
+          {totals.intrinsic_debt > 0 && (
+            <Stat label="Intrinsic to repay" value={cash(totals.intrinsic_debt)}
+                  tone="text-amber-300"
+                  sub="melted intrinsic future juice still owes back" />
+          )}
         </div>
       </Card>
 
@@ -217,6 +243,7 @@ export default function PayoutsTab() {
                 <th className="py-2 pr-3">Month</th>
                 <th className="py-2 pr-3">Juice</th>
                 <th className="py-2 pr-3">LEAP burn</th>
+                <th className="py-2 pr-3">Intrinsic</th>
                 <th className="py-2 pr-3">Leftover</th>
                 <th className="py-2 pr-3">Status</th>
                 <th className="py-2 pr-3 text-right">Action</th>
@@ -231,6 +258,13 @@ export default function PayoutsTab() {
                       title={m.burn_tracked ? "Realized weekly LEAP extrinsic burn this month" : "No burn marks yet"}>
                     {m.burn_tracked ? (m.leap_burn ? `−${cash(m.leap_burn)}` : cash(0)) : "n/a"}
                   </td>
+                  <td className="py-2 pr-3 text-amber-300/80"
+                      title={m.intrinsic_debt > 0
+                        ? `Repaid this month; ${cash(m.intrinsic_debt)} melted intrinsic still carried forward`
+                        : "Net juice repaid to melted ITM→OTM intrinsic this month"}>
+                    {m.intrinsic_repaid > 0 ? `−${cash(m.intrinsic_repaid)}` : "—"}
+                    {m.intrinsic_debt > 0 ? ` (${cash(m.intrinsic_debt)} owed)` : ""}
+                  </td>
                   <td className={`py-2 pr-3 font-semibold ${tone(m.net_payout)}`}>
                     {cash(m.payout_amount)}{m.estimated ? " ·est" : ""}
                   </td>
@@ -243,7 +277,7 @@ export default function PayoutsTab() {
                 </tr>
               ))}
               {history.length === 0 && (
-                <tr><td colSpan={6} className="py-6 text-center text-slate-500">
+                <tr><td colSpan={7} className="py-6 text-center text-slate-500">
                   No income logged yet — payouts appear as short closes book net juice.
                 </td></tr>
               )}
