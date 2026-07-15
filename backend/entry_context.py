@@ -246,6 +246,8 @@ def _sector_section(gate: dict | None, track, reason: str) -> dict:
         "etf": d.get("sector"),
         "name": d.get("name"),
         "rs3m_vs_spy": track("sector.rs3m_vs_spy", d.get("rs3m"), reason),
+        # RS1M vs SPY is the sector GATE bar now (RS3M is display only).
+        "rs1m_vs_spy": d.get("rs1m"),
         "breadth": track("sector.breadth", d.get("breadth"), reason),
         "atr_expanding": d.get("atr_expanding"),
         "status": d.get("status"),
@@ -254,7 +256,7 @@ def _sector_section(gate: dict | None, track, reason: str) -> dict:
 
 def _stock_section(ticker: str, gate: dict | None, row: dict | None,
                    bars_stale: bool, track, reason: str) -> dict:
-    d = _level_detail(gate, 3)   # the _stock_row (rs3m pair, atr_pct, consolidating)
+    d = _level_detail(gate, 3)   # the _stock_row (lights, rs pairs, atr_pct, right-spot)
     row = row or {}
     # ATR value + RSI are not on the scorecard/gate row — compute from cached
     # bars (unless bars are stale, in which case they stay null with reason).
@@ -264,19 +266,38 @@ def _stock_section(ticker: str, gate: dict | None, row: dict | None,
     return {
         "rs3m_vs_spy": track("stock.rs3m_vs_spy", d.get("rs3m_vs_spy"), reason),
         "rs3m_vs_sector": track("stock.rs3m_vs_sector", d.get("rs3m_vs_sector"), reason),
+        # RS1M ranking inputs frozen alongside (the ranking key within GREENs).
+        "rs1m_vs_spy": d.get("rs1m_vs_spy"),
+        "rs1m_vs_sector": d.get("rs1m_vs_sector"),
         # Provenance: which RS-vs-sector variant gated this entry. The gate now
         # uses the DIRECT rs3m(stock, sector_etf) ratio everywhere (no vs-SPY
         # difference approximation), so this is constant "direct" — recorded
         # explicitly so a future change of variant can never be silent, and old
-        # v1/v2 snapshots (which predate the switch) stay distinguishable.
+        # v1/v2 snapshots (which predate the switch) stay distinguishable. RS3M is
+        # now display/kill-switch only; RS1M is the ranking key.
         "rs3m_vs_sector_method": "direct",
         "atr_pct": track("stock.atr_pct", d.get("atr_pct"), reason),
         "atr_value": track("stock.atr_value", atr_value, reason),
         "rsi": track("stock.rsi", rsi, reason),
         "pct_above_ma21": track("stock.pct_above_ma21", row.get("pct_above_ma21"), reason),
         "price": track("stock.price", row.get("price"), reason),
+        # --- Per-name Genius lights + verdict (frozen: all four light values +
+        # colors, and the stock verdict they produced) ---
+        "lights": d.get("lights"),
+        "greens": d.get("greens"),
+        "verdict": d.get("verdict"),
+        "insufficient": d.get("insufficient"),
+        # --- Veto evaluations (every veto, tripped or not) ---
+        "vetoes": d.get("vetoes"),
+        "vetoed": d.get("vetoed"),
+        "veto_reasons": d.get("veto_reasons"),
+        # --- Right-spot gate (check values + pass/blocked_by) ---
+        "right_spot": d.get("right_spot"),
+        "enterable": d.get("enterable"),
+        # `consolidating` now means "in the right spot" (the gate that replaced the
+        # single consolidating flag).
         "consolidating": d.get("consolidating"),
-        "is_etf": row.get("is_etf"),
+        "is_etf": row.get("is_etf") if row.get("is_etf") is not None else d.get("is_etf"),
     }
 
 
