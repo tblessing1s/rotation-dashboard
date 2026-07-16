@@ -268,7 +268,13 @@ ATR_WINDOW = 9               # CFM uses a 9-day ATR for strike spacing
 RSI_WINDOW = 14
 MA_WINDOW = 21
 VOL_AVG_WINDOW = 20
-HISTORY_DAYS = 320           # daily bars pulled / cached per symbol
+# Calendar-day lookback for the daily-bar fetch/cache. Sized so BOTH providers
+# clear the ≥250-TRADING-bar floor the structure classifier needs (SMA200 series
+# + 150-day slope + base counting): ~400 calendar days ≈ ~275 trading bars.
+# Schwab bounds the fetch by this window's startDate; Alpha Vantage is filtered to
+# the SAME start (data_handler._fetch), so both key off one window and return a
+# consistent earliest bar — which the classifier's prefix-causal replay relies on.
+HISTORY_DAYS = 400           # daily bars pulled / cached per symbol (calendar days)
 
 # ---- Smart intraday refresh (hot tiering) ----------------------------------
 # The whole universe is fetched once pre-open (the warm-up) and then frozen in
