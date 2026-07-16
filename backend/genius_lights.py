@@ -98,6 +98,21 @@ def light_momentum(roc: float | None) -> dict:
     return {"signal": _signal(green), "roc": roc}
 
 
+def light_sma_slow_vs_slower(slow_ma: float | None, slower_ma: float | None) -> dict:
+    """A STRUCTURAL light — the slow SMA above the slower SMA (e.g. SMA50 > SMA200,
+    a golden-cross / long-clock trend posture) is a GREEN light.
+
+    This is NOT used by the market regime or the stock lights (whose fourth light
+    is the short-clock ``light_fast_vs_slow`` = EMA21 > SMA50). It is the Symbol
+    Genius fourth light — the deliberate divergence: the per-symbol instance judges
+    structural health on a longer clock. Kept here beside the other light functions
+    so every light in the system is defined in one place, but ``compute_lights``
+    (the regime/stock light-set) does NOT call it — Symbol Genius assembles its own
+    light-set in ``symbol_genius`` from this plus the three shared lights."""
+    green = None if slow_ma is None or slower_ma is None else slow_ma > slower_ma
+    return {"signal": _signal(green), "slow_ma": slow_ma, "slower_ma": slower_ma}
+
+
 def compute_lights(df, params: dict | None = None) -> dict:
     """The four lights for the latest bar of `df` (an ascending OHLCV frame).
     Every indicator is computed here from `df` alone — no clock, no I/O."""

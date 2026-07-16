@@ -218,7 +218,17 @@ SECTOR_BREADTH_MIN = 60.0     # % of sector constituents above 50-DMA
 # replacing the RS3M vs SPY bar — RS3M is a laggy 3-month figure that keeps a
 # rolled-over sector "strong" for weeks. RS1M > 0 means the sector is leading SPY
 # right now; SECTOR_BREADTH_MIN (above) still gates participation.
-SECTOR_RS1M_MIN = 0.0          # PROPOSED_DEFAULT — sector RS1M vs SPY must be > this (leading SPY)
+SECTOR_RS1M_MIN = 0.0          # PROPOSED_DEFAULT — sector "strong" bar: RS1M vs SPY > this (display/sizing)
+# Level-2 reframe (sector as VETO, not selector): the gate blocks only when the
+# sector is DETERIORATING — RS1M vs SPY negative, breadth below this collapse floor
+# (well under the SECTOR_BREADTH_MIN participation bar), or the sector ETF under
+# distribution — otherwise it passes and lets SYM + BASE + INST carry selection.
+SECTOR_BREADTH_COLLAPSE = 40.0  # PROPOSED_DEFAULT — sector breadth below this % = collapsing (a veto)
+# Sector-strength SIZING modifier (advisory — a suggested contract count, never
+# enforced): a STRONG sector (the SECTOR_RS1M_MIN / SECTOR_BREADTH_MIN bar) sizes
+# full; a merely-neutral sector that clears the Level-2 veto sizes down by this
+# factor. Keeps sector strength as a size lever now that it is no longer a gate.
+SECTOR_NEUTRAL_SIZE_FACTOR = 0.5  # PROPOSED_DEFAULT — neutral-sector size = round(full x this)
 
 # ---- Stock gate (Levels 3 & 4) ---------------------------------------------
 STOCK_RS_VS_SPY_MIN = 5.0      # stock RS3M vs SPY > +5% (growth-leader bar)
@@ -261,6 +271,25 @@ SPOT_ATR_MOMENTUM_MAX = 1.0    # PROPOSED_DEFAULT — ATR/ATR_5EMA <= this = con
 # the MA200 trend line. The volatility veto pairs an expanding ATR with a rich IV.
 VETO_IVR_PERCENTILE_MIN = 90.0  # PROPOSED_DEFAULT — ATR expanding AND IVR percentile >= this vetoes
 
+# ---- Symbol Genius (symbol_genius.py) --------------------------------------
+# A per-name four-light instance of the Genius engine that DELIBERATELY diverges
+# from the market regime on its fourth light: the regime votes EMA21 > SMA50 (a
+# short-clock trend read, GENIUS_FAST_MA above), while Symbol Genius votes
+# SMA50 > SMA200 — structural health on a longer clock. The two engines must NOT
+# silently share the fourth-light constant, so Symbol Genius carries its OWN
+# param (SMA200 window) and reads NO fast_ma at all. The other three lights
+# (close>SMA50, SAR, ROC10) reuse the shared GENIUS_* params above.
+SYMBOL_GENIUS_SLOWER_MA = 200  # PROPOSED_DEFAULT — the "slower" SMA in the SMA50>SMA200 fourth light
+# The SMA200 light needs >=200 bars, so a name needs at least this many bars
+# before its Symbol Genius verdict is trusted (inside the warm-up it reads
+# insufficient -> RED, never GREEN). Binding warm-up is the SMA200 window, well
+# above the stock-lights SAR warm-up (STOCK_LIGHTS_WARMUP_BARS = 50).
+SYMBOL_LIGHTS_WARMUP_BARS = SYMBOL_GENIUS_SLOWER_MA  # PROPOSED_DEFAULT
+# Days of daily Symbol Genius color retained in the shadow-log (DATA_DIR/
+# symbol_genius_history.json) — the churn measurement that must precede any
+# per-symbol yellow dwell. Derived telemetry, recomputable from cached bars.
+SYMBOL_GENIUS_HISTORY_DAYS = 90  # PROPOSED_DEFAULT — ~1 quarter of trading days
+
 # ---- Indicator calibration (matches thinkorswim daily studies) -------------
 RS3M_LOOKBACK = 63            # ~3 months of trading days
 RS1M_LOOKBACK = 21           # ~1 month of trading days (ranking within GREENs + sector gate)
@@ -268,7 +297,13 @@ ATR_WINDOW = 9               # CFM uses a 9-day ATR for strike spacing
 RSI_WINDOW = 14
 MA_WINDOW = 21
 VOL_AVG_WINDOW = 20
-HISTORY_DAYS = 320           # daily bars pulled / cached per symbol
+# Calendar-day lookback for the daily-bar fetch/cache. Sized so BOTH providers
+# clear the ≥250-TRADING-bar floor the structure classifier needs (SMA200 series
+# + 150-day slope + base counting): ~400 calendar days ≈ ~275 trading bars.
+# Schwab bounds the fetch by this window's startDate; Alpha Vantage is filtered to
+# the SAME start (data_handler._fetch), so both key off one window and return a
+# consistent earliest bar — which the classifier's prefix-causal replay relies on.
+HISTORY_DAYS = 400           # daily bars pulled / cached per symbol (calendar days)
 
 # ---- Smart intraday refresh (hot tiering) ----------------------------------
 # The whole universe is fetched once pre-open (the warm-up) and then frozen in

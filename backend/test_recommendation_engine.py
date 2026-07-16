@@ -300,9 +300,10 @@ def test_xlk_july6_snapshot_blocking_verdict_and_no_enter(monkeypatch):
     # The REAL scoring path (no fork): sector_etf == ticker waives the sector
     # leg; has_weeklies pinned True so no provider probe runs offline.
     row = sc.score_ticker("XLK", spy, "XLK", xlk, has_weeklies=True)
-    verdict = row.get("verdict")
-    # Worst-signal-wins must land a BLOCKING verdict on the broken tape.
-    assert verdict in ("AVOID", "CAUTION"), f"expected blocking verdict, got {row}"
+    # The recommendation candidate keys off the CFM-suitability lens (the engine
+    # layers its own Level-1 regime check on top); on this broken tape it blocks.
+    verdict = row.get("suitability")
+    assert verdict in ("AVOID", "CAUTION"), f"expected blocking suitability, got {row}"
 
     as_of = datetime(2026, 7, 6, 20, 15, tzinfo=timezone.utc)
     tk = {"price": float(xlk["Close"].iloc[-1]), "last_close": float(xlk["Close"].iloc[-1]),

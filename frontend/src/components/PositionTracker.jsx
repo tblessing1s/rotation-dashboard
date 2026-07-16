@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Meter, Loading, Modal, money, fmt, useApi } from "./ui.jsx";
+import { Card, Meter, Loading, Modal, Light, money, fmt, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { Orange, pulpOf, balanceOf } from "./JuiceStand.jsx";
@@ -1123,6 +1123,22 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
           <span className={`text-slate-500 transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
           <span className="text-sm font-semibold text-slate-100">{p.ticker}</span>
           <span className="truncate text-xs text-slate-500">{p.sector}</span>
+          {p.symbol_genius?.color && (
+            <span
+              className="flex items-center gap-1"
+              title={`Symbol Genius: ${p.symbol_genius.color.toUpperCase()}`
+                + (p.symbol_genius.greens != null ? ` (${p.symbol_genius.greens}/4 lights)` : "")
+                + " — the per-name four-light structural read (SMA50>SMA200 fourth light). "
+                + "YELLOW (3 green) or RED is an early structural warning alongside the RS-based kill switch."}
+            >
+              <Light status={p.symbol_genius.color} size="h-2 w-2" />
+              {p.symbol_genius.color !== "green" && (
+                <span className={`text-[9px] font-semibold uppercase ${p.symbol_genius.color === "yellow" ? "text-amber-300" : "text-rose-300"}`}>
+                  SYM {p.symbol_genius.color}
+                </span>
+              )}
+            </span>
+          )}
           {hasAlert && (
             <span title="Needs attention — expand to resolve"
                   className="rounded-full border border-rose-500/50 bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-rose-300">⚠</span>

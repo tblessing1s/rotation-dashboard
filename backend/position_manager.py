@@ -427,6 +427,20 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
             out["circuit_breaker_status"] = circuit_breaker.evaluate(position)
         except Exception:  # noqa: BLE001 — the breaker view is informational, never block positions
             out["circuit_breaker_status"] = None
+        # Symbol Genius on the held name — a SECOND consumer of the same per-name
+        # four-light engine the scan uses (its fourth light is SMA50>SMA200). A held
+        # position slipping to YELLOW (exactly 3 green) or RED is an early structural
+        # warning that complements the RS-based kill switch. Informational only —
+        # never closes or blocks a position (the kill switch / circuit breaker own
+        # exits); the same compute path as the scan, so the two never disagree.
+        try:
+            import data_handler
+            import symbol_genius
+            sg = symbol_genius.compute(data_handler.get_daily(ticker))
+            out["symbol_genius"] = {"color": sg["color"], "greens": sg["greens"],
+                                    "insufficient": sg["insufficient"], "lights": sg["lights"]}
+        except Exception:  # noqa: BLE001 — informational, never block positions
+            out["symbol_genius"] = None
     shares = dict(position.get("shares") or {})
     count = int(shares.get("count") or 0)
     cap = int(shares.get("cap") or config.SHARE_CAP)

@@ -18,7 +18,10 @@ import pandas as pd
 import config
 import data_handler
 import indicators
+import scan_verdict
 import sector_data
+import structure_classifier
+import symbol_genius
 
 from . import thresholds as T
 
@@ -301,15 +304,16 @@ _ROUND = {  # display rounding per field (verdict is computed from full precisio
 }
 
 _GATE_LEVEL_NAMES = {1: "market regime", 2: "sector strength",
-                     3: "stock beating peers", 4: "consolidating"}
+                     3: "stock beating peers", 3.5: "structure", 4: "consolidating"}
 
-# Only the stock's OWN gate legs decide the verdict: Level 3 (beats peers) and
-# Level 4 (consolidating). The market-wide legs — Level 1 (regime) and Level 2
-# (sector strength) — are EXCLUDED: they're context, not a property of the stock,
-# and letting them blanket the table to AVOID would defeat the per-stock
-# comparison exactly when it's most wanted (e.g. a yellow regime, or a sector
-# that's merely lagging while the stock itself leads its peers and consolidates).
-_STOCK_GATE_LEVELS = (3, 4)
+# Only the stock's OWN gate legs decide the verdict: Level 3 (beats peers),
+# Level 3.5 (structure — the classifier's entrability), and Level 4 (consolidating).
+# The market-wide legs — Level 1 (regime) and Level 2 (sector strength) — are
+# EXCLUDED: they're context, not a property of the stock, and letting them blanket
+# the table to AVOID would defeat the per-stock comparison exactly when it's most
+# wanted (e.g. a yellow regime, or a sector that's merely lagging while the stock
+# itself leads its peers and consolidates).
+_STOCK_GATE_LEVELS = (3, 3.5, 4)
 
 
 def _round_row(metrics: dict) -> dict:
@@ -373,7 +377,8 @@ def _apply_price_override(df, price_override):
 
 def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                  sector_df: pd.DataFrame | None, gate: dict | None = None,
-                 has_weeklies: bool | None = None, price_override: float | None = None) -> dict:
+                 has_weeklies: bool | None = None, price_override: float | None = None,
+                 regime_color: str | None = None) -> dict:
     """One scorecard row: numeric metrics + the composite verdict.
 
     Only the stock's own gate legs decide it: a beats-peers (L3) or consolidating
@@ -442,19 +447,44 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["earnings_date"] = earn.get("date")
     row["earnings_days"] = earn.get("days_until")
 
+    # Scan-restructure signals — the per-symbol columns SYM | BASE | INST | VERDICT.
+    # Symbol Genius (the four-light SYM), the structure classifier (BASE + INST from
+    # ONE call, display-only split), and the composed, CANONICAL `verdict`
+    # (worst-signal-wins of the INVISIBLE market regime + SYM + structure
+    # entrability). A RED regime forces every verdict to BLOCKED. Computed for every
+    # row (even a gate short-circuit below) so the scan table is complete.
+    #
+    # The older GO/CAUTION/AVOID CFM-suitability lens is retained as `suitability`
+    # (a demoted drawer readout) and is what the internal queue / recommendation /
+    # refresh pipeline reads — it carries its own regime handling and measures a
+    # different thing (stock-momentum suitability, not the regime-aware composition).
+    sym = symbol_genius.compute(df)
+    cls = structure_classifier.classify(df)
+    composed = scan_verdict.compose_verdict(regime_color, sym["color"],
+                                            cls["base_stage"], cls["inst_flow"])
+    row["sym"] = sym["color"]
+    row["sym_greens"] = sym["greens"]
+    row["base_stage"] = cls["base_stage"]
+    row["inst_flow"] = cls["inst_flow"]
+    row["structure_entrability"] = composed["structure_entrability"]
+    row["verdict"] = composed["verdict"]                 # the canonical scan verdict
+    row["verdict_reasons"] = composed["reasons"]
+
+    # `suitability` = the CFM-suitability lens (stock-level gate short-circuit, else
+    # the GO/CAUTION/AVOID metric rules). Not the headline verdict — a demoted signal.
     failed = _failed_stock_gate_level(gate)
     if failed is not None:
         name = _GATE_LEVEL_NAMES.get(failed, "")
-        row["verdict"] = "AVOID"
-        row["reasons"] = [f"fails entry gate level {failed}"
-                          + (f" ({name})" if name else "")]
+        row["suitability"] = "AVOID"
+        row["suitability_reasons"] = [f"fails entry gate level {failed}"
+                                      + (f" ({name})" if name else "")]
         return row
 
-    # Judge the rounded values the UI actually shows, so a verdict can never
+    # Judge the rounded values the UI actually shows, so the suitability can never
     # disagree with the number displayed next to it (sub-rounding boundaries).
-    verdict = compute_verdict(row)
-    row["verdict"] = verdict["verdict"]
-    row["reasons"] = verdict["reasons"]
+    suitability = compute_verdict(row)
+    row["suitability"] = suitability["verdict"]
+    row["suitability_reasons"] = suitability["reasons"]
     return row
 
 
@@ -474,6 +504,14 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_frames = {e: data_handler.get_daily(e) for e in etfs}
 
+    # The invisible market regime — ONE read for the whole sweep — feeds the composed
+    # scan verdict (a RED regime blocks every row). Best-effort: a regime failure
+    # degrades regime_color to None (composed verdict then never emits READY).
+    try:
+        regime_color = screening.regime().get("status")
+    except Exception:  # noqa: BLE001
+        regime_color = None
+
     rows = []
     for t in names:
         etf = sector_of[t]
@@ -483,7 +521,8 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
             gate = None
         rows.append(score_ticker(t, spy, etf, sector_frames.get(etf), gate,
                                  has_weeklies=weeklies.has_weeklies(t),
-                                 price_override=price_overrides.get(t.upper())))
+                                 price_override=price_overrides.get(t.upper()),
+                                 regime_color=regime_color))
 
     rows.sort(key=lambda r: (r["sector"], r["ticker"]))
     return {"as_of": log.utcnow(), "results": rows}

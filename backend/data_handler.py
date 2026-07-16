@@ -144,7 +144,14 @@ def _fetch(symbol: str) -> pd.DataFrame:
             errors.append(f"schwab: {e}")
     if alpha_vantage.configured():
         try:
-            df = alpha_vantage.daily_bars(symbol).tail(config.HISTORY_DAYS)
+            # Align to the SAME calendar window as the Schwab path (startDate =
+            # `start`) instead of a fixed row-count tail: Schwab measures calendar
+            # days and AV measures trading rows, so a tail(HISTORY_DAYS) would hand
+            # back a different (deeper) history than Schwab for the same symbol —
+            # a different earliest bar, which would make the classifier's
+            # prefix-causal replay depend on which provider served the frame. AV
+            # full is 20+ yrs; slicing from `start` keeps both keyed off one window.
+            df = alpha_vantage.daily_bars(symbol).loc[start:]
             _record_success("alpha_vantage_bars", symbol)
             if schwab_api.configured():
                 _fallback_events += 1

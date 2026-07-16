@@ -247,13 +247,34 @@ def _compute_sectors() -> dict:
         expanding = indicators.atr_expanding(df) if df is not None else None
         strong = (rs1m is not None and rs1m > config.SECTOR_RS1M_MIN
                   and bdth is not None and bdth >= config.SECTOR_BREADTH_MIN)
-        status = "green" if strong else "red" if (rs1m is not None and rs1m < 0) else "yellow"
+        # Level-2 reframe: sector as a VETO, not a selector. The gate blocks only on
+        # positive evidence the sector is DETERIORATING — lagging SPY (RS1M < 0),
+        # breadth collapsing (below the collapse floor, well under the participation
+        # bar), or the sector ETF itself under distribution (the classifier's InstFlow
+        # on price/volume). Missing data never vetoes (fail-open). Otherwise the
+        # sector passes through and lets SYM + BASE + INST carry selection. `strong`
+        # (the old bar) is kept for display / sizing only.
+        import structure_classifier
+        inst_flow = structure_classifier.classify_symbol(df)[1] if df is not None else None
+        det_reasons = []
+        if rs1m is not None and rs1m < 0:
+            det_reasons.append("rs1m_negative")
+        if bdth is not None and bdth < config.SECTOR_BREADTH_COLLAPSE:
+            det_reasons.append("breadth_collapsing")
+        if inst_flow == structure_classifier.InstFlow.DISTRIBUTING:
+            det_reasons.append("under_distribution")
+        deteriorating = bool(det_reasons)
+        status = "green" if strong else "red" if deteriorating else "yellow"
         out[etf] = {
             "name": sector_data.sectors()[etf].name,
-            "rs1m": rs1m,        # the GATE bar (vs SPY, 1-month)
+            "rs1m": rs1m,        # display + the sizing "strong" bar (vs SPY, 1-month)
             "rs3m": rs3m,        # display only (vs SPY, 3-month)
             "breadth": bdth,
             "atr_expanding": expanding,
+            "inst_flow": inst_flow,           # sector ETF's own accumulation/distribution read
+            "strong": strong,                 # the old "sector strong" bar — display / sizing only
+            "deteriorating": deteriorating,   # the Level-2 VETO: True blocks entry
+            "deteriorating_reasons": det_reasons,
             "status": status,
         }
     return out
@@ -428,17 +449,23 @@ def entry_gate(ticker: str) -> dict:
     levels.append({"level": 1, "name": "Market regime green", "pass": regime_green,
                    "checks": l1_checks, "detail": reg})
 
-    # Level 2 — sector strong. The gate now bars on RS1M vs SPY (fresher 1-month
-    # read) + breadth, replacing the laggy RS3M vs SPY bar. RS3M is shown for
-    # context but no longer gated on.
+    # Level 2 — sector NOT deteriorating (a VETO, not a selector). The old bar
+    # required the sector to be strong (RS1M vs SPY > 0 AND breadth ≥ 60); the
+    # reframe blocks only on positive evidence of deterioration — RS1M negative,
+    # breadth collapsing, or the sector ETF under distribution — and otherwise
+    # passes through, letting SYM + BASE + INST carry selection. Missing data never
+    # vetoes (fail-open). One-position-per-sector at Level 5 still caps the
+    # concentration this bar used to manage implicitly.
     sec = sectors().get(sector_etf, {}) if sector_etf else {}
     l2_checks = [
-        _check(f"Sector RS1M vs SPY > {config.SECTOR_RS1M_MIN:g}%", sec.get("rs1m"),
-               sec.get("rs1m") is not None and sec.get("rs1m") > config.SECTOR_RS1M_MIN),
-        _check(f"Sector breadth ≥ {config.SECTOR_BREADTH_MIN:g}%", sec.get("breadth"),
-               sec.get("breadth") is not None and sec.get("breadth") >= config.SECTOR_BREADTH_MIN),
+        _check(f"Sector RS1M vs SPY not negative", sec.get("rs1m"),
+               not (sec.get("rs1m") is not None and sec.get("rs1m") < 0)),
+        _check(f"Sector breadth not collapsing (≥ {config.SECTOR_BREADTH_COLLAPSE:g}%)", sec.get("breadth"),
+               not (sec.get("breadth") is not None and sec.get("breadth") < config.SECTOR_BREADTH_COLLAPSE)),
+        _check("Sector not under distribution", sec.get("inst_flow"),
+               sec.get("inst_flow") != "DISTRIBUTING"),
     ]
-    levels.append({"level": 2, "name": "Sector strong", "pass": _all(l2_checks),
+    levels.append({"level": 2, "name": "Sector not deteriorating", "pass": _all(l2_checks),
                    "checks": l2_checks, "detail": {"sector": sector_etf, **sec}})
 
     # Level 3 — stock lights GREEN. The SAME four Genius lights as the market
@@ -466,6 +493,28 @@ def entry_gate(ticker: str) -> dict:
     stock_green = row.get("verdict") == stock_lights.GREEN
     levels.append({"level": 3, "name": "Stock lights green", "pass": stock_green,
                    "checks": l3_checks, "detail": row})
+
+    # Level 3.5 — structure. The pure classifier's (BaseStage, InstFlow) mapped
+    # through the entrability grid, inserted between "beats peers" (L3) and "right
+    # spot" (L4): a topping / declining / distributing / insufficient structure
+    # (BLOCKED) or a watchlist-only cell (WATCH) is not entrable and stops the gate.
+    # Reads only price/volume structure, so it runs IDENTICALLY for stocks and ETFs
+    # (no is_etf branch, no vs-sector path). All classifier thresholds are
+    # PROPOSED_DEFAULT. Stop-on-first-fail is preserved: with the level ordered 3.5
+    # here, a structure miss holds cleared at 3 (WAIT), and a full clear still
+    # reaches cleared == 4 only when 3.5 AND 4 both pass.
+    import structure_classifier
+    df_struct = data_handler.get_daily(ticker)
+    base_stage, inst_flow = structure_classifier.classify_symbol(df_struct)
+    entrability = structure_classifier.structure_entrability(base_stage, inst_flow)
+    l35_pass = entrability in (structure_classifier.Entrability.READY,
+                               structure_classifier.Entrability.CAUTION)
+    l35_checks = [_check(f"Structure entrable ({base_stage} × {inst_flow})",
+                         entrability, l35_pass)]
+    levels.append({"level": 3.5, "name": "Structure entrable", "pass": bool(l35_pass),
+                   "checks": l35_checks,
+                   "detail": {"base_stage": base_stage, "inst_flow": inst_flow,
+                              "entrability": entrability}})
 
     # Level 4 — right spot. A SEPARATE, blocking gate applied AFTER the lights (the
     # consolidation "right spot" checks are NOT lights). Identical for stocks/ETFs.

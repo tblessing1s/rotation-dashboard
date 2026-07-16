@@ -493,8 +493,8 @@ def test_scan_ready_splits_go_rows_by_level5_and_sorts_by_juice(isolated_state, 
     import app as app_module
 
     rows = [
-        {"ticker": "AAA", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 1.0, "earnings_date": None},
-        {"ticker": "BBB", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 3.0, "earnings_date": None},
+        {"ticker": "AAA", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 1.0, "earnings_date": None},
+        {"ticker": "BBB", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 3.0, "earnings_date": None},
         {"ticker": "CCC", "sector": "XLK", "verdict": "CAUTION", "juice_weekly_pct": 5.0, "earnings_date": None},
     ]
     monkeypatch.setattr(scorecard_metrics, "scorecard",
@@ -502,7 +502,7 @@ def test_scan_ready_splits_go_rows_by_level5_and_sorts_by_juice(isolated_state, 
 
     def _fake_evaluate_many(tickers, contracts=None):
         # AAA blocked (thin juice), BBB passes — CCC is excluded before this
-        # is even called since it isn't a GO row.
+        # is even called since it isn't a READY row.
         assert set(tickers) == {"AAA", "BBB"}
         return {
             "AAA": {"pass": False, "blocking_failures": ["juice_adequacy"]},
@@ -524,8 +524,8 @@ def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state
     import app as app_module
 
     rows = [
-        {"ticker": "LOW", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 2.0, "earnings_date": None},
-        {"ticker": "HIGH", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 6.0, "earnings_date": None},
+        {"ticker": "LOW", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 2.0, "earnings_date": None},
+        {"ticker": "HIGH", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 6.0, "earnings_date": None},
     ]
     monkeypatch.setattr(scorecard_metrics, "scorecard",
                         lambda tickers=None: {"as_of": "x", "results": rows})
@@ -555,7 +555,7 @@ def test_scan_ready_fetches_live_quote_on_demand_so_go_clears(isolated_state, mo
     data_cache.put("AAA", BARS, "df", "schwab", Tier.T1, fetched_at=time.time() - 60)
     data_cache.put("SPY", QUOTE, 1.0, "schwab", Tier.T1, fetched_at=time.time() - 5)
 
-    rows = [{"ticker": "AAA", "sector": "XLK", "verdict": "GO",
+    rows = [{"ticker": "AAA", "sector": "XLK", "verdict": "READY",
              "juice_weekly_pct": 1.0, "earnings_date": None}]
     monkeypatch.setattr(scorecard_metrics, "scorecard",
                         lambda tickers=None: {"as_of": "x", "results": rows})
@@ -629,3 +629,23 @@ def test_earnings_beyond_the_cycle_does_not_block(isolated_state, monkeypatch):
     g = account_gate.evaluate("NVDA", contracts=5,
                               leap_cost_per_share=40.0, weekly_extrinsic_per_share=1.20)
     assert "earnings_in_cycle" not in g["blocking_failures"] and g["pass"] is True
+
+
+def test_sector_size_suggestion_scales_by_strength(monkeypatch):
+    import account_gate
+    import screening
+    import sector_data
+    monkeypatch.setattr(sector_data, "sector_for", lambda t: "XLK")
+
+    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {"strong": True, "deteriorating": False, "status": "green"}})
+    strong = account_gate.sector_size_suggestion("NVDA", full_contracts=4)
+    assert strong["suggested_contracts"] == 4 and strong["modifier"] == 1.0
+
+    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {"strong": False, "deteriorating": False, "status": "yellow"}})
+    neutral = account_gate.sector_size_suggestion("NVDA", full_contracts=4)
+    assert neutral["suggested_contracts"] == 2      # round(4 * 0.5)
+
+    # Suggestion never drops below 1 contract even from a single full contract.
+    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {"strong": False, "deteriorating": True, "status": "red"}})
+    minimal = account_gate.sector_size_suggestion("NVDA", full_contracts=1)
+    assert minimal["suggested_contracts"] == 1 and minimal["deteriorating"] is True

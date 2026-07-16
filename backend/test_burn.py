@@ -297,9 +297,9 @@ def test_queue_ranks_on_net_not_gross():
     equal gross but different net rank net-first (higher net = rank 1)."""
     import queue_state
     rows = [
-        {"ticker": "AAA", "verdict": "GO", "juice_weekly_pct": 2.0, "net_juice_weekly_pct": 1.2},
-        {"ticker": "BBB", "verdict": "GO", "juice_weekly_pct": 2.0, "net_juice_weekly_pct": 1.7},
-        {"ticker": "CCC", "verdict": "GO", "juice_weekly_pct": 2.0, "net_juice_weekly_pct": 0.9},
+        {"ticker": "AAA", "suitability": "GO", "juice_weekly_pct": 2.0, "net_juice_weekly_pct": 1.2},
+        {"ticker": "BBB", "suitability": "GO", "juice_weekly_pct": 2.0, "net_juice_weekly_pct": 1.7},
+        {"ticker": "CCC", "suitability": "GO", "juice_weekly_pct": 2.0, "net_juice_weekly_pct": 0.9},
     ]
     qs = queue_state.build_queue_state(state={"positions": []}, rows=rows)
     order = [c.symbol for c in qs.candidates]
@@ -309,8 +309,8 @@ def test_queue_ranks_on_net_not_gross():
 def test_queue_falls_back_to_gross_when_net_missing():
     import queue_state
     rows = [
-        {"ticker": "AAA", "verdict": "GO", "juice_weekly_pct": 3.0},  # no net
-        {"ticker": "BBB", "verdict": "GO", "juice_weekly_pct": 1.0, "net_juice_weekly_pct": 2.0},
+        {"ticker": "AAA", "suitability": "GO", "juice_weekly_pct": 3.0},  # no net
+        {"ticker": "BBB", "suitability": "GO", "juice_weekly_pct": 1.0, "net_juice_weekly_pct": 2.0},
     ]
     qs = queue_state.build_queue_state(state={"positions": []}, rows=rows)
     order = [c.symbol for c in qs.candidates]

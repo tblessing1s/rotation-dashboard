@@ -117,14 +117,17 @@ def _live_price(ticker: str) -> float | None:
 
 
 def _entry_candidates(market: dict, spy_bars) -> list[dict]:
-    """The frozen ENTER candidate list: the Scorecard's own worst-signal GO
-    subset + Level 5, exactly what /api/scan/ready composes. Uses the memoized
-    sweep — a cold cache computes once and is shared with the Scan tab."""
+    """The frozen ENTER candidate list: the Scorecard's own worst-signal
+    SUITABILITY (GO) subset + Level 5. The recommendation engine layers its own
+    Level-1 regime check on top (_entry_blocked), so this keys off the
+    regime-unaware CFM-suitability signal (`suitability`), not the regime-aware
+    scan `verdict`, to avoid double-counting the regime. Uses the memoized sweep —
+    a cold cache computes once and is shared with the Scan tab."""
     try:
         import account_gate
         from metrics import scorecard as scorecard_metrics
         sc = scorecard_metrics.scorecard(None)
-        go_rows = [r for r in sc.get("results", []) if r.get("verdict") == "GO"]
+        go_rows = [r for r in sc.get("results", []) if r.get("suitability") == "GO"]
         if not go_rows:
             return []
         level5 = account_gate.evaluate_many([r["ticker"] for r in go_rows])
@@ -135,7 +138,7 @@ def _entry_candidates(market: dict, spy_bars) -> list[dict]:
             market["tickers"].setdefault(t.upper(), _ticker_snapshot(
                 t, None, None, _live_price(t), bars, spy_bars))
             out.append({
-                "ticker": t, "verdict": r.get("verdict"),
+                "ticker": t, "verdict": r.get("suitability"),
                 "level5": level5.get(t),
                 "juice_weekly_pct": r.get("juice_weekly_pct"),
                 "blockers": [],
