@@ -467,6 +467,12 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # key. Kept alongside gross so the panel can show both; ranking sorts on net.
     row["net_juice_weekly_pct"] = est.get("net_weekly_yield_pct")
     row["burn_weekly_per_share"] = est.get("burn_weekly_per_share")
+    # LEAP theta burn as a % of LEAP cost/week = gross − net (the decay the income
+    # has to overcome). Derived so the table can show gross · burn · net side by side
+    # with gross − burn = net legible at a glance.
+    row["burn_weekly_pct"] = (None if (row["juice_weekly_pct"] is None
+                                       or row["net_juice_weekly_pct"] is None)
+                              else round(row["juice_weekly_pct"] - row["net_juice_weekly_pct"], 2))
     row["juice_target_pct"] = target
     row["juice_ok"] = (None if est["weekly_yield_pct"] is None
                        else bool(est["weekly_yield_pct"] >= target))

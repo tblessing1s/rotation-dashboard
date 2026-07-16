@@ -96,10 +96,22 @@ const COLUMNS = [
     ) : <span className="text-slate-600">—</span>),
   },
   {
-    key: "net_juice_weekly_pct", label: "Juice/wk", sortVal: (r) => r.net_juice_weekly_pct,
+    key: "juice_weekly_pct", label: "Gross/wk", sortVal: (r) => r.juice_weekly_pct,
+    render: (r) => (r.juice_weekly_pct == null
+      ? <span className="text-slate-600">—</span>
+      : <span className="tabular-nums text-slate-300">{pctSigned(r.juice_weekly_pct, 2)}</span>),
+  },
+  {
+    key: "burn_weekly_pct", label: "Burn/wk", sortVal: (r) => r.burn_weekly_pct,
+    render: (r) => (r.burn_weekly_pct == null
+      ? <span className="text-slate-600">—</span>
+      : <span className="tabular-nums text-amber-300/80">−{fmt(r.burn_weekly_pct, 2)}%</span>),
+  },
+  {
+    key: "net_juice_weekly_pct", label: "Net/wk", sortVal: (r) => r.net_juice_weekly_pct,
     render: (r) => (r.net_juice_weekly_pct == null
       ? <span className="text-slate-600">—</span>
-      : <span className={`tabular-nums ${r.net_juice_weekly_pct <= 0 ? "text-rose-300" : "text-slate-300"}`}>
+      : <span className={`tabular-nums font-medium ${r.net_juice_weekly_pct <= 0 ? "text-rose-300" : "text-emerald-300/90"}`}>
           {pctSigned(r.net_juice_weekly_pct, 2)}
         </span>),
   },
@@ -144,7 +156,9 @@ const COLUMN_HELP = {
   rs_state: "Two-speed relative strength vs the sector (SHADOW — does not affect the verdict).\n" +
     "Level = 3-month RS (leading ⊕ / lagging ⊖); slope = the 21-day EMA direction of the RS line.\n" +
     "⊕ rising (leading, improving) · ⊕ fading (leading, rolling over) · ⊖ turning (lagging, recovering) · ⊖ falling (lagging, worsening). vs SPY is in the row drawer.",
-  net_juice_weekly_pct: "Net juice / week — weekly extrinsic as % of LEAP cost, NET of the LEAP's model theta burn and slippage. The income the setup actually pays; the Ready-to-Enter ranking key.",
+  juice_weekly_pct: "Gross juice / week — the weekly short extrinsic as % of LEAP cost, BEFORE the LEAP's own decay. The strategy's stated income bar; the juice ADEQUACY floor gates on this (below the floor → BLOCKED).",
+  burn_weekly_pct: "LEAP burn / week — the LEAP's model theta decay as % of LEAP cost (gross − net). The drag the weekly income has to overcome; a fat burn is why a rich-looking gross can net to little.",
+  net_juice_weekly_pct: "Net juice / week — gross minus the LEAP burn and slippage. The income the setup actually pays (gross − burn); the Ready-to-Enter ranking key. Net ≤ 0 (burn exceeds income) is a hard BLOCK.",
   score: "Composite SCORE 0–10 (SHADOW — zero authority).\n" +
     "A quality rank over the non-blocking inputs (sector strength, base maturity, InstFlow grade, ATR posture, MA21 distance, net juice/wk, RS state). All weights are PROPOSED_DEFAULT and logged for calibration. It does NOT feed the verdict, Ready-to-Enter, or sizing — it only ranks names within a tier.",
   verdict: "The composed verdict — worst-signal-wins of the (invisible) market regime, Symbol Genius, and the structure cell, folded with the FULL entry gate.\n" +
@@ -388,7 +402,7 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                 <Readout label="Vol×" value={fmt(row.volume_ratio, 2)} />
                 <Readout label="ATR mom" value={fmt(row.atr_momentum, 2)} />
                 <Readout label="OBV" value={row.obv_above_ema == null ? "—" : row.obv_above_ema ? "↑ accum" : "↓ distrib"} />
-                <Readout label="Gross juice/wk" value={row.juice_weekly_pct == null ? "—" : pctSigned(row.juice_weekly_pct, 2)} />
+                <Readout label="Burn $/sh/wk" value={row.burn_weekly_per_share == null ? "—" : `$${fmt(row.burn_weekly_per_share, 2)}`} />
                 <Readout label="Earnings" value={row.earnings_days != null ? `${row.earnings_days}d` : (row.earnings_date || "—")} />
                 <Readout label="Suitability" value={row.suitability || "—"} />
               </div>
