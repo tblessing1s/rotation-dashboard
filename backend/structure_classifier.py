@@ -73,10 +73,15 @@ class Entrability:
 # ---------------------------------------------------------------------------
 # PROPOSED_DEFAULT thresholds — none of these is a HARD_CFM_RULE.
 # ---------------------------------------------------------------------------
-# Data sufficiency (bars). BaseStage needs the SMA200 series + a 150-day slope +
-# room to count bases; the depth precondition (config.HISTORY_DAYS ~= 400 cal ~=
-# ~276 trading bars) is sized to clear this floor.
-MIN_BARS_BASE = 250            # PROPOSED_DEFAULT — below this, BaseStage = INSUFFICIENT_DATA
+# Data sufficiency (bars). BaseStage's binding inputs are SMA200 (200 bars) and
+# the LONG_LOOKBACK=200-bar long-run gain (201 bars); the 150-day slope needs 150.
+# The floor sits just above that hard requirement so a name is classified whenever
+# its signals can actually be computed — NOT at an arbitrarily deeper level that
+# would blank names the data can support (a fresh fetch under HISTORY_DAYS=400 is
+# ~276 bars, but a name carrying only ~210-250 bars is still perfectly classifiable
+# and must not read NO DATA). Below this, or if any binding input is missing,
+# BaseStage is INSUFFICIENT_DATA.
+MIN_BARS_BASE = 210            # PROPOSED_DEFAULT — just above the SMA200/roc200 hard floor
 MIN_BARS_FLOW = 50             # PROPOSED_DEFAULT — below this, InstFlow = INSUFFICIENT_DATA
 
 # Long-term trend (150-day least-squares slope, expressed as the total % change
@@ -298,7 +303,10 @@ def _base_stage(sig: dict) -> str:
     slope = sig["slope_pct"]
     above200 = sig["above_sma200"]
     above50 = sig["above_sma50"]
-    if slope is None or above200 is None:
+    # Sufficiency is ultimately "can the binding inputs be computed": the SMA200
+    # position, the 150-day slope, and the long-run gain (roc_long). Any missing ->
+    # INSUFFICIENT_DATA, so the bar-count floor and the actual computability agree.
+    if slope is None or above200 is None or sig["roc_long"] is None:
         return BaseStage.INSUFFICIENT_DATA
 
     rising = slope > SLOPE_RISING_PCT
