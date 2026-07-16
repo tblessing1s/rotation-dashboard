@@ -18,6 +18,8 @@ import pandas as pd
 import config
 import data_handler
 import indicators
+import rs_state as rss
+import scan_score
 import scan_verdict
 import sector_data
 import structure_classifier
@@ -468,7 +470,44 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["inst_flow"] = cls["inst_flow"]
     row["structure_entrability"] = composed["structure_entrability"]
     row["verdict"] = composed["verdict"]                 # the canonical scan verdict
-    row["verdict_reasons"] = composed["reasons"]
+    row["verdict_reasons"] = list(composed["reasons"])
+
+    # Two-speed RS SHADOW — vs Sector (the table's primary) + vs SPY (drawer). Level
+    # reuses the displayed RS3M; slope is the RS-line-EMA direction. A sector ETF has
+    # no distinct peer sector, so its vs-Sector RS is N/A (same rule as rs3m_vs_sector).
+    # SHADOW ONLY: never feeds the composed verdict above, never blocks, never sizes.
+    rs_sec = (rss.rs_state(df, sector_df) if (not is_sector_etf and sector_df is not None)
+              else {"state": None, "level": None, "slope": None})
+    rs_spy = rss.rs_state(df, spy_df) if spy_df is not None else {"state": None, "level": None, "slope": None}
+    row["rs_state"] = rs_sec["state"]            # vs Sector — the table column
+    row["rs_level"] = rs_sec["level"]
+    row["rs_slope"] = rs_sec["slope"]
+    row["rs_state_spy"] = rs_spy["state"]        # vs SPY — the drawer readout
+    row["rs_spy_level"] = rs_spy["level"]
+    row["rs_spy_slope"] = rs_spy["slope"]
+
+    # Gated Phase-0 exception: a TURNING vs-Sector RS on an already-non-READY row is
+    # an informational WATCH annotation (relative strength recovering) appended to the
+    # CANONICAL verdict's reasons — never a second verdict, never a verdict change.
+    annotation = rss.turning_watch_reason(row["verdict"], row["rs_state"])
+    if annotation:
+        row["verdict_reasons"].append(annotation)
+
+    # Composite SCORE (0–10) SHADOW — a pure rank over the already-computed row
+    # inputs. ZERO authority: not read by the verdict, gate, /api/scan/ready, sizing,
+    # or recommendations (see scan_score.py). sector_rs1m is the sector ETF's own
+    # strength vs SPY (one cheap arithmetic call over the already-cached frames).
+    sector_rs1m = (indicators.rs1m(sector_df, spy_df)
+                   if (sector_df is not None and spy_df is not None) else None)
+    scored = scan_score.compute_score(
+        inst_flow=cls["inst_flow"], base_stage=cls["base_stage"],
+        base_count=cls["signals"].get("base_count"), rs_state_value=row["rs_state"],
+        sector_rs1m=sector_rs1m, atr_momentum=row.get("atr_momentum"),
+        pct_above_ma21=row.get("pct_above_ma21"),
+        net_juice_weekly_pct=row.get("net_juice_weekly_pct"))
+    row["score"] = scored["score"]
+    row["score_parts"] = scored["parts"]
+    row["sector_rs1m"] = None if sector_rs1m is None else round(sector_rs1m, 2)
 
     # `suitability` = the CFM-suitability lens (stock-level gate short-circuit, else
     # the GO/CAUTION/AVOID metric rules). Not the headline verdict — a demoted signal.

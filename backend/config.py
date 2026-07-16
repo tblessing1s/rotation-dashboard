@@ -293,6 +293,11 @@ SYMBOL_GENIUS_HISTORY_DAYS = 90  # PROPOSED_DEFAULT — ~1 quarter of trading da
 # ---- Indicator calibration (matches thinkorswim daily studies) -------------
 RS3M_LOOKBACK = 63            # ~3 months of trading days
 RS1M_LOOKBACK = 21           # ~1 month of trading days (ranking within GREENs + sector gate)
+# Two-speed RS shadow (rs_state.py) — the RS line is stock_close/bench_close; its
+# EMA is the ToS-style momentum smoothing, and the slope of that EMA over
+# RS_SLOPE_LOOKBACK bars is the fast "is it turning" read. SHADOW ONLY (never gates).
+RS_EMA_SPAN = 21             # PROPOSED_DEFAULT — EMA span of the RS line (ToS RS momentum smoothing)
+RS_SLOPE_LOOKBACK = 21       # PROPOSED_DEFAULT — the "21-day EMA slope" window
 ATR_WINDOW = 9               # CFM uses a 9-day ATR for strike spacing
 RSI_WINDOW = 14
 MA_WINDOW = 21
