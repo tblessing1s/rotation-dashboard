@@ -402,3 +402,29 @@ def test_accumulation_blocked_on_kill_switch(isolated_state, monkeypatch):
                         lambda t: {"ticker": t, "status": "green",
                                    "rs3m_vs_spy": 8.0, "rs3m_vs_sector": 3.0})
     assert pm.can_add_shares(state, "NVDA") is True
+
+
+def test_enrich_position_surfaces_symbol_genius(monkeypatch):
+    """An open position carries a Symbol Genius read — the SAME per-name four-light
+    engine the scan uses (a second consumer). A clean uptrend reads GREEN; an
+    insufficient-history name degrades to RED, never a crash."""
+    import numpy as np
+    import data_handler
+    up = _frame(list(100 + np.cumsum(np.full(260, 0.4))))
+    monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: up)
+    out = pm.enrich_position({"ticker": "NVDA", "sector": "XLK", "status": "open",
+                              "short_calls": [], "leaps": []})
+    assert out["symbol_genius"]["color"] == "green"
+    assert out["symbol_genius"]["greens"] == 4
+
+    short = _frame([100.0] * 40)   # < 200 bars -> SMA200 light insufficient -> RED
+    monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: short)
+    out2 = pm.enrich_position({"ticker": "AAA", "sector": "XLK", "status": "open",
+                               "short_calls": [], "leaps": []})
+    assert out2["symbol_genius"]["color"] == "red"
+    assert out2["symbol_genius"]["insufficient"] is True
+
+    # A closed position gets no Symbol Genius read (it's an open-risk warning).
+    out3 = pm.enrich_position({"ticker": "AAA", "sector": "XLK", "status": "closed",
+                               "short_calls": [], "leaps": []})
+    assert "symbol_genius" not in out3
