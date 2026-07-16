@@ -449,6 +449,19 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["earnings_date"] = earn.get("date")
     row["earnings_days"] = earn.get("days_until")
 
+    # IV Rank (drawer context) — sourced from the local IV-history store the app
+    # already accrues (option-chain views + nightly maintenance); NO new provider
+    # call. A juicy row sitting at a high IVR deserves suspicion ("don't be lured
+    # by high juice"). None below the store's minimum sample, never a guess.
+    try:
+        import iv_history
+        ivr = iv_history.iv_rank(ticker)
+        row["iv_rank"] = ivr.get("iv_rank")
+        row["iv_percentile"] = ivr.get("iv_percentile")
+    except Exception:  # noqa: BLE001 — IVR is a drawer readout, never sinks a row
+        row["iv_rank"] = None
+        row["iv_percentile"] = None
+
     # Scan-restructure signals — the per-symbol columns SYM | BASE | INST | VERDICT.
     # Symbol Genius (the four-light SYM), the structure classifier (BASE + INST from
     # ONE call, display-only split), and the composed, CANONICAL `verdict`
