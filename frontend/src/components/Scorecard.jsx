@@ -157,7 +157,8 @@ const COLUMN_HELP = {
     "Level = 3-month RS (leading ⊕ / lagging ⊖); slope = the 21-day EMA direction of the RS line.\n" +
     "⊕ rising (leading, improving) · ⊕ fading (leading, rolling over) · ⊖ turning (lagging, recovering) · ⊖ falling (lagging, worsening). vs SPY is in the row drawer.",
   juice_weekly_pct: "Gross juice / week — the weekly short extrinsic as % of LEAP cost, BEFORE the LEAP's own decay. The strategy's stated income bar; the juice ADEQUACY floor gates on this (below the floor → BLOCKED).",
-  burn_weekly_pct: "LEAP burn / week — the LEAP's model theta decay as % of LEAP cost (gross − net). The drag the weekly income has to overcome; a fat burn is why a rich-looking gross can net to little.",
+  burn_weekly_pct: "LEAP burn / week — theta decay of the LEAP's remaining EXTRINSIC, as % of LEAP cost (gross − net). Priced at ENTRY (a fresh ~0.90-delta LEAP) at flat spot, so it's the cost of WAITING and the MOST burn the position ever carries.\n" +
+    "In a good stock it shrinks toward zero: price rises → LEAP goes deep ITM → extrinsic → 0 → burn → 0, and Net climbs toward Gross. The structure/SYM/RS columns are your read on whether that will happen; the Positions view shows it as the real LEAP deepens.",
   net_juice_weekly_pct: "Net juice / week — gross minus the LEAP burn and slippage. The income the setup actually pays (gross − burn); the Ready-to-Enter ranking key. Net ≤ 0 (burn exceeds income) is a hard BLOCK.",
   score: "Composite SCORE 0–10 (SHADOW — zero authority).\n" +
     "A quality rank over the non-blocking inputs (sector strength, base maturity, InstFlow grade, ATR posture, MA21 distance, net juice/wk, RS state). All weights are PROPOSED_DEFAULT and logged for calibration. It does NOT feed the verdict, Ready-to-Enter, or sizing — it only ranks names within a tier.",
