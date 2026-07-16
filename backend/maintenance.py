@@ -210,13 +210,50 @@ def nightly_refresh() -> dict:
     # SCORE-weight graduation data). Derived telemetry (DATA_DIR/scan_rejection_log.
     # json), append-only, single nightly writer — never touches state.json. The
     # scorecard sweep is memoized, so this reuses today's already-computed rows.
+    sweep_results = None
     try:
         import scan_rejection_log
         from metrics import scorecard as scorecard_metrics
         sweep = scorecard_metrics.scorecard(None)
-        report["scan_rejection_log"] = scan_rejection_log.record_scan(sweep.get("results", []))
+        sweep_results = sweep.get("results", [])
+        report["scan_rejection_log"] = scan_rejection_log.record_scan(sweep_results)
     except Exception as e:  # noqa: BLE001 — a scan-log failure must not sink the sweep
         report["errors"].append(f"scan_rejection_log: {e}")
+
+    # Daily scan TRANSITION diff — yesterday's per-symbol scan state vs today's:
+    # emit BENCH→READY / fresh-READY / degrade / pipeline-entrant / sector-slot-open
+    # events, append them to the derived transition log (append-only, Q9 capture),
+    # and fan them out through the EXISTING notifier per the per-type alert toggle.
+    # Inform only — nothing here enters the executor or recommendation path.
+    try:
+        if sweep_results is not None:
+            import scan_diff
+            import scan_diff_log
+            import scan_rejection_log
+            import sector_data
+            import alerts as alerts_mod
+            prev_by_sym = scan_rejection_log.latest_before()
+            today_by_sym = {(r.get("ticker") or "").upper(): r for r in sweep_results
+                            if r.get("ticker")}
+            state = log.load_state()
+            occupied_now = sorted({(p.get("sector")
+                                    or sector_data.sector_for(p.get("ticker", "")) or "")
+                                   for p in state.get("positions", [])
+                                   if p.get("status") != "closed"} - {""})
+            prev_occupied = (scan_diff_log.read_snapshot() or {}).get("occupied_sectors")
+            events = scan_diff.diff(prev_by_sym, today_by_sym,
+                                    prev_occupied=prev_occupied, occupied_now=occupied_now)
+            scan_diff_log.append(events, occupied_sectors=occupied_now)
+            enabled = alerts_mod.get_settings(state)["enabled"]
+            fired = 0
+            for e in events:
+                if enabled.get(e["type"], True):
+                    alerts_mod.record_event(e["type"], e.get("ticker"), e["message"],
+                                            data=e.get("data"), key=e.get("data", {}).get("axis", ""))
+                    fired += 1
+            report["scan_diff"] = {"events": len(events), "notified": fired}
+    except Exception as e:  # noqa: BLE001 — a diff failure must not sink the sweep
+        report["errors"].append(f"scan_diff: {e}")
 
     # Weekly theta-burn mark (end-of-week cadence, once per ISO week): snapshots
     # each LEAP's model extrinsic + forward burn projection so the

@@ -254,12 +254,13 @@ function Readout({ label, value }) {
   );
 }
 
-function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt, refreshError }) {
+function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt, refreshError, innerRef }) {
   const blocked = row.verdict === "BLOCKED";
   const caution = row.verdict === "CAUTION";
   return (
     <>
       <tr
+        ref={innerRef}
         onClick={onToggle}
         className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800/40 ${
           blocked ? "bg-rose-500/5" : caution ? "bg-amber-500/5" : ""
@@ -409,7 +410,7 @@ function sortBench(rows) {
   });
 }
 
-export default function Scorecard({ regimeStatus, refreshKey }) {
+export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFocusHandled }) {
   const { data, error, loading, reload } = useApi(api.scorecard, [refreshKey]);
   const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
@@ -417,6 +418,7 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);
   const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
+  const rowRefs = React.useRef({});
   const [overrides, setOverrides] = React.useState({});
   const [busy, setBusy] = React.useState({});
   const [refreshedAt, setRefreshedAt] = React.useState({});
@@ -509,6 +511,24 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
     () => (verdictFilter === BENCH && sort.key === "verdict" ? sortBench(filtered) : sortRows(filtered, sort)),
     [filtered, sort, verdictFilter],
   );
+
+  // A scan-transition deep link (?tab=Scan&ticker=X): clear filters that would hide
+  // the row, expand it, and scroll it into view — then release the intent.
+  React.useEffect(() => {
+    const t = focusTicker?.ticker;
+    if (!t || !data) return;
+    if (!results.some((r) => r.ticker === t)) { onFocusHandled?.(); return; }
+    setVerdictFilter("ALL");
+    setSectorFilter("ALL");
+    setWeekliesOnly(false);
+    setOpen((o) => ({ ...o, [t]: true }));
+    const id = setTimeout(() => {
+      rowRefs.current[t]?.scrollIntoView({ behavior: "smooth", block: "center" });
+      onFocusHandled?.();
+    }, 120);
+    return () => clearTimeout(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusTicker?.id, data]);
 
   function toggleSort(key) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
@@ -612,6 +632,7 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
               <ScoreRow
                 key={row.ticker}
                 row={row}
+                innerRef={(el) => { rowRefs.current[row.ticker] = el; }}
                 expanded={!!open[row.ticker]}
                 onToggle={() => setOpen((o) => ({ ...o, [row.ticker]: !o[row.ticker] }))}
                 onRefresh={() => refreshTicker(row.ticker)}

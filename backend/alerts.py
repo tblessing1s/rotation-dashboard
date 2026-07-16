@@ -64,6 +64,21 @@ ALERT_TYPES = {
     "RECOMMENDATION": ("HIGH", "HARD_CFM_RULE: the engine committed to an actionable recommendation BEFORE the operator acts -> execute or dismiss with a coded reason (never ignore silently)"),
     "TRUST_COVERAGE_MISS": ("HIGH", "HARD_CFM_RULE: an operator action had NO matching open recommendation -> the engine failed to commit first; the trust evidence for that action type is void until investigated"),
     "ORDER_FIDELITY_FAIL": ("HIGH", "HARD_CFM_RULE: a live order lifecycle failed a fidelity check (illegal transition / slippage / orphan leg / unconfirmed cancel) -> the execution layer did not behave exactly as specified"),
+    # Scan-pipeline transitions (nightly diff — inform, never act). The operator
+    # decides; these just surface what changed overnight, deep-linked to the row.
+    "SCAN_BENCH_READY": ("HIGH", "PROPOSED_DEFAULT: a BENCH name (one trigger from READY) cleared its trigger overnight -> now READY; the most actionable pipeline transition"),
+    "SCAN_NEW_READY": ("MEDIUM", "PROPOSED_DEFAULT: a name became READY (the full L1-L4 gate now clears) that was not READY yesterday"),
+    "SCAN_DEGRADED": ("MEDIUM", "PROPOSED_DEFAULT: a watched name rolled over (base TOPPING/DECLINING, inst DISTRIBUTING, or RS FADING/FALLING) -> re-check before it was on your bench"),
+    "SCAN_PIPELINE_ENTRANT": ("LOW", "PROPOSED_DEFAULT: a name newly reads BASING + early institutional interest -> a fresh entrant to watch build a base"),
+    "SCAN_SECTOR_SLOT_OPEN": ("MEDIUM", "PROPOSED_DEFAULT: a sector position exited and a bench/ready name is waiting in that now-free sector (one-position-per-sector) -> the slot the diversification cap held is available"),
+}
+
+# The scan-transition alert types deep-link to the affected name's SCAN row (the
+# same query-string pattern the roll/focus flows use; the client routes ?tab=Scan
+# + ticker to the Scorecard and expands the row).
+_SCAN_ACTIONS = {
+    "SCAN_BENCH_READY", "SCAN_NEW_READY", "SCAN_DEGRADED",
+    "SCAN_PIPELINE_ENTRANT", "SCAN_SECTOR_SLOT_OPEN",
 }
 
 
@@ -96,6 +111,8 @@ def _action_url(type_: str, ticker: str | None) -> str | None:
         return f"/?action=roll&ticker={t}&reason={quote(_ROLL_ACTIONS[type_])}"
     if type_ in _FOCUS_ACTIONS:
         return f"/?action=focus&ticker={t}"
+    if type_ in _SCAN_ACTIONS:
+        return f"/?tab=Scan&ticker={t}"
     return None
 
 

@@ -294,6 +294,12 @@ SYMBOL_GENIUS_HISTORY_DAYS = 90  # PROPOSED_DEFAULT — ~1 quarter of trading da
 # calibration dataset. Derived telemetry, append-only, never in state.json.
 SCAN_REJECTION_LOG_DAYS = 180    # PROPOSED_DEFAULT — ~2 quarters of trading days
 
+# Scan transition-events log (DATA_DIR/scan_diff_log.json) — the append-only
+# audit trail of daily BENCH→READY / degrade / entrant / slot-open transitions,
+# also the retrospective-capture store (Phase-0 Q9). Derived, single nightly
+# writer, never in state.json.
+SCAN_DIFF_LOG_MAX = 5000         # PROPOSED_DEFAULT — retained transition events
+
 # ---- Indicator calibration (matches thinkorswim daily studies) -------------
 RS3M_LOOKBACK = 63            # ~3 months of trading days
 RS1M_LOOKBACK = 21           # ~1 month of trading days (ranking within GREENs + sector gate)

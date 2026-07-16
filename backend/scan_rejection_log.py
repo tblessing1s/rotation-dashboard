@@ -89,6 +89,7 @@ def _record_from_row(row: dict) -> dict:
     binding = row.get("binding") or {}
     return {
         "verdict": row.get("verdict"),
+        "bench": bool(row.get("bench")),
         "binding_constraint": binding_constraint(row),
         # Structured binding (Phase-0 Q9 capture): the level / check id / trigger
         # kind of the first-failing gate check, so the deferred miss-analysis can
@@ -122,6 +123,19 @@ def _record_from_row(row: dict) -> dict:
 def series(ticker: str) -> list[dict]:
     """All stored scan records for one symbol, chronological (oldest first)."""
     return list(_load()["symbols"].get((ticker or "").upper(), []))
+
+
+def latest_before(day: str | None = None) -> dict:
+    """The newest stored record per symbol whose date is BEFORE ``day`` (default
+    today) — i.e. "yesterday's scan state" for the nightly transition diff, robust
+    to today's point already being appended (idempotent re-runs). {ticker: record}."""
+    day = day or _today()
+    out: dict[str, dict] = {}
+    for ticker, recs in _load()["symbols"].items():
+        prior = [r for r in recs if r.get("date", "") < day]
+        if prior:
+            out[ticker] = prior[-1]
+    return out
 
 
 def summary(window: int | None = None) -> dict:

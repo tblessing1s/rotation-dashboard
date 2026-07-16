@@ -36,6 +36,9 @@ export default function App() {
   // The full-universe Scorecard stays UNMOUNTED until opened, so its ~500-ticker
   // sweep isn't fetched on every Scan-tab visit.
   const [scanDetails, setScanDetails] = React.useState(false);
+  // A scan-row deep link (a tapped SCAN_* transition push) focuses one ticker in
+  // the Scorecard — {ticker, id}; a fresh id re-triggers focus for the same name.
+  const [scanIntent, setScanIntent] = React.useState(null);
   // Bumped when the detached background scan finishes, so the Scan panels reload
   // with the freshly-warmed data (see ScanProgress).
   const [scanNonce, setScanNonce] = React.useState(0);
@@ -103,6 +106,17 @@ export default function App() {
     if (target && TABS.includes(target)) {
       setTab(target);
       setExecute(null);
+      // A scan-transition push targets /?tab=Scan&ticker=X — open the full
+      // scorecard and focus that row (expand + scroll), mirroring how a payout
+      // push lands on the finalize card, not just the tab.
+      if (target === "Scan") {
+        const scanTicker = params.get("ticker");
+        if (scanTicker) {
+          setScanDetails(true);
+          setScanIntent({ ticker: scanTicker.toUpperCase(), id: Date.now() });
+          params.delete("ticker");
+        }
+      }
       params.delete("tab");
       const qs = params.toString();
       window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
@@ -214,7 +228,11 @@ export default function App() {
                     {scanDetails ? "▲ collapse" : "▼ loads the full sweep on open"}
                   </span>
                 </button>
-                {scanDetails && <Scorecard regimeStatus={regimeStatus} refreshKey={scanNonce} />}
+                {scanDetails && (
+                  <Scorecard regimeStatus={regimeStatus} refreshKey={scanNonce}
+                             focusTicker={scanIntent}
+                             onFocusHandled={() => setScanIntent(null)} />
+                )}
               </div>
             )}
             {tab === "Positions" && (

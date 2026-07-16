@@ -863,6 +863,20 @@ def api_scan_rejection_stats():
         return _err(e)
 
 
+@app.route("/api/scan/transitions")
+def api_scan_transitions():
+    """The nightly scan transition feed — BENCH→READY / fresh-READY / degrade /
+    pipeline-entrant / sector-slot-open events, newest first. The pipeline's audit
+    trail and the retrospective (Q9) capture. Optional ?limit=N (default 100).
+    Read-only derived telemetry; empty until the nightly diff has run."""
+    try:
+        import scan_diff_log
+        limit = int(request.args.get("limit") or 100)
+        return jsonify({"events": scan_diff_log.recent(limit=limit)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/overview")
 def api_overview():
     """One-call landing payload for the Overview tab: regime + positions/capital
