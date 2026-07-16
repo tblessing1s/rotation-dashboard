@@ -27,6 +27,12 @@ backend/state.json.pre-restore.*
 backend/state.demo.json.pre-restore.*
 backend/state.json.tmp.*
 backend/state.demo.json.tmp.*
+# Atomic-write temps for the derived-telemetry stores (never real data)
+backend/*.json.tmp.*
+# Derived scan-pipeline telemetry stores (DATA_DIR; recomputable, never committed)
+backend/scan_rejection_log.json
+backend/scan_diff_log.json
+backend/candidate_universe.json
 # Auto-generated cookie-signing key (persisted so sessions survive restarts)
 backend/.session_secret
 .session_secret

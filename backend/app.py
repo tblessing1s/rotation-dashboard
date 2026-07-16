@@ -134,21 +134,21 @@ def api_scorecard():
 
 @app.route("/api/scan/ready")
 def api_scan_ready():
-    """Tickers that clear Level 3 (beats peers), Level 4 (consolidating), AND
-    Level 5 (Account & Juice) right now — a ready-to-enter shortlist.
+    """Tickers whose canonical scan VERDICT is READY (the FULL Level 1–4 gate
+    clears — regime + sector + stock lights + structure + the Level-4 right spot),
+    then layered with Level 5 (Account & Juice) — a ready-to-enter shortlist.
 
-    Level 1 (market regime) and Level 2 (sector strength) are deliberately
-    excluded, same as the Scorecard's own verdict: they're market-wide
-    context, not a property of the stock, so this stays a useful relative
-    ranking even on a yellow/red tape. RED still hard-blocks actual execution
-    regardless of what appears here (Level 1 entry-gate rule, unchanged).
+    Verdict-completeness (Phase-0 fix): the READY verdict now consumes the whole
+    L1–L4 gate, so a name extended past the Level-4 right spot is WATCH, never
+    READY — it can no longer reach this shortlist (the AAPL "READY + fails level 4"
+    bug). Level 5 is the account overlay evaluated here, with the SAME account
+    context Execute uses (account_gate loads state + resolves live cash once); a
+    name that clears L1–L4 but fails L5 lands in ``near_misses`` with its L5
+    triggers so the operator sees the path (earnings date, sector slot, cash).
 
-    Only evaluates Level 5 for tickers the Scorecard already verdicts GO (a
-    proxy for clearing gate levels 3 & 4 plus its own CFM-suitability rules)
-    — cheaper than running Level 5 across the whole universe, and consistent
-    with "GO" already meaning stock-level-ready. Juice numbers are always the
-    history-implied estimate (no live chain in a bulk sweep); optional
-    ?contracts= sizes the capital/reserve checks (default LEAP_CONTRACTS)."""
+    Juice numbers are always the history-implied estimate (no live chain in a bulk
+    sweep); optional ?contracts= sizes the capital/reserve checks
+    (default LEAP_CONTRACTS)."""
     raw = request.args.get("tickers")
     tickers = [t.strip().upper() for t in raw.split(",") if t.strip()] if raw else None
     contracts = int(request.args.get("contracts") or 0) or None
@@ -196,9 +196,15 @@ def api_scan_ready():
                     logging.getLogger("cfm.app").warning(
                         "scan_ready on-demand quote fetch failed: %s", fe)
 
+        import scan_triggers
         ready, near_misses, stale_blocked = [], [], []
         for r in ready_rows:
             l5 = level5.get(r["ticker"])
+            # Level-5 account overlay: classify the L5 blocking failures into the
+            # same forward triggers the table uses (earnings CALENDAR, sector-slot
+            # CONDITIONAL, cash/capital CONDITIONAL) so a near-miss shows its path.
+            l5_blocks = scan_triggers.gate_blocks(None, account_gate=l5)
+            l5_triggers = scan_triggers.triggers_for_blocks(l5_blocks)
             blocked, stale_inputs = data_cache.stale_blocks_go(
                 r["ticker"], market_scheduler.Tier.T1, market_open=mkt_open, live=live)
             entry = {"ticker": r["ticker"], "sector": r["sector"],
@@ -214,6 +220,10 @@ def api_scan_ready():
                      "lights": r.get("lights"), "stock_greens": r.get("stock_greens"),
                      "stock_verdict": r.get("stock_verdict"),
                      "stock_vetoes": r.get("stock_vetoes"), "right_spot": r.get("right_spot"),
+                     # L5 overlay triggers + rendered path (near-miss "path to READY").
+                     "l5_triggers": l5_triggers,
+                     "l5_path_to_ready": scan_triggers.path_to_ready(l5_triggers),
+                     "l5_eligible_days": scan_triggers.earliest_eligible_days(l5_triggers),
                      "stale": blocked, "stale_inputs": stale_inputs}
             if blocked:
                 stale_blocked.append(entry)
@@ -849,6 +859,34 @@ def api_scan_rejection_stats():
         import scan_rejection_log
         window = int(request.args.get("window") or 0) or None
         return jsonify(scan_rejection_log.summary(window=window))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/scan/transitions")
+def api_scan_transitions():
+    """The nightly scan transition feed — BENCH→READY / fresh-READY / degrade /
+    pipeline-entrant / sector-slot-open events, newest first. The pipeline's audit
+    trail and the retrospective (Q9) capture. Optional ?limit=N (default 100).
+    Read-only derived telemetry; empty until the nightly diff has run."""
+    try:
+        import scan_diff_log
+        limit = int(request.args.get("limit") or 100)
+        return jsonify({"events": scan_diff_log.recent(limit=limit)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/scan/candidate-universe")
+def api_scan_candidate_universe():
+    """The weekly universe-intake screen result — the momentum/quality-filtered
+    candidate list, the sector-diversity fold (the empirical one-position-per-sector
+    check), and the append-only add/drop change log. SHADOW: the current sector
+    universe stays operative unless CFM_UNIVERSE_SCREEN is enabled. Read-only;
+    empty until the first weekly screen has run."""
+    try:
+        import candidate_universe
+        return jsonify(candidate_universe.report())
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

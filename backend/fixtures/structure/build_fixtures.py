@@ -163,10 +163,39 @@ def topping_distribution_sector() -> pd.DataFrame:
     return _sector_from_rs_line(topping_distribution()["Close"].to_numpy(), r)
 
 
+def early_advance_extended() -> pd.DataFrame:
+    """Fixture D — the AAPL 7/16 shape. A clean early advance on up-day-heavy
+    volume (BaseStage=EARLY_ADVANCE, InstFlow=ACCUMULATING, structure entrable),
+    that ends on a sharp multi-bar POP with a widening intraday range: price is
+    driven >1.5 ATR above its MA21 with ATR expanding, so the Level-4 right-spot
+    gate FAILS (extension + atr_5d_ema) even though the structure is READY and the
+    Symbol-Genius lights are green.
+
+    The pop is sized to stay UNDER +15% of the (laggier) SMA50 so the classifier
+    still reads EARLY_ADVANCE (not LATE_ADVANCE/TOPPING) — the whole point is a
+    READY-structure name that the full gate must NOT call READY. This is the guard
+    for the verdict-completeness fix: VERDICT != READY, binding constraint = L4.
+    """
+    rng = np.random.default_rng(19)
+    base = 100 + rng.normal(0, 0.5, 90)                                    # base ~100
+    advance = 100 + np.linspace(0, 40, 176) + rng.normal(0, 0.6, 176)      # 100 -> ~140, orderly
+    pop = advance[-1] + np.linspace(2.0, 11.0, 4)                          # sharp 4-bar pop to ~151
+    closes = np.concatenate([base, advance, pop]).astype(float)
+    # Calm ranges through the advance, then a wide spike over the pop so ATR
+    # expands (atr/atr_5ema > 1) and the extension in ATR units blows past 1.5.
+    band = np.concatenate([np.full(90, 0.5), np.full(176, 0.6),
+                           np.linspace(2.5, 5.0, 4)])
+    highs = closes + band
+    lows = closes - band
+    vols = _updown_volume(closes, up_vol=3_200_000.0, down_vol=900_000.0)
+    return _ohlcv(closes, highs, lows, vols, start="2023-01-02")
+
+
 FIXTURES = {
     "topping_distribution": topping_distribution,
     "topping_distribution_sector": topping_distribution_sector,
     "early_advance_accum": early_advance_accum,
+    "early_advance_extended": early_advance_extended,
     "turning_recovery": turning_recovery,
     "turning_recovery_sector": turning_recovery_sector,
 }

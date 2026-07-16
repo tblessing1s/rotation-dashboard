@@ -146,11 +146,21 @@ export default function ReadyToEnter({ onSelectStock, refreshKey }) {
           {showMisses && (
             <ul className="mt-2 space-y-1">
               {misses.map((r) => (
-                <li key={r.ticker} className="flex items-center gap-2 rounded-lg bg-slate-950/60 px-3 py-1.5 text-sm">
-                  <Pill status="avoid">{r.ticker}</Pill>
-                  <span className="text-xs text-slate-500">{r.sector}</span>
-                  {r.lights ? <StockLights lights={r.lights} size="h-2.5 w-2.5" /> : null}
-                  <span className="ml-auto text-xs text-rose-300">{reasonList(r.level5)}</span>
+                <li key={r.ticker} className="rounded-lg bg-slate-950/60 px-3 py-1.5 text-sm">
+                  <div className="flex items-center gap-2">
+                    <Pill status="avoid">{r.ticker}</Pill>
+                    <span className="text-xs text-slate-500">{r.sector}</span>
+                    {r.lights ? <StockLights lights={r.lights} size="h-2.5 w-2.5" /> : null}
+                    <span className="ml-auto text-xs text-rose-300">{reasonList(r.level5)}</span>
+                  </div>
+                  {/* The Level-5 path to READY — the forward trigger (earnings date,
+                      sector slot, cash) that clears the account block. */}
+                  {r.l5_path_to_ready && (
+                    <div className="mt-1 text-xs text-sky-300">
+                      → {r.l5_path_to_ready}
+                      {r.l5_eligible_days != null ? ` · ~${r.l5_eligible_days}d` : ""}
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
