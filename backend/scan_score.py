@@ -32,12 +32,14 @@ import structure_classifier as sclf
 W_INST_FLOW = 2.0          # PROPOSED_DEFAULT — accumulation is the strongest tell
 W_BASE = 2.0               # PROPOSED_DEFAULT — where the name sits in its cycle
 W_RS_STATE = 1.5           # PROPOSED_DEFAULT — leading + improving vs its sector
-W_NET_JUICE = 1.5          # PROPOSED_DEFAULT — the income the setup actually pays
 W_SECTOR = 1.0             # PROPOSED_DEFAULT — tailwind from a strong sector
 W_ATR = 1.0                # PROPOSED_DEFAULT — contracting vol is a CFM positive
 W_DIST_MA21 = 1.0          # PROPOSED_DEFAULT — near the MA (not extended) is best
-_TOTAL_WEIGHT = (W_INST_FLOW + W_BASE + W_RS_STATE + W_NET_JUICE
-                 + W_SECTOR + W_ATR + W_DIST_MA21)   # 10.0
+# Net juice is NO LONGER an additive weight — it is a MULTIPLICATIVE viability
+# factor (see compute_score): a chart-quality rank, then scaled by whether the
+# setup actually pays. The quality weights sum to 8.5, renormalized to 0–10.
+_QUALITY_WEIGHT = (W_INST_FLOW + W_BASE + W_RS_STATE
+                   + W_SECTOR + W_ATR + W_DIST_MA21)   # 8.5
 
 # ---------------------------------------------------------------------------
 # Sub-score maps (each returns a 0..1 quality) — PROPOSED_DEFAULT.
@@ -72,6 +74,10 @@ ATR_CONTRACTING = 1.0       # PROPOSED_DEFAULT — <= 1.0 is contracting/flat (i
 ATR_EXPANDING = 1.2         # PROPOSED_DEFAULT — >= 1.2 scores 0 (volatility blowing out)
 # Net juice/week (% of LEAP cost). PROPOSED_DEFAULT.
 JUICE_FULL = 3.8           # PROPOSED_DEFAULT — net juice/wk at/above this scores 1.0 (~2x the ~1.9% bar)
+# Net juice/week viability TARGET for the multiplicative factor (below). A name at
+# or above this earns full viability (factor 1.0); a beautiful chart with little
+# income is scaled toward zero — SCORE ranks viable-first, not prettiest-first.
+JUICE_TARGET_WK = 1.5      # PROPOSED_DEFAULT — net juice/wk for full viability (%)
 
 
 def _clamp01(x: float) -> float:
@@ -145,13 +151,25 @@ def compute_score(*, inst_flow: str | None, base_stage: str | None, base_count=N
         "dist_ma21": _dist_ma21_sub(pct_above_ma21),
         "net_juice": _juice_sub(net_juice_weekly_pct),
     }
+    # QUALITY — the chart/structure rank over the six non-juice components,
+    # renormalized to 0–10 (net juice is intentionally NOT summed in here; it is
+    # ``parts["net_juice"]`` for calibration continuity but drives only the factor).
     weighted = (parts["inst_flow"] * W_INST_FLOW
                 + parts["base"] * W_BASE
                 + parts["rs_state"] * W_RS_STATE
-                + parts["net_juice"] * W_NET_JUICE
                 + parts["sector"] * W_SECTOR
                 + parts["atr"] * W_ATR
                 + parts["dist_ma21"] * W_DIST_MA21)
-    # _TOTAL_WEIGHT is 10.0, so the weighted sum is already on a 0–10 scale.
-    return {"score": round(weighted / _TOTAL_WEIGHT * 10.0, 2),
+    quality = weighted / _QUALITY_WEIGHT * 10.0
+
+    # Multiplicative VIABILITY factor on net juice/wk — NOT an additive term.
+    # A beautiful chart that pays nothing scores near zero; negative or missing
+    # income clamps the factor to 0. This is what stops the bench sorting
+    # prettiest-first (a pure quality rank) instead of viable-first. SCORE remains
+    # SHADOW — this changes its VALUE, never its (zero) authority.
+    viability = (0.0 if (net_juice_weekly_pct is None or net_juice_weekly_pct <= 0)
+                 else min(net_juice_weekly_pct / JUICE_TARGET_WK, 1.0))
+    parts["juice_viability"] = viability
+    return {"score": round(quality * viability, 2),
+            "score_quality": round(quality, 2),
             "parts": {k: round(v, 3) for k, v in parts.items()}}

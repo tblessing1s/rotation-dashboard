@@ -191,11 +191,29 @@ def early_advance_extended() -> pd.DataFrame:
     return _ohlcv(closes, highs, lows, vols, start="2023-01-02")
 
 
+def early_advance_low_juice() -> pd.DataFrame:
+    """Fixture E — the PNC shape. A pristine early advance (EARLY_ADVANCE × ACCUM,
+    SYM green) on a VERY LOW-volatility name: tight daily ranges and a gentle drift,
+    so realized vol is low, the BSM-implied weekly extrinsic is thin, and NET juice/
+    wk lands BELOW the viability floor. The structure/RS/SYM are all green — the only
+    thing wrong is the economics, which is exactly the case the juice safety block
+    must catch (VERDICT BLOCKED, binding = L5 juice, NOT on bench)."""
+    rng = np.random.default_rng(23)
+    base = 100 + rng.normal(0, 0.10, 90)                                   # calm base
+    advance = 100 + np.linspace(0, 30, 180) + rng.normal(0, 0.12, 180)     # orderly, low-vol
+    closes = np.concatenate([base, advance]).astype(float)
+    highs = closes + 0.15                                                   # tight ranges -> low HV
+    lows = closes - 0.15
+    vols = _updown_volume(closes, up_vol=3_200_000.0, down_vol=900_000.0)   # still ACCUM
+    return _ohlcv(closes, highs, lows, vols, start="2023-01-02")
+
+
 FIXTURES = {
     "topping_distribution": topping_distribution,
     "topping_distribution_sector": topping_distribution_sector,
     "early_advance_accum": early_advance_accum,
     "early_advance_extended": early_advance_extended,
+    "early_advance_low_juice": early_advance_low_juice,
     "turning_recovery": turning_recovery,
     "turning_recovery_sector": turning_recovery_sector,
 }

@@ -25,6 +25,22 @@ def test_fresh_ready_when_not_previously_bench():
     assert [e["type"] for e in evs] == [sd.NEW_READY]
 
 
+def test_watch_to_bench_is_pipeline_progress():
+    prev = {"NVDA": _rec("NVDA", verdict="WATCH", bench=False)}       # WATCH intake
+    today = {"NVDA": _rec("NVDA", verdict="WATCH", bench=True,        # advanced to bench
+                          path_to_ready="pull back within 1 ATR of MA21", eligible_days=6)}
+    evs = sd.diff(prev, today)
+    assert [e["type"] for e in evs] == [sd.WATCH_BENCH]
+    assert evs[0]["data"]["eligible_days"] == 6
+
+
+def test_bench_to_ready_beats_watch_bench():
+    # A bench name that went straight to READY fires BENCH_READY, not WATCH_BENCH.
+    prev = {"NVDA": _rec("NVDA", verdict="WATCH", bench=True)}
+    today = {"NVDA": _rec("NVDA", verdict="READY", bench=False)}
+    assert [e["type"] for e in sd.diff(prev, today)] == [sd.BENCH_READY]
+
+
 def test_no_event_when_already_ready():
     prev = {"AAPL": _rec("AAPL", verdict="READY")}
     today = {"AAPL": _rec("AAPL", verdict="READY")}

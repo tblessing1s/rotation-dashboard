@@ -34,6 +34,7 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 
+import config
 import scan_verdict as sv
 
 # Trigger kinds.
@@ -88,7 +89,12 @@ _KIND = {
     "position_limit": CONDITIONAL,
     "capital_limit": CONDITIONAL,
     "cash_reserve": CONDITIONAL,
-    "juice_adequacy": CONDITIONAL,
+    # Juice is SAFETY, never benchable: burn exceeding income (or income below the
+    # viability floor) is structural — low IV does not clear on a date. Both the
+    # canonical verdict's NET floor (``juice_floor``) and the account gate's GROSS
+    # adequacy check (``juice_adequacy``) are safety blocks.
+    "juice_floor": SAFETY,
+    "juice_adequacy": SAFETY,
 }
 
 # Human-readable "clears when" phrasing per id (the path-to-READY leg).
@@ -110,7 +116,8 @@ _CLEARS = {
     "position_limit": "a position slot frees",
     "capital_limit": "deployed-capital headroom frees",
     "cash_reserve": "free cash ≥ reserve",
-    "juice_adequacy": "weekly juice ≥ target",
+    "juice_floor": "net juice below floor (structural — low IV)",
+    "juice_adequacy": "weekly juice below target (structural — low IV)",
 }
 
 
@@ -156,10 +163,22 @@ def classify(block: dict) -> dict:
         trig["clears_when"] = (f"earnings {earn.get('date')} clears"
                                if earn.get("date") else clears)
 
+    elif cid in ("juice_floor", "juice_adequacy"):
+        # A SAFETY block — no trigger/days. Phrase the binding with the numbers so
+        # the operator sees WHY it's blocked: "net juice X% < floor Y%".
+        net = obs.get("net_juice_weekly_pct")
+        floor = obs.get("floor")
+        if net is not None and floor is not None:
+            trig["clears_when"] = f"net juice {net:+.2f}% < floor {floor:g}%"
+
     elif kind == ESTIMATED:
         days = _estimate_days(cid, obs)
         trig["estimated"] = True
         trig["days_estimate"] = days
+        # Minimum-information guard: a degenerate estimate (no concrete day count)
+        # renders as its condition WORD, never a fabricated count.
+        if days is None:
+            trig["estimated"] = False
 
     return {**block, "kind": kind, "trigger": trig}
 
@@ -190,9 +209,13 @@ def _estimate_days(cid: str, obs: dict) -> int | None:
         days = excess / rate
     else:
         return None
-    if days < 0 or days > MAX_ESTIMATED_DAYS:
+    # Minimum-information guard: only emit a concrete count that is a real,
+    # in-range whole day. A sub-1-day estimate (barely over the line, or a fast
+    # MA21 catch-up) is degenerate — return None so the caller renders the
+    # condition word, never a fabricated "~1D" (the old `or 1` bug).
+    if days < 1 or days > MAX_ESTIMATED_DAYS:
         return None
-    return int(round(days)) or 1
+    return int(round(days))
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +285,33 @@ def gate_blocks(gate: dict | None, account_gate: dict | None = None,
     return blocks
 
 
+def juice_floor_block(net_juice_weekly_pct: float | None) -> dict | None:
+    """A Level-5 NET juice-floor SAFETY block, or None when the income is adequate.
+    Two-tier, both structural (low IV does not clear on a date, so this is BLOCKED,
+    never benchable):
+
+      * hard floor — ``net_juice_per_week <= 0`` (burn exceeds income);
+      * adequacy floor — ``net_juice_per_week < config.JUICE_FLOOR_WK``.
+
+    PURE over the net juice already on the row (no account state), so it folds into
+    the memoized market sweep. ETFs pass through identically — the floor is the
+    mechanism that self-eliminates low-IV ETFs; there is no ETF branch. ``None``
+    net juice (insufficient history) is NOT blocked here — the structure/data gates
+    already handle a name we can't price."""
+    if net_juice_weekly_pct is None:
+        return None
+    floor = config.JUICE_FLOOR_WK
+    if net_juice_weekly_pct <= 0:
+        return {"level": 5, "id": "juice_floor", "label": "net juice",
+                "observed": {"net_juice_weekly_pct": net_juice_weekly_pct,
+                             "floor": floor, "tier": "hard"}}
+    if net_juice_weekly_pct < floor:
+        return {"level": 5, "id": "juice_floor", "label": "net juice",
+                "observed": {"net_juice_weekly_pct": net_juice_weekly_pct,
+                             "floor": floor, "tier": "adequacy"}}
+    return None
+
+
 def triggers_for_blocks(blocks: list[dict]) -> list[dict]:
     """Classify every block into its trigger, in gate-level order (binding first)."""
     ordered = sorted(blocks, key=lambda b: (b.get("level", 99), str(b.get("id"))))
@@ -274,6 +324,15 @@ def triggers_for_blocks(blocks: list[dict]) -> list[dict]:
 _BLOCK_SEVERITY = {SAFETY: sv.BLOCKED, CALENDAR: sv.WATCH,
                    CONDITIONAL: sv.WATCH, ESTIMATED: sv.WATCH}
 _SEV = {sv.READY: 0, sv.CAUTION: 1, sv.WATCH: 2, sv.BLOCKED: 3}
+
+
+def _trigger_severity(t: dict) -> int:
+    """A trigger's severity on the verdict ladder: a signal block carries its own
+    level (regime RED = BLOCKED, SYM yellow = WATCH); a gate block carries its
+    kind's severity (safety = BLOCKED, everything else = WATCH)."""
+    if t.get("signal"):
+        return _SEV.get(t.get("level_str"), _SEV[sv.WATCH])
+    return _SEV[_BLOCK_SEVERITY.get(t["kind"], sv.WATCH)]
 
 
 def _signal_blocks(composed: dict) -> list[dict]:
@@ -305,11 +364,18 @@ def compose_row_verdict(composed: dict, blocks: list[dict]) -> dict:
 
     worst = _SEV[composed.get("verdict", sv.READY)]
     for t in triggers:
-        worst = max(worst, _SEV[_BLOCK_SEVERITY.get(t["kind"], sv.WATCH)])
+        worst = max(worst, _trigger_severity(t))
     verdict = next(v for v, s in _SEV.items() if s == worst)
 
-    # Legacy reason strings, gate-level ordered. Signal reasons keep the
-    # "name:LEVEL" shape compose_verdict used; gate reasons are "L<n>:<id>".
+    # The BINDING constraint is the most DECISIVE block: worst severity first (a
+    # SAFETY block that BLOCKS the trade — juice, distribution — leads a mere WATCH
+    # wait), tie-broken by earliest gate level. This is why a sub-floor-juice name
+    # binds on L5 juice even when it is also slightly extended (L4). Triggers are
+    # re-ordered so reasons[0] == the binding (scan_rejection_log reads reasons[0]).
+    triggers.sort(key=lambda t: (-_trigger_severity(t), t.get("level", 99), str(t.get("id"))))
+
+    # Legacy reason strings. Signal reasons keep the "name:LEVEL" shape
+    # compose_verdict used; gate reasons are "L<n>:<id>".
     reasons = []
     for t in triggers:
         if t.get("signal"):
@@ -326,14 +392,26 @@ def compose_row_verdict(composed: dict, blocks: list[dict]) -> dict:
 # Bench membership — a derived VIEW, not a verdict value.
 # ---------------------------------------------------------------------------
 def is_bench(verdict: str | None, triggers: list[dict] | None) -> bool:
-    """A row is BENCH when it is not READY, would otherwise be READY, and every
-    blocking trigger is a WAIT (calendar / conditional / estimated) — i.e. NO safety
-    block. Safety blocks (regime RED, SYM RED, topping/declining/distributing
-    structure, broken-trend / sector-distribution veto) are "no", never "waiting".
+    """A row is BENCH (a derived VIEW, never a verdict value) when it is
+    structure-COMPLETE and entrable-but-for CLEARABLE gate blocks — "waiting, with
+    a schedule". Distinct from WATCH (the verdict state / pipeline intake):
+
+      * NOT READY and has ≥1 clearable GATE block (level 2–5), AND
+      * NO safety block (juice, distribution, broken trend, regime/SYM RED), AND
+      * NO non-READY SIGNAL block (regime / symbol / structure). A signal-level
+        WATCH — the canonical BASING × EARLY_INTEREST intake, a YELLOW SYM
+        watchlist, a yellow regime — is "interesting, not waiting": WATCH-only,
+        never bench. This is what keeps WATCH and BENCH from collapsing into
+        synonyms.
     """
     if verdict == sv.READY or not triggers:
         return False
-    return all(t.get("kind") != SAFETY for t in triggers)
+    for t in triggers:
+        if t.get("kind") == SAFETY:      # a "no" — not waiting
+            return False
+        if t.get("signal"):              # intake / market context — not benchable
+            return False
+    return any(not t.get("signal") for t in triggers)  # a real clearable gate block
 
 
 def path_to_ready(triggers: list[dict] | None) -> str | None:
@@ -343,14 +421,18 @@ def path_to_ready(triggers: list[dict] | None) -> str | None:
         return None
     legs = []
     for t in triggers:
+        if t.get("kind") == SAFETY:
+            continue                     # a "no" is not a path TO ready — skip it
         tr = t.get("trigger") or {}
         leg = tr.get("clears_when") or t.get("id")
+        # Rendering discipline: a deterministic CALENDAR date is plain; an ESTIMATE
+        # is tilded + EST; a CONDITIONAL is its word alone (no fabricated count).
         if tr.get("eligible_date"):
-            leg += f" (eligible ~{tr['eligible_date']})"
+            leg += f" (by {tr['eligible_date']})"
         elif tr.get("kind") == ESTIMATED and tr.get("days_estimate") is not None:
             leg += f" (~{tr['days_estimate']}d EST)"
         legs.append(leg)
-    return " · ".join(legs)
+    return " · ".join(legs) if legs else None
 
 
 def earliest_eligible_days(triggers: list[dict] | None) -> int | None:

@@ -487,6 +487,15 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
         row["iv_rank"] = None
         row["iv_percentile"] = None
 
+    # HV-RANK (HVR) — the pure-from-bars volatility-rank PROXY: where realized vol
+    # sits in its own trailing-252d range. Available for EVERY swept name (unlike
+    # true IVR, which only covers held/viewed chains), so the drawer always has a
+    # volatility read. Labelled HVR — never mistaken for true IV rank.
+    hvr = indicators.hv_rank(df)
+    row["hv_rank"] = hvr.get("hv_rank")
+    row["hv_percentile"] = hvr.get("hv_percentile")
+    row["hv"] = hvr.get("hv")
+
     # Scan-restructure signals — the per-symbol columns SYM | BASE | INST | VERDICT.
     # Symbol Genius (the four-light SYM), the structure classifier (BASE + INST from
     # ONE call, display-only split), and the composed, CANONICAL `verdict`
@@ -518,6 +527,13 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     import scan_triggers
     ext_context = _ext_trigger_context(df)
     blocks = scan_triggers.gate_blocks(gate, ext_context=ext_context)
+    # NET juice-floor SAFETY block — the viability gate, folded into the canonical
+    # verdict here (pure over the row's net juice, no account state, so the memoized
+    # market sweep can carry it). A sub-floor name is BLOCKED, off the bench, with an
+    # L5-juice binding constraint — closing the "bench led by names that can't pay".
+    juice_block = scan_triggers.juice_floor_block(row.get("net_juice_weekly_pct"))
+    if juice_block is not None:
+        blocks.append(juice_block)
     rv = scan_triggers.compose_row_verdict(composed, blocks)
     row["verdict"] = rv["verdict"]                       # the canonical scan verdict
     row["verdict_reasons"] = list(rv["reasons"])

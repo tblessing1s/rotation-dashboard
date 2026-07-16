@@ -195,6 +195,23 @@ def test_hist_vol_is_positive_annualized_pct():
     assert ind.hist_vol(_frame([100, 101, 102]), 20) is None  # too little history
 
 
+def test_hv_rank_ranks_current_vol_in_its_own_range():
+    rs = np.random.RandomState(11)
+    # 300 bars: a calm first half, a volatile recent stretch -> current HV ranks high.
+    calm = np.cumsum(rs.normal(0, 0.4, 150))
+    wild = np.cumsum(rs.normal(0, 2.0, 150))
+    df = _frame(100 + np.concatenate([calm, calm[-1] + wild]))
+    out = ind.hv_rank(df, window=20, lookback=252)
+    assert out["n"] >= 252 and out["hv"] is not None
+    assert 0.0 <= out["hv_rank"] <= 100.0 and 0.0 <= out["hv_percentile"] <= 100.0
+    assert out["hv_rank"] > 50   # recent vol is elevated vs the calm history
+
+    # Insufficient depth -> INSUFFICIENT_DATA (all None), with the sample count.
+    short = ind.hv_rank(_frame(100 + np.cumsum(rs.normal(0, 1, 60))), lookback=252)
+    assert short["hv_rank"] is None and short["hv_percentile"] is None
+    assert ind.hv_rank(None)["hv"] is None
+
+
 def test_detect_action_follows_position_state():
     import option_chain as oc
     assert oc._detect_action(has_leap=False, open_shorts=[])[0] == "buy_leap"
