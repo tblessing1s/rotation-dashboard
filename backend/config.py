@@ -261,6 +261,21 @@ SPOT_ATR_MOMENTUM_MAX = 1.0    # PROPOSED_DEFAULT — ATR/ATR_5EMA <= this = con
 # the MA200 trend line. The volatility veto pairs an expanding ATR with a rich IV.
 VETO_IVR_PERCENTILE_MIN = 90.0  # PROPOSED_DEFAULT — ATR expanding AND IVR percentile >= this vetoes
 
+# ---- Symbol Genius (symbol_genius.py) --------------------------------------
+# A per-name four-light instance of the Genius engine that DELIBERATELY diverges
+# from the market regime on its fourth light: the regime votes EMA21 > SMA50 (a
+# short-clock trend read, GENIUS_FAST_MA above), while Symbol Genius votes
+# SMA50 > SMA200 — structural health on a longer clock. The two engines must NOT
+# silently share the fourth-light constant, so Symbol Genius carries its OWN
+# param (SMA200 window) and reads NO fast_ma at all. The other three lights
+# (close>SMA50, SAR, ROC10) reuse the shared GENIUS_* params above.
+SYMBOL_GENIUS_SLOWER_MA = 200  # PROPOSED_DEFAULT — the "slower" SMA in the SMA50>SMA200 fourth light
+# The SMA200 light needs >=200 bars, so a name needs at least this many bars
+# before its Symbol Genius verdict is trusted (inside the warm-up it reads
+# insufficient -> RED, never GREEN). Binding warm-up is the SMA200 window, well
+# above the stock-lights SAR warm-up (STOCK_LIGHTS_WARMUP_BARS = 50).
+SYMBOL_LIGHTS_WARMUP_BARS = SYMBOL_GENIUS_SLOWER_MA  # PROPOSED_DEFAULT
+
 # ---- Indicator calibration (matches thinkorswim daily studies) -------------
 RS3M_LOOKBACK = 63            # ~3 months of trading days
 RS1M_LOOKBACK = 21           # ~1 month of trading days (ranking within GREENs + sector gate)
