@@ -89,6 +89,10 @@ SLOPE_FALLING_PCT = -8.0       # PROPOSED_DEFAULT — fit falls below this = fal
 EXT_LATE_PCT = 15.0            # PROPOSED_DEFAULT — close > this % above SMA50 = extended (late)
 ATR_EXPANDING_MAX = 1.10       # PROPOSED_DEFAULT — ATR/ATR_5EMA above this = volatility expanding
 LATE_ADVANCE_MIN_BASES = 3     # PROPOSED_DEFAULT — this many prior bases = a mature (late) advance
+LONG_LOOKBACK = 200            # PROPOSED_DEFAULT — the medium/long-run performance window
+LONG_GAIN_PCT = 25.0           # PROPOSED_DEFAULT — a non-rising name up more than this over
+                               # LONG_LOOKBACK bars is stalling AFTER a big advance (TOPPING),
+                               # vs resting after a flat/down run (BASING)
 
 # Base counting.
 BASE_MIN_LEN = 25              # PROPOSED_DEFAULT — a consolidation must last >= this many bars
@@ -196,14 +200,16 @@ def base_count(df: pd.DataFrame | None, min_len: int = BASE_MIN_LEN,
                max_depth: float = BASE_MAX_DEPTH) -> int | None:
     """A PROPOSED_DEFAULT heuristic count of completed bases in the frame.
 
-    Full replay over the bars: a base is a ``min_len``-bar consolidation whose
-    range is shallower than ``max_depth`` (high-to-low); it *completes* (count
-    += 1) when a bar closes above that consolidation's high (a breakout to new
-    highs). The low of the just-broken-out base is remembered, and a later close
-    back below THAT prior base low resets the count (a failed base / decline
-    phase). A cooldown prevents re-counting the same breakout. This is a maturity
-    proxy for EARLY vs LATE advance, not a chart-perfect base detector. None when
-    the frame is shorter than one base."""
+    Full replay over the bars. A base is a genuine SIDEWAYS consolidation — a
+    stretch of at least ``min_len`` bars that makes NO new high (price capped
+    under a resistance level) and whose depth (resistance to the consolidation
+    low) is shallower than ``max_depth`` — that then RESOLVES with a breakout to
+    a new high. That "no new high for N bars, then break out" shape is what
+    distinguishes a base from a steady uptrend (which keeps printing new highs
+    and is NOT a series of bases). The low of each completed base is remembered,
+    and a later close back below that prior base low resets the count (a failed
+    base / decline phase). A maturity proxy for EARLY vs LATE advance, not a
+    chart-perfect base detector. None when the frame is shorter than one base."""
     if df is None or len(df) <= min_len:
         return None
     highs = df["High"].astype(float).to_numpy()
@@ -211,23 +217,29 @@ def base_count(df: pd.DataFrame | None, min_len: int = BASE_MIN_LEN,
     closes = df["Close"].astype(float).to_numpy()
     n = len(closes)
     count = 0
-    cooldown = 0
+    resistance = float(highs[0])          # the high the consolidation sits under
+    base_low = float(lows[0])             # lowest low since that high printed
+    bars_capped = 0                       # consecutive bars with no new high
     prior_base_low: float | None = None
-    for i in range(min_len, n):
+    for i in range(1, n):
         c = float(closes[i])
         # Undercut of the prior base's low -> reset (failed base / decline phase).
         if prior_base_low is not None and c < prior_base_low:
             count = 0
             prior_base_low = None
-        window_high = float(highs[i - min_len:i].max())
-        window_low = float(lows[i - min_len:i].min())
-        depth = (window_high - window_low) / window_high if window_high else 1.0
-        if cooldown == 0 and depth <= max_depth and c > window_high:
-            count += 1
-            prior_base_low = window_low   # the base we just broke out of
-            cooldown = min_len            # don't re-count until a fresh base forms
-        elif cooldown:
-            cooldown -= 1
+        if highs[i] > resistance:
+            # New high — a base completes iff we consolidated long and shallow
+            # enough under the prior resistance before breaking it.
+            depth = (resistance - base_low) / resistance if resistance else 1.0
+            if bars_capped >= min_len and depth <= max_depth:
+                count += 1
+                prior_base_low = base_low
+            resistance = float(highs[i])
+            base_low = float(lows[i])
+            bars_capped = 0
+        else:
+            bars_capped += 1
+            base_low = min(base_low, float(lows[i]))
     return count
 
 
@@ -245,6 +257,8 @@ def _signals(df: pd.DataFrame | None) -> dict:
                                         and atr not in (None, 0)) else None
     pct_above_sma50 = ((price / sma50 - 1) * 100 if (price is not None and sma50)
                        else None)
+    pct_above_sma200 = ((price / sma200 - 1) * 100 if (price is not None and sma200)
+                        else None)
     acc_dist = acc_dist_day_counts(df)
     return {
         "bars": 0 if df is None else len(df),
@@ -256,6 +270,8 @@ def _signals(df: pd.DataFrame | None) -> dict:
         "slope_pct": trend_slope_pct(df),
         "ext_atr": ext_atr,
         "pct_above_sma50": pct_above_sma50,
+        "pct_above_sma200": pct_above_sma200,
+        "roc_long": indicators.roc(df, LONG_LOOKBACK) if df is not None else None,
         "atr_posture": indicators.atr_momentum(df) if df is not None else None,
         "base_count": base_count(df),
         "udvr": up_down_volume_ratio(df),
@@ -299,11 +315,15 @@ def _base_stage(sig: dict) -> str:
         if above200 and (extended or mature):
             return BaseStage.LATE_ADVANCE
         return BaseStage.EARLY_ADVANCE
-    # Perched above the long-term average but momentum has stalled.
+    # Perched above the long-term average but momentum has stalled. Distinguish a
+    # top (stalling at ELEVATED levels — far above the 200-day mean, or rolling /
+    # widening) from a quiet re-base resting near the mean.
     if above200:
-        if falling or expanding or not above50:
+        stalled_after_advance = (sig["roc_long"] is not None
+                                 and sig["roc_long"] > LONG_GAIN_PCT)
+        if falling or expanding or not above50 or stalled_after_advance:
             return BaseStage.TOPPING
-        return BaseStage.BASING          # quiet consolidation above the LT trend (re-base)
+        return BaseStage.BASING          # quiet consolidation near the LT trend (re-base)
     # Below the long-term average: falling = declining, flat = building a base.
     if falling:
         return BaseStage.DECLINING
