@@ -300,13 +300,17 @@ SCAN_REJECTION_LOG_DAYS = 180    # PROPOSED_DEFAULT — ~2 quarters of trading d
 # writer, never in state.json.
 SCAN_DIFF_LOG_MAX = 5000         # PROPOSED_DEFAULT — retained transition events
 
-# NET juice floor (% of LEAP cost per week, AFTER model burn/slippage) — the
-# viability gate the canonical scan verdict enforces as a SAFETY block: a name
-# whose income can't clear this bar is not a trade at any conviction, and low IV
-# does not fix itself on a date (so it's BLOCKED, never benchable). This is a NET
-# figure, distinct from the account_gate's GROSS weekly_yield_target (~1.9%/wk,
-# derived from the HARD_CFM_RULE CYCLE_RETURN_MIN/CYCLE_WEEKS_MAX).
-JUICE_FLOOR_WK = 1.5             # PROPOSED_DEFAULT — net juice/wk adequacy floor (%)
+# Juice viability floor — the SAFETY block the canonical scan verdict enforces
+# (low IV does not fix itself on a date, so a sub-floor name is BLOCKED, never
+# benchable). Two tiers:
+#   * hard floor  — NET juice/wk (post LEAP-burn + slippage) <= 0: burn exceeds
+#     income, not a trade at any conviction. Always applies; no constant.
+#   * adequacy floor — GROSS juice/wk (weekly short extrinsic / LEAP cost, BEFORE
+#     burn) below JUICE_FLOOR_WK: the premium itself is too thin. Keyed off GROSS
+#     because that is the strategy's stated income bar (~1.9%/wk, the HARD_CFM_RULE
+#     CYCLE_RETURN_MIN/CYCLE_WEEKS_MAX); the net column still shows the take-home.
+# Env-tunable (CFM_JUICE_FLOOR_WK) so the bar can be calibrated live.
+JUICE_FLOOR_WK = float(os.environ.get("CFM_JUICE_FLOOR_WK", "1.5"))   # PROPOSED_DEFAULT — GROSS juice/wk adequacy floor (%)
 
 # Weekly universe-intake screen (DATA_DIR/candidate_universe.json) — the internal
 # approximation of the operator's Finviz momentum screen over cached bars. The

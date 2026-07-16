@@ -531,7 +531,8 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # verdict here (pure over the row's net juice, no account state, so the memoized
     # market sweep can carry it). A sub-floor name is BLOCKED, off the bench, with an
     # L5-juice binding constraint — closing the "bench led by names that can't pay".
-    juice_block = scan_triggers.juice_floor_block(row.get("net_juice_weekly_pct"))
+    juice_block = scan_triggers.juice_floor_block(row.get("net_juice_weekly_pct"),
+                                                  row.get("juice_weekly_pct"))
     if juice_block is not None:
         blocks.append(juice_block)
     rv = scan_triggers.compose_row_verdict(composed, blocks)
