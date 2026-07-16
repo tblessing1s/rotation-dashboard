@@ -1,120 +1,94 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Spinner, ErrorState, StockLights, fmt, pct, useApi } from "./ui.jsx";
+import { Card, Pill, Light, Spinner, ErrorState, StockLights, fmt, pct, useApi } from "./ui.jsx";
 
-// The numeric CFM scorecard: one row per holding, a single composite verdict,
-// no chart-reading required. Grouped by sector, filterable by verdict, sortable
-// by any numeric column; click a row to see the reasons behind its verdict.
+// The per-symbol scan table, collapsed to the composable read:
+//
+//     SYMBOL | SYM | BASE | INST | VERDICT
+//
+// SYM = the per-name Symbol Genius color; BASE / INST = the two structure-classifier
+// enums (both derived from the SINGLE classifier return the backend puts on the row);
+// VERDICT = the composed worst-signal-wins scan verdict (invisible market regime +
+// SYM + structure entrability). Every legacy indicator readout (RS3M, ATR%, MFI,
+// OBV, juice, the four Genius lights, …) demotes to the expandable per-row drawer.
+// Grouped by sector, filterable by verdict, sortable by any column.
 
-const VERDICT_STATUS = { GO: "go", CAUTION: "caution", AVOID: "avoid" };
+// ---------------------------------------------------------------------------
+// Display constants — enum VALUE -> short label / tone / sort order. UI constants
+// mapping from the enum values, never truncated strings scattered through the JSX.
+// ---------------------------------------------------------------------------
+const BASE_LABELS = {
+  BASING: "BASING", EARLY_ADVANCE: "EARLY ADV", LATE_ADVANCE: "LATE ADV",
+  TOPPING: "TOPPING", DECLINING: "DECLINING", INSUFFICIENT_DATA: "NO DATA",
+};
+const BASE_TONE = {
+  EARLY_ADVANCE: "text-emerald-300", LATE_ADVANCE: "text-amber-300",
+  BASING: "text-sky-300", TOPPING: "text-rose-300", DECLINING: "text-rose-400",
+  INSUFFICIENT_DATA: "text-slate-500",
+};
+const INST_LABELS = {
+  ACCUMULATING: "ACCUM", EARLY_INTEREST: "EARLY INT", NO_INTEREST: "NO INT",
+  DISTRIBUTING: "DISTRIB", INSUFFICIENT_DATA: "NO DATA",
+};
+const INST_TONE = {
+  ACCUMULATING: "text-emerald-300", EARLY_INTEREST: "text-sky-300",
+  NO_INTEREST: "text-slate-400", DISTRIBUTING: "text-rose-300",
+  INSUFFICIENT_DATA: "text-slate-500",
+};
+const VERDICT_STATUS = { READY: "ready", CAUTION: "caution", WATCH: "watch", BLOCKED: "blocked" };
+const VERDICT_ORDER = { READY: 0, CAUTION: 1, WATCH: 2, BLOCKED: 3 };
+const BASE_ORDER = { EARLY_ADVANCE: 0, LATE_ADVANCE: 1, BASING: 2, TOPPING: 3, DECLINING: 4, INSUFFICIENT_DATA: 5 };
+const INST_ORDER = { ACCUMULATING: 0, EARLY_INTEREST: 1, NO_INTEREST: 2, DISTRIBUTING: 3, INSUFFICIENT_DATA: 4 };
+const SYM_ORDER = { green: 0, yellow: 1, red: 2 };
 
-// Columns: key -> how to render. `num` columns are sortable numerically.
+// Columns: key + label + optional render + optional sortVal (numeric sort key for
+// an enum column). A BASE/INST column is fully declarative — one entry each.
 const COLUMNS = [
-  { key: "ticker", label: "Ticker", num: false },
+  { key: "ticker", label: "Symbol" },
   {
-    // The per-name Genius four lights + the right-spot gate — the SAME indicator
-    // system as the market regime, at a glance. The verdict (green/yellow/red) is
-    // the four lights + vetoes; the right-spot check is separate (a dot).
-    key: "lights", label: "Lights", num: false,
-    render: (r) => (
-      <span className="inline-flex items-center gap-2">
-        <StockLights lights={r.lights} />
-        {r.right_spot ? (
-          <span
-            title={`Right spot: ${r.right_spot.pass ? "in spot" : (r.right_spot.blocked_by || []).join(", ") || "blocked"}`}
-            className={`text-[10px] uppercase ${r.right_spot.pass ? "text-emerald-400" : "text-rose-400"}`}
-          >
-            {r.right_spot.pass ? "spot✓" : "spot✗"}
-          </span>
-        ) : null}
+    key: "sym", label: "SYM", sortVal: (r) => SYM_ORDER[r.sym] ?? 9,
+    render: (r) => (r.sym ? (
+      <span className="inline-flex items-center gap-1.5" title={`Symbol Genius: ${r.sym.toUpperCase()}${r.sym_greens != null ? ` (${r.sym_greens}/4 lights)` : ""}`}>
+        <Light status={r.sym} /><span className="text-[10px] uppercase text-slate-500">{r.sym}</span>
       </span>
-    ),
-  },
-  { key: "price", label: "Price", num: true, render: (r) => fmt(r.price, 2) },
-  { key: "rs3m_vs_spy", label: "RS3M SPY", num: true, render: (r) => pct(r.rs3m_vs_spy) },
-  { key: "rs3m_vs_sector", label: "RS3M Sec", num: true, render: (r) => pct(r.rs3m_vs_sector) },
-  { key: "pct_above_ma21", label: "%>MA21", num: true, render: (r) => pct(r.pct_above_ma21) },
-  { key: "atr_extension", label: "ATR ext", num: true, render: (r) => fmt(r.atr_extension, 2) },
-  { key: "mfi", label: "MFI", num: true, render: (r) => fmt(r.mfi, 0) },
-  { key: "volume_ratio", label: "Vol×", num: true, render: (r) => fmt(r.volume_ratio, 2) },
-  { key: "atr_momentum", label: "ATR mom", num: true, render: (r) => fmt(r.atr_momentum, 2) },
-  { key: "obv_above_ema", label: "OBV", num: false, render: (r) => (r.obv_above_ema == null ? "—" : r.obv_above_ema ? "↑" : "↓") },
-  {
-    key: "juice_weekly_pct", label: "Juice/wk", num: true,
-    render: (r) =>
-      r.juice_weekly_pct == null ? "—" : (
-        <span
-          title={`History-implied weekly extrinsic ÷ LEAP cost (target ≥ ${fmt(r.juice_target_pct, 2)}%/wk)`}
-          className={r.juice_ok === false ? "text-rose-300" : "text-emerald-300"}
-        >
-          {fmt(r.juice_weekly_pct, 2)}%
-        </span>
-      ),
+    ) : <span className="text-slate-600">—</span>),
   },
   {
-    key: "earnings_days", label: "Earnings", num: true,
-    render: (r) =>
-      r.earnings_date == null ? "—" : (
-        <span
-          title={`Next earnings ${r.earnings_date}`}
-          className={r.earnings_days != null && r.earnings_days <= 7 ? "text-amber-300" : "text-slate-400"}
-        >
-          {r.earnings_days != null ? `${r.earnings_days}d` : r.earnings_date}
-        </span>
-      ),
+    key: "base_stage", label: "Base", sortVal: (r) => BASE_ORDER[r.base_stage] ?? 9,
+    render: (r) => <span className={BASE_TONE[r.base_stage] || "text-slate-400"}>{BASE_LABELS[r.base_stage] || "—"}</span>,
   },
-  { key: "verdict", label: "Verdict", num: false, render: (r) => <Pill status={VERDICT_STATUS[r.verdict] || "unknown"}>{r.verdict}</Pill> },
+  {
+    key: "inst_flow", label: "Inst", sortVal: (r) => INST_ORDER[r.inst_flow] ?? 9,
+    render: (r) => <span className={INST_TONE[r.inst_flow] || "text-slate-400"}>{INST_LABELS[r.inst_flow] || "—"}</span>,
+  },
+  {
+    key: "scan_verdict", label: "Verdict", sortVal: (r) => VERDICT_ORDER[r.scan_verdict] ?? 9,
+    render: (r) => <Pill status={VERDICT_STATUS[r.scan_verdict] || "unknown"}>{r.scan_verdict || "—"}</Pill>,
+  },
 ];
 
-// Per-column help — what the column is AND what the value levels mean. Shown as a
-// hover tooltip on the header (with a small ⓘ affordance). Kept out of the COLUMNS
-// definitions so the render logic stays terse.
 const COLUMN_HELP = {
-  ticker:
-    "The symbol. Click the row (▸) to expand its verdict reasons. ETF / no-weeklies tags flag special handling.",
-  lights:
-    "The four Genius lights (Close > MA50 · EMA21 > MA50 · SAR below price · ROC10 > 0) plus the separate right-spot gate.\n" +
-    "4 green = GREEN · exactly 3 = YELLOW (watchlist, not enterable) · ≤2 or any veto = RED.\n" +
-    "SPOT✓ = in a good entry spot · SPOT✗ = extended or too volatile.",
-  price: "Latest daily close, or a live quote after ↻.",
-  rs3m_vs_spy:
-    "3-month relative strength vs SPY, %. Display / kill-switch only now — it no longer gates entry. >0 = outrunning SPY.",
-  rs3m_vs_sector:
-    "3-month relative strength vs its own sector ETF, %. The kill-switch line: <0 = weaker than its sector (exit signal, and an entry veto for stocks). N/A for a sector ETF.",
-  pct_above_ma21:
-    "Price distance above/below its 21-day MA, %. Context only — the right-spot gate uses the ATR-normalized ATR ext, not raw %.",
-  atr_extension:
-    "How far price sits above MA21, measured in ATRs. Right-spot extension check: ≤ 1.5 = in the pocket · > 1.5 = extended (blocks the spot gate).",
-  mfi:
-    "Money Flow Index (0–100), a volume-weighted momentum read. Extremes raise a CAUTION; the mid-band is healthy. Waived for ETFs.",
-  volume_ratio:
-    "Today's volume ÷ its 20-day average. Below ~1 = thin participation (a CAUTION for stocks). Waived for ETFs.",
-  atr_momentum:
-    "ATR ÷ its 5-day average. ≤ 1 = volatility contracting or flat (good, coiling) · > 1 = expanding (breaking out). The right-spot volatility check.",
-  obv_above_ema:
-    "On-Balance Volume vs its 20-EMA. ↑ = accumulation (buyers), ↓ = distribution (sellers).",
-  juice_weekly_pct:
-    "History-implied weekly extrinsic ÷ LEAP cost — the CFM payoff. Green = meets the weekly target · red = below it.",
-  earnings_days:
-    "Days to next earnings. ≤ 7d is flagged amber — roll the short deep-ITM or avoid entering into the report.",
-  verdict:
-    "The roll-up: GO (clears the stock legs + CFM rules) · CAUTION (soft flags) · AVOID (a hard rail failed). A non-green market regime can still block a GO — see the banner above.",
+  ticker: "The symbol. Click the row (▸) to expand the full indicator readout + verdict inputs. ETF / no-weeklies tags flag special handling.",
+  sym: "Symbol Genius — the per-name four-light instance (Close > SMA50 · SMA50 > SMA200 · SAR below price · ROC10 > 0).\n" +
+    "4 green = GREEN · exactly 3 = YELLOW (watchlist) · ≤2 or insufficient history = RED. The fourth light (SMA50 > SMA200) diverges from the market regime's EMA21 > SMA50 on purpose — a longer structural clock.",
+  base_stage: "Structure — where the name sits in its base→advance→decline cycle.\n" +
+    "EARLY ADV / LATE ADV / BASING / TOPPING / DECLINING (from the 150-day slope, price position, base count, ATR posture). Only EARLY ADV is READY-eligible; TOPPING / DECLINING block.",
+  inst_flow: "Institutional flow — accumulation vs distribution.\n" +
+    "ACCUM / EARLY INT / NO INT / DISTRIB (from 50-day up/down volume, OBV vs its 20-EMA with a price-divergence check, and accumulation/distribution day counts). DISTRIB blocks.",
+  scan_verdict: "The composed verdict — worst-signal-wins of the (invisible) market regime, Symbol Genius, and the structure cell.\n" +
+    "READY (all clear) · CAUTION (entrable with care) · WATCH (valid setup, not entrable) · BLOCKED. A RED market regime forces every row to BLOCKED even though regime has no column.",
 };
 
-const VERDICT_ORDER = { AVOID: 0, CAUTION: 1, GO: 2 };
-
-// When the market regime isn't green, the gate's Level 1 is the headline risk —
-// a GO here means "best CFM setup once the tape clears," not "enter now". Surface
-// that right on the table so a green verdict is never mistaken for a fresh-risk
-// signal. Keyed to the same traffic-light tones as the regime card.
+// When the market regime isn't green it's the invisible input driving BLOCKED/WATCH
+// verdicts below — surface it so the table's verdicts are read in context.
 const REGIME_BANNER = {
   yellow: {
     cls: "border-amber-500/40 bg-amber-500/10 text-amber-200",
-    text: "Market regime YELLOW — tighten criteria, no fresh risk. Verdicts below are a relative ranking, not entry signals.",
+    text: "Market regime YELLOW — the invisible verdict input caps every row at WATCH (no fresh entries). Structure/SYM still rank names for when the tape clears.",
   },
   red: {
     cls: "border-rose-500/40 bg-rose-500/10 text-rose-200",
-    text: "Market regime RED — risk-off, stand down. Verdicts below are a relative ranking, not entry signals.",
+    text: "Market regime RED — risk-off. Every VERDICT below is BLOCKED regardless of SYM/structure; the columns are a relative ranking, not entry signals.",
   },
 };
 
@@ -122,18 +96,14 @@ function sortRows(rows, sort) {
   const { key, dir } = sort;
   const col = COLUMNS.find((c) => c.key === key);
   const mul = dir === "asc" ? 1 : -1;
+  const valOf = (r) => (col?.sortVal ? col.sortVal(r) : r[key]);
   return [...rows].sort((a, b) => {
-    let av = a[key];
-    let bv = b[key];
-    if (key === "verdict") {
-      av = VERDICT_ORDER[av] ?? 99;
-      bv = VERDICT_ORDER[bv] ?? 99;
-    }
-    // Nulls always sort last regardless of direction.
+    const av = valOf(a);
+    const bv = valOf(b);
     if (av == null && bv == null) return 0;
     if (av == null) return 1;
     if (bv == null) return -1;
-    if (col?.num || key === "verdict") return (av - bv) * mul;
+    if (typeof av === "number" && typeof bv === "number") return (av - bv) * mul;
     return String(av).localeCompare(String(bv)) * mul;
   });
 }
@@ -142,9 +112,6 @@ function sortRows(rows, sort) {
 // bypassing the daily cache. Spins while in flight; turns emerald once a name
 // has been refreshed this session, and red with a tooltip if the pull failed.
 function RefreshButton({ onClick, busy, error, title, refreshedAt }) {
-  // refreshedAt is { at, source } once a name has been pulled. A "cache" source
-  // means the live providers didn't answer — flag it amber, not emerald, so a
-  // stale price never masquerades as a fresh live quote.
   const source = refreshedAt?.source;
   const stale = source === "cache";
   const tip = error
@@ -173,15 +140,25 @@ function RefreshButton({ onClick, busy, error, title, refreshedAt }) {
   );
 }
 
+// One demoted readout in the expand drawer (label over value).
+function Readout({ label, value }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="text-slate-300">{value}</div>
+    </div>
+  );
+}
+
 function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt, refreshError }) {
-  const weak = row.verdict === "AVOID";
-  const caution = row.verdict === "CAUTION";
+  const blocked = row.scan_verdict === "BLOCKED";
+  const caution = row.scan_verdict === "CAUTION";
   return (
     <>
       <tr
         onClick={onToggle}
         className={`cursor-pointer border-t border-slate-800 hover:bg-slate-800/40 ${
-          weak ? "bg-rose-500/5" : caution ? "bg-amber-500/5" : ""
+          blocked ? "bg-rose-500/5" : caution ? "bg-amber-500/5" : ""
         }`}
       >
         {COLUMNS.map((c) => (
@@ -227,15 +204,47 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
       {expanded && (
         <tr className="border-t border-slate-800/50 bg-slate-900/40">
           <td colSpan={COLUMNS.length} className="px-4 py-3">
-            {row.reasons?.length ? (
-              <ul className="list-disc space-y-1 pl-5 text-sm text-slate-300">
-                {row.reasons.map((reason, i) => (
-                  <li key={i}>{reason}</li>
+            <div className="space-y-3">
+              {/* Why this verdict — the input(s) at the worst (deciding) level. */}
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span className="uppercase tracking-wide text-slate-500">Verdict inputs</span>
+                {(row.scan_verdict_reasons?.length ? row.scan_verdict_reasons : ["all clear"]).map((reason, i) => (
+                  <span key={i} className="rounded border border-slate-700 px-1.5 py-0.5 text-slate-300">{reason}</span>
                 ))}
-              </ul>
-            ) : (
-              <p className="text-sm text-emerald-300">Clean — passes the entry gate and every scorecard rule.</p>
-            )}
+              </div>
+              {/* The four Genius stock lights + right-spot (the old Lights column, demoted). */}
+              <div className="flex items-center gap-3 text-xs text-slate-400">
+                <span className="uppercase tracking-wide text-slate-500">Genius lights</span>
+                <StockLights lights={row.lights} />
+                {row.right_spot ? (
+                  <span className={row.right_spot.pass ? "text-emerald-400" : "text-rose-400"}>
+                    {row.right_spot.pass ? "spot✓" : "spot✗"}
+                  </span>
+                ) : null}
+                {row.sym_greens != null && <span>SYM {row.sym_greens}/4</span>}
+              </div>
+              {/* The demoted numeric readouts. */}
+              <div className="grid grid-cols-3 gap-x-6 gap-y-2 sm:grid-cols-4 lg:grid-cols-6">
+                <Readout label="Price" value={fmt(row.price, 2)} />
+                <Readout label="RS3M SPY" value={pct(row.rs3m_vs_spy)} />
+                <Readout label="RS3M Sec" value={pct(row.rs3m_vs_sector)} />
+                <Readout label="%>MA21" value={pct(row.pct_above_ma21)} />
+                <Readout label="ATR ext" value={fmt(row.atr_extension, 2)} />
+                <Readout label="MFI" value={fmt(row.mfi, 0)} />
+                <Readout label="Vol×" value={fmt(row.volume_ratio, 2)} />
+                <Readout label="ATR mom" value={fmt(row.atr_momentum, 2)} />
+                <Readout label="OBV" value={row.obv_above_ema == null ? "—" : row.obv_above_ema ? "↑ accum" : "↓ distrib"} />
+                <Readout label="Juice/wk" value={row.juice_weekly_pct == null ? "—" : `${fmt(row.juice_weekly_pct, 2)}%`} />
+                <Readout label="Earnings" value={row.earnings_days != null ? `${row.earnings_days}d` : (row.earnings_date || "—")} />
+                <Readout label="Suitability" value={row.verdict || "—"} />
+              </div>
+              {/* The CFM-suitability reasons (the internal GO/CAUTION/AVOID lens). */}
+              {row.reasons?.length ? (
+                <ul className="list-disc space-y-0.5 pl-5 text-xs text-slate-400">
+                  {row.reasons.map((reason, i) => <li key={i}>{reason}</li>)}
+                </ul>
+              ) : null}
+            </div>
           </td>
         </tr>
       )}
@@ -243,22 +252,20 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
   );
 }
 
+const FILTERS = ["ALL", "READY", "CAUTION", "WATCH", "BLOCKED"];
+
 export default function Scorecard({ regimeStatus, refreshKey }) {
   const { data, error, loading, reload } = useApi(api.scorecard, [refreshKey]);
   const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);
-  const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
+  const [sort, setSort] = React.useState({ key: "scan_verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
-  // On-demand live-quote refresh: rows we've force-refreshed since the last full
-  // sweep (fresher than the memoized scorecard), plus per-key in-flight/when/error.
   const [overrides, setOverrides] = React.useState({});
   const [busy, setBusy] = React.useState({});
   const [refreshedAt, setRefreshedAt] = React.useState({});
   const [refreshErr, setRefreshErr] = React.useState({});
 
-  // A new full sweep supersedes every manual override — drop them so the newest
-  // scorecard wins (keyed on as_of, which only changes on a real reload).
   React.useEffect(() => {
     setOverrides({});
     setRefreshedAt({});
@@ -307,25 +314,22 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
     () => (data?.results || []).map((r) => overrides[r.ticker] || r),
     [data, overrides],
   );
-  // Monthly-only names can't run CFM (no weekly short); count them so the toggle
-  // can show how many are being hidden. `null` = undetermined, treated as tradeable.
   const noWeeklies = React.useMemo(
     () => results.filter((r) => r.has_weeklies === false).length,
     [results],
   );
   const counts = React.useMemo(() => {
-    const c = { GO: 0, CAUTION: 0, AVOID: 0 };
-    results.forEach((r) => { if (c[r.verdict] != null) c[r.verdict] += 1; });
+    const c = { READY: 0, CAUTION: 0, WATCH: 0, BLOCKED: 0 };
+    results.forEach((r) => { if (c[r.scan_verdict] != null) c[r.scan_verdict] += 1; });
     return c;
   }, [results]);
 
   const filtered = results.filter(
     (r) =>
-      (verdictFilter === "ALL" || r.verdict === verdictFilter) &&
+      (verdictFilter === "ALL" || r.scan_verdict === verdictFilter) &&
       (!weekliesOnly || r.has_weeklies !== false),
   );
 
-  // Group by sector, then sort within each group by the active column.
   const groups = React.useMemo(() => {
     const by = {};
     filtered.forEach((r) => { (by[r.sector] || (by[r.sector] = [])).push(r); });
@@ -338,8 +342,9 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
   }
 
-  const filterBtn = (val, label) => (
+  const filterBtn = (val) => (
     <button
+      key={val}
       onClick={() => setVerdictFilter(val)}
       className={`rounded-lg border px-3 py-1.5 text-sm ${
         verdictFilter === val
@@ -347,13 +352,13 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
           : "border-slate-700 text-slate-400 hover:text-slate-200"
       }`}
     >
-      {label}
+      {val === "ALL" ? `All (${results.length})` : `${val} ${counts[val] ?? 0}`}
     </button>
   );
 
   return (
     <Card
-      title="Scorecard (numeric CFM lens)"
+      title="Scan — per-symbol verdict"
       right={loading ? <span className="flex items-center gap-1.5 text-xs text-slate-500"><Spinner size="h-3 w-3" />scoring…</span> : data?.as_of ? <span className="text-xs text-slate-500">as of {data.as_of}</span> : null}
     >
       {banner && (
@@ -362,10 +367,7 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
         </div>
       )}
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        {filterBtn("ALL", `All (${results.length})`)}
-        {filterBtn("GO", `GO ${counts.GO}`)}
-        {filterBtn("CAUTION", `CAUTION ${counts.CAUTION}`)}
-        {filterBtn("AVOID", `AVOID ${counts.AVOID}`)}
+        {FILTERS.map(filterBtn)}
         <label
           className="ml-auto flex cursor-pointer items-center gap-2 text-sm text-slate-400"
           title="CFM sells a weekly short — hide names whose option chain has no weeklies"
@@ -380,8 +382,6 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
         </label>
       </div>
       {error && <ErrorState error={error} onRetry={reload} />}
-      {/* Own vertical scroll (max-h) so the header can stick to the top of THIS
-          container — independent of the page/navbar, which is a dynamic height. */}
       <div className="max-h-[70vh] overflow-auto">
         <table className="w-full text-sm">
           <thead>
