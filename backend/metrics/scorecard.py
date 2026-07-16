@@ -377,6 +377,31 @@ def _apply_price_override(df, price_override):
     return df
 
 
+def _ext_trigger_context(df: pd.DataFrame | None) -> dict:
+    """The extra observed values the two Level-4 ESTIMATED triggers need for a
+    crude days-to-trigger (``scan_triggers._estimate_days``): the ATR beyond the
+    max in ATR units, the recent MA21 daily rise ($/day), and the current ATR.
+    Pure over the frame; None-safe. All estimation is labelled EST downstream."""
+    if df is None or len(df) < 26:
+        return {}
+    price = indicators.last(df)
+    atr = indicators.atr(df)
+    ma21 = indicators.sma(df, 21)
+    ma21_prev = indicators.sma(df.iloc[:-5], 21)
+    ext = indicators.atr_extension(df)
+    momentum = indicators.atr_momentum(df)
+    out: dict = {}
+    if None not in (ext, atr) and atr:
+        excess = ext - config.SPOT_ATR_EXTENSION_MAX
+        rise = (ma21 - ma21_prev) / 5.0 if (ma21 is not None and ma21_prev is not None) else None
+        out["extension"] = {"excess_atr": excess if excess > 0 else None,
+                            "ma21_rise_per_day": rise, "atr": atr}
+    if momentum is not None:
+        excess_m = momentum - config.SPOT_ATR_MOMENTUM_MAX
+        out["atr_5d_ema"] = {"momentum_excess": excess_m if excess_m > 0 else None}
+    return out
+
+
 def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                  sector_df: pd.DataFrame | None, gate: dict | None = None,
                  has_weeklies: bool | None = None, price_override: float | None = None,
@@ -482,8 +507,25 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["base_stage"] = cls["base_stage"]
     row["inst_flow"] = cls["inst_flow"]
     row["structure_entrability"] = composed["structure_entrability"]
-    row["verdict"] = composed["verdict"]                 # the canonical scan verdict
-    row["verdict_reasons"] = list(composed["reasons"])
+
+    # VERDICT COMPLETENESS (Phase-0 fix): the canonical verdict is worst-of the
+    # three SIGNAL inputs composed above AND every failing FULL-gate block — so a
+    # name extended past the Level-4 right spot can never read READY (the AAPL bug).
+    # Blocks are a READ of the gate ALREADY computed for this row (never a re-eval);
+    # Level 5 (account) is layered as a per-request overlay in /api/scan/ready where
+    # the account context Execute uses is loaded (see app.api_scan_ready). Triggers
+    # are the forward-looking "path to READY" annotations over the SAME evaluation.
+    import scan_triggers
+    ext_context = _ext_trigger_context(df)
+    blocks = scan_triggers.gate_blocks(gate, ext_context=ext_context)
+    rv = scan_triggers.compose_row_verdict(composed, blocks)
+    row["verdict"] = rv["verdict"]                       # the canonical scan verdict
+    row["verdict_reasons"] = list(rv["reasons"])
+    row["binding"] = rv["binding"]                       # structured first-fail (Q9)
+    row["triggers"] = rv["triggers"]                     # per-block forward triggers
+    row["path_to_ready"] = scan_triggers.path_to_ready(rv["triggers"])
+    row["eligible_days"] = scan_triggers.earliest_eligible_days(rv["triggers"])
+    row["bench"] = scan_triggers.is_bench(rv["verdict"], rv["triggers"])
 
     # Two-speed RS SHADOW — vs Sector (the table's primary) + vs SPY (drawer). Level
     # reuses the displayed RS3M; slope is the RS-line-EMA direction. A sector ETF has

@@ -86,9 +86,21 @@ def binding_constraint(row: dict) -> str | None:
 
 def _record_from_row(row: dict) -> dict:
     """The persisted fields for one scan row (compact but calibration-sufficient)."""
+    binding = row.get("binding") or {}
     return {
         "verdict": row.get("verdict"),
         "binding_constraint": binding_constraint(row),
+        # Structured binding (Phase-0 Q9 capture): the level / check id / trigger
+        # kind of the first-failing gate check, so the deferred miss-analysis can
+        # ask "did L4-blocked names resolve into entries we missed" without a
+        # string parse. None on a READY row.
+        "binding_level": binding.get("level"),
+        "binding_check": binding.get("id"),
+        "binding_kind": binding.get("kind"),
+        # Spot price at the scan (Phase-0 Q9): the forward-return anchor — a later
+        # pass joins subsequent price against this to answer "did the skipped name
+        # keep rising". Nothing recovers it after the fact, so capture it now.
+        "price": row.get("price"),
         "score": row.get("score"),
         "score_parts": row.get("score_parts"),
         "rs_state": row.get("rs_state"),
