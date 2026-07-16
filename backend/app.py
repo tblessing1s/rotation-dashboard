@@ -160,8 +160,12 @@ def api_scan_ready():
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo as _ZI
         sc = scorecard_metrics.scorecard(tickers)
-        go_rows = [r for r in sc["results"] if r["verdict"] == "GO"]
-        level5 = account_gate.evaluate_many([r["ticker"] for r in go_rows], contracts=contracts)
+        # Ready-to-Enter = the composed scan VERDICT is READY (the invisible market
+        # regime + Symbol Genius + structure entrability all clear). A RED regime
+        # forces every scan_verdict to BLOCKED, so the shortlist correctly empties on
+        # a red tape — the invisible-regime rule, now enforced here.
+        ready_rows = [r for r in sc["results"] if r.get("scan_verdict") == "READY"]
+        level5 = account_gate.evaluate_many([r["ticker"] for r in ready_rows], contracts=contracts)
 
         # HARD_CFM_RULE (STALE_BLOCKS_GO): a GO that the operator would act on must
         # not be emitted on stale inputs. Only enforced once the tiered scheduler is
@@ -178,10 +182,10 @@ def api_scan_ready():
         # stale-blocked below. When live, pull a live quote for exactly the GO
         # names that lack a fresh one, so this shortlist reflects what the
         # operator could actually enter — not just what happens to be on-deck.
-        if live and go_rows:
+        if live and ready_rows:
             import data_transport
             from market_scheduler import QUOTE as _QUOTE
-            need = [r["ticker"] for r in go_rows
+            need = [r["ticker"] for r in ready_rows
                     if data_cache.get_with_staleness(
                         r["ticker"], _QUOTE, tier=market_scheduler.Tier.T1)[2]]
             if need:
@@ -193,7 +197,7 @@ def api_scan_ready():
                         "scan_ready on-demand quote fetch failed: %s", fe)
 
         ready, near_misses, stale_blocked = [], [], []
-        for r in go_rows:
+        for r in ready_rows:
             l5 = level5.get(r["ticker"])
             blocked, stale_inputs = data_cache.stale_blocks_go(
                 r["ticker"], market_scheduler.Tier.T1, market_open=mkt_open, live=live)
@@ -201,6 +205,10 @@ def api_scan_ready():
                      "juice_weekly_pct": r.get("juice_weekly_pct"),
                      "net_juice_weekly_pct": r.get("net_juice_weekly_pct"),
                      "earnings_date": r.get("earnings_date"), "level5": l5,
+                     # The per-symbol scan cells (SYM | BASE | INST | VERDICT) so the
+                     # shortlist can show the same read as the table.
+                     "sym": r.get("sym"), "base_stage": r.get("base_stage"),
+                     "inst_flow": r.get("inst_flow"), "scan_verdict": r.get("scan_verdict"),
                      # Per-name Genius lights so the shortlist can show the four-light
                      # row + verdict + right-spot at a glance (same data as the gate).
                      "lights": r.get("lights"), "stock_greens": r.get("stock_greens"),

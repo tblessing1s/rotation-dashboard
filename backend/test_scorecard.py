@@ -363,7 +363,9 @@ def test_scorecard_endpoint_shape(monkeypatch):
                   "pct_above_ma21", "pct_above_ma200", "atr_extension", "below_ma50",
                   "below_ma200", "ma50_slope", "volume_ratio", "volume_acceleration",
                   "obv_above_ema", "obv_pct_distance", "mfi", "atr_momentum",
-                  "has_weeklies", "verdict", "reasons"):
+                  "has_weeklies", "verdict", "reasons",
+                  # scan-restructure per-symbol cells
+                  "sym", "base_stage", "inst_flow", "scan_verdict"):
         assert field in row, field
     # Response is JSON-serializable end to end (no numpy types leaked).
     import json

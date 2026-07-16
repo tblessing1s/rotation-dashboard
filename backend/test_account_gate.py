@@ -493,16 +493,16 @@ def test_scan_ready_splits_go_rows_by_level5_and_sorts_by_juice(isolated_state, 
     import app as app_module
 
     rows = [
-        {"ticker": "AAA", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 1.0, "earnings_date": None},
-        {"ticker": "BBB", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 3.0, "earnings_date": None},
-        {"ticker": "CCC", "sector": "XLK", "verdict": "CAUTION", "juice_weekly_pct": 5.0, "earnings_date": None},
+        {"ticker": "AAA", "sector": "XLK", "scan_verdict": "READY", "juice_weekly_pct": 1.0, "earnings_date": None},
+        {"ticker": "BBB", "sector": "XLK", "scan_verdict": "READY", "juice_weekly_pct": 3.0, "earnings_date": None},
+        {"ticker": "CCC", "sector": "XLK", "scan_verdict": "CAUTION", "juice_weekly_pct": 5.0, "earnings_date": None},
     ]
     monkeypatch.setattr(scorecard_metrics, "scorecard",
                         lambda tickers=None: {"as_of": "2026-07-02T00:00:00Z", "results": rows})
 
     def _fake_evaluate_many(tickers, contracts=None):
         # AAA blocked (thin juice), BBB passes — CCC is excluded before this
-        # is even called since it isn't a GO row.
+        # is even called since it isn't a READY row.
         assert set(tickers) == {"AAA", "BBB"}
         return {
             "AAA": {"pass": False, "blocking_failures": ["juice_adequacy"]},
@@ -524,8 +524,8 @@ def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state
     import app as app_module
 
     rows = [
-        {"ticker": "LOW", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 2.0, "earnings_date": None},
-        {"ticker": "HIGH", "sector": "XLK", "verdict": "GO", "juice_weekly_pct": 6.0, "earnings_date": None},
+        {"ticker": "LOW", "sector": "XLK", "scan_verdict": "READY", "juice_weekly_pct": 2.0, "earnings_date": None},
+        {"ticker": "HIGH", "sector": "XLK", "scan_verdict": "READY", "juice_weekly_pct": 6.0, "earnings_date": None},
     ]
     monkeypatch.setattr(scorecard_metrics, "scorecard",
                         lambda tickers=None: {"as_of": "x", "results": rows})
@@ -555,7 +555,7 @@ def test_scan_ready_fetches_live_quote_on_demand_so_go_clears(isolated_state, mo
     data_cache.put("AAA", BARS, "df", "schwab", Tier.T1, fetched_at=time.time() - 60)
     data_cache.put("SPY", QUOTE, 1.0, "schwab", Tier.T1, fetched_at=time.time() - 5)
 
-    rows = [{"ticker": "AAA", "sector": "XLK", "verdict": "GO",
+    rows = [{"ticker": "AAA", "sector": "XLK", "scan_verdict": "READY",
              "juice_weekly_pct": 1.0, "earnings_date": None}]
     monkeypatch.setattr(scorecard_metrics, "scorecard",
                         lambda tickers=None: {"as_of": "x", "results": rows})

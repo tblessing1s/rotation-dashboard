@@ -18,7 +18,10 @@ import pandas as pd
 import config
 import data_handler
 import indicators
+import scan_verdict
 import sector_data
+import structure_classifier
+import symbol_genius
 
 from . import thresholds as T
 
@@ -373,7 +376,8 @@ def _apply_price_override(df, price_override):
 
 def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                  sector_df: pd.DataFrame | None, gate: dict | None = None,
-                 has_weeklies: bool | None = None, price_override: float | None = None) -> dict:
+                 has_weeklies: bool | None = None, price_override: float | None = None,
+                 regime_color: str | None = None) -> dict:
     """One scorecard row: numeric metrics + the composite verdict.
 
     Only the stock's own gate legs decide it: a beats-peers (L3) or consolidating
@@ -442,6 +446,27 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["earnings_date"] = earn.get("date")
     row["earnings_days"] = earn.get("days_until")
 
+    # Scan-restructure signals — the per-symbol columns SYM | BASE | INST | VERDICT.
+    # Symbol Genius (the four-light SYM), the structure classifier (BASE + INST from
+    # ONE call, display-only split), and the composed scan VERDICT (worst-signal-wins
+    # of the INVISIBLE market regime + SYM + structure entrability). A RED regime
+    # forces every scan_verdict to BLOCKED. Computed for every row (even a gate
+    # short-circuit below) so the scan table is complete. NOTE: the GO/CAUTION/AVOID
+    # `verdict` above is retained as the internal CFM-suitability signal that the
+    # queue / recommendation / refresh pipeline reads (it carries its own regime
+    # handling); the scan surface uses `scan_verdict`.
+    sym = symbol_genius.compute(df)
+    cls = structure_classifier.classify(df)
+    composed = scan_verdict.compose_verdict(regime_color, sym["color"],
+                                            cls["base_stage"], cls["inst_flow"])
+    row["sym"] = sym["color"]
+    row["sym_greens"] = sym["greens"]
+    row["base_stage"] = cls["base_stage"]
+    row["inst_flow"] = cls["inst_flow"]
+    row["structure_entrability"] = composed["structure_entrability"]
+    row["scan_verdict"] = composed["verdict"]
+    row["scan_verdict_reasons"] = composed["reasons"]
+
     failed = _failed_stock_gate_level(gate)
     if failed is not None:
         name = _GATE_LEVEL_NAMES.get(failed, "")
@@ -474,6 +499,14 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_frames = {e: data_handler.get_daily(e) for e in etfs}
 
+    # The invisible market regime — ONE read for the whole sweep — feeds the composed
+    # scan verdict (a RED regime blocks every row). Best-effort: a regime failure
+    # degrades regime_color to None (composed verdict then never emits READY).
+    try:
+        regime_color = screening.regime().get("status")
+    except Exception:  # noqa: BLE001
+        regime_color = None
+
     rows = []
     for t in names:
         etf = sector_of[t]
@@ -483,7 +516,8 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
             gate = None
         rows.append(score_ticker(t, spy, etf, sector_frames.get(etf), gate,
                                  has_weeklies=weeklies.has_weeklies(t),
-                                 price_override=price_overrides.get(t.upper())))
+                                 price_override=price_overrides.get(t.upper()),
+                                 regime_color=regime_color))
 
     rows.sort(key=lambda r: (r["sector"], r["ticker"]))
     return {"as_of": log.utcnow(), "results": rows}
