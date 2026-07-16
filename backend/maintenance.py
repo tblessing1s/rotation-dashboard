@@ -203,6 +203,21 @@ def nightly_refresh() -> dict:
     except Exception as e:  # noqa: BLE001 — a SYM snapshot failure must not sink the sweep
         report["errors"].append(f"symbol_genius_log: {e}")
 
+    # Persist today's full-universe scan rejection-reason record — per symbol: the
+    # canonical verdict, its BINDING CONSTRAINT (a read of the first/worst input),
+    # the shadow SCORE + parts, and the two-speed RS state + raw level/slope. This is
+    # the empirical calibration dataset ("is the gate too strict", plus RS-slope and
+    # SCORE-weight graduation data). Derived telemetry (DATA_DIR/scan_rejection_log.
+    # json), append-only, single nightly writer — never touches state.json. The
+    # scorecard sweep is memoized, so this reuses today's already-computed rows.
+    try:
+        import scan_rejection_log
+        from metrics import scorecard as scorecard_metrics
+        sweep = scorecard_metrics.scorecard(None)
+        report["scan_rejection_log"] = scan_rejection_log.record_scan(sweep.get("results", []))
+    except Exception as e:  # noqa: BLE001 — a scan-log failure must not sink the sweep
+        report["errors"].append(f"scan_rejection_log: {e}")
+
     # Weekly theta-burn mark (end-of-week cadence, once per ISO week): snapshots
     # each LEAP's model extrinsic + forward burn projection so the
     # realized-vs-projected divergence harness stays current. Telemetry only

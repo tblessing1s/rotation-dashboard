@@ -226,6 +226,51 @@ def rs1m(df: pd.DataFrame, bench: pd.DataFrame, lookback: int = config.RS1M_LOOK
     return relative_strength(df, bench, lookback)
 
 
+# ---------------------------------------------------------------------------
+# Two-speed RS shadow primitives (rs_state.py). The RS LINE is the aligned close
+# ratio symbol/bench; unlike relative_strength (a two-point % change of that
+# ratio) these read the ratio's SMOOTHED PATH — the ToS RS-momentum definition —
+# so the app's RS-slope read agrees with the chart. Pure, causal, no I/O; SHADOW
+# ONLY — nothing here gates, blocks, or touches the kill switch.
+# ---------------------------------------------------------------------------
+def rs_line(df: pd.DataFrame | None, bench: pd.DataFrame | None) -> pd.Series | None:
+    """The relative-strength line: symbol_close / bench_close, aligned on date.
+    Positive-valued — its DIRECTION, not its level, is the momentum read. None
+    when either frame is missing/empty or they don't overlap."""
+    if df is None or bench is None or df.empty or bench.empty:
+        return None
+    ratio = (_close(df) / _close(bench).reindex(df.index)).dropna()
+    return ratio if not ratio.empty else None
+
+
+def rs_ema(df: pd.DataFrame | None, bench: pd.DataFrame | None,
+           span: int = config.RS_EMA_SPAN) -> float | None:
+    """Latest EMA of the RS line over `span` bars (adjust=False, causal). This is
+    the smoothed RS-momentum line the ToS RS study plots. None with < span points."""
+    line = rs_line(df, bench)
+    if line is None or len(line) < span:
+        return None
+    return float(line.ewm(span=span, adjust=False).mean().iloc[-1])
+
+
+def rs_ema_slope(df: pd.DataFrame | None, bench: pd.DataFrame | None,
+                 span: int = config.RS_EMA_SPAN,
+                 lookback: int = config.RS_SLOPE_LOOKBACK) -> float | None:
+    """Slope of the RS-line EMA over `lookback` bars: (EMA_now − EMA_then) as a
+    percent of |EMA_then|, so it's comparable across names. Positive = the RS line
+    is turning up. Only its SIGN drives the RS state, but the magnitude is kept for
+    the calibration log. None with insufficient history or a zero base."""
+    line = rs_line(df, bench)
+    if line is None or len(line) < span + lookback:
+        return None
+    e = line.ewm(span=span, adjust=False).mean()
+    now = float(e.iloc[-1])
+    then = float(e.iloc[-1 - lookback])
+    if then == 0:
+        return None
+    return round((now - then) / abs(then) * 100.0, 4)
+
+
 def above_ma(df: pd.DataFrame, window: int = config.BREADTH_MA_WINDOW) -> bool | None:
     ma = sma(df, window)
     px = last(df)

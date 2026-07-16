@@ -94,9 +94,81 @@ def early_advance_accum() -> pd.DataFrame:
     return _ohlcv(closes, highs, lows, vols, start="2023-01-02")
 
 
+# ---------------------------------------------------------------------------
+# Two-speed RS shadow fixtures (Fixture C + the Fixture A sector companion).
+# The RS state needs a SECOND frame (the sector benchmark). We build each sector by
+# dividing the stock closes by a DESIGNED RS line r = stock/sector, so the RS
+# pairing lands on an exact target state regardless of the stock's own shape:
+#   * level  = rs3m  = (r[-1]/r[-64] - 1) * 100   (63-bar relative strength)
+#   * slope  = sign of the RS-line EMA over the last 21 bars
+# ---------------------------------------------------------------------------
+def _sector_from_rs_line(stock_closes: np.ndarray, r: np.ndarray, band: float = 0.8) -> pd.DataFrame:
+    """A benchmark frame such that stock/sector == r (the designed RS line)."""
+    sector = (np.asarray(stock_closes, float) / np.asarray(r, float))
+    highs = sector + band
+    lows = sector - band
+    vols = np.full(len(sector), 1_000_000.0)
+    return _ohlcv(sector, highs, lows, vols, start="2023-01-02")
+
+
+def _rs_line(n: int, seg_start: float, seg_mid: float, seg_end: float) -> np.ndarray:
+    """A three-segment RS line: flat 1.0 until 63 bars out, a linear leg to the
+    -21-bar point (``seg_start`` -> ``seg_mid``), then a linear leg over the last 21
+    bars (``seg_mid`` -> ``seg_end``). The 63-bar level is ``seg_end/seg_start - 1``;
+    the last-21 direction is ``sign(seg_end - seg_mid)``."""
+    r = np.full(n, seg_start)
+    i0, i1 = n - 64, n - 21
+    r[:i0] = seg_start
+    r[i0:i1] = np.linspace(seg_start, seg_mid, i1 - i0)
+    r[i1:] = np.linspace(seg_mid, seg_end, n - i1)
+    return r
+
+
+def turning_recovery() -> pd.DataFrame:
+    """Fixture C stock (the NVDA shape): a high plateau, a deep dip, then a 120-bar
+    recovery that holds above SMA50 while SMA50 is still BELOW SMA200 (golden cross
+    not yet). The classifier reads EARLY_ADVANCE x EARLY_INTEREST (entrable), but the
+    per-name Symbol Genius is YELLOW (3/4 — the SMA50>SMA200 light is red), so the
+    composed VERDICT is non-READY with the SYM (Level-3) input binding. Paired with
+    ``turning_recovery_sector`` its RS state is TURNING (lagging on 3M, recovering)."""
+    rng = np.random.default_rng(11)
+    plateau = 200 + rng.normal(0, 0.6, 60)                                 # tall, keeps SMA200 elevated
+    dip = np.linspace(200, 95, 90) + rng.normal(0, 0.8, 90)                # 200 -> 95
+    advance = np.linspace(95, 128, 120) + rng.normal(0, 0.8, 120)          # orderly recovery, below SMA200
+    closes = np.concatenate([plateau, dip, advance]).astype(float)
+    highs = closes + 1.0
+    lows = closes - 1.0
+    vols = _updown_volume(closes, up_vol=1_150_000.0, down_vol=1_000_000.0)  # mild EARLY_INTEREST
+    return _ohlcv(closes, highs, lows, vols, start="2023-01-02")
+
+
+def turning_recovery_sector() -> pd.DataFrame:
+    """Fixture C sector: the benchmark that makes the stock's RS state TURNING —
+    3-month level NEGATIVE (the sector out-ran the stock over 63 bars) while the
+    last-21-bar RS-EMA slope is UP (the stock is now catching up). r declines
+    1.00 -> 0.90 over [-63,-21] then rises 0.90 -> 0.95 over the last 21 bars, so
+    level = 0.95/1.00 - 1 = -5% and the recent slope is positive."""
+    r = _rs_line(len(turning_recovery()), seg_start=1.00, seg_mid=0.90, seg_end=0.95)
+    return _sector_from_rs_line(turning_recovery()["Close"].to_numpy(), r)
+
+
+def topping_distribution_sector() -> pd.DataFrame:
+    """Fixture A sector companion: makes the topping stock's RS state FADING —
+    3-month level NON-NEGATIVE (the stock led over 63 bars from its earlier surge)
+    while the last-21-bar RS-EMA slope is DOWN (rolling over into the top —
+    distribution-into-strength). r rises 1.00 -> 1.08 over [-63,-21] then falls
+    1.08 -> 1.03 over the last 21 bars, so level = +3% and the recent slope is
+    negative."""
+    r = _rs_line(len(topping_distribution()), seg_start=1.00, seg_mid=1.08, seg_end=1.03)
+    return _sector_from_rs_line(topping_distribution()["Close"].to_numpy(), r)
+
+
 FIXTURES = {
     "topping_distribution": topping_distribution,
+    "topping_distribution_sector": topping_distribution_sector,
     "early_advance_accum": early_advance_accum,
+    "turning_recovery": turning_recovery,
+    "turning_recovery_sector": turning_recovery_sector,
 }
 
 

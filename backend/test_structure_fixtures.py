@@ -24,7 +24,10 @@ import pytest
 
 import genius_lights as gl
 import indicators
+import rs_state as rss
+import scan_verdict as sv
 import structure_classifier as sc
+import symbol_genius
 from structure_classifier import BaseStage, InstFlow, Entrability
 
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "structure")
@@ -103,9 +106,81 @@ def test_fixture_b_red_regime_composes_to_blocked():
 
 
 # ---------------------------------------------------------------------------
+# Fixture A RS-state extension — the two-speed RS shadow reads FADING
+# (distribution-into-strength: led its sector on 3M, but rolling over now).
+# ---------------------------------------------------------------------------
+def test_fixture_a_rs_state_is_fading():
+    stock = _load("topping_distribution")
+    sector = _load("topping_distribution_sector")
+    st = rss.rs_state(stock, sector)
+    assert st["level"] is not None and st["level"] >= 0      # led its sector over 3M
+    assert st["slope"] is not None and st["slope"] < 0        # but rolling over now
+    assert st["state"] == rss.FADING
+
+
+# ---------------------------------------------------------------------------
+# Fixture C — the NVDA shape: EARLY_ADVANCE x EARLY_INTEREST, RS TURNING, and a
+# non-READY verdict whose binding constraint is the SYM (Level-3) input.
+# ---------------------------------------------------------------------------
+def test_fixture_c_has_enough_history():
+    assert len(_load("turning_recovery")) >= sc.MIN_BARS_BASE
+
+
+def test_fixture_c_classifier_is_early_advance_early_interest():
+    df = _load("turning_recovery")
+    base, inst = sc.classify_symbol(df)
+    assert base == BaseStage.EARLY_ADVANCE
+    assert inst == InstFlow.EARLY_INTEREST
+    # The structure cell itself is entrable — the block comes from SYM, not structure.
+    assert sc.structure_entrability(base, inst) == Entrability.READY
+
+
+def test_fixture_c_rs_state_is_turning():
+    stock = _load("turning_recovery")
+    sector = _load("turning_recovery_sector")
+    st = rss.rs_state(stock, sector)
+    assert st["level"] is not None and st["level"] < 0        # lags its sector on 3M
+    assert st["slope"] is not None and st["slope"] > 0        # but recovering now
+    assert st["state"] == rss.TURNING
+
+
+def test_fixture_c_symbol_genius_is_yellow_not_green():
+    # SMA50 is still below SMA200 (golden cross not yet), so the divergent fourth
+    # light is red -> 3/4 -> YELLOW. This is the input that blocks the verdict.
+    df = _load("turning_recovery")
+    assert symbol_genius.compute(df)["color"] == "yellow"
+
+
+def test_fixture_c_verdict_non_ready_binding_is_symbol_level3():
+    # Structure READY + SYM yellow under a green regime -> WATCH (non-READY). The
+    # binding constraint (the worst input) is the SYM / stock-lights read = Level 3.
+    stock = _load("turning_recovery")
+    base, inst = sc.classify_symbol(stock)
+    sym = symbol_genius.compute(stock)["color"]
+    composed = sv.compose_verdict("green", sym, base, inst)
+    assert composed["verdict"] != sv.READY
+    assert composed["reasons"] == ["symbol:WATCH"]            # SYM is the binding input
+
+
+def test_fixture_c_turning_annotation_present_on_non_ready():
+    # The gated Phase-0 exception: a TURNING vs-Sector RS annotates an already-
+    # non-READY row's reasons — informational only, never a verdict change.
+    stock = _load("turning_recovery")
+    sector = _load("turning_recovery_sector")
+    base, inst = sc.classify_symbol(stock)
+    sym = symbol_genius.compute(stock)["color"]
+    verdict = sv.compose_verdict("green", sym, base, inst)["verdict"]
+    state = rss.rs_state(stock, sector)["state"]
+    assert rss.turning_watch_reason(verdict, state) == rss.WATCH_ANNOTATION
+    # ...but a READY row is never annotated, even if TURNING.
+    assert rss.turning_watch_reason(sv.READY, rss.TURNING) is None
+
+
+# ---------------------------------------------------------------------------
 # Determinism (the fixtures are committed; classification must be stable)
 # ---------------------------------------------------------------------------
-@pytest.mark.parametrize("name", ["topping_distribution", "early_advance_accum"])
+@pytest.mark.parametrize("name", ["topping_distribution", "early_advance_accum",
+                                  "turning_recovery"])
 def test_classification_is_deterministic(name):
     df = _load(name)
     assert sc.classify_symbol(df) == sc.classify_symbol(df.copy())

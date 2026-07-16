@@ -289,10 +289,19 @@ SYMBOL_LIGHTS_WARMUP_BARS = SYMBOL_GENIUS_SLOWER_MA  # PROPOSED_DEFAULT
 # symbol_genius_history.json) — the churn measurement that must precede any
 # per-symbol yellow dwell. Derived telemetry, recomputable from cached bars.
 SYMBOL_GENIUS_HISTORY_DAYS = 90  # PROPOSED_DEFAULT — ~1 quarter of trading days
+# Days of per-symbol scan rejection-reason records retained (DATA_DIR/
+# scan_rejection_log.json) — the empirical "is the gate too strict" + RS/SCORE
+# calibration dataset. Derived telemetry, append-only, never in state.json.
+SCAN_REJECTION_LOG_DAYS = 180    # PROPOSED_DEFAULT — ~2 quarters of trading days
 
 # ---- Indicator calibration (matches thinkorswim daily studies) -------------
 RS3M_LOOKBACK = 63            # ~3 months of trading days
 RS1M_LOOKBACK = 21           # ~1 month of trading days (ranking within GREENs + sector gate)
+# Two-speed RS shadow (rs_state.py) — the RS line is stock_close/bench_close; its
+# EMA is the ToS-style momentum smoothing, and the slope of that EMA over
+# RS_SLOPE_LOOKBACK bars is the fast "is it turning" read. SHADOW ONLY (never gates).
+RS_EMA_SPAN = 21             # PROPOSED_DEFAULT — EMA span of the RS line (ToS RS momentum smoothing)
+RS_SLOPE_LOOKBACK = 21       # PROPOSED_DEFAULT — the "21-day EMA slope" window
 ATR_WINDOW = 9               # CFM uses a 9-day ATR for strike spacing
 RSI_WINDOW = 14
 MA_WINDOW = 21

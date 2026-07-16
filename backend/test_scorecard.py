@@ -45,6 +45,63 @@ def test_score_ticker_reflects_the_live_price_override(monkeypatch):
     assert over["pct_above_ma21"] < 0              # ...and the price-derived legs follow it
 
 
+# ---- two-speed RS + SCORE + IVR shadow fields on the row ------------------
+def _load_fixture(name):
+    import pandas as _pd
+    return _pd.read_parquet(os.path.join(os.path.dirname(__file__), "fixtures",
+                                          "structure", f"{name}.parquet"))
+
+
+def test_score_ticker_carries_rs_score_and_ivr_fields(monkeypatch):
+    import data_handler
+    stock = _load_fixture("turning_recovery")
+    sector = _load_fixture("turning_recovery_sector")
+    monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: stock)
+    row = sc.score_ticker("NVDA", stock, "XLK", sector, regime_color="green")
+
+    # RS shadow: vs-Sector state on the row, vs-SPY in the drawer fields, raw
+    # level/slope for the calibration log.
+    assert row["rs_state"] == "TURNING"
+    assert row["rs_level"] is not None and row["rs_slope"] is not None
+    assert "rs_state_spy" in row and "rs_spy_level" in row
+    # SCORE shadow: a 0–10 number with its component parts.
+    assert 0.0 <= row["score"] <= 10.0
+    assert set(row["score_parts"]) >= {"inst_flow", "base", "rs_state", "net_juice"}
+    # IVR drawer field present (None here — no accrued history in the test store).
+    assert "iv_rank" in row and "iv_percentile" in row
+    # Net juice/wk (the promoted column) is present.
+    assert "net_juice_weekly_pct" in row
+
+
+def test_turning_annotation_appended_to_non_ready_reasons(monkeypatch):
+    import data_handler
+    stock = _load_fixture("turning_recovery")
+    sector = _load_fixture("turning_recovery_sector")
+    monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: stock)
+    row = sc.score_ticker("NVDA", stock, "XLK", sector, regime_color="green")
+    # SYM yellow -> verdict WATCH (non-READY); the TURNING vs-sector RS annotates it.
+    assert row["verdict"] != "READY"
+    assert row["verdict_reasons"][0] == "symbol:WATCH"          # binding constraint leads
+    assert any("TURNING" in r for r in row["verdict_reasons"])  # annotation appended
+
+
+def test_score_does_not_leak_into_the_verdict(monkeypatch):
+    """SCORE boundary: the verdict is recomputed purely from regime/SYM/structure —
+    it can never depend on the shadow score, whatever the score's value."""
+    import data_handler
+    import scan_verdict
+    import symbol_genius
+    import structure_classifier
+    stock = _load_fixture("turning_recovery")
+    sector = _load_fixture("turning_recovery_sector")
+    monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: stock)
+    row = sc.score_ticker("NVDA", stock, "XLK", sector, regime_color="green")
+    base, inst = structure_classifier.classify_symbol(stock)
+    sym = symbol_genius.compute(stock)["color"]
+    expected = scan_verdict.compose_verdict("green", sym, base, inst)["verdict"]
+    assert row["verdict"] == expected                # verdict is score-independent
+
+
 # ---- extension metrics -----------------------------------------------------
 def test_pct_above_ma21_normal_and_edges():
     assert sc.pct_above_ma21(110.0, 100.0) == pytest.approx(10.0)

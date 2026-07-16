@@ -4,14 +4,18 @@ import { Card, Pill, Light, Spinner, ErrorState, StockLights, fmt, pct, useApi }
 
 // The per-symbol scan table, collapsed to the composable read:
 //
-//     SYMBOL | SYM | BASE | INST | VERDICT
+//     SYMBOL | SYM | BASE | INST | RS | JUICE/WK | SCORE | VERDICT
 //
 // SYM = the per-name Symbol Genius color; BASE / INST = the two structure-classifier
 // enums (both derived from the SINGLE classifier return the backend puts on the row);
-// VERDICT = the composed worst-signal-wins scan verdict (invisible market regime +
-// SYM + structure entrability). Every legacy indicator readout (RS3M, ATR%, MFI,
-// OBV, juice, the four Genius lights, …) demotes to the expandable per-row drawer.
-// Grouped by sector, filterable by verdict, sortable by any column.
+// RS = the two-speed relative-strength state vs the sector (SHADOW); JUICE/WK = net
+// weekly juice (% of LEAP cost, net of burn/slippage); SCORE = the composite 0–10
+// quality rank (SHADOW — zero authority); VERDICT = the composed worst-signal-wins
+// scan verdict (invisible market regime + SYM + structure entrability). RS and SCORE
+// are displayed + logged but never feed the verdict, sizing, or Ready-to-Enter. Every
+// other legacy readout (RS3M, ATR%, MFI, OBV, IVR, the four Genius lights, …) demotes
+// to the expandable per-row drawer. Grouped by sector, filterable by verdict, sortable
+// by any column; the default sort groups by verdict tier then SCORE desc within tier.
 
 // ---------------------------------------------------------------------------
 // Display constants — enum VALUE -> short label / tone / sort order. UI constants
@@ -40,6 +44,22 @@ const VERDICT_ORDER = { READY: 0, CAUTION: 1, WATCH: 2, BLOCKED: 3 };
 const BASE_ORDER = { EARLY_ADVANCE: 0, LATE_ADVANCE: 1, BASING: 2, TOPPING: 3, DECLINING: 4, INSUFFICIENT_DATA: 5 };
 const INST_ORDER = { ACCUMULATING: 0, EARLY_INTEREST: 1, NO_INTEREST: 2, DISTRIBUTING: 3, INSUFFICIENT_DATA: 4 };
 const SYM_ORDER = { green: 0, yellow: 1, red: 2 };
+// Two-speed RS (shadow): glyph = level sign (⊕ leading / ⊖ lagging), word = the
+// four-state read. Order best->worst mirrors backend rs_state.ORDER.
+const RS_LABELS = { RISING: "rising", FADING: "fading", TURNING: "turning", FALLING: "falling" };
+const RS_GLYPH = { RISING: "⊕", FADING: "⊕", TURNING: "⊖", FALLING: "⊖" };
+const RS_TONE = {
+  RISING: "text-emerald-300", FADING: "text-amber-300",
+  TURNING: "text-sky-300", FALLING: "text-rose-300",
+};
+const RS_ORDER = { RISING: 0, TURNING: 1, FADING: 2, FALLING: 3 };
+
+function rsTitle(row, benchLabel) {
+  const state = row.rs_state;
+  if (!state) return `Relative strength vs ${benchLabel}: no read (insufficient history)`;
+  return `Relative strength vs ${benchLabel}: ${state} — level ${pct(row.rs_level)} (3-month), ` +
+    `slope ${fmt(row.rs_slope, 2)} (21-day EMA). SHADOW — does not affect the verdict.`;
+}
 
 // Columns: key + label + optional render + optional sortVal (numeric sort key for
 // an enum column). A BASE/INST column is fully declarative — one entry each.
@@ -62,6 +82,32 @@ const COLUMNS = [
     render: (r) => <span className={INST_TONE[r.inst_flow] || "text-slate-400"}>{INST_LABELS[r.inst_flow] || "—"}</span>,
   },
   {
+    key: "rs_state", label: "RS", sortVal: (r) => RS_ORDER[r.rs_state] ?? 9,
+    render: (r) => (r.rs_state ? (
+      <span className={`inline-flex items-center gap-1 ${RS_TONE[r.rs_state] || "text-slate-400"}`} title={rsTitle(r, "sector")}>
+        <span>{RS_GLYPH[r.rs_state]}</span>
+        <span className="text-[10px] uppercase">{RS_LABELS[r.rs_state]}</span>
+      </span>
+    ) : <span className="text-slate-600">—</span>),
+  },
+  {
+    key: "net_juice_weekly_pct", label: "Juice/wk", sortVal: (r) => r.net_juice_weekly_pct,
+    render: (r) => (r.net_juice_weekly_pct == null
+      ? <span className="text-slate-600">—</span>
+      : <span className="tabular-nums text-slate-300">{fmt(r.net_juice_weekly_pct, 2)}%</span>),
+  },
+  {
+    key: "score", label: "Score", sortVal: (r) => r.score,
+    render: (r) => (r.score == null
+      ? <span className="text-slate-600">—</span>
+      : <span
+          className={`tabular-nums ${r.score >= 7 ? "text-emerald-300" : r.score >= 4 ? "text-slate-300" : "text-slate-500"}`}
+          title="Composite SCORE 0–10 (SHADOW — a rank over quality inputs; does not affect the verdict, sizing, or Ready-to-Enter)."
+        >
+          {fmt(r.score, 1)}
+        </span>),
+  },
+  {
     key: "verdict", label: "Verdict", sortVal: (r) => VERDICT_ORDER[r.verdict] ?? 9,
     render: (r) => <Pill status={VERDICT_STATUS[r.verdict] || "unknown"}>{r.verdict || "—"}</Pill>,
   },
@@ -75,6 +121,12 @@ const COLUMN_HELP = {
     "EARLY ADV / LATE ADV / BASING / TOPPING / DECLINING (from the 150-day slope, price position, base count, ATR posture). Only EARLY ADV is READY-eligible; TOPPING / DECLINING block.",
   inst_flow: "Institutional flow — accumulation vs distribution.\n" +
     "ACCUM / EARLY INT / NO INT / DISTRIB (from 50-day up/down volume, OBV vs its 20-EMA with a price-divergence check, and accumulation/distribution day counts). DISTRIB blocks.",
+  rs_state: "Two-speed relative strength vs the sector (SHADOW — does not affect the verdict).\n" +
+    "Level = 3-month RS (leading ⊕ / lagging ⊖); slope = the 21-day EMA direction of the RS line.\n" +
+    "⊕ rising (leading, improving) · ⊕ fading (leading, rolling over) · ⊖ turning (lagging, recovering) · ⊖ falling (lagging, worsening). vs SPY is in the row drawer.",
+  net_juice_weekly_pct: "Net juice / week — weekly extrinsic as % of LEAP cost, NET of the LEAP's model theta burn and slippage. The income the setup actually pays; the Ready-to-Enter ranking key.",
+  score: "Composite SCORE 0–10 (SHADOW — zero authority).\n" +
+    "A quality rank over the non-blocking inputs (sector strength, base maturity, InstFlow grade, ATR posture, MA21 distance, net juice/wk, RS state). All weights are PROPOSED_DEFAULT and logged for calibration. It does NOT feed the verdict, Ready-to-Enter, or sizing — it only ranks names within a tier.",
   verdict: "The composed verdict — worst-signal-wins of the (invisible) market regime, Symbol Genius, and the structure cell.\n" +
     "READY (all clear) · CAUTION (entrable with care) · WATCH (valid setup, not entrable) · BLOCKED. A RED market regime forces every row to BLOCKED even though regime has no column.",
 };
@@ -92,10 +144,29 @@ const REGIME_BANNER = {
   },
 };
 
+// A numeric "bigger is better" tie-break: non-null wins over null, then desc.
+function descNullsLast(a, b) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return b - a;
+}
+
 function sortRows(rows, sort) {
   const { key, dir } = sort;
-  const col = COLUMNS.find((c) => c.key === key);
   const mul = dir === "asc" ? 1 : -1;
+  // The Verdict column (also the default sort) groups by verdict tier, then ranks
+  // within a tier by SCORE desc, then JUICE/WK desc — so the strongest entrable
+  // names surface at the top of the READY tier. Toggling only flips the tier order.
+  if (key === "verdict") {
+    return [...rows].sort((a, b) => {
+      const av = VERDICT_ORDER[a.verdict] ?? 9;
+      const bv = VERDICT_ORDER[b.verdict] ?? 9;
+      if (av !== bv) return (av - bv) * mul;
+      return descNullsLast(a.score, b.score) || descNullsLast(a.net_juice_weekly_pct, b.net_juice_weekly_pct);
+    });
+  }
+  const col = COLUMNS.find((c) => c.key === key);
   const valOf = (r) => (col?.sortVal ? col.sortVal(r) : r[key]);
   return [...rows].sort((a, b) => {
     const av = valOf(a);
@@ -205,11 +276,23 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
         <tr className="border-t border-slate-800/50 bg-slate-900/40">
           <td colSpan={COLUMNS.length} className="px-4 py-3">
             <div className="space-y-3">
-              {/* Why this verdict — the input(s) at the worst (deciding) level. */}
+              {/* Why this verdict — the binding constraint (the first, worst input)
+                  leads for a non-READY row; any remaining inputs follow. */}
               <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="uppercase tracking-wide text-slate-500">Verdict inputs</span>
+                <span className="uppercase tracking-wide text-slate-500">
+                  {row.verdict === "READY" ? "Verdict inputs" : "Binding constraint"}
+                </span>
                 {(row.verdict_reasons?.length ? row.verdict_reasons : ["all clear"]).map((reason, i) => (
-                  <span key={i} className="rounded border border-slate-700 px-1.5 py-0.5 text-slate-300">{reason}</span>
+                  <span
+                    key={i}
+                    className={`rounded border px-1.5 py-0.5 ${
+                      i === 0 && row.verdict !== "READY"
+                        ? "border-rose-500/50 bg-rose-500/10 font-medium text-rose-200"
+                        : "border-slate-700 text-slate-300"
+                    }`}
+                  >
+                    {reason}
+                  </span>
                 ))}
               </div>
               {/* The four Genius stock lights + right-spot (the old Lights column, demoted). */}
@@ -228,13 +311,30 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                 <Readout label="Price" value={fmt(row.price, 2)} />
                 <Readout label="RS3M SPY" value={pct(row.rs3m_vs_spy)} />
                 <Readout label="RS3M Sec" value={pct(row.rs3m_vs_sector)} />
+                <Readout
+                  label="RS vs SPY"
+                  value={row.rs_state_spy
+                    ? <span className={RS_TONE[row.rs_state_spy]} title={rsTitle({ rs_state: row.rs_state_spy, rs_level: row.rs_spy_level, rs_slope: row.rs_spy_slope }, "SPY")}>
+                        {RS_GLYPH[row.rs_state_spy]} {RS_LABELS[row.rs_state_spy]}
+                      </span>
+                    : "—"}
+                />
+                <Readout
+                  label="IVR"
+                  value={row.iv_rank == null ? "—" : (
+                    <span className={row.iv_rank >= 80 ? "text-amber-300" : "text-slate-300"}
+                          title={`IV Rank ${fmt(row.iv_rank, 0)} (percentile ${fmt(row.iv_percentile, 0)}). High IVR + high juice = suspicion, not a signal to chase.`}>
+                      {fmt(row.iv_rank, 0)}
+                    </span>
+                  )}
+                />
                 <Readout label="%>MA21" value={pct(row.pct_above_ma21)} />
                 <Readout label="ATR ext" value={fmt(row.atr_extension, 2)} />
                 <Readout label="MFI" value={fmt(row.mfi, 0)} />
                 <Readout label="Vol×" value={fmt(row.volume_ratio, 2)} />
                 <Readout label="ATR mom" value={fmt(row.atr_momentum, 2)} />
                 <Readout label="OBV" value={row.obv_above_ema == null ? "—" : row.obv_above_ema ? "↑ accum" : "↓ distrib"} />
-                <Readout label="Juice/wk" value={row.juice_weekly_pct == null ? "—" : `${fmt(row.juice_weekly_pct, 2)}%`} />
+                <Readout label="Gross juice/wk" value={row.juice_weekly_pct == null ? "—" : `${fmt(row.juice_weekly_pct, 2)}%`} />
                 <Readout label="Earnings" value={row.earnings_days != null ? `${row.earnings_days}d` : (row.earnings_date || "—")} />
                 <Readout label="Suitability" value={row.suitability || "—"} />
               </div>
