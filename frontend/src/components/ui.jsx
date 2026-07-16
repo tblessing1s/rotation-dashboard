@@ -135,6 +135,17 @@ export function fmt(n, digits = 2) {
   return Number(n).toLocaleString(undefined, { maximumFractionDigits: digits });
 }
 
+// A SIGNED fixed-decimal percent for figures where the sign carries meaning and a
+// dropped decimal misleads — net juice above all: "-0.08%", never a bare "-0%".
+// Forces `digits` decimals (no trailing-zero drop) and clamps negative zero to a
+// clean 0 so a value that rounds to -0.00 never renders with a phantom sign.
+export function pctSigned(n, digits = 2) {
+  if (n === null || n === undefined || Number.isNaN(Number(n))) return "—";
+  const v = Number(n) === 0 ? 0 : Number(n);   // -0 -> 0 (kills the "-0%" render)
+  return v.toLocaleString(undefined, { minimumFractionDigits: digits,
+                                       maximumFractionDigits: digits }) + "%";
+}
+
 export function money(n) {
   if (n === null || n === undefined) return "—";
   return "$" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });

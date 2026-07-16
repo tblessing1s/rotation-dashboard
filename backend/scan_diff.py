@@ -27,6 +27,7 @@ from __future__ import annotations
 # Event type ids (mirror ALERT_TYPES).
 BENCH_READY = "SCAN_BENCH_READY"
 NEW_READY = "SCAN_NEW_READY"
+WATCH_BENCH = "SCAN_WATCH_BENCH"
 DEGRADED = "SCAN_DEGRADED"
 PIPELINE_ENTRANT = "SCAN_PIPELINE_ENTRANT"
 SECTOR_SLOT_OPEN = "SCAN_SECTOR_SLOT_OPEN"
@@ -62,6 +63,15 @@ def diff_symbol(prev: dict | None, today: dict | None) -> list[dict]:
             events.append(_event(NEW_READY, tkr,
                                  f"{disp} is now READY",
                                  {"from": pv, "sector": today.get("sector")}))
+    # Pipeline PROGRESS — a name that moved onto the bench (structure complete, now
+    # waiting on a clearable trigger with a schedule) without yet being READY. This
+    # is NOT actionable like BENCH→READY; it's a heads-up that a name advanced from
+    # WATCH intake to "waiting, with a schedule". Never fires alongside a READY event.
+    elif today.get("bench") and not was_bench:
+        events.append(_event(WATCH_BENCH, tkr,
+                             f"{disp} moved to the bench — {today.get('path_to_ready') or 'waiting on a trigger'}",
+                             {"sector": today.get("sector"),
+                              "eligible_days": today.get("eligible_days")}))
 
     if prev:
         # Degradations — only for a name we were WATCHING (prev not BLOCKED).

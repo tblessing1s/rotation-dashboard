@@ -68,6 +68,7 @@ ALERT_TYPES = {
     # decides; these just surface what changed overnight, deep-linked to the row.
     "SCAN_BENCH_READY": ("HIGH", "PROPOSED_DEFAULT: a BENCH name (one trigger from READY) cleared its trigger overnight -> now READY; the most actionable pipeline transition"),
     "SCAN_NEW_READY": ("MEDIUM", "PROPOSED_DEFAULT: a name became READY (the full L1-L4 gate now clears) that was not READY yesterday"),
+    "SCAN_WATCH_BENCH": ("LOW", "PROPOSED_DEFAULT: a WATCH-intake name advanced to the near-ready bench (structure complete, now waiting on a clearable calendar/conditional trigger) -> pipeline progress, not yet actionable"),
     "SCAN_DEGRADED": ("MEDIUM", "PROPOSED_DEFAULT: a watched name rolled over (base TOPPING/DECLINING, inst DISTRIBUTING, or RS FADING/FALLING) -> re-check before it was on your bench"),
     "SCAN_PIPELINE_ENTRANT": ("LOW", "PROPOSED_DEFAULT: a name newly reads BASING + early institutional interest -> a fresh entrant to watch build a base"),
     "SCAN_SECTOR_SLOT_OPEN": ("MEDIUM", "PROPOSED_DEFAULT: a sector position exited and a bench/ready name is waiting in that now-free sector (one-position-per-sector) -> the slot the diversification cap held is available"),
@@ -77,7 +78,7 @@ ALERT_TYPES = {
 # same query-string pattern the roll/focus flows use; the client routes ?tab=Scan
 # + ticker to the Scorecard and expands the row).
 _SCAN_ACTIONS = {
-    "SCAN_BENCH_READY", "SCAN_NEW_READY", "SCAN_DEGRADED",
+    "SCAN_BENCH_READY", "SCAN_NEW_READY", "SCAN_WATCH_BENCH", "SCAN_DEGRADED",
     "SCAN_PIPELINE_ENTRANT", "SCAN_SECTOR_SLOT_OPEN",
 }
 

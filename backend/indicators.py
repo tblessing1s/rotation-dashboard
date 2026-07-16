@@ -180,6 +180,37 @@ def hist_vol(df: pd.DataFrame, window: int = 20) -> float | None:
     return None if pd.isna(vol) else float(round(vol, 2))
 
 
+def hv_rank(df: pd.DataFrame | None, window: int = 20, lookback: int = 252) -> dict:
+    """HV-RANK — the current realized vol ranked against its OWN trailing
+    ``lookback``-day realized-vol series. A pure-from-bars PROXY for IV rank (label
+    it HVR, never IVR): where the name's volatility sits in its own recent range.
+
+    Returns ``{"hv", "hv_rank", "hv_percentile", "n"}``. ``hv_rank`` = (now − lo)/
+    (hi − lo)×100 over the window; ``hv_percentile`` = share of the window ≤ now.
+    INSUFFICIENT_DATA (all None, ``n`` = samples) when fewer than ``lookback``
+    trailing HV points exist — mirrors ``iv_history.iv_rank`` math and the
+    <window → None discipline. PURE: no I/O, no store, no clock.
+    """
+    none = {"hv": None, "hv_rank": None, "hv_percentile": None, "n": 0}
+    if df is None:
+        return none
+    c = _close(df)
+    if len(c) < window + 2:
+        return none
+    rets = np.log(c / c.shift(1))
+    # Rolling annualized realized vol (%) — the HV *series* (hist_vol is its last).
+    hv_series = rets.rolling(window).std(ddof=1) * np.sqrt(252) * 100
+    hv_series = hv_series.dropna()
+    if len(hv_series) < lookback:
+        return {**none, "n": int(len(hv_series))}
+    tail = hv_series.tail(lookback)
+    now = float(tail.iloc[-1])
+    lo, hi = float(tail.min()), float(tail.max())
+    rank = None if hi == lo else round((now - lo) / (hi - lo) * 100, 1)
+    pct = round(float((tail <= now).mean()) * 100, 1)
+    return {"hv": round(now, 2), "hv_rank": rank, "hv_percentile": pct, "n": int(len(tail))}
+
+
 def pct_from_ma(df: pd.DataFrame, window: int = config.MA_WINDOW) -> float | None:
     """Percent distance of close above (+) / below (-) its `window`-day MA."""
     ma = sma(df, window)

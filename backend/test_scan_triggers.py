@@ -142,6 +142,75 @@ def test_fixture_d_with_l5_still_binds_l4_and_shows_slot_trigger():
     assert st.is_bench(rv["verdict"], rv["triggers"]) is True
 
 
+# ---------------------------------------------------------------------------
+# Net juice-floor SAFETY block — Fixture E is the guard (the PNC shape).
+# ---------------------------------------------------------------------------
+def test_juice_floor_block_two_tiers():
+    import config
+    floor = config.JUICE_FLOOR_WK
+    assert st.juice_floor_block(-0.5)["observed"]["tier"] == "hard"       # burn > income
+    assert st.juice_floor_block(0.0)["observed"]["tier"] == "hard"        # net <= 0
+    assert st.juice_floor_block(floor - 0.1)["observed"]["tier"] == "adequacy"
+    assert st.juice_floor_block(floor)  is None                          # at floor clears
+    assert st.juice_floor_block(floor + 1.0) is None
+    assert st.juice_floor_block(None)   is None                          # unpriceable: not here
+
+
+def test_juice_block_is_safety_blocked_and_never_bench():
+    composed = sv.compose_verdict("green", "green", BaseStage.EARLY_ADVANCE,
+                                  InstFlow.ACCUMULATING)  # pristine -> READY signals
+    rv = st.compose_row_verdict(composed, [st.juice_floor_block(0.12)])
+    assert rv["verdict"] == sv.BLOCKED                    # safety, not a WATCH wait
+    assert rv["binding"]["id"] == "juice_floor" and rv["binding"]["level"] == 5
+    assert st.is_bench(rv["verdict"], rv["triggers"]) is False
+    # The binding phrases the economics: "net juice +0.12% < floor 1.5%".
+    assert "net juice" in rv["binding"]["trigger"]["clears_when"]
+
+
+def test_juice_safety_binds_over_a_lower_level_extension_wait():
+    # A sub-floor name that is ALSO slightly extended (L4) must bind on L5 juice
+    # (the decisive safety block), not the L4 WATCH wait.
+    df = _load("early_advance_extended")
+    composed = sv.compose_verdict("green", "green", *__import__("structure_classifier").classify_symbol(df))
+    blocks = st.gate_blocks(_gate_with_l4(df)) + [st.juice_floor_block(0.1)]
+    rv = st.compose_row_verdict(composed, blocks)
+    assert rv["verdict"] == sv.BLOCKED
+    assert rv["binding"]["id"] == "juice_floor"           # safety worst -> binds over L4
+    assert st.is_bench(rv["verdict"], rv["triggers"]) is False
+
+
+def test_fixture_e_pnc_shape_blocks_on_juice(monkeypatch):
+    # End-to-end over the PNC fixture: pristine structure + SYM green, but net juice
+    # below the floor => VERDICT BLOCKED, binding L5 juice, NOT on bench.
+    import account_gate, structure_classifier
+    df = _load("early_advance_low_juice")
+    base, inst = structure_classifier.classify_symbol(df)
+    assert base == BaseStage.EARLY_ADVANCE and inst == InstFlow.ACCUMULATING
+    net = account_gate.juice_estimate("PNC", df)["net_weekly_yield_pct"]
+    import config
+    assert net is not None and net < config.JUICE_FLOOR_WK      # below the viability floor
+    composed = sv.compose_verdict("green", "green", base, inst)
+    assert composed["verdict"] == sv.READY                      # signals alone say READY
+    rv = st.compose_row_verdict(composed, [st.juice_floor_block(net)])
+    assert rv["verdict"] == sv.BLOCKED and rv["binding"]["level"] == 5
+    assert st.is_bench(rv["verdict"], rv["triggers"]) is False
+
+
+# ---------------------------------------------------------------------------
+# ~1D guard — a degenerate estimate renders as a condition word, never a count.
+# ---------------------------------------------------------------------------
+def test_extension_sub_day_estimate_is_condition_word_not_fabricated_1d():
+    # excess just over the line, MA21 rising fast => days rounds to 0 => None (word),
+    # never the old "or 1" fabricated ~1D.
+    obs = {"excess_atr": 0.03, "ma21_rise_per_day": 1.5, "atr": 2.0}
+    trig = st.classify({"level": 4, "id": "extension", "observed": obs})["trigger"]
+    assert trig["days_estimate"] is None
+    assert trig.get("estimated") is False                # renders as the condition word
+    # A genuine multi-day estimate still comes through.
+    obs2 = {"excess_atr": 2.0, "ma21_rise_per_day": 0.5, "atr": 2.0}
+    assert st.classify({"level": 4, "id": "extension", "observed": obs2})["trigger"]["days_estimate"] == 8
+
+
 def test_no_blocks_leaves_composed_verdict_untouched():
     # gate=None path (the many score_ticker(...) callers with a synthetic/None gate).
     composed = sv.compose_verdict("green", "green", BaseStage.EARLY_ADVANCE,
@@ -149,6 +218,35 @@ def test_no_blocks_leaves_composed_verdict_untouched():
     rv = st.compose_row_verdict(composed, [])
     assert rv["verdict"] == sv.READY and rv["reasons"] == [] and rv["binding"] is None
     assert st.is_bench(rv["verdict"], rv["triggers"]) is False
+
+
+def test_basing_intake_is_watch_only_never_bench():
+    # A BASING x EARLY_INTEREST intake maps to structure entrability WATCH -> a
+    # structure SIGNAL block. That is "interesting, not waiting": WATCH-only, never
+    # bench. This is the WATCH/BENCH de-collapse.
+    composed = sv.compose_verdict("green", "green", BaseStage.BASING, InstFlow.EARLY_INTEREST)
+    rv = st.compose_row_verdict(composed, [])
+    assert rv["verdict"] == sv.WATCH
+    assert st.is_bench(rv["verdict"], rv["triggers"]) is False   # signal-WATCH != bench
+
+
+def test_yellow_sym_signal_is_watch_only_never_bench():
+    composed = sv.compose_verdict("green", "yellow", BaseStage.EARLY_ADVANCE,
+                                  InstFlow.ACCUMULATING)          # SYM yellow watchlist
+    rv = st.compose_row_verdict(composed, [])
+    assert rv["verdict"] == sv.WATCH
+    assert st.is_bench(rv["verdict"], rv["triggers"]) is False
+
+
+def test_gate_block_with_clear_signals_is_bench():
+    # Entrable structure + green SYM/regime, blocked only by an L4 estimate =>
+    # BENCH ("waiting, with a schedule").
+    df = _load("early_advance_extended")
+    import structure_classifier
+    composed = sv.compose_verdict("green", "green", *structure_classifier.classify_symbol(df))
+    rv = st.compose_row_verdict(composed, st.gate_blocks(_gate_with_l4(df)))
+    assert rv["verdict"] == sv.WATCH
+    assert st.is_bench(rv["verdict"], rv["triggers"]) is True
 
 
 def test_safety_block_excludes_from_bench():
@@ -180,5 +278,7 @@ def test_path_to_ready_renders_legs():
         st.classify({"level": 5, "id": "sector_concentration", "observed": {}}),
     ]
     line = st.path_to_ready(triggers)
-    assert "EST" in line and "eligible ~2026-07-31" in line and "slot" in line
+    # Rendering discipline: estimate tilded (~8d EST), calendar date plain (by …),
+    # conditional as a word (slot).
+    assert "~8d EST" in line and "by 2026-07-31" in line and "slot" in line
     assert st.earliest_eligible_days(triggers) == 8    # min(8 EST, 15 earnings)
