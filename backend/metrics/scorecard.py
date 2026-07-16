@@ -449,13 +449,15 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
 
     # Scan-restructure signals — the per-symbol columns SYM | BASE | INST | VERDICT.
     # Symbol Genius (the four-light SYM), the structure classifier (BASE + INST from
-    # ONE call, display-only split), and the composed scan VERDICT (worst-signal-wins
-    # of the INVISIBLE market regime + SYM + structure entrability). A RED regime
-    # forces every scan_verdict to BLOCKED. Computed for every row (even a gate
-    # short-circuit below) so the scan table is complete. NOTE: the GO/CAUTION/AVOID
-    # `verdict` above is retained as the internal CFM-suitability signal that the
-    # queue / recommendation / refresh pipeline reads (it carries its own regime
-    # handling); the scan surface uses `scan_verdict`.
+    # ONE call, display-only split), and the composed, CANONICAL `verdict`
+    # (worst-signal-wins of the INVISIBLE market regime + SYM + structure
+    # entrability). A RED regime forces every verdict to BLOCKED. Computed for every
+    # row (even a gate short-circuit below) so the scan table is complete.
+    #
+    # The older GO/CAUTION/AVOID CFM-suitability lens is retained as `suitability`
+    # (a demoted drawer readout) and is what the internal queue / recommendation /
+    # refresh pipeline reads — it carries its own regime handling and measures a
+    # different thing (stock-momentum suitability, not the regime-aware composition).
     sym = symbol_genius.compute(df)
     cls = structure_classifier.classify(df)
     composed = scan_verdict.compose_verdict(regime_color, sym["color"],
@@ -465,22 +467,24 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["base_stage"] = cls["base_stage"]
     row["inst_flow"] = cls["inst_flow"]
     row["structure_entrability"] = composed["structure_entrability"]
-    row["scan_verdict"] = composed["verdict"]
-    row["scan_verdict_reasons"] = composed["reasons"]
+    row["verdict"] = composed["verdict"]                 # the canonical scan verdict
+    row["verdict_reasons"] = composed["reasons"]
 
+    # `suitability` = the CFM-suitability lens (stock-level gate short-circuit, else
+    # the GO/CAUTION/AVOID metric rules). Not the headline verdict — a demoted signal.
     failed = _failed_stock_gate_level(gate)
     if failed is not None:
         name = _GATE_LEVEL_NAMES.get(failed, "")
-        row["verdict"] = "AVOID"
-        row["reasons"] = [f"fails entry gate level {failed}"
-                          + (f" ({name})" if name else "")]
+        row["suitability"] = "AVOID"
+        row["suitability_reasons"] = [f"fails entry gate level {failed}"
+                                      + (f" ({name})" if name else "")]
         return row
 
-    # Judge the rounded values the UI actually shows, so a verdict can never
+    # Judge the rounded values the UI actually shows, so the suitability can never
     # disagree with the number displayed next to it (sub-rounding boundaries).
-    verdict = compute_verdict(row)
-    row["verdict"] = verdict["verdict"]
-    row["reasons"] = verdict["reasons"]
+    suitability = compute_verdict(row)
+    row["suitability"] = suitability["verdict"]
+    row["suitability_reasons"] = suitability["reasons"]
     return row
 
 

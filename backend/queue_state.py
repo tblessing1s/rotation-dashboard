@@ -64,7 +64,7 @@ def build_queue_state(state: dict | None = None,
     rows = rows if rows is not None else _cached_scorecard_rows()
     slot_days = 0.0 if _free_slots(state) > 0 else float("inf")
 
-    go = [r for r in rows if r.get("verdict") == "GO" and (r.get("ticker") or "").strip()]
+    go = [r for r in rows if r.get("suitability") == "GO" and (r.get("ticker") or "").strip()]
     # Strongest NET juice first (gross minus LEAP burn — never gross); missing
     # juice sorts last. Falls back to gross when net is unavailable so a pricing
     # gap can't drop a name. Ranks are 1-based and dense.

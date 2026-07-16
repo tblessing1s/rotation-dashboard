@@ -176,7 +176,7 @@ def test_yellow_stock_absent_from_scan_ready(monkeypatch):
     l3 = next(lv for lv in gate["levels"] if lv["level"] == 3)
     assert l3["pass"] is False
     row = sc.scorecard(["NVDA"])["results"][0]
-    assert row["verdict"] != "GO"
+    assert row["suitability"] != "GO"
 
     client = app_module.app.test_client()
     body = client.get("/api/scan/ready?tickers=NVDA").get_json()

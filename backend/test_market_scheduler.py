@@ -275,8 +275,8 @@ def test_due_quote_symbols_batch_to_one_request():
 def test_queue_adapter_ranks_and_slots(monkeypatch):
     import queue_state
     rows = [
-        {"ticker": "AAA", "verdict": "GO", "juice_weekly_pct": 1.2},
-        {"ticker": "BBB", "verdict": "GO", "juice_weekly_pct": 2.5},
+        {"ticker": "AAA", "suitability": "GO", "juice_weekly_pct": 1.2},
+        {"ticker": "BBB", "suitability": "GO", "juice_weekly_pct": 2.5},
         {"ticker": "CCC", "verdict": "CAUTION", "juice_weekly_pct": 3.0},  # not GO
     ]
     monkeypatch.setattr(queue_state, "_cached_scorecard_rows", lambda: rows)
@@ -290,7 +290,7 @@ def test_queue_adapter_ranks_and_slots(monkeypatch):
 
 def test_queue_adapter_no_free_slot(monkeypatch):
     import queue_state
-    rows = [{"ticker": "AAA", "verdict": "GO", "juice_weekly_pct": 1.0}]
+    rows = [{"ticker": "AAA", "suitability": "GO", "juice_weekly_pct": 1.0}]
     monkeypatch.setattr(queue_state, "_cached_scorecard_rows", lambda: rows)
     # book full -> no free slot -> slot_opens_within_days is inf (not on-deck)
     monkeypatch.setattr(queue_state.maintenance, "open_tickers",

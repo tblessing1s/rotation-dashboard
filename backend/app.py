@@ -160,11 +160,11 @@ def api_scan_ready():
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo as _ZI
         sc = scorecard_metrics.scorecard(tickers)
-        # Ready-to-Enter = the composed scan VERDICT is READY (the invisible market
+        # Ready-to-Enter = the canonical scan VERDICT is READY (the invisible market
         # regime + Symbol Genius + structure entrability all clear). A RED regime
-        # forces every scan_verdict to BLOCKED, so the shortlist correctly empties on
-        # a red tape — the invisible-regime rule, now enforced here.
-        ready_rows = [r for r in sc["results"] if r.get("scan_verdict") == "READY"]
+        # forces every verdict to BLOCKED, so the shortlist correctly empties on a
+        # red tape — the invisible-regime rule, now enforced here.
+        ready_rows = [r for r in sc["results"] if r.get("verdict") == "READY"]
         level5 = account_gate.evaluate_many([r["ticker"] for r in ready_rows], contracts=contracts)
 
         # HARD_CFM_RULE (STALE_BLOCKS_GO): a GO that the operator would act on must
@@ -208,7 +208,7 @@ def api_scan_ready():
                      # The per-symbol scan cells (SYM | BASE | INST | VERDICT) so the
                      # shortlist can show the same read as the table.
                      "sym": r.get("sym"), "base_stage": r.get("base_stage"),
-                     "inst_flow": r.get("inst_flow"), "scan_verdict": r.get("scan_verdict"),
+                     "inst_flow": r.get("inst_flow"), "verdict": r.get("verdict"),
                      # Per-name Genius lights so the shortlist can show the four-light
                      # row + verdict + right-spot at a glance (same data as the gate).
                      "lights": r.get("lights"), "stock_greens": r.get("stock_greens"),

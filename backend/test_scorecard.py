@@ -243,8 +243,8 @@ def test_score_ticker_surfaces_stock_level_gate_failure(monkeypatch):
     # Level 3 (stock beating peers) failed: cleared 2 -> first fail = 3 (stock-level).
     gate = {"verdict": "WAIT", "cleared_level": 2}
     row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
-    assert row["verdict"] == "AVOID"
-    assert "entry gate level 3" in row["reasons"][0]
+    assert row["suitability"] == "AVOID"
+    assert "entry gate level 3" in row["suitability_reasons"][0]
     # Numeric fields are still present (nothing hidden) even on a gate failure.
     assert "atr_extension" in row and "mfi" in row and row["ticker"] == "AAPL"
 
@@ -261,9 +261,9 @@ def test_score_ticker_market_regime_fail_does_not_blanket_avoid(monkeypatch):
         {"level": 3, "pass": True}, {"level": 4, "pass": True}]}
     row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
     # Verdict came from the scorecard rules, not a blanket gate AVOID.
-    assert row["verdict"] in ("GO", "CAUTION", "AVOID")
-    assert not any("entry gate" in r for r in row["reasons"])
-    assert sc.compute_verdict(row)["verdict"] == row["verdict"]
+    assert row["suitability"] in ("GO", "CAUTION", "AVOID")
+    assert not any("entry gate" in r for r in row["suitability_reasons"])
+    assert sc.compute_verdict(row)["verdict"] == row["suitability"]
 
 
 def test_score_ticker_weak_sector_does_not_gate(monkeypatch):
@@ -277,8 +277,8 @@ def test_score_ticker_weak_sector_does_not_gate(monkeypatch):
         {"level": 1, "pass": True}, {"level": 2, "pass": False},
         {"level": 3, "pass": True}, {"level": 4, "pass": True}]}
     row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
-    assert not any("entry gate" in r for r in row["reasons"])
-    assert sc.compute_verdict(row)["verdict"] == row["verdict"]
+    assert not any("entry gate" in r for r in row["suitability_reasons"])
+    assert sc.compute_verdict(row)["verdict"] == row["suitability"]
 
 
 def test_score_ticker_stock_level_fail_behind_regime_fail_still_avoids(monkeypatch):
@@ -291,8 +291,8 @@ def test_score_ticker_stock_level_fail_behind_regime_fail_still_avoids(monkeypat
         {"level": 1, "pass": False}, {"level": 2, "pass": True},
         {"level": 3, "pass": True}, {"level": 4, "pass": False}]}
     row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
-    assert row["verdict"] == "AVOID"
-    assert "entry gate level 4" in row["reasons"][0]
+    assert row["suitability"] == "AVOID"
+    assert "entry gate level 4" in row["suitability_reasons"][0]
 
 
 def test_score_ticker_verdict_matches_displayed_values(monkeypatch):
@@ -303,7 +303,7 @@ def test_score_ticker_verdict_matches_displayed_values(monkeypatch):
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
     row = sc.score_ticker("AAPL", df, "XLK", df, gate={"verdict": "READY TO ENTER", "cleared_level": 4})
     # Re-running the verdict on exactly the row's displayed fields reproduces it.
-    assert sc.compute_verdict(row)["verdict"] == row["verdict"]
+    assert sc.compute_verdict(row)["verdict"] == row["suitability"]
 
 
 def test_score_ticker_nulls_sector_leg_for_a_sector_etf_candidate(monkeypatch):
@@ -319,7 +319,7 @@ def test_score_ticker_nulls_sector_leg_for_a_sector_etf_candidate(monkeypatch):
     assert row["is_sector_etf"] is True
     assert row["rs3m_vs_sector"] is None
     # The (now-null) sector leg must not spuriously trigger the AVOID rule.
-    assert sc.compute_verdict(row)["verdict"] == row["verdict"]
+    assert sc.compute_verdict(row)["verdict"] == row["suitability"]
 
     # A regular constituent (ticker != sector_etf) is unaffected.
     normal = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
@@ -332,7 +332,7 @@ def test_score_ticker_runs_scorecard_when_gate_passes(monkeypatch):
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
     gate = {"verdict": "READY TO ENTER", "cleared_level": 4}
     row = sc.score_ticker("MSFT", df, "XLK", df, gate=gate)
-    assert row["verdict"] in ("GO", "CAUTION", "AVOID")
+    assert row["suitability"] in ("GO", "CAUTION", "AVOID")
     assert row["gate_cleared_level"] == 4
 
 
@@ -363,9 +363,11 @@ def test_scorecard_endpoint_shape(monkeypatch):
                   "pct_above_ma21", "pct_above_ma200", "atr_extension", "below_ma50",
                   "below_ma200", "ma50_slope", "volume_ratio", "volume_acceleration",
                   "obv_above_ema", "obv_pct_distance", "mfi", "atr_momentum",
-                  "has_weeklies", "verdict", "reasons",
+                  "has_weeklies",
+                  # the canonical composed verdict + the demoted suitability lens
+                  "verdict", "verdict_reasons", "suitability", "suitability_reasons",
                   # scan-restructure per-symbol cells
-                  "sym", "base_stage", "inst_flow", "scan_verdict"):
+                  "sym", "base_stage", "inst_flow"):
         assert field in row, field
     # Response is JSON-serializable end to end (no numpy types leaked).
     import json

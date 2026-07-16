@@ -107,7 +107,7 @@ def hot_tickers(state: dict | None = None) -> list[str]:
         add(t)
     # Tier 3 — entry candidates the scorecard verdicts GO.
     for r in rows:
-        if r.get("verdict") == "GO":
+        if r.get("suitability") == "GO":
             add(r.get("ticker"))
 
     cap = max(config.HOT_TICKERS_MAX, n_positions)

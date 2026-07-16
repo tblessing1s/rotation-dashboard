@@ -62,8 +62,8 @@ const COLUMNS = [
     render: (r) => <span className={INST_TONE[r.inst_flow] || "text-slate-400"}>{INST_LABELS[r.inst_flow] || "—"}</span>,
   },
   {
-    key: "scan_verdict", label: "Verdict", sortVal: (r) => VERDICT_ORDER[r.scan_verdict] ?? 9,
-    render: (r) => <Pill status={VERDICT_STATUS[r.scan_verdict] || "unknown"}>{r.scan_verdict || "—"}</Pill>,
+    key: "verdict", label: "Verdict", sortVal: (r) => VERDICT_ORDER[r.verdict] ?? 9,
+    render: (r) => <Pill status={VERDICT_STATUS[r.verdict] || "unknown"}>{r.verdict || "—"}</Pill>,
   },
 ];
 
@@ -75,7 +75,7 @@ const COLUMN_HELP = {
     "EARLY ADV / LATE ADV / BASING / TOPPING / DECLINING (from the 150-day slope, price position, base count, ATR posture). Only EARLY ADV is READY-eligible; TOPPING / DECLINING block.",
   inst_flow: "Institutional flow — accumulation vs distribution.\n" +
     "ACCUM / EARLY INT / NO INT / DISTRIB (from 50-day up/down volume, OBV vs its 20-EMA with a price-divergence check, and accumulation/distribution day counts). DISTRIB blocks.",
-  scan_verdict: "The composed verdict — worst-signal-wins of the (invisible) market regime, Symbol Genius, and the structure cell.\n" +
+  verdict: "The composed verdict — worst-signal-wins of the (invisible) market regime, Symbol Genius, and the structure cell.\n" +
     "READY (all clear) · CAUTION (entrable with care) · WATCH (valid setup, not entrable) · BLOCKED. A RED market regime forces every row to BLOCKED even though regime has no column.",
 };
 
@@ -151,8 +151,8 @@ function Readout({ label, value }) {
 }
 
 function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt, refreshError }) {
-  const blocked = row.scan_verdict === "BLOCKED";
-  const caution = row.scan_verdict === "CAUTION";
+  const blocked = row.verdict === "BLOCKED";
+  const caution = row.verdict === "CAUTION";
   return (
     <>
       <tr
@@ -208,7 +208,7 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
               {/* Why this verdict — the input(s) at the worst (deciding) level. */}
               <div className="flex flex-wrap items-center gap-2 text-xs">
                 <span className="uppercase tracking-wide text-slate-500">Verdict inputs</span>
-                {(row.scan_verdict_reasons?.length ? row.scan_verdict_reasons : ["all clear"]).map((reason, i) => (
+                {(row.verdict_reasons?.length ? row.verdict_reasons : ["all clear"]).map((reason, i) => (
                   <span key={i} className="rounded border border-slate-700 px-1.5 py-0.5 text-slate-300">{reason}</span>
                 ))}
               </div>
@@ -236,12 +236,12 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                 <Readout label="OBV" value={row.obv_above_ema == null ? "—" : row.obv_above_ema ? "↑ accum" : "↓ distrib"} />
                 <Readout label="Juice/wk" value={row.juice_weekly_pct == null ? "—" : `${fmt(row.juice_weekly_pct, 2)}%`} />
                 <Readout label="Earnings" value={row.earnings_days != null ? `${row.earnings_days}d` : (row.earnings_date || "—")} />
-                <Readout label="Suitability" value={row.verdict || "—"} />
+                <Readout label="Suitability" value={row.suitability || "—"} />
               </div>
               {/* The CFM-suitability reasons (the internal GO/CAUTION/AVOID lens). */}
-              {row.reasons?.length ? (
+              {row.suitability_reasons?.length ? (
                 <ul className="list-disc space-y-0.5 pl-5 text-xs text-slate-400">
-                  {row.reasons.map((reason, i) => <li key={i}>{reason}</li>)}
+                  {row.suitability_reasons.map((reason, i) => <li key={i}>{reason}</li>)}
                 </ul>
               ) : null}
             </div>
@@ -259,7 +259,7 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
   const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);
-  const [sort, setSort] = React.useState({ key: "scan_verdict", dir: "asc" });
+  const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
   const [overrides, setOverrides] = React.useState({});
   const [busy, setBusy] = React.useState({});
@@ -320,13 +320,13 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
   );
   const counts = React.useMemo(() => {
     const c = { READY: 0, CAUTION: 0, WATCH: 0, BLOCKED: 0 };
-    results.forEach((r) => { if (c[r.scan_verdict] != null) c[r.scan_verdict] += 1; });
+    results.forEach((r) => { if (c[r.verdict] != null) c[r.verdict] += 1; });
     return c;
   }, [results]);
 
   const filtered = results.filter(
     (r) =>
-      (verdictFilter === "ALL" || r.scan_verdict === verdictFilter) &&
+      (verdictFilter === "ALL" || r.verdict === verdictFilter) &&
       (!weekliesOnly || r.has_weeklies !== false),
   );
 

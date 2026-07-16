@@ -37,7 +37,7 @@ def test_hot_set_includes_positions_candidates_and_earnings(monkeypatch):
     soon = (date.today() + timedelta(days=3)).isoformat()
     far = (date.today() + timedelta(days=60)).isoformat()
     rows = [
-        {"ticker": "AVGO", "verdict": "GO", "earnings_date": far},        # GO candidate
+        {"ticker": "AVGO", "suitability": "GO", "earnings_date": far},        # GO candidate
         {"ticker": "MRVL", "verdict": "CAUTION", "earnings_date": soon},  # earnings-imminent
         {"ticker": "IBM", "verdict": "AVOID", "earnings_date": far},      # neither → excluded
     ]
@@ -53,7 +53,7 @@ def test_hot_set_includes_positions_candidates_and_earnings(monkeypatch):
 def test_hot_set_dedupes_a_held_candidate(monkeypatch):
     monkeypatch.setattr(maintenance, "open_tickers", lambda state=None: ["NVDA"])
     monkeypatch.setattr(screening, "peek_cached",
-                        _scorecard([{"ticker": "NVDA", "verdict": "GO"}]))
+                        _scorecard([{"ticker": "NVDA", "suitability": "GO"}]))
     assert refresh_policy.hot_tickers(state={}).count("NVDA") == 1
 
 
@@ -64,7 +64,7 @@ def test_positions_are_never_dropped_by_the_cap(monkeypatch):
     positions = [f"P{i}" for i in range(5)]
     monkeypatch.setattr(maintenance, "open_tickers", lambda state=None: positions)
     monkeypatch.setattr(screening, "peek_cached",
-                        _scorecard([{"ticker": "CAND", "verdict": "GO"}]))
+                        _scorecard([{"ticker": "CAND", "suitability": "GO"}]))
     hot = refresh_policy.hot_tickers(state={})
     assert all(p in hot for p in positions)   # all 5 positions kept
     assert "CAND" not in hot                   # candidate dropped past the cap
