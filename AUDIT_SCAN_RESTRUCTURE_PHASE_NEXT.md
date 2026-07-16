@@ -1,3 +1,20 @@
+> **Implementation status (post-audit).** All three phases are implemented on this
+> branch, shadow-only, 973 backend tests passing + frontend building:
+> - **P1** — `indicators.rs_line/rs_ema/rs_ema_slope`; `rs_state.py` (four-state
+>   collapse + the gated `turning_watch_reason`); `scan_score.py` (0–10 composite);
+>   wired into `metrics/scorecard.score_ticker`; Fixture C (`turning_recovery` +
+>   `_sector`) → TURNING and Fixture A sector companion → FADING.
+> - **P2** — RS + JUICE/WK columns, drawer IVR + RS-vs-SPY + binding-constraint-first,
+>   IVR sourced from the existing `iv_history` store.
+> - **P3** — SCORE column + verdict-tier default sort; `scan_rejection_log.py`
+>   (append-only derived store) wired into the nightly maintenance sweep;
+>   `GET /api/scan/rejection-stats`.
+>
+> The DO-NOT list below held: no change to `compose_verdict`, the WATCH/CAUTION
+> ordering, or the Level-2 RS1M choice; every new threshold is `PROPOSED_DEFAULT`.
+> The Q2 (RS1M) and Q3 (verdict ordering) items remain audit-and-document only,
+> awaiting a calibration decision.
+
 # Phase 0 Audit — Two-Speed RS / SCORE Shadow / Income Column / Calibration Plumbing
 
 **Scope:** the remaining delta on top of the shipped scan restructure. Audit only —
