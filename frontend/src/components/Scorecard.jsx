@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Light, Spinner, ErrorState, StockLights, fmt, pct, useApi } from "./ui.jsx";
+import { Card, Pill, Light, Spinner, ErrorState, StockLights, fmt, pct, pctSigned, useApi } from "./ui.jsx";
 
 // The per-symbol scan table, collapsed to the composable read:
 //
@@ -99,7 +99,9 @@ const COLUMNS = [
     key: "net_juice_weekly_pct", label: "Juice/wk", sortVal: (r) => r.net_juice_weekly_pct,
     render: (r) => (r.net_juice_weekly_pct == null
       ? <span className="text-slate-600">—</span>
-      : <span className="tabular-nums text-slate-300">{fmt(r.net_juice_weekly_pct, 2)}%</span>),
+      : <span className={`tabular-nums ${r.net_juice_weekly_pct <= 0 ? "text-rose-300" : "text-slate-300"}`}>
+          {pctSigned(r.net_juice_weekly_pct, 2)}
+        </span>),
   },
   {
     key: "score", label: "Score", sortVal: (r) => r.score,
@@ -371,13 +373,22 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                     </span>
                   )}
                 />
+                <Readout
+                  label="HVR*"
+                  value={row.hv_percentile == null ? "—" : (
+                    <span className={row.hv_percentile >= 80 ? "text-amber-300" : "text-slate-300"}
+                          title={`HV Rank ${fmt(row.hv_percentile, 0)} — realized-vol percentile vs its own trailing 252-day range (HV ${fmt(row.hv, 0)}%). A PROXY for IV rank from bars (starred, not true IVR); available for every name.`}>
+                      {fmt(row.hv_percentile, 0)}
+                    </span>
+                  )}
+                />
                 <Readout label="%>MA21" value={pct(row.pct_above_ma21)} />
                 <Readout label="ATR ext" value={fmt(row.atr_extension, 2)} />
                 <Readout label="MFI" value={fmt(row.mfi, 0)} />
                 <Readout label="Vol×" value={fmt(row.volume_ratio, 2)} />
                 <Readout label="ATR mom" value={fmt(row.atr_momentum, 2)} />
                 <Readout label="OBV" value={row.obv_above_ema == null ? "—" : row.obv_above_ema ? "↑ accum" : "↓ distrib"} />
-                <Readout label="Gross juice/wk" value={row.juice_weekly_pct == null ? "—" : `${fmt(row.juice_weekly_pct, 2)}%`} />
+                <Readout label="Gross juice/wk" value={row.juice_weekly_pct == null ? "—" : pctSigned(row.juice_weekly_pct, 2)} />
                 <Readout label="Earnings" value={row.earnings_days != null ? `${row.earnings_days}d` : (row.earnings_date || "—")} />
                 <Readout label="Suitability" value={row.suitability || "—"} />
               </div>
@@ -478,9 +489,11 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
   );
   const counts = React.useMemo(() => {
     const c = { READY: 0, CAUTION: 0, WATCH: 0, BLOCKED: 0, [BENCH]: 0 };
+    // A row is never BOTH a WATCH and a BENCH: a bench row (structure-complete,
+    // waiting on a schedule) counts only as BENCH; WATCH stays the pure intake tier.
     results.forEach((r) => {
-      if (c[r.verdict] != null) c[r.verdict] += 1;
       if (r.bench) c[BENCH] += 1;
+      else if (c[r.verdict] != null) c[r.verdict] += 1;
     });
     return c;
   }, [results]);
@@ -498,9 +511,17 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
     [results],
   );
 
+  // WATCH and BENCH are disjoint views: the WATCH filter shows only pure intake
+  // (verdict WATCH and NOT bench); BENCH shows the near-ready bench.
+  const matchesVerdict = (r) =>
+    verdictFilter === "ALL" ? true
+      : verdictFilter === BENCH ? r.bench === true
+      : verdictFilter === "WATCH" ? (r.verdict === "WATCH" && !r.bench)
+      : r.verdict === verdictFilter;
+
   const filtered = results.filter(
     (r) =>
-      (verdictFilter === "ALL" || (verdictFilter === BENCH ? r.bench === true : r.verdict === verdictFilter)) &&
+      matchesVerdict(r) &&
       (sectorFilter === "ALL" || r.sector === sectorFilter) &&
       (!weekliesOnly || r.has_weeklies !== false),
   );
