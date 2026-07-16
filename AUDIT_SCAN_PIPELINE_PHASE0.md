@@ -1,3 +1,28 @@
+> **Implementation status (post-audit).** The hard stop was lifted and all four
+> phases are implemented on this branch — 1003 backend tests pass, frontend builds:
+> - **P1** — `scan_triggers.py` (gate-complete verdict + calendar/conditional/
+>   estimated/safety triggers, a READ of the already-computed gate — no re-eval);
+>   Fixture D (`early_advance_extended`) proves READY-structure ⇒ WATCH, binding L4;
+>   `/api/scan/ready` L4-blind filter + stale docstring fixed, L5 overlay triggers;
+>   rejection log persists the structured binding + spot price (Q9).
+> - **P2** — Scorecard BENCH filter (derived VIEW, `row.bench`), "path to READY"
+>   drawer line, bench/~Nd verdict tag, the pipeline throughput strip; Ready-to-Enter
+>   near-miss L5 path.
+> - **P3** — `scan_diff.py` (nightly transition diff) + `scan_diff_log.py`
+>   (append-only, Q9) wired into `maintenance.nightly_refresh`; 5 `SCAN_*` alert
+>   types fanned through the existing notifier + per-type toggles; `?tab=Scan&ticker=`
+>   deep-link focuses the row. Quiet hours confirmed absent → descoped.
+> - **P4** — `universe_screen.py` (offline Finviz approximation: Perf-Quarter/RSI/
+>   avg-vol from bars; market-cap + optionability reported/descoped, never guessed)
+>   + `candidate_universe.py` (weekly candidate list + append-only change log +
+>   sector-diversity report). SHADOW: `CFM_UNIVERSE_SCREEN` gates consumption
+>   (default off, current universe = fallback). Orphan `universe.json.tmp` reaped.
+>
+> Every DO-NOT held: no rebuild of the shipped classifier/genius/gate; no parallel
+> rules engine; no fifth verdict value; no executor/recommendation/kill-switch/
+> regime-constant changes; no new provider integrations (market cap/optionability
+> descoped with reasons); all new thresholds `PROPOSED_DEFAULT`.
+
 # Phase 0 Audit — Scan Pipeline: From Snapshot to Pipeline
 
 **Scope:** turn the scan from "what is READY today" into "what will be READY, when,

@@ -877,6 +877,20 @@ def api_scan_transitions():
         return _err(e)
 
 
+@app.route("/api/scan/candidate-universe")
+def api_scan_candidate_universe():
+    """The weekly universe-intake screen result — the momentum/quality-filtered
+    candidate list, the sector-diversity fold (the empirical one-position-per-sector
+    check), and the append-only add/drop change log. SHADOW: the current sector
+    universe stays operative unless CFM_UNIVERSE_SCREEN is enabled. Read-only;
+    empty until the first weekly screen has run."""
+    try:
+        import candidate_universe
+        return jsonify(candidate_universe.report())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/overview")
 def api_overview():
     """One-call landing payload for the Overview tab: regime + positions/capital

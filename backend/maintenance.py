@@ -255,6 +255,27 @@ def nightly_refresh() -> dict:
     except Exception as e:  # noqa: BLE001 — a diff failure must not sink the sweep
         report["errors"].append(f"scan_diff: {e}")
 
+    # Weekly universe-intake screen (once per ISO week): the internal approximation
+    # of the operator's Finviz momentum screen over the ALREADY-cached bars (the
+    # nightly sweep warmed them + the weeklies cache), producing a candidate list,
+    # an append-only change log, and a sector-diversity report. SHADOW artifact —
+    # the current sector universe stays operative unless CFM_UNIVERSE_SCREEN is on.
+    try:
+        import candidate_universe
+        if candidate_universe.weekly_due():
+            import data_handler
+            import sector_data
+            import universe_screen
+            import weeklies
+            names = sector_data.all_tickers()
+            frames = data_handler.get_many(names)          # cached from the sweep
+            wk = {t: weeklies.has_weeklies(t) for t in names}  # 7-day cached probe
+            result = universe_screen.screen(names, frames, weeklies=wk)
+            report["universe_screen"] = candidate_universe.record(
+                result, sector_data.sector_for)
+    except Exception as e:  # noqa: BLE001 — a screen failure must not sink the sweep
+        report["errors"].append(f"universe_screen: {e}")
+
     # Weekly theta-burn mark (end-of-week cadence, once per ISO week): snapshots
     # each LEAP's model extrinsic + forward burn projection so the
     # realized-vs-projected divergence harness stays current. Telemetry only
