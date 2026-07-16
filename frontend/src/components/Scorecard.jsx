@@ -4,14 +4,18 @@ import { Card, Pill, Light, Spinner, ErrorState, StockLights, fmt, pct, useApi }
 
 // The per-symbol scan table, collapsed to the composable read:
 //
-//     SYMBOL | SYM | BASE | INST | VERDICT
+//     SYMBOL | SYM | BASE | INST | RS | JUICE/WK | SCORE | VERDICT
 //
 // SYM = the per-name Symbol Genius color; BASE / INST = the two structure-classifier
 // enums (both derived from the SINGLE classifier return the backend puts on the row);
-// VERDICT = the composed worst-signal-wins scan verdict (invisible market regime +
-// SYM + structure entrability). Every legacy indicator readout (RS3M, ATR%, MFI,
-// OBV, juice, the four Genius lights, …) demotes to the expandable per-row drawer.
-// Grouped by sector, filterable by verdict, sortable by any column.
+// RS = the two-speed relative-strength state vs the sector (SHADOW); JUICE/WK = net
+// weekly juice (% of LEAP cost, net of burn/slippage); SCORE = the composite 0–10
+// quality rank (SHADOW — zero authority); VERDICT = the composed worst-signal-wins
+// scan verdict (invisible market regime + SYM + structure entrability). RS and SCORE
+// are displayed + logged but never feed the verdict, sizing, or Ready-to-Enter. Every
+// other legacy readout (RS3M, ATR%, MFI, OBV, IVR, the four Genius lights, …) demotes
+// to the expandable per-row drawer. Grouped by sector, filterable by verdict, sortable
+// by any column; the default sort groups by verdict tier then SCORE desc within tier.
 
 // ---------------------------------------------------------------------------
 // Display constants — enum VALUE -> short label / tone / sort order. UI constants
@@ -93,6 +97,17 @@ const COLUMNS = [
       : <span className="tabular-nums text-slate-300">{fmt(r.net_juice_weekly_pct, 2)}%</span>),
   },
   {
+    key: "score", label: "Score", sortVal: (r) => r.score,
+    render: (r) => (r.score == null
+      ? <span className="text-slate-600">—</span>
+      : <span
+          className={`tabular-nums ${r.score >= 7 ? "text-emerald-300" : r.score >= 4 ? "text-slate-300" : "text-slate-500"}`}
+          title="Composite SCORE 0–10 (SHADOW — a rank over quality inputs; does not affect the verdict, sizing, or Ready-to-Enter)."
+        >
+          {fmt(r.score, 1)}
+        </span>),
+  },
+  {
     key: "verdict", label: "Verdict", sortVal: (r) => VERDICT_ORDER[r.verdict] ?? 9,
     render: (r) => <Pill status={VERDICT_STATUS[r.verdict] || "unknown"}>{r.verdict || "—"}</Pill>,
   },
@@ -110,6 +125,8 @@ const COLUMN_HELP = {
     "Level = 3-month RS (leading ⊕ / lagging ⊖); slope = the 21-day EMA direction of the RS line.\n" +
     "⊕ rising (leading, improving) · ⊕ fading (leading, rolling over) · ⊖ turning (lagging, recovering) · ⊖ falling (lagging, worsening). vs SPY is in the row drawer.",
   net_juice_weekly_pct: "Net juice / week — weekly extrinsic as % of LEAP cost, NET of the LEAP's model theta burn and slippage. The income the setup actually pays; the Ready-to-Enter ranking key.",
+  score: "Composite SCORE 0–10 (SHADOW — zero authority).\n" +
+    "A quality rank over the non-blocking inputs (sector strength, base maturity, InstFlow grade, ATR posture, MA21 distance, net juice/wk, RS state). All weights are PROPOSED_DEFAULT and logged for calibration. It does NOT feed the verdict, Ready-to-Enter, or sizing — it only ranks names within a tier.",
   verdict: "The composed verdict — worst-signal-wins of the (invisible) market regime, Symbol Genius, and the structure cell.\n" +
     "READY (all clear) · CAUTION (entrable with care) · WATCH (valid setup, not entrable) · BLOCKED. A RED market regime forces every row to BLOCKED even though regime has no column.",
 };
@@ -127,10 +144,29 @@ const REGIME_BANNER = {
   },
 };
 
+// A numeric "bigger is better" tie-break: non-null wins over null, then desc.
+function descNullsLast(a, b) {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  return b - a;
+}
+
 function sortRows(rows, sort) {
   const { key, dir } = sort;
-  const col = COLUMNS.find((c) => c.key === key);
   const mul = dir === "asc" ? 1 : -1;
+  // The Verdict column (also the default sort) groups by verdict tier, then ranks
+  // within a tier by SCORE desc, then JUICE/WK desc — so the strongest entrable
+  // names surface at the top of the READY tier. Toggling only flips the tier order.
+  if (key === "verdict") {
+    return [...rows].sort((a, b) => {
+      const av = VERDICT_ORDER[a.verdict] ?? 9;
+      const bv = VERDICT_ORDER[b.verdict] ?? 9;
+      if (av !== bv) return (av - bv) * mul;
+      return descNullsLast(a.score, b.score) || descNullsLast(a.net_juice_weekly_pct, b.net_juice_weekly_pct);
+    });
+  }
+  const col = COLUMNS.find((c) => c.key === key);
   const valOf = (r) => (col?.sortVal ? col.sortVal(r) : r[key]);
   return [...rows].sort((a, b) => {
     const av = valOf(a);

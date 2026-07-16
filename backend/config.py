@@ -289,6 +289,10 @@ SYMBOL_LIGHTS_WARMUP_BARS = SYMBOL_GENIUS_SLOWER_MA  # PROPOSED_DEFAULT
 # symbol_genius_history.json) — the churn measurement that must precede any
 # per-symbol yellow dwell. Derived telemetry, recomputable from cached bars.
 SYMBOL_GENIUS_HISTORY_DAYS = 90  # PROPOSED_DEFAULT — ~1 quarter of trading days
+# Days of per-symbol scan rejection-reason records retained (DATA_DIR/
+# scan_rejection_log.json) — the empirical "is the gate too strict" + RS/SCORE
+# calibration dataset. Derived telemetry, append-only, never in state.json.
+SCAN_REJECTION_LOG_DAYS = 180    # PROPOSED_DEFAULT — ~2 quarters of trading days
 
 # ---- Indicator calibration (matches thinkorswim daily studies) -------------
 RS3M_LOOKBACK = 63            # ~3 months of trading days

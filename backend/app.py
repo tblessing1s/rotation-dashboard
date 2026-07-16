@@ -838,6 +838,21 @@ def api_symbol_genius_flips():
         return _err(e)
 
 
+@app.route("/api/scan/rejection-stats")
+def api_scan_rejection_stats():
+    """Scan rejection-reason calibration rollup — the distribution of binding
+    constraints and the READY rate over the retained window (the empirical read on
+    whether the entry gate is too strict, plus the RS/SCORE graduation dataset).
+    Optional ?window=N bounds each symbol to its newest N records. Read-only
+    telemetry; empty until the nightly sweep has logged a few days."""
+    try:
+        import scan_rejection_log
+        window = int(request.args.get("window") or 0) or None
+        return jsonify(scan_rejection_log.summary(window=window))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/overview")
 def api_overview():
     """One-call landing payload for the Overview tab: regime + positions/capital
