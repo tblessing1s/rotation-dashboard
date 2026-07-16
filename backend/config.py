@@ -224,6 +224,11 @@ SECTOR_RS1M_MIN = 0.0          # PROPOSED_DEFAULT — sector "strong" bar: RS1M 
 # (well under the SECTOR_BREADTH_MIN participation bar), or the sector ETF under
 # distribution — otherwise it passes and lets SYM + BASE + INST carry selection.
 SECTOR_BREADTH_COLLAPSE = 40.0  # PROPOSED_DEFAULT — sector breadth below this % = collapsing (a veto)
+# Sector-strength SIZING modifier (advisory — a suggested contract count, never
+# enforced): a STRONG sector (the SECTOR_RS1M_MIN / SECTOR_BREADTH_MIN bar) sizes
+# full; a merely-neutral sector that clears the Level-2 veto sizes down by this
+# factor. Keeps sector strength as a size lever now that it is no longer a gate.
+SECTOR_NEUTRAL_SIZE_FACTOR = 0.5  # PROPOSED_DEFAULT — neutral-sector size = round(full x this)
 
 # ---- Stock gate (Levels 3 & 4) ---------------------------------------------
 STOCK_RS_VS_SPY_MIN = 5.0      # stock RS3M vs SPY > +5% (growth-leader bar)

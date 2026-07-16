@@ -110,6 +110,42 @@ def juice_estimate(ticker: str, df=None) -> dict:
     }
 
 
+def sector_size_suggestion(ticker: str, full_contracts: int | None = None) -> dict:
+    """A sector-strength SIZING suggestion for a proposed entry — ADVISORY ONLY.
+
+    Now that sector strength is a Level-2 VETO rather than a selector, it is kept
+    as a SIZE lever: a STRONG sector (RS1M > SECTOR_RS1M_MIN AND breadth >=
+    SECTOR_BREADTH_MIN) suggests full size; a merely-neutral sector that clears the
+    veto suggests a reduced size (round(full x SECTOR_NEUTRAL_SIZE_FACTOR), min 1);
+    a deteriorating sector — which Level 2 blocks — would size minimally if entered
+    on an override. This never changes the ENFORCED contract count (the cash /
+    reserve / capital checks use the caller's `contracts`); it is a recommendation
+    the Execute flow can show and the operator can take or leave."""
+    import sector_data
+    import screening
+    full = int(full_contracts or config.LEAP_CONTRACTS)
+    etf = sector_data.sector_for(ticker) or ""
+    try:
+        sec = screening.sectors().get(etf, {}) if etf else {}
+    except Exception:  # noqa: BLE001 — a sector sweep failure never blocks the gate
+        sec = {}
+    strong = bool(sec.get("strong"))
+    deteriorating = bool(sec.get("deteriorating"))
+    reduced = max(1, round(full * config.SECTOR_NEUTRAL_SIZE_FACTOR))
+    if strong:
+        modifier, suggested, reason = 1.0, full, "sector strong — full size"
+    elif deteriorating:
+        modifier, suggested = config.SECTOR_NEUTRAL_SIZE_FACTOR, reduced
+        reason = "sector deteriorating — Level 2 blocks entry; minimal size if overridden"
+    else:
+        modifier, suggested = config.SECTOR_NEUTRAL_SIZE_FACTOR, reduced
+        reason = "sector neutral — reduced size"
+    return {"sector": etf, "sector_status": sec.get("status"),
+            "strong": strong, "deteriorating": deteriorating,
+            "modifier": modifier, "full_contracts": full,
+            "suggested_contracts": suggested, "reason": reason}
+
+
 def weekly_yield_target_pct(ticker: str | None = None) -> float:
     """Minimum weekly juice as % of LEAP cost. Growth stocks use the CFM cycle
     target (low end of 15-25% over the slow end of 4-8 weeks, ~1.9%/wk); ETFs
@@ -349,6 +385,9 @@ def evaluate(ticker: str, contracts: int | None = None,
         "juice": {"weekly_yield_pct": weekly_yield, "target_pct": target,
                   "source": juice_source, "is_etf": is_etf_underlying,
                   "profile": "etf" if is_etf_underlying else "stock"},
+        # Advisory sector-strength size suggestion (never enforced — the checks
+        # above use the caller's `contracts`; this is a recommendation only).
+        "sizing": sector_size_suggestion(ticker, contracts),
     }
 
 

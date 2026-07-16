@@ -629,3 +629,23 @@ def test_earnings_beyond_the_cycle_does_not_block(isolated_state, monkeypatch):
     g = account_gate.evaluate("NVDA", contracts=5,
                               leap_cost_per_share=40.0, weekly_extrinsic_per_share=1.20)
     assert "earnings_in_cycle" not in g["blocking_failures"] and g["pass"] is True
+
+
+def test_sector_size_suggestion_scales_by_strength(monkeypatch):
+    import account_gate
+    import screening
+    import sector_data
+    monkeypatch.setattr(sector_data, "sector_for", lambda t: "XLK")
+
+    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {"strong": True, "deteriorating": False, "status": "green"}})
+    strong = account_gate.sector_size_suggestion("NVDA", full_contracts=4)
+    assert strong["suggested_contracts"] == 4 and strong["modifier"] == 1.0
+
+    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {"strong": False, "deteriorating": False, "status": "yellow"}})
+    neutral = account_gate.sector_size_suggestion("NVDA", full_contracts=4)
+    assert neutral["suggested_contracts"] == 2      # round(4 * 0.5)
+
+    # Suggestion never drops below 1 contract even from a single full contract.
+    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {"strong": False, "deteriorating": True, "status": "red"}})
+    minimal = account_gate.sector_size_suggestion("NVDA", full_contracts=1)
+    assert minimal["suggested_contracts"] == 1 and minimal["deteriorating"] is True

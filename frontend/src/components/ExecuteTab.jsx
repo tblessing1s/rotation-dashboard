@@ -162,6 +162,16 @@ function AccountGate({ gate }) {
             price − 2×ATR {fmt(gate.suggested_circuit_breaker.atr_stop, 2)})
           </p>
         )}
+        {gate.sizing && (
+          <p className="mt-1 text-xs text-slate-500" title="Advisory only — sector strength as a size lever now that it's no longer a gate. Not enforced; the operator sizes the trade.">
+            Suggested size: <span className="font-semibold text-slate-300">
+            {gate.sizing.suggested_contracts} contract{gate.sizing.suggested_contracts === 1 ? "" : "s"}</span>
+            {gate.sizing.suggested_contracts !== gate.sizing.full_contracts && (
+              <span className="text-amber-400"> (reduced from {gate.sizing.full_contracts})</span>
+            )}
+            <span className="text-slate-500"> — {gate.sizing.reason}</span>
+          </p>
+        )}
       </div>
       <Pill status={gate.pass ? "ready" : "no"}>{gate.pass ? "PASS" : "BLOCKED"}</Pill>
     </div>
