@@ -95,9 +95,10 @@ def test_snapshot_is_complete_on_open(warm):
     assert config.SNAPSHOT_SCHEMA_VERSION >= 3
     assert {"iv_rank", "iv_percentile"} <= set(snap["iv"])
 
-    # Gates: entry-gate levels 1-4 + account-gate checks + typed override.
+    # Gates: entry-gate levels 1, 2, 3, 3.5 (structure), 4 + account-gate checks +
+    # typed override.
     levels = snap["gates"]["entry_gate"]["levels"]
-    assert [lv["level"] for lv in levels] == [1, 2, 3, 4]
+    assert [lv["level"] for lv in levels] == [1, 2, 3, 3.5, 4]
     assert snap["gates"]["account_gate"]["checks"]  # per-check detail present
     assert snap["gates"]["override"]["reason"] == "fixture"  # typed override logged
 

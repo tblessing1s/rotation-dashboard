@@ -304,15 +304,16 @@ _ROUND = {  # display rounding per field (verdict is computed from full precisio
 }
 
 _GATE_LEVEL_NAMES = {1: "market regime", 2: "sector strength",
-                     3: "stock beating peers", 4: "consolidating"}
+                     3: "stock beating peers", 3.5: "structure", 4: "consolidating"}
 
-# Only the stock's OWN gate legs decide the verdict: Level 3 (beats peers) and
-# Level 4 (consolidating). The market-wide legs — Level 1 (regime) and Level 2
-# (sector strength) — are EXCLUDED: they're context, not a property of the stock,
-# and letting them blanket the table to AVOID would defeat the per-stock
-# comparison exactly when it's most wanted (e.g. a yellow regime, or a sector
-# that's merely lagging while the stock itself leads its peers and consolidates).
-_STOCK_GATE_LEVELS = (3, 4)
+# Only the stock's OWN gate legs decide the verdict: Level 3 (beats peers),
+# Level 3.5 (structure — the classifier's entrability), and Level 4 (consolidating).
+# The market-wide legs — Level 1 (regime) and Level 2 (sector strength) — are
+# EXCLUDED: they're context, not a property of the stock, and letting them blanket
+# the table to AVOID would defeat the per-stock comparison exactly when it's most
+# wanted (e.g. a yellow regime, or a sector that's merely lagging while the stock
+# itself leads its peers and consolidates).
+_STOCK_GATE_LEVELS = (3, 3.5, 4)
 
 
 def _round_row(metrics: dict) -> dict:

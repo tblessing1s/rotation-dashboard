@@ -467,6 +467,28 @@ def entry_gate(ticker: str) -> dict:
     levels.append({"level": 3, "name": "Stock lights green", "pass": stock_green,
                    "checks": l3_checks, "detail": row})
 
+    # Level 3.5 — structure. The pure classifier's (BaseStage, InstFlow) mapped
+    # through the entrability grid, inserted between "beats peers" (L3) and "right
+    # spot" (L4): a topping / declining / distributing / insufficient structure
+    # (BLOCKED) or a watchlist-only cell (WATCH) is not entrable and stops the gate.
+    # Reads only price/volume structure, so it runs IDENTICALLY for stocks and ETFs
+    # (no is_etf branch, no vs-sector path). All classifier thresholds are
+    # PROPOSED_DEFAULT. Stop-on-first-fail is preserved: with the level ordered 3.5
+    # here, a structure miss holds cleared at 3 (WAIT), and a full clear still
+    # reaches cleared == 4 only when 3.5 AND 4 both pass.
+    import structure_classifier
+    df_struct = data_handler.get_daily(ticker)
+    base_stage, inst_flow = structure_classifier.classify_symbol(df_struct)
+    entrability = structure_classifier.structure_entrability(base_stage, inst_flow)
+    l35_pass = entrability in (structure_classifier.Entrability.READY,
+                               structure_classifier.Entrability.CAUTION)
+    l35_checks = [_check(f"Structure entrable ({base_stage} × {inst_flow})",
+                         entrability, l35_pass)]
+    levels.append({"level": 3.5, "name": "Structure entrable", "pass": bool(l35_pass),
+                   "checks": l35_checks,
+                   "detail": {"base_stage": base_stage, "inst_flow": inst_flow,
+                              "entrability": entrability}})
+
     # Level 4 — right spot. A SEPARATE, blocking gate applied AFTER the lights (the
     # consolidation "right spot" checks are NOT lights). Identical for stocks/ETFs.
     spot = row.get("right_spot") or {"checks": [], "pass": False}
