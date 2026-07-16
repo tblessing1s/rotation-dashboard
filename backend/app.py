@@ -825,6 +825,19 @@ def api_kill_switch():
         return _err(e)
 
 
+@app.route("/api/symbol-genius/flips")
+def api_symbol_genius_flips():
+    """Symbol Genius flip-frequency shadow-log — how often each tracked name's SYM
+    color changed over the retained window. The measurement that must precede any
+    decision to add a per-symbol yellow dwell (does SYM churn enough to warrant
+    one?). Read-only telemetry; empty until the nightly sweep has logged a few days."""
+    try:
+        import symbol_genius_history
+        return jsonify(symbol_genius_history.flip_stats())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/overview")
 def api_overview():
     """One-call landing payload for the Overview tab: regime + positions/capital

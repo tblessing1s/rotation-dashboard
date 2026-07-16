@@ -189,6 +189,20 @@ def nightly_refresh() -> dict:
     except Exception as e:  # noqa: BLE001 — a regime snapshot failure must not sink the sweep
         report["errors"].append(f"regime_snapshot: {e}")
 
+    # Shadow-log today's Symbol Genius color for the held names + sector ETFs, so
+    # SYM flip frequency can be measured before deciding whether a per-symbol
+    # yellow dwell is worth building (the audit's explicit prerequisite). Pure
+    # telemetry (DATA_DIR/symbol_genius_history.json) — records what SYM already
+    # shows, changes nothing. Sector ETFs are always cached post-close, so the log
+    # has a stable set even with no open positions.
+    try:
+        import sector_data
+        import symbol_genius_history
+        names = list(dict.fromkeys(tickers + sector_data.sector_etfs()))
+        report["symbol_genius_log"] = symbol_genius_history.record_today(names)
+    except Exception as e:  # noqa: BLE001 — a SYM snapshot failure must not sink the sweep
+        report["errors"].append(f"symbol_genius_log: {e}")
+
     # Weekly theta-burn mark (end-of-week cadence, once per ISO week): snapshots
     # each LEAP's model extrinsic + forward burn projection so the
     # realized-vs-projected divergence harness stays current. Telemetry only

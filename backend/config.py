@@ -275,6 +275,10 @@ SYMBOL_GENIUS_SLOWER_MA = 200  # PROPOSED_DEFAULT — the "slower" SMA in the SM
 # insufficient -> RED, never GREEN). Binding warm-up is the SMA200 window, well
 # above the stock-lights SAR warm-up (STOCK_LIGHTS_WARMUP_BARS = 50).
 SYMBOL_LIGHTS_WARMUP_BARS = SYMBOL_GENIUS_SLOWER_MA  # PROPOSED_DEFAULT
+# Days of daily Symbol Genius color retained in the shadow-log (DATA_DIR/
+# symbol_genius_history.json) — the churn measurement that must precede any
+# per-symbol yellow dwell. Derived telemetry, recomputable from cached bars.
+SYMBOL_GENIUS_HISTORY_DAYS = 90  # PROPOSED_DEFAULT — ~1 quarter of trading days
 
 # ---- Indicator calibration (matches thinkorswim daily studies) -------------
 RS3M_LOOKBACK = 63            # ~3 months of trading days
