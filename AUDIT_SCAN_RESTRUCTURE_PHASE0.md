@@ -449,21 +449,45 @@ the vs-SPY difference approximation" (`config.py:922`). Level 2 uses sector-vs-S
 
 ## Recommended Phase 1 scope (ordered, smallest safe increments)
 
-0. **Precondition — bar depth.** Raise cached daily depth to reliably ≥250 trading
-   bars and reconcile Schwab vs Alpha-Vantage depth (`config.HISTORY_DAYS` is
-   calendar-day based ≈220 trading, `config.py:271`; AV `.tail` path differs,
-   `data_handler.py:147`). Everything else is starved without this. *(No new
-   feature; a data precondition.)*
+0. **Precondition — bar depth. [APPROVED]** Raise cached daily depth to reliably
+   ≥250 trading bars. **Decision: set `config.HISTORY_DAYS ≈ 400`** (≈275 trading
+   bars — comfortable headroom for SMA200 + 150-day slope + base counting) and
+   reconcile the two providers, which measure depth differently:
+   - Schwab (`get_daily_bars`, `schwab_api.py:245-272`) is bounded only by the
+     `startDate` computed from `HISTORY_DAYS` (`data_handler._fetch:136`);
+     `periodType=year` supports up to 20 years, so widening the window is the whole
+     fix — no API limit near 250.
+   - Alpha Vantage (`alpha_vantage.py:66-69`) already requests `outputsize="full"`
+     (20+ yrs); the sole limiter is our own `.tail(HISTORY_DAYS)` truncation
+     (`data_handler.py:147`) — align it to the same window (or leave AV full).
+   Because Schwab measures **calendar days** and AV measures **trading rows**, size
+   the target in trading bars so neither silently under-delivers. Deeper history
+   lands on the next forced refetch / cache cycle (12h freshness, `_is_fresh`), not
+   instantly. *(No new feature; a data precondition.)*
 1. **Pure `classify_symbol(bars) -> (BaseStage, InstFlow | INSUFFICIENT_DATA)`.**
    Full-replay base counting (Q4 option a); reuse existing pure inputs (OBV, ATR
    posture, `ma50_slope` template) and add the new pure functions (up/down volume
    ratio, accumulation/distribution day count, 150-day slope). Explicit
    `INSUFFICIENT_DATA`, never a guessed enum. All thresholds tagged
    `PROPOSED_DEFAULT`. Unit-tested on **volume-varied** fixtures.
-2. **Symbol Genius light-set.** Add a 4th-light injection point to `genius_lights`
-   (additive, not a fork, not a `compute_lights` edit) for `SMA50>SMA200`; give it
-   its **own** params object (never `default_params`) and its **own** warm-up
-   (≥200 bars); reuse the stock verdict mapping (`stock_lights.verdict`).
+2. **Symbol Genius light-set. [DESIGN APPROVED]** The 4th light is `SMA50 > SMA200`
+   (the two slow MAs). Injection design:
+   - Add **one new pure light function** to `genius_lights` (e.g.
+     `light_sma_slow_vs_slower(sma50, sma200)`) beside `light_fast_vs_slow`
+     (`genius_lights.py:83-86`); reuse `indicators.sma(df, 200)` (already used at
+     `stock_lights.py:39`) — no new indicator math.
+   - Make **light-slot-2 an injected choice**, defaulted to today's
+     `light_fast_vs_slow(EMA21, SMA50)` so the regime path stays byte-identical
+     (pinned by `test_regime_regression.py:95,108`). Symbol Genius passes the
+     SMA50>SMA200 light; the other three lights (close>SMA50, SAR, ROC10) stay
+     shared verbatim.
+   - New param **`slower_ma = 200` (`PROPOSED_DEFAULT`)**, distinct from
+     `GENIUS_FAST_MA=21` — the mechanical guarantee the engines never share the
+     4th-light constant (Symbol Genius carries `slow_ma=50` + `slower_ma=200`, no
+     EMA21). SMA50 is computed once and feeds both light 1 and light 4.
+   - **Own warm-up ≥200 bars** (`PROPOSED_DEFAULT`), not the HARD
+     `STOCK_LIGHTS_WARMUP_BARS=50`.
+   - Reuse the stock verdict mapping (`stock_lights.verdict`), never the market vote.
 3. **Single shared `VERDICT` function.** Worst-signal-wins(Market Genius regime,
    Symbol Genius color, structure entrability grid) → READY/CAUTION/BLOCKED.
    Consumed by the entry gate, the scorecard display, and `/api/scan/ready` —
