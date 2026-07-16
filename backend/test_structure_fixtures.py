@@ -89,16 +89,17 @@ def test_fixture_b_symbol_genius_is_green():
     assert _symbol_genius_greens(_load("early_advance_accum")) == 4
 
 
-def test_fixture_b_red_regime_would_block_is_pending_shared_verdict():
-    # The composed VERDICT (worst-signal-wins of Market Genius + Symbol Genius +
-    # structure entrability) lands in a later step. Here we pin the two stock-level
-    # inputs it consumes; the regime is the invisible third input that must force
-    # BLOCKED when red. Both inputs are individually "go", so ONLY the regime can
-    # block it — which is exactly what makes this the invisible-regime pin.
+def test_fixture_b_red_regime_composes_to_blocked():
+    # The invisible-regime pin, now via the real shared VERDICT: both stock-level
+    # inputs are "go" (structure READY, SYM green), so ONLY the regime can block —
+    # and a RED regime does, even though regime is never displayed per-row.
+    import scan_verdict as sv
     df = _load("early_advance_accum")
     base, inst = sc.classify_symbol(df)
     assert sc.structure_entrability(base, inst) == Entrability.READY
     assert _symbol_genius_greens(df) == 4
+    assert sv.compose_verdict("green", "green", base, inst)["verdict"] == "READY"
+    assert sv.compose_verdict("red", "green", base, inst)["verdict"] == "BLOCKED"
 
 
 # ---------------------------------------------------------------------------
