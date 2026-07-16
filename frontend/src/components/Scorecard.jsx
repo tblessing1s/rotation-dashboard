@@ -114,7 +114,19 @@ const COLUMNS = [
   },
   {
     key: "verdict", label: "Verdict", sortVal: (r) => VERDICT_ORDER[r.verdict] ?? 9,
-    render: (r) => <Pill status={VERDICT_STATUS[r.verdict] || "unknown"}>{r.verdict || "—"}</Pill>,
+    render: (r) => (
+      <span className="inline-flex items-center gap-1.5">
+        <Pill status={VERDICT_STATUS[r.verdict] || "unknown"}>{r.verdict || "—"}</Pill>
+        {r.bench && (
+          <span
+            title={r.path_to_ready ? `Bench — path to READY: ${r.path_to_ready}` : "Bench — waiting on a calendar/conditional trigger"}
+            className="text-[10px] font-medium uppercase tracking-wide text-sky-400"
+          >
+            bench{r.eligible_days != null ? ` ~${r.eligible_days}d` : ""}
+          </span>
+        )}
+      </span>
+    ),
   },
 ];
 
@@ -133,9 +145,14 @@ const COLUMN_HELP = {
   net_juice_weekly_pct: "Net juice / week — weekly extrinsic as % of LEAP cost, NET of the LEAP's model theta burn and slippage. The income the setup actually pays; the Ready-to-Enter ranking key.",
   score: "Composite SCORE 0–10 (SHADOW — zero authority).\n" +
     "A quality rank over the non-blocking inputs (sector strength, base maturity, InstFlow grade, ATR posture, MA21 distance, net juice/wk, RS state). All weights are PROPOSED_DEFAULT and logged for calibration. It does NOT feed the verdict, Ready-to-Enter, or sizing — it only ranks names within a tier.",
-  verdict: "The composed verdict — worst-signal-wins of the (invisible) market regime, Symbol Genius, and the structure cell.\n" +
-    "READY (all clear) · CAUTION (entrable with care) · WATCH (valid setup, not entrable) · BLOCKED. A RED market regime forces every row to BLOCKED even though regime has no column.",
+  verdict: "The composed verdict — worst-signal-wins of the (invisible) market regime, Symbol Genius, and the structure cell, folded with the FULL entry gate.\n" +
+    "READY (the whole L1–L4 gate clears — will pass Execute) · CAUTION (entrable with care) · WATCH (valid setup, not entrable) · BLOCKED. A RED market regime forces every row to BLOCKED even though regime has no column.\n" +
+    "BENCH tag = a WATCH row that is one calendar/conditional trigger away from READY (no safety block). Hover it for the path to READY.",
 };
+
+// The filter set. BENCH is not a verdict value — it's a derived VIEW over WATCH rows
+// whose only blockers are calendar/conditional triggers (server flag row.bench).
+const BENCH = "BENCH";
 
 // When the market regime isn't green it's the invisible input driving BLOCKED/WATCH
 // verdicts below — surface it so the table's verdicts are read in context.
@@ -311,6 +328,15 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                   </span>
                 ))}
               </div>
+              {/* Path to READY — the forward-looking trigger legs (calendar dates +
+                  EST days) that clear each blocker, derived from the SAME gate read
+                  that produced the binding constraint. */}
+              {row.path_to_ready && (
+                <div className="flex flex-wrap items-start gap-2 text-xs">
+                  <span className="uppercase tracking-wide text-slate-500">Path to READY</span>
+                  <span className="text-sky-300">→ {row.path_to_ready}</span>
+                </div>
+              )}
               {/* The four Genius stock lights + right-spot (the old Lights column, demoted). */}
               <div className="flex items-center gap-3 text-xs text-slate-400">
                 <span className="uppercase tracking-wide text-slate-500">Genius lights</span>
@@ -368,7 +394,20 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
   );
 }
 
-const FILTERS = ["ALL", "READY", "CAUTION", "WATCH", "BLOCKED"];
+const FILTERS = ["ALL", "READY", BENCH, "CAUTION", "WATCH", "BLOCKED"];
+
+// Bench sort: earliest expected trigger first (a concrete calendar/EST day count
+// ascending, purely-conditional rows with no day count last), then SCORE / JUICE
+// desc — so the names about to clear lead the bench.
+function sortBench(rows) {
+  return [...rows].sort((a, b) => {
+    const ad = a.eligible_days, bd = b.eligible_days;
+    if (ad == null && bd == null) return descNullsLast(a.score, b.score) || descNullsLast(a.net_juice_weekly_pct, b.net_juice_weekly_pct);
+    if (ad == null) return 1;
+    if (bd == null) return -1;
+    return (ad - bd) || descNullsLast(a.score, b.score);
+  });
+}
 
 export default function Scorecard({ regimeStatus, refreshKey }) {
   const { data, error, loading, reload } = useApi(api.scorecard, [refreshKey]);
@@ -436,10 +475,21 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
     [results],
   );
   const counts = React.useMemo(() => {
-    const c = { READY: 0, CAUTION: 0, WATCH: 0, BLOCKED: 0 };
-    results.forEach((r) => { if (c[r.verdict] != null) c[r.verdict] += 1; });
+    const c = { READY: 0, CAUTION: 0, WATCH: 0, BLOCKED: 0, [BENCH]: 0 };
+    results.forEach((r) => {
+      if (c[r.verdict] != null) c[r.verdict] += 1;
+      if (r.bench) c[BENCH] += 1;
+    });
     return c;
   }, [results]);
+
+  // Pipeline throughput (a fold over row verdicts + triggers — no separate
+  // computation): READY now, then bench names eligible within 14 days, then beyond.
+  const pipeline = React.useMemo(() => {
+    const bench = results.filter((r) => r.bench);
+    const le14 = bench.filter((r) => r.eligible_days != null && r.eligible_days <= 14).length;
+    return { ready: counts.READY, le14, beyond: bench.length - le14 };
+  }, [results, counts.READY]);
 
   const sectorOptions = React.useMemo(
     () => Array.from(new Set(results.map((r) => r.sector).filter(Boolean))).sort(),
@@ -448,12 +498,17 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
 
   const filtered = results.filter(
     (r) =>
-      (verdictFilter === "ALL" || r.verdict === verdictFilter) &&
+      (verdictFilter === "ALL" || (verdictFilter === BENCH ? r.bench === true : r.verdict === verdictFilter)) &&
       (sectorFilter === "ALL" || r.sector === sectorFilter) &&
       (!weekliesOnly || r.has_weeklies !== false),
   );
 
-  const visible = React.useMemo(() => sortRows(filtered, sort), [filtered, sort]);
+  // In the BENCH view, sort by earliest expected trigger unless the operator has
+  // clicked a specific column to sort by instead.
+  const visible = React.useMemo(
+    () => (verdictFilter === BENCH && sort.key === "verdict" ? sortBench(filtered) : sortRows(filtered, sort)),
+    [filtered, sort, verdictFilter],
+  );
 
   function toggleSort(key) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
@@ -463,9 +518,14 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
     <button
       key={val}
       onClick={() => setVerdictFilter(val)}
+      title={val === BENCH
+        ? "Near-ready bench — WATCH names one calendar/conditional trigger from READY (no safety block). Sorted by earliest expected trigger."
+        : undefined}
       className={`rounded-lg border px-3 py-1.5 text-sm ${
         verdictFilter === val
-          ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-300"
+          ? val === BENCH
+            ? "border-sky-500/50 bg-sky-500/10 text-sky-300"
+            : "border-emerald-500/50 bg-emerald-500/10 text-emerald-300"
           : "border-slate-700 text-slate-400 hover:text-slate-200"
       }`}
     >
@@ -483,6 +543,14 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
           {banner.text}
         </div>
       )}
+      {/* Pipeline throughput — the scan as a pipeline, not a snapshot: how many are
+          READY now, how many bench names come eligible within two weeks, the rest. */}
+      <div className="mb-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
+        <span className="uppercase tracking-wide text-slate-500">Pipeline</span>
+        <span className="text-emerald-300">{pipeline.ready} READY now</span>
+        <span className="text-sky-300">{pipeline.le14} eligible ≤14d</span>
+        <span className="text-slate-500">{pipeline.beyond} beyond</span>
+      </div>
       <div className="mb-4 flex flex-wrap items-center gap-2">
         {FILTERS.map(filterBtn)}
         <div className="flex items-center gap-1.5" title="Filter the table to one sector">
