@@ -218,7 +218,12 @@ SECTOR_BREADTH_MIN = 60.0     # % of sector constituents above 50-DMA
 # replacing the RS3M vs SPY bar — RS3M is a laggy 3-month figure that keeps a
 # rolled-over sector "strong" for weeks. RS1M > 0 means the sector is leading SPY
 # right now; SECTOR_BREADTH_MIN (above) still gates participation.
-SECTOR_RS1M_MIN = 0.0          # PROPOSED_DEFAULT — sector RS1M vs SPY must be > this (leading SPY)
+SECTOR_RS1M_MIN = 0.0          # PROPOSED_DEFAULT — sector "strong" bar: RS1M vs SPY > this (display/sizing)
+# Level-2 reframe (sector as VETO, not selector): the gate blocks only when the
+# sector is DETERIORATING — RS1M vs SPY negative, breadth below this collapse floor
+# (well under the SECTOR_BREADTH_MIN participation bar), or the sector ETF under
+# distribution — otherwise it passes and lets SYM + BASE + INST carry selection.
+SECTOR_BREADTH_COLLAPSE = 40.0  # PROPOSED_DEFAULT — sector breadth below this % = collapsing (a veto)
 
 # ---- Stock gate (Levels 3 & 4) ---------------------------------------------
 STOCK_RS_VS_SPY_MIN = 5.0      # stock RS3M vs SPY > +5% (growth-leader bar)

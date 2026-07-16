@@ -1162,3 +1162,36 @@ def test_filter_ready_requires_regime_and_sector(monkeypatch):
     all_green = screening._stock_row("NVDA", df, None, "XLK", regime_green=True, sector_strong=True)
     assert all_green["status"] == "ready"
     assert all_green["blocked_by"] == []
+
+
+def test_level2_is_a_veto_not_a_selector(monkeypatch):
+    # The Level-2 reframe: a merely-NEUTRAL sector (not strong, but not
+    # deteriorating) now PASSES Level 2, where the old "sector strong" bar failed
+    # it. Only positive deterioration (RS1M<0 / breadth collapsing / under
+    # distribution) blocks.
+    import screening
+    screening._results.clear()
+    df = _frame([100 + i * 0.08 for i in range(230)])
+    monkeypatch.setattr(__import__("data_handler"), "get_daily", lambda s, force=False: df)
+    monkeypatch.setattr(screening, "regime", lambda: {"status": "green", "published_regime": "green"})
+
+    # Neutral sector: RS1M positive but weak, breadth below the old 60 bar yet above
+    # the 40 collapse floor, not under distribution -> Level 2 PASSES (veto clear).
+    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {
+        "rs1m": 1.0, "breadth": 50.0, "inst_flow": "NO_INTEREST", "status": "yellow"}})
+    l2 = next(l for l in screening.entry_gate("NVDA")["levels"] if l["level"] == 2)
+    assert l2["pass"] is True
+
+    # Deteriorating sector: RS1M negative -> Level 2 VETOES.
+    screening._results.clear()
+    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {
+        "rs1m": -3.0, "breadth": 70.0, "inst_flow": "ACCUMULATING", "status": "red"}})
+    l2b = next(l for l in screening.entry_gate("NVDA")["levels"] if l["level"] == 2)
+    assert l2b["pass"] is False
+
+    # Under distribution alone also vetoes, even with strong RS/breadth.
+    screening._results.clear()
+    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {
+        "rs1m": 5.0, "breadth": 70.0, "inst_flow": "DISTRIBUTING", "status": "green"}})
+    l2c = next(l for l in screening.entry_gate("NVDA")["levels"] if l["level"] == 2)
+    assert l2c["pass"] is False
