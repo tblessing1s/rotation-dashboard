@@ -81,7 +81,7 @@ def test_turning_annotation_appended_to_non_ready_reasons(monkeypatch):
     monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: stock)
     # Isolate the SIGNAL binding from the (separately-tested) net-juice safety gate,
     # which this low-vol recovery fixture would otherwise trip.
-    monkeypatch.setattr(scan_triggers, "juice_floor_block", lambda _n: None)
+    monkeypatch.setattr(scan_triggers, "juice_floor_block", lambda _n, _g=None: None)
     row = sc.score_ticker("NVDA", stock, "XLK", sector, regime_color="green")
     # SYM yellow -> verdict WATCH (non-READY); the TURNING vs-sector RS annotates it.
     assert row["verdict"] != "READY"
@@ -103,7 +103,7 @@ def test_score_does_not_leak_into_the_verdict(monkeypatch):
     # With no gate blocks and juice adequate, the verdict is exactly the signal
     # composition — proving the shadow SCORE never leaks into it. (The juice safety
     # gate is exercised separately; neutralize it here to isolate the boundary.)
-    monkeypatch.setattr(scan_triggers, "juice_floor_block", lambda _n: None)
+    monkeypatch.setattr(scan_triggers, "juice_floor_block", lambda _n, _g=None: None)
     row = sc.score_ticker("NVDA", stock, "XLK", sector, regime_color="green")
     base, inst = structure_classifier.classify_symbol(stock)
     sym = symbol_genius.compute(stock)["color"]

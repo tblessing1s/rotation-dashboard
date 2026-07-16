@@ -165,11 +165,15 @@ def classify(block: dict) -> dict:
 
     elif cid in ("juice_floor", "juice_adequacy"):
         # A SAFETY block — no trigger/days. Phrase the binding with the numbers so
-        # the operator sees WHY it's blocked: "net juice X% < floor Y%".
+        # the operator sees WHY it's blocked: the hard tier names the negative net
+        # (burn > income); the adequacy tier names the thin gross vs the floor.
         net = obs.get("net_juice_weekly_pct")
+        gross = obs.get("gross_juice_weekly_pct")
         floor = obs.get("floor")
-        if net is not None and floor is not None:
-            trig["clears_when"] = f"net juice {net:+.2f}% < floor {floor:g}%"
+        if obs.get("tier") == "hard" and net is not None:
+            trig["clears_when"] = f"net juice {net:+.2f}% — LEAP burn exceeds income"
+        elif gross is not None and floor is not None:
+            trig["clears_when"] = f"gross juice {gross:.2f}% < floor {floor:g}%"
 
     elif kind == ESTIMATED:
         days = _estimate_days(cid, obs)
@@ -285,29 +289,32 @@ def gate_blocks(gate: dict | None, account_gate: dict | None = None,
     return blocks
 
 
-def juice_floor_block(net_juice_weekly_pct: float | None) -> dict | None:
-    """A Level-5 NET juice-floor SAFETY block, or None when the income is adequate.
-    Two-tier, both structural (low IV does not clear on a date, so this is BLOCKED,
+def juice_floor_block(net_juice_weekly_pct: float | None,
+                      gross_juice_weekly_pct: float | None = None) -> dict | None:
+    """A Level-5 juice-viability SAFETY block, or None when the income is adequate.
+    Two tiers, both structural (low IV does not clear on a date, so this is BLOCKED,
     never benchable):
 
-      * hard floor — ``net_juice_per_week <= 0`` (burn exceeds income);
-      * adequacy floor — ``net_juice_per_week < config.JUICE_FLOOR_WK``.
+      * hard floor — NET juice/wk (post LEAP-burn) ``<= 0``: burn exceeds income;
+      * adequacy floor — GROSS juice/wk (weekly extrinsic / LEAP cost, before burn)
+        ``< config.JUICE_FLOOR_WK``: the premium itself is too thin.
 
-    PURE over the net juice already on the row (no account state), so it folds into
-    the memoized market sweep. ETFs pass through identically — the floor is the
-    mechanism that self-eliminates low-IV ETFs; there is no ETF branch. ``None``
-    net juice (insufficient history) is NOT blocked here — the structure/data gates
+    Keyed off GROSS for the adequacy tier because that is the strategy's stated
+    income bar; the hard tier keeps the take-home honest. PURE over the juice
+    figures already on the row (no account state), so it folds into the memoized
+    market sweep. ETFs pass through identically — no ETF branch. A ``None`` figure
+    (insufficient history to price) is NOT blocked here; the structure/data gates
     already handle a name we can't price."""
-    if net_juice_weekly_pct is None:
-        return None
     floor = config.JUICE_FLOOR_WK
-    if net_juice_weekly_pct <= 0:
-        return {"level": 5, "id": "juice_floor", "label": "net juice",
+    if net_juice_weekly_pct is not None and net_juice_weekly_pct <= 0:
+        return {"level": 5, "id": "juice_floor", "label": "juice",
                 "observed": {"net_juice_weekly_pct": net_juice_weekly_pct,
+                             "gross_juice_weekly_pct": gross_juice_weekly_pct,
                              "floor": floor, "tier": "hard"}}
-    if net_juice_weekly_pct < floor:
-        return {"level": 5, "id": "juice_floor", "label": "net juice",
+    if gross_juice_weekly_pct is not None and gross_juice_weekly_pct < floor:
+        return {"level": 5, "id": "juice_floor", "label": "juice",
                 "observed": {"net_juice_weekly_pct": net_juice_weekly_pct,
+                             "gross_juice_weekly_pct": gross_juice_weekly_pct,
                              "floor": floor, "tier": "adequacy"}}
     return None
 

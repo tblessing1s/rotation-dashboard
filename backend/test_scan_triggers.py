@@ -148,23 +148,36 @@ def test_fixture_d_with_l5_still_binds_l4_and_shows_slot_trigger():
 def test_juice_floor_block_two_tiers():
     import config
     floor = config.JUICE_FLOOR_WK
-    assert st.juice_floor_block(-0.5)["observed"]["tier"] == "hard"       # burn > income
-    assert st.juice_floor_block(0.0)["observed"]["tier"] == "hard"        # net <= 0
-    assert st.juice_floor_block(floor - 0.1)["observed"]["tier"] == "adequacy"
-    assert st.juice_floor_block(floor)  is None                          # at floor clears
-    assert st.juice_floor_block(floor + 1.0) is None
-    assert st.juice_floor_block(None)   is None                          # unpriceable: not here
+    # Hard tier: NET <= 0 (burn exceeds income), regardless of gross.
+    assert st.juice_floor_block(-0.5, floor + 2)["observed"]["tier"] == "hard"
+    assert st.juice_floor_block(0.0, floor + 2)["observed"]["tier"] == "hard"
+    # Adequacy tier: NET positive but GROSS below the floor (thin premium).
+    assert st.juice_floor_block(0.4, floor - 0.1)["observed"]["tier"] == "adequacy"
+    # Clears: net positive AND gross at/above the floor.
+    assert st.juice_floor_block(0.4, floor) is None
+    assert st.juice_floor_block(1.0, floor + 1.0) is None
+    # A None figure isn't blocked here (can't price -> other gates handle it).
+    assert st.juice_floor_block(None, None) is None
+    assert st.juice_floor_block(0.4, None) is None            # gross unknown -> no adequacy block
 
 
 def test_juice_block_is_safety_blocked_and_never_bench():
     composed = sv.compose_verdict("green", "green", BaseStage.EARLY_ADVANCE,
                                   InstFlow.ACCUMULATING)  # pristine -> READY signals
-    rv = st.compose_row_verdict(composed, [st.juice_floor_block(0.12)])
+    rv = st.compose_row_verdict(composed, [st.juice_floor_block(0.5, 1.0)])  # gross 1.0 < 1.5
     assert rv["verdict"] == sv.BLOCKED                    # safety, not a WATCH wait
     assert rv["binding"]["id"] == "juice_floor" and rv["binding"]["level"] == 5
     assert st.is_bench(rv["verdict"], rv["triggers"]) is False
-    # The binding phrases the economics: "net juice +0.12% < floor 1.5%".
-    assert "net juice" in rv["binding"]["trigger"]["clears_when"]
+    # The binding phrases the economics: "gross juice 1.00% < floor 1.5%".
+    assert "gross juice" in rv["binding"]["trigger"]["clears_when"]
+
+
+def test_juice_hard_tier_names_the_negative_net():
+    rv = st.compose_row_verdict(
+        sv.compose_verdict("green", "green", BaseStage.EARLY_ADVANCE, InstFlow.ACCUMULATING),
+        [st.juice_floor_block(-0.3, 2.0)])               # gross fine, but net negative
+    assert rv["verdict"] == sv.BLOCKED
+    assert "burn exceeds income" in rv["binding"]["trigger"]["clears_when"]
 
 
 def test_juice_safety_binds_over_a_lower_level_extension_wait():
@@ -172,7 +185,7 @@ def test_juice_safety_binds_over_a_lower_level_extension_wait():
     # (the decisive safety block), not the L4 WATCH wait.
     df = _load("early_advance_extended")
     composed = sv.compose_verdict("green", "green", *__import__("structure_classifier").classify_symbol(df))
-    blocks = st.gate_blocks(_gate_with_l4(df)) + [st.juice_floor_block(0.1)]
+    blocks = st.gate_blocks(_gate_with_l4(df)) + [st.juice_floor_block(0.4, 1.0)]
     rv = st.compose_row_verdict(composed, blocks)
     assert rv["verdict"] == sv.BLOCKED
     assert rv["binding"]["id"] == "juice_floor"           # safety worst -> binds over L4
@@ -180,18 +193,19 @@ def test_juice_safety_binds_over_a_lower_level_extension_wait():
 
 
 def test_fixture_e_pnc_shape_blocks_on_juice(monkeypatch):
-    # End-to-end over the PNC fixture: pristine structure + SYM green, but net juice
-    # below the floor => VERDICT BLOCKED, binding L5 juice, NOT on bench.
+    # End-to-end over the PNC fixture: pristine structure + SYM green, but juice
+    # below the viability floor => VERDICT BLOCKED, binding L5 juice, NOT on bench.
     import account_gate, structure_classifier
     df = _load("early_advance_low_juice")
     base, inst = structure_classifier.classify_symbol(df)
     assert base == BaseStage.EARLY_ADVANCE and inst == InstFlow.ACCUMULATING
-    net = account_gate.juice_estimate("PNC", df)["net_weekly_yield_pct"]
-    import config
-    assert net is not None and net < config.JUICE_FLOOR_WK      # below the viability floor
+    est = account_gate.juice_estimate("PNC", df)
+    net, gross = est["net_weekly_yield_pct"], est["weekly_yield_pct"]
+    block = st.juice_floor_block(net, gross)
+    assert block is not None                                    # trips a tier
     composed = sv.compose_verdict("green", "green", base, inst)
     assert composed["verdict"] == sv.READY                      # signals alone say READY
-    rv = st.compose_row_verdict(composed, [st.juice_floor_block(net)])
+    rv = st.compose_row_verdict(composed, [block])
     assert rv["verdict"] == sv.BLOCKED and rv["binding"]["level"] == 5
     assert st.is_bench(rv["verdict"], rv["triggers"]) is False
 
