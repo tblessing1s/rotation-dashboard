@@ -4,7 +4,7 @@ import { Card, Pill, Light, Spinner, ErrorState, StockLights, fmt, pct, useApi }
 
 // The per-symbol scan table, collapsed to the composable read:
 //
-//     SYMBOL | SYM | BASE | INST | RS | JUICE/WK | SCORE | VERDICT
+//     SYMBOL | SECTOR | SYM | BASE | INST | RS | JUICE/WK | SCORE | VERDICT
 //
 // SYM = the per-name Symbol Genius color; BASE / INST = the two structure-classifier
 // enums (both derived from the SINGLE classifier return the backend puts on the row);
@@ -14,8 +14,9 @@ import { Card, Pill, Light, Spinner, ErrorState, StockLights, fmt, pct, useApi }
 // scan verdict (invisible market regime + SYM + structure entrability). RS and SCORE
 // are displayed + logged but never feed the verdict, sizing, or Ready-to-Enter. Every
 // other legacy readout (RS3M, ATR%, MFI, OBV, IVR, the four Genius lights, …) demotes
-// to the expandable per-row drawer. Grouped by sector, filterable by verdict, sortable
-// by any column; the default sort groups by verdict tier then SCORE desc within tier.
+// to the expandable per-row drawer. One flat list (a SECTOR column, not sector-grouped
+// sections), filterable by verdict AND by sector, sortable by any column; the default
+// sort groups by verdict tier then SCORE desc within tier.
 
 // ---------------------------------------------------------------------------
 // Display constants — enum VALUE -> short label / tone / sort order. UI constants
@@ -66,6 +67,10 @@ function rsTitle(row, benchLabel) {
 const COLUMNS = [
   { key: "ticker", label: "Symbol" },
   {
+    key: "sector", label: "Sector",
+    render: (r) => <span className="text-slate-400">{r.sector || "—"}</span>,
+  },
+  {
     key: "sym", label: "SYM", sortVal: (r) => SYM_ORDER[r.sym] ?? 9,
     render: (r) => (r.sym ? (
       <span className="inline-flex items-center gap-1.5" title={`Symbol Genius: ${r.sym.toUpperCase()}${r.sym_greens != null ? ` (${r.sym_greens}/4 lights)` : ""}`}>
@@ -115,6 +120,7 @@ const COLUMNS = [
 
 const COLUMN_HELP = {
   ticker: "The symbol. Click the row (▸) to expand the full indicator readout + verdict inputs. ETF / no-weeklies tags flag special handling.",
+  sector: "The name's sector ETF. Sort to cluster by sector, or use the Sector filter above to show one sector at a time.",
   sym: "Symbol Genius — the per-name four-light instance (Close > SMA50 · SMA50 > SMA200 · SAR below price · ROC10 > 0).\n" +
     "4 green = GREEN · exactly 3 = YELLOW (watchlist) · ≤2 or insufficient history = RED. The fourth light (SMA50 > SMA200) diverges from the market regime's EMA21 > SMA50 on purpose — a longer structural clock.",
   base_stage: "Structure — where the name sits in its base→advance→decline cycle.\n" +
@@ -164,6 +170,16 @@ function sortRows(rows, sort) {
       const bv = VERDICT_ORDER[b.verdict] ?? 9;
       if (av !== bv) return (av - bv) * mul;
       return descNullsLast(a.score, b.score) || descNullsLast(a.net_juice_weekly_pct, b.net_juice_weekly_pct);
+    });
+  }
+  // Sorting by Sector clusters the sectors, then ranks within each by verdict tier
+  // then SCORE desc — so a sector's strongest entrable names lead its block.
+  if (key === "sector") {
+    return [...rows].sort((a, b) => {
+      const c = String(a.sector || "").localeCompare(String(b.sector || "")) * mul;
+      if (c) return c;
+      return ((VERDICT_ORDER[a.verdict] ?? 9) - (VERDICT_ORDER[b.verdict] ?? 9))
+        || descNullsLast(a.score, b.score);
     });
   }
   const col = COLUMNS.find((c) => c.key === key);
@@ -358,6 +374,7 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
   const { data, error, loading, reload } = useApi(api.scorecard, [refreshKey]);
   const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
+  const [sectorFilter, setSectorFilter] = React.useState("ALL");
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);
   const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
@@ -424,19 +441,19 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
     return c;
   }, [results]);
 
+  const sectorOptions = React.useMemo(
+    () => Array.from(new Set(results.map((r) => r.sector).filter(Boolean))).sort(),
+    [results],
+  );
+
   const filtered = results.filter(
     (r) =>
       (verdictFilter === "ALL" || r.verdict === verdictFilter) &&
+      (sectorFilter === "ALL" || r.sector === sectorFilter) &&
       (!weekliesOnly || r.has_weeklies !== false),
   );
 
-  const groups = React.useMemo(() => {
-    const by = {};
-    filtered.forEach((r) => { (by[r.sector] || (by[r.sector] = [])).push(r); });
-    return Object.entries(by)
-      .sort((a, b) => a[0].localeCompare(b[0]))
-      .map(([sector, rows]) => [sector, sortRows(rows, sort)]);
-  }, [filtered, sort]);
+  const visible = React.useMemo(() => sortRows(filtered, sort), [filtered, sort]);
 
   function toggleSort(key) {
     setSort((s) => (s.key === key ? { key, dir: s.dir === "asc" ? "desc" : "asc" } : { key, dir: "asc" }));
@@ -468,6 +485,26 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
       )}
       <div className="mb-4 flex flex-wrap items-center gap-2">
         {FILTERS.map(filterBtn)}
+        <div className="flex items-center gap-1.5" title="Filter the table to one sector">
+          <select
+            value={sectorFilter}
+            onChange={(e) => setSectorFilter(e.target.value)}
+            className="rounded-lg border border-slate-700 bg-slate-900 px-2 py-1.5 text-sm text-slate-300 hover:border-slate-600 focus:outline-none"
+          >
+            <option value="ALL">All sectors ({sectorOptions.length})</option>
+            {sectorOptions.map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+          </select>
+          {sectorFilter !== "ALL" && (
+            <RefreshButton
+              onClick={() => refreshSector(sectorFilter)}
+              busy={!!busy[`sector:${sectorFilter}`]}
+              error={refreshErr[`sector:${sectorFilter}`]}
+              title={`Refresh all of ${sectorFilter} — pull live quotes for the sector`}
+            />
+          )}
+        </div>
         <label
           className="ml-auto flex cursor-pointer items-center gap-2 text-sm text-slate-400"
           title="CFM sells a weekly short — hide names whose option chain has no weeklies"
@@ -503,38 +540,19 @@ export default function Scorecard({ regimeStatus, refreshKey }) {
             </tr>
           </thead>
           <tbody>
-            {groups.map(([sector, rows]) => (
-              <React.Fragment key={sector}>
-                <tr className="bg-slate-800/30">
-                  <td colSpan={COLUMNS.length} className="px-2 py-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">
-                    <span className="flex items-center gap-2">
-                      {sector || "—"}
-                      {sector && (
-                        <RefreshButton
-                          onClick={() => refreshSector(sector)}
-                          busy={!!busy[`sector:${sector}`]}
-                          error={refreshErr[`sector:${sector}`]}
-                          title={`Refresh all of ${sector} — pull live quotes for the sector`}
-                        />
-                      )}
-                    </span>
-                  </td>
-                </tr>
-                {rows.map((row) => (
-                  <ScoreRow
-                    key={row.ticker}
-                    row={row}
-                    expanded={!!open[row.ticker]}
-                    onToggle={() => setOpen((o) => ({ ...o, [row.ticker]: !o[row.ticker] }))}
-                    onRefresh={() => refreshTicker(row.ticker)}
-                    refreshing={!!busy[row.ticker]}
-                    refreshedAt={refreshedAt[row.ticker]}
-                    refreshError={refreshErr[row.ticker]}
-                  />
-                ))}
-              </React.Fragment>
+            {visible.map((row) => (
+              <ScoreRow
+                key={row.ticker}
+                row={row}
+                expanded={!!open[row.ticker]}
+                onToggle={() => setOpen((o) => ({ ...o, [row.ticker]: !o[row.ticker] }))}
+                onRefresh={() => refreshTicker(row.ticker)}
+                refreshing={!!busy[row.ticker]}
+                refreshedAt={refreshedAt[row.ticker]}
+                refreshError={refreshErr[row.ticker]}
+              />
             ))}
-            {!loading && filtered.length === 0 && (
+            {!loading && visible.length === 0 && (
               <tr><td colSpan={COLUMNS.length} className="py-6 text-center text-slate-500">No tickers.</td></tr>
             )}
           </tbody>
