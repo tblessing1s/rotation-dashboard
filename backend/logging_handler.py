@@ -889,6 +889,29 @@ def recompute_derived(state: dict) -> dict:
         "income_positive": agg_at_entry > 0 and agg_remaining <= 0,
     }
 
+    # Dividend income ledger (schema v20) — held-share cash dividends, kept as a
+    # SEPARATE income taxonomy so they never contaminate the juice/theta ledger
+    # (which derives only extrinsic/juice). Held-share dividends would otherwise be
+    # invisible to P&L; a naive add would corrupt the juice numbers.
+    div_records: list[dict] = []
+    div_by_ticker: dict[str, float] = {}
+    div_by_month: dict[str, float] = {}
+    for e in execs:
+        if e.get("action") != "dividend_income":
+            continue
+        t = e.get("ticker", "")
+        amt = float(e.get("amount") or 0)
+        month = str(e.get("pay_date") or e.get("date") or "")[:7] or UNDATED
+        div_by_ticker[t] = round(div_by_ticker.get(t, 0.0) + amt, 2)
+        div_by_month[month] = round(div_by_month.get(month, 0.0) + amt, 2)
+        div_records.append({"id": e.get("id"), "ticker": t, "amount": round(amt, 2),
+                            "shares": int(e.get("shares") or 0), "per_share": e.get("per_share"),
+                            "ex_date": e.get("ex_date"), "month": month, "date": e.get("date")})
+    state["dividend_ledger"] = {
+        "records": div_records, "by_ticker": div_by_ticker, "by_month": div_by_month,
+        "total": round(sum(div_by_ticker.values()), 2),
+    }
+
     # Roll-cost / whipsaw ledger — derived from the paired roll executions
     # (executor stamps both legs with roll_id + roll_reason). This is the data
     # that later validates 1.5x vs 2x ATR strike placement.

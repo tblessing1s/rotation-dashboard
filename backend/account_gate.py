@@ -396,6 +396,26 @@ def evaluate(ticker: str, contracts: int | None = None,
     except Exception:  # noqa: BLE001
         div = {"ex_date": None, "amount": None}
 
+    # 7b) Ex-dividend inside the planned cycle (payers only). A short-call cycle
+    #     straddling an ex-div carries early-assignment risk; WARN (not a hard
+    #     block — PROPOSED_DEFAULT) so the operator plans to roll around it. The
+    #     dividend sibling of earnings_in_cycle; only meaningful when an ex-date is
+    #     known (non-payers and unknown dates simply pass).
+    ex_date = div.get("ex_date") if isinstance(div, dict) else None
+    ex_in_cycle, ex_days = False, None
+    if ex_date:
+        try:
+            from datetime import date, datetime
+            ex = datetime.strptime(str(ex_date)[:10], "%Y-%m-%d").date()
+            ex_days = (ex - date.today()).days
+            ex_in_cycle = 0 <= ex_days <= cycle_days
+        except (TypeError, ValueError):
+            ex_in_cycle = False
+    checks.append(_check(
+        "ex_div_in_cycle", f"No ex-dividend inside the {config.CYCLE_WEEKS_MAX}-week cycle",
+        not ex_in_cycle, False,
+        {"dividend": div, "ex_date": ex_date, "days_until": ex_days, "cycle_days": cycle_days}))
+
     blocking_failures = [c for c in checks if c["blocking"] and not c["pass"]]
     warnings = [c for c in checks if not c["blocking"] and not c["pass"]]
     return {

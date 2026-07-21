@@ -30,7 +30,10 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
                  # Shares-primary base leg (schema v20). buy_shares/sell_shares book the
                  # real-share base; close_shares_assigned books a called-away exit at the
                  # short strike (a clean delivery of owned shares — see _close_shares_assigned).
-                 "buy_shares", "sell_shares", "close_shares_assigned"}
+                 "buy_shares", "sell_shares", "close_shares_assigned",
+                 # Held-share cash dividend, booked as its OWN income event (kept out of
+                 # the juice/theta ledger — derived into state['dividend_ledger']).
+                 "dividend_income"}
 
 # Actions REJECTED on a frozen (needs_review) position — new risk cannot be added
 # to a position whose state is unverified. Closing actions (close_short,
@@ -444,6 +447,11 @@ def execute(payload: dict, now: datetime | None = None) -> dict:
     # immutable execution + a position holding correction, no gate/price capture.
     if action == "adjustment":
         return _adjustment(payload, ticker)
+
+    # Held-share cash dividend — an income booking, not a trade: no gate, no price
+    # capture, no order. Recorded as its own event and derived into dividend_ledger.
+    if action == "dividend_income":
+        return _dividend_income(payload, ticker)
 
     contracts = int(payload.get("contracts") or 0)
     strike = payload.get("strike")
@@ -1799,6 +1807,36 @@ def _preview_equity_order(payload, ticker, action, contracts, stock_price):
         except Exception as exc:  # noqa: BLE001 — preview is advisory, never blocks
             result["preview_error"] = str(exc)
     return result
+
+
+def _dividend_income(payload, ticker):
+    """Book a cash dividend received on held shares as its OWN income event —
+    kept out of the juice/theta ledger so the income taxonomy stays clean (schema
+    v20). Derived into state['dividend_ledger'] by recompute_derived. Never mutates
+    holdings; the immutable record is the source of truth. amount OR per_share may
+    be supplied (the other is derived from the held-share count)."""
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    held = int((position.get("shares") or {}).get("count") or 0) if position else 0
+    shares_ct = int(payload.get("shares") or held or 0)
+    per_share = payload.get("per_share")
+    amount = payload.get("amount")
+    if amount is None and per_share is not None:
+        amount = float(per_share) * shares_ct
+    amount = round(float(amount or 0), 2)
+    if per_share is None and shares_ct:
+        per_share = round(amount / shares_ct, 4)
+    execution = {
+        "ticker": ticker, "action": "dividend_income",
+        "amount": amount, "shares": shares_ct,
+        "per_share": round(float(per_share), 4) if per_share is not None else None,
+        "ex_date": payload.get("ex_date"), "pay_date": payload.get("pay_date"),
+        "source": payload.get("source") or "manual",
+    }
+    _stamp_source_rec(execution, payload)
+    stored = log.append_execution(execution)
+    return {"success": True, "status": "recorded", "execution_id": stored["id"],
+            "amount": amount, "execution": stored}
 
 
 def _commit_shares(payload, ticker, action, contracts, strike, stock_price, price_source, mode):
