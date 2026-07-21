@@ -1237,23 +1237,39 @@ def _ff(v):
 
 
 def save_transactions(edits: list, ticker: str | None = None) -> dict:
-    """Editable-transaction-table save. Applies per-transaction economic edits to
-    the execution log, then DERIVES the open position for each touched ticker from
-    those transactions (opens − closes) — so the one table is the source of truth
-    and the position falls out of it.
+    """Editable-transaction-table save. Each per-transaction economic edit is
+    recorded as an APPENDED ``txn_correction`` event (never an in-place rewrite of
+    the immutable execution log — Work Item 10c), then the open position for each
+    touched ticker is DERIVED from the corrected transactions (opens − closes).
 
     Entry stock price and extrinsic are LINKED (premium = intrinsic + extrinsic,
     intrinsic = max(stock − strike, 0)): whichever the operator edits, the other is
-    computed and both are stored consistently. Recompute + freeze re-eval."""
+    computed. The correction carries the derived field set; derived_executions
+    overlays it onto the target execution at derive time so every ledger + the
+    position fall out of the same corrected view. Recompute + freeze re-eval."""
     by_id = {str(ed.get("id")): ed for ed in (edits or []) if ed.get("id")}
     state = log.load_state()
-    tickers, touched = set(), 0
-    for e in state.get("executions") or []:
-        ed = by_id.get(e.get("id"))
-        if ed:
-            _apply_txn_edit(e, ed)
-            touched += 1
-            tickers.add((e.get("ticker") or "").upper())
+    # Compute each edit's changes against the CURRENT corrected view (so stacked
+    # corrections compose), then append one txn_correction per edit.
+    corrected = {str(e.get("id")): e for e in log.derived_executions(state)}
+    corrections, tickers, touched = [], set(), 0
+    for eid, ed in by_id.items():
+        base = corrected.get(eid)
+        if base is None:
+            continue
+        changes = _compute_txn_changes(base, ed)
+        if not changes:
+            continue
+        corrections.append({
+            "action": log.TXN_CORRECTION_ACTION, "ticker": base.get("ticker"),
+            "corrects": eid, "changes": changes,
+            "reason": ed.get("reason") or "history edit",
+        })
+        touched += 1
+        tickers.add((base.get("ticker") or "").upper())
+    for corr in corrections:
+        log.append_execution(corr)  # append-only; recomputes the derived ledgers
+    state = log.load_state()
     if ticker:
         tickers.add(ticker.upper())
     for t in filter(None, tickers):
@@ -1262,22 +1278,27 @@ def save_transactions(edits: list, ticker: str | None = None) -> dict:
     import reconcile
     reconcile.reevaluate_freezes(state)
     log.save_state(state)
-    return {"success": True, "status": "saved", "edited": touched, "tickers": sorted(filter(None, tickers))}
+    return {"success": True, "status": "saved", "edited": touched,
+            "tickers": sorted(filter(None, tickers))}
 
 
-def _apply_txn_edit(e: dict, ed: dict) -> None:
-    """Apply one transaction's edits, linking stock price <-> extrinsic. ``price``
-    is per-share for shorts, per-contract for LEAPs; ``extrinsic`` matches
-    (per-share for shorts, total for LEAPs)."""
+def _compute_txn_changes(e: dict, ed: dict) -> dict:
+    """Compute one History edit's field changes as a plain dict — the append-only
+    replacement for the old in-place _apply_txn_edit. Same stock <-> extrinsic
+    linking; ``price`` is per-share for shorts, per-contract for LEAPs; ``extrinsic``
+    matches (per-share for shorts, total for LEAPs). ``e`` is the current corrected
+    view of the target execution. Returns only the fields that change, which land
+    on an appended ``txn_correction`` record and overlay the target at derive time."""
+    ch: dict = {}
     a = e.get("action")
     if ed.get("strike") not in (None, ""):
-        e["strike"] = float(ed["strike"])
+        ch["strike"] = float(ed["strike"])
     if ed.get("contracts") not in (None, ""):
-        e["contracts"] = int(round(float(ed["contracts"])))
+        ch["contracts"] = int(round(float(ed["contracts"])))
     if "expiration" in ed:
-        e["expiration"] = ed["expiration"] or None
-    c = int(e.get("contracts") or 1) or 1
-    strike = float(e.get("strike") or 0)
+        ch["expiration"] = ed["expiration"] or None
+    c = int(ch.get("contracts", e.get("contracts") or 1)) or 1
+    strike = float(ch.get("strike", e.get("strike") or 0) or 0)
     is_leap = a in ("buy_leap", "close_leap")
     price = _ff(ed.get("price"))
     stock = _ff(ed.get("stock_price"))
@@ -1294,37 +1315,36 @@ def _apply_txn_edit(e: dict, ed: dict) -> None:
             stock = strike + max(per_share - ext_ps, 0.0)
 
     if stock is not None:
-        e["stock_price"] = round(stock, 4)
+        ch["stock_price"] = round(stock, 4)
     if a == "buy_leap":
         if price is not None:
-            e["execution_price"] = round(price, 2)
-            e["execution_total"] = round(price * c, 2)
+            ch["execution_price"] = round(price, 2)
+            ch["execution_total"] = round(price * c, 2)
         if ext_ps is not None:
-            e["extrinsic_captured"] = round(ext_ps * 100 * c, 2)   # per-share -> per-contract -> total
+            ch["extrinsic_captured"] = round(ext_ps * 100 * c, 2)  # per-share -> per-contract -> total
     elif a == "sell_short":
         if price is not None:
-            e["premium_per_share"] = round(price, 4)
-            e["premium_total"] = round(price * c * 100, 2)
+            ch["premium_per_share"] = round(price, 4)
+            ch["premium_total"] = round(price * c * 100, 2)
         if ext_ps is not None:
-            e["entry_extrinsic_per_share"] = round(ext_ps, 4)
+            ch["entry_extrinsic_per_share"] = round(ext_ps, 4)
     elif a == "close_short":
         if price is not None:
-            e["close_price_per_share"] = round(price, 4)
+            ch["close_price_per_share"] = round(price, 4)
         # Re-derive the close economics from the (possibly edited) close price,
-        # underlying, and strike so net juice never goes stale after an edit —
-        # mirrors _close_short: extrinsic paid back = close price - intrinsic,
-        # net juice = what we sold at entry - what we paid to buy back.
-        cps = _ff(e.get("close_price_per_share"))
-        stk = _ff(e.get("stock_price"))
+        # underlying, and strike so net juice never goes stale — mirrors _close_short.
+        cps = ch.get("close_price_per_share", _ff(e.get("close_price_per_share")))
+        stk = ch.get("stock_price", _ff(e.get("stock_price")))
         if cps is not None and stk is not None:
             paid_ps = max(cps - max(stk - strike, 0.0), 0.0)
             sold_ps = float(e.get("extrinsic_sold") or 0)
-            e["extrinsic_paid_back"] = round(paid_ps, 4)
-            e["net_juice"] = round(sold_ps - paid_ps, 4)
-            e["net_juice_total"] = round((sold_ps - paid_ps) * c * 100, 2)
+            ch["extrinsic_paid_back"] = round(paid_ps, 4)
+            ch["net_juice"] = round(sold_ps - paid_ps, 4)
+            ch["net_juice_total"] = round((sold_ps - paid_ps) * c * 100, 2)
     elif a == "close_leap":
         if price is not None:
-            e["close_price"] = round(price, 2)
+            ch["close_price"] = round(price, 2)
+    return ch
 
 
 def _existing_per_share(e: dict):
@@ -1351,9 +1371,10 @@ def _set_derived_open_legs(state: dict, ticker: str) -> None:
     open transaction's value. Voided/undone executions are ignored."""
     leaps: dict = {}
     shorts: dict = {}
-    for e in state.get("executions") or []:
-        if e.get("excluded") or e.get("reversed_by") or e.get("reverses_execution_id"):
-            continue
+    # Read the CORRECTED derived view: excluded/reversed rows are already dropped
+    # and any txn_correction overlay is applied, so an edited transaction derives
+    # the position from its corrected economics (append-only, no in-place rewrite).
+    for e in log.derived_executions(state):
         if (e.get("ticker") or "").upper() != ticker.upper():
             continue
         a = e.get("action")

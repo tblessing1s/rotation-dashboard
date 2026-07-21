@@ -667,6 +667,25 @@ def validate_payback(execs: list[dict]) -> list[dict]:
     return issues
 
 
+TXN_CORRECTION_ACTION = "txn_correction"
+
+
+def _correction_overlay(execs: list[dict]) -> dict[str, dict]:
+    """Map corrected-execution-id -> merged {field: value} from append-only
+    ``txn_correction`` records (applied in append order, last-write-wins). A
+    correction is an APPENDED typed event that carries an economic edit for an
+    earlier execution; the original execution is NEVER rewritten — the change is
+    applied only to the DERIVED view here (schema v20, Work Item 10c). This is what
+    replaced the old in-place History-edit mutation of the append-only log."""
+    overlay: dict[str, dict] = {}
+    for e in execs:
+        if e.get("action") == TXN_CORRECTION_ACTION:
+            tid = str(e.get("corrects") or "")
+            if tid:
+                overlay.setdefault(tid, {}).update(e.get("changes") or {})
+    return overlay
+
+
 def derived_executions(state: dict) -> list[dict]:
     """The executions that feed the DERIVED views — the theta ledger AND the payout
     view — with the ones that must leave no trace filtered out:
@@ -675,13 +694,28 @@ def derived_executions(state: dict) -> list[dict]:
     * ``reverses_execution_id`` — the ``adoption_reversal`` marker itself, and
     * ``excluded`` — a fill the operator has manually excluded.
 
+    ``txn_correction`` records are not trades — they are excluded from the returned
+    list, but their economic edits are OVERLAID onto the executions they correct
+    (append-only correction, never an in-place rewrite). A corrected execution is
+    returned as a merged COPY; the immutable original on the log is untouched.
+
     A reversed/excluded execution must read the same everywhere: absent from the
     per-week theta ledger AND absent from the monthly payout, so History and Payouts
     can't disagree about it. Its immutable record stays on the log for the audit
     trail (append-only, never rewritten)."""
-    return [e for e in state.get("executions", [])
-            if not e.get("reversed_by") and not e.get("reverses_execution_id")
-            and not e.get("excluded")]
+    raw = [e for e in state.get("executions", [])
+           if not e.get("reversed_by") and not e.get("reverses_execution_id")
+           and not e.get("excluded")]
+    overlay = _correction_overlay(raw)
+    if not overlay:
+        return [e for e in raw if e.get("action") != TXN_CORRECTION_ACTION]
+    out = []
+    for e in raw:
+        if e.get("action") == TXN_CORRECTION_ACTION:
+            continue
+        ch = overlay.get(str(e.get("id")))
+        out.append({**e, **ch} if ch else e)
+    return out
 
 
 def recompute_derived(state: dict) -> dict:

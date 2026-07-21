@@ -404,8 +404,19 @@ def test_save_transactions_links_stock_extrinsic_and_derives_position(store):
     res = executor.save_transactions(edits, ticker="XLK")
     assert res["status"] == "saved"
 
+    # APPEND-ONLY: the immutable original execution is NEVER rewritten — the edit
+    # lands on an appended txn_correction record and is applied at derive time.
+    saved = log.load_state()
+    orig179b = next(e for e in saved["executions"]
+                    if e["id"] == "t_179b" and e.get("action") == "sell_short")
+    assert orig179b.get("stock_price") is None  # original untouched
+    corr = next(e for e in saved["executions"]
+                if e.get("action") == "txn_correction" and e.get("corrects") == "t_179b")
+    assert corr["changes"]["entry_extrinsic_per_share"] == 1.83
     # Editing extrinsic back-computed the entry stock price (179 @ 5.10, extr 1.83 -> 182.27).
-    e179b = next(e for e in log.load_state()["executions"] if e["id"] == "t_179b")
+    assert corr["changes"]["stock_price"] == 182.27
+    # The CORRECTED derived view reflects the edit.
+    e179b = next(e for e in log.derived_executions(saved) if e["id"] == "t_179b")
     assert e179b["entry_extrinsic_per_share"] == 1.83
     assert e179b["stock_price"] == 182.27
 
@@ -438,7 +449,13 @@ def test_save_transactions_recomputes_close_net_juice(store):
     # Correct the buyback price to 1.10; stock 178 < strike 180 -> all extrinsic.
     executor.save_transactions([{"id": "c1", "price": 1.10}], ticker="XLK")
 
-    c1 = next(e for e in log.load_state()["executions"] if e["id"] == "c1")
+    saved = log.load_state()
+    # APPEND-ONLY: the original close is untouched; the fix lives on a correction.
+    orig = next(e for e in saved["executions"]
+                if e["id"] == "c1" and e.get("action") == "close_short")
+    assert orig["close_price_per_share"] == 5.0        # immutable original
+    # The corrected derived view re-derives the close economics from the new price.
+    c1 = next(e for e in log.derived_executions(saved) if e["id"] == "c1")
     assert c1["close_price_per_share"] == 1.10
     assert c1["extrinsic_paid_back"] == 1.10            # OTM -> whole price is time value
     assert c1["net_juice"] == round(3.0 - 1.10, 4)      # sold - paid, per share

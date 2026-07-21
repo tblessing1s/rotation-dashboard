@@ -18,6 +18,7 @@ empty account), and hands the parsed view to the core.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from datetime import datetime, timezone
 
@@ -32,6 +33,17 @@ UNEXPECTED_AT_BROKER = "UNEXPECTED_AT_BROKER"
 QUANTITY_MISMATCH = "QUANTITY_MISMATCH"
 SHORT_STOCK_DETECTED = "SHORT_STOCK_DETECTED"          # highest severity
 EXPIRED_WORTHLESS_PENDING = "EXPIRED_WORTHLESS_PENDING"  # benign carve-out
+# Per-field ECONOMIC divergence (schema v20): quantities MATCH but a per-position
+# economic field disagrees. Before the migration the classifier compared existence
+# + signed quantity only, so cost-basis / entry-extrinsic drift read CLEAN forever —
+# the exact silent divergence the owner reports. Fired only when both sides carry a
+# comparable value; inert (never fabricated) when the broker view omits it.
+COST_BASIS_MISMATCH = "COST_BASIS_MISMATCH"
+EXTRINSIC_MISMATCH = "EXTRINSIC_MISMATCH"
+
+# Beyond this absolute difference an economic field counts as diverged (dollars for
+# cost basis, per-share dollars for entry extrinsic). PROPOSED_DEFAULT.
+ECONOMIC_TOLERANCE = 0.01
 
 # Diffs of these classes are benign / non-freezing.
 BENIGN = {MATCH, EXPIRED_WORTHLESS_PENDING}
@@ -104,7 +116,8 @@ def parse_option_symbol(symbol: str) -> dict:
 # ---------------------------------------------------------------------------
 # Normalized instrument shape
 # ---------------------------------------------------------------------------
-def _instrument(symbol, underlying, itype, put_call, strike, expiry, quantity):
+def _instrument(symbol, underlying, itype, put_call, strike, expiry, quantity,
+                cost_basis=None, entry_extrinsic=None):
     return {
         "symbol": symbol,
         "underlying": (underlying or "").upper(),
@@ -113,6 +126,10 @@ def _instrument(symbol, underlying, itype, put_call, strike, expiry, quantity):
         "strike": strike,
         "expiry": expiry,
         "quantity": quantity,  # signed: negative = short
+        # Optional economic fields for the per-field economic diff (schema v20).
+        # None on either side -> that comparison is skipped (never fabricated).
+        "cost_basis": cost_basis,
+        "entry_extrinsic": entry_extrinsic,
     }
 
 
@@ -306,9 +323,22 @@ def _in_past(date_str: str | None, today) -> bool:
 # ---------------------------------------------------------------------------
 # Core classification — pure over (broker_view, expected_view)
 # ---------------------------------------------------------------------------
+def _stable_id(classification: str, inst: dict, field: str | None = None) -> str:
+    """A STABLE identity for a diff — a short hash of (classification, instrument
+    identity[, economic field]) that survives across reconcile runs. The per-run
+    ``diff_001…`` id is unstable (it re-numbers each run), so acknowledgements keyed
+    to it were dropped on the next run and freezes re-asserted (schema v20 gap).
+    Resolutions/acks persist against THIS id instead."""
+    parts = [classification, str(inst.get("underlying") or ""), str(inst.get("instrument_type") or ""),
+             str(inst.get("put_call") or ""), str(inst.get("strike") or ""),
+             str(inst.get("expiry") or ""), field or ""]
+    return "sd_" + hashlib.sha1("|".join(parts).encode()).hexdigest()[:12]
+
+
 def _diff(idx, classification, inst, expected_qty, broker_qty, summary, **extra):
     d = {
         "id": f"diff_{idx:03d}",
+        "stable_id": _stable_id(classification, inst, extra.get("field")),
         "classification": classification,
         "ticker": inst["underlying"],
         "instrument_type": inst["instrument_type"],
@@ -367,7 +397,13 @@ def reconcile(broker_view: list[dict], expected_view: list[dict], as_of: str,
 
         if exp and brk:
             if float(exp_qty) == float(brk_qty):
-                continue  # MATCH — no diff recorded
+                # Quantities MATCH — but check per-field ECONOMIC divergence (cost
+                # basis / entry extrinsic) that a quantity-only comparison misses.
+                econ = _economic_diff(idx, exp, brk)
+                if econ is not None:
+                    diffs.append(econ)
+                    idx += 1
+                continue
             diffs.append(_diff(
                 idx, QUANTITY_MISMATCH, inst, exp_qty, brk_qty,
                 f"{_fmt_inst(inst)}: state expects {exp_qty}, broker holds {brk_qty}."))
@@ -406,6 +442,30 @@ def reconcile(broker_view: list[dict], expected_view: list[dict], as_of: str,
         "error": None,
     }
     return report
+
+
+def _economic_diff(idx, exp, brk) -> dict | None:
+    """When quantities match, compare per-position economic fields (cost basis,
+    then entry extrinsic) between state and broker. Returns a COST_BASIS_MISMATCH /
+    EXTRINSIC_MISMATCH diff for the first field that diverges beyond ECONOMIC_TOLERANCE,
+    or None when nothing comparable diverges. Both sides must carry the field — a
+    broker view that omits it yields None (the divergence is never fabricated)."""
+    for field, cls, label in (("cost_basis", COST_BASIS_MISMATCH, "cost basis"),
+                              ("entry_extrinsic", EXTRINSIC_MISMATCH, "entry extrinsic")):
+        ev, bv = exp.get(field), brk.get(field)
+        if ev is None or bv is None:
+            continue
+        try:
+            if abs(float(ev) - float(bv)) > ECONOMIC_TOLERANCE:
+                return _diff(
+                    idx, cls, exp, exp.get("quantity"), brk.get("quantity"),
+                    (f"{_fmt_inst(exp)}: {label} diverges — state {float(ev):.2f}, "
+                     f"broker {float(bv):.2f} (quantities match)."),
+                    field=field, expected_value=round(float(ev), 4),
+                    broker_value=round(float(bv), 4))
+        except (TypeError, ValueError):
+            continue
+    return None
 
 
 def _classify_missing(idx, exp, close_on_expiry, today) -> dict:
@@ -487,6 +547,14 @@ def _suggest_resolutions(diffs: list[dict]) -> list[dict]:
                 "label": ("Record the assignment: buy back the short stock or close the "
                           "position, then log a compensating adjustment. Do NOT exercise the "
                           "LEAP. (Legacy LEAP diagonal — a shares base has no short stock.)")})
+        elif cls in (COST_BASIS_MISMATCH, EXTRINSIC_MISMATCH):
+            out.append({
+                "diff_id": d["id"], "kind": "resolve_with_correction", "ticker": d["ticker"],
+                "field": d.get("field"), "expected_value": d.get("expected_value"),
+                "broker_value": d.get("broker_value"),
+                "label": (f"{d['ticker']} {d.get('field')} diverges (state "
+                          f"{d.get('expected_value')} vs broker {d.get('broker_value')}) — "
+                          f"book a txn_correction to the broker value, or acknowledge.")})
         elif cls in (MISSING_AT_BROKER, UNEXPECTED_AT_BROKER, QUANTITY_MISMATCH):
             out.append({
                 "diff_id": d["id"], "kind": "resolve_with_adjustment", "ticker": d["ticker"],
@@ -621,14 +689,37 @@ def _demo_broker_accounts() -> list:
 
 
 def _persist_report(state: dict, report: dict) -> None:
-    """Store the report as the last reconciliation + append to the capped history."""
+    """Store the report as the last reconciliation + append to the capped history.
+
+    Persisted resolutions/acks (keyed by STABLE diff identity) are re-applied to the
+    fresh report's diffs so an acknowledged non-issue does NOT re-surface and a
+    resolved diff does NOT re-freeze on the next run — the exact regression the
+    unstable per-run diff id used to cause (schema v20 gap)."""
     recon = state.setdefault("reconciliation", {"last": None, "history": []})
+    resolutions = recon.get("resolutions") or {}
+    if resolutions:
+        for d in report.get("diffs", []):
+            if not (d.get("resolution") or {}).get("status"):
+                prior = resolutions.get(d.get("stable_id"))
+                if prior:
+                    d["resolution"] = dict(prior, carried=True)
     recon["last"] = report
     if report.get("broker_ok"):
         recon["last_success"] = report["as_of"]
     hist = recon.setdefault("history", [])
     hist.append({k: report[k] for k in ("as_of", "status", "counts", "broker_ok", "error")})
     del hist[:-config.RECONCILE_HISTORY_MAX]
+
+
+def _persist_resolution(state: dict, d: dict, resolution: dict) -> None:
+    """Persist a resolution/ack keyed to the diff's STABLE identity so it survives
+    the next reconcile run (append-only in effect — the latest wins per stable id)."""
+    sid = d.get("stable_id")
+    if not sid:
+        return
+    recon = state.setdefault("reconciliation", {"last": None, "history": []})
+    recon.setdefault("resolutions", {})[sid] = dict(resolution, stable_id=sid,
+                                                    diff_summary=d.get("summary"))
 
 
 def apply_report_to_state(state: dict, report: dict) -> None:
@@ -756,6 +847,7 @@ def mark_diff_resolved(state: dict, diff_id: str, how: str, detail: dict | None 
     if d is None:
         raise ValueError(f"unknown diff id {diff_id!r} in the latest reconciliation report")
     d["resolution"] = {"status": "resolved", "how": how, "at": _utcnow(), "detail": detail}
+    _persist_resolution(state, d, d["resolution"])
     reevaluate_freezes(state)
     return d
 
@@ -770,5 +862,6 @@ def ack_diff(state: dict, diff_id: str, ack_reason: str) -> dict:
     if d is None:
         raise ValueError(f"unknown diff id {diff_id!r} in the latest reconciliation report")
     d["resolution"] = {"status": "acknowledged", "ack_reason": reason, "at": _utcnow()}
+    _persist_resolution(state, d, d["resolution"])
     reevaluate_freezes(state)
     return d
