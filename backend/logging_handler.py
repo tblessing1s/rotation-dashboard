@@ -824,10 +824,17 @@ def recompute_derived(state: dict) -> dict:
 
     # Extrinsic payback meter per position: how much of the LEAP's entry
     # extrinsic the collected short juice has paid back (current cycle only).
+    import position_types
     payback: dict[str, dict] = {}
     agg_at_entry = agg_collected = agg_remaining = 0.0
     for p in state.get("positions", []):
         ticker = p.get("ticker", "")
+        # Extrinsic payback is LEAP-extrinsic denominated. A SHARES base has no
+        # extrinsic to pay back, so it gets NO payback meter (a zero-denominator
+        # meter would read pct_complete=0 forever — a meaningless income hurdle).
+        # Shares juice is immediately real; the meter is simply absent for them.
+        if position_types.is_shares(p):
+            continue
         leap = p.get("leap") or {}
         at_entry = float(cycle_target.get(ticker, leap.get("extrinsic_at_entry") or 0))
         collected = float(cycle_collected.get(ticker, 0.0))

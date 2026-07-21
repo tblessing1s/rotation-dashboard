@@ -426,6 +426,22 @@ SHORT_ATR_MULT = 1.5         # short strike = stock - 1.5 * ATR (legacy flat def
                               # superseded by STRIKE_TABLE below for regime/posture-aware picks)
 SHARE_CAP = 500              # accumulate to 500 shares per stock, then rotate
 
+# ---- Shares-primary base leg (v3.0 / schema v20) ---------------------------
+# With real shares as the active base leg, a "contract" of coverage is a literal
+# 100-share round lot. Fragments below one round lot can never be sold against
+# (HARD_CFM_RULE) — see position_manager.covered_lots.
+SHARES_PER_LOT = 100
+# PROPOSED_DEFAULT — per-position lot-cost ceiling (SIZE-BLOCKED). No coded
+# per-position dollar cap existed before the migration (only the book-wide
+# MAX_DEPLOYED_CAPITAL); this blocks a high-priced name whose single 100-share
+# lot would blow the position envelope. Override via the PER_POSITION_CAP_USD env.
+PER_POSITION_CAP_USD = float(os.environ.get("PER_POSITION_CAP_USD") or 15000)
+# PROPOSED_DEFAULT — weekly juice adequacy floor for a SHARES base, denominated
+# against DEPLOYED SHARE CAPITAL (spot x shares) rather than LEAP cost. The gross
+# floor number is unchanged from the LEAP path pending recalibration; this is
+# logged to the rejection log against the new denominator (see account_gate).
+SHARES_JUICE_FLOOR_PCT = 1.5
+
 # ---- Weekly short strike selection: regime x posture table -----------------
 # HARD_CFM_RULE ("Genius System" market-timing table). The weekly short strike
 # distance below spot is set by BOTH an ATR multiplier and a minimum ITM% floor,

@@ -19,13 +19,18 @@ import indicators
 import logging_handler as log
 import order_lifecycle as olc
 import order_pricing
+import position_types
 import schwab_api
 import sector_data
 import session
 import spread_monitor
 
 VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_short",
-                 "roll_leap", "open_position_atomic", "close_position_atomic", "adjustment"}
+                 "roll_leap", "open_position_atomic", "close_position_atomic", "adjustment",
+                 # Shares-primary base leg (schema v20). buy_shares/sell_shares book the
+                 # real-share base; close_shares_assigned books a called-away exit at the
+                 # short strike (a clean delivery of owned shares — see _close_shares_assigned).
+                 "buy_shares", "sell_shares", "close_shares_assigned"}
 
 # Actions REJECTED on a frozen (needs_review) position — new risk cannot be added
 # to a position whose state is unverified. Closing actions (close_short,
@@ -34,7 +39,7 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
 # safe in either state of the world. ``adjustment`` is the resolution path, also
 # allowed. See docs/reconciliation.md.
 FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap",
-                          "open_position_atomic"}
+                          "open_position_atomic", "buy_shares"}
 
 
 class PositionFrozenError(RuntimeError):
@@ -101,12 +106,19 @@ ROLL_REASONS = {"scheduled", "75%-rule", "defend", "earnings", "kill-switch-exit
 # requires a typed exit_note. The coded enum replaced the old free-text set so
 # calibration can bucket outcomes by why they ended.
 
-# Schwab order instruction per single-leg CFM action (all legs are calls).
+# Schwab order instruction per single-leg CFM action (option legs are calls;
+# equity legs are the shares base). The equity instructions are LIVE_VERIFY —
+# the option builders use BUY_TO_OPEN/SELL_TO_CLOSE, but Schwab's equity order
+# schema is believed to use plain "BUY"/"SELL". These are used only to build a
+# previewOrder payload today (never transmitted); confirm against a live
+# previewOrder capture before any equity order is placed (see schwab_api).
 INSTRUCTION = {
     "buy_leap": "BUY_TO_OPEN",
     "sell_short": "SELL_TO_OPEN",
     "close_short": "BUY_TO_CLOSE",
     "close_leap": "SELL_TO_CLOSE",
+    "buy_shares": "BUY",          # LIVE_VERIFY equity instruction
+    "sell_shares": "SELL",        # LIVE_VERIFY equity instruction
 }
 
 
@@ -396,9 +408,14 @@ def _ensure_position(state: dict, ticker: str) -> dict:
         "sector": sector_data.sector_for(ticker) or "",
         "entry_date": log.utcnow()[:10],
         "status": "active",
+        # Base-leg discriminator (schema v20). None here resolves to LEGACY via
+        # position_types.of; the builder's apply() stamps the concrete type
+        # (buy_shares -> SHARES, buy_leap -> LEAP_PMCC_LEGACY) on the first leg.
+        "position_type": None,
         "leap": None,
         "leap_legs": [],
-        "shares": {"count": 0, "cost_basis_per_share": None, "cap": config.SHARE_CAP, "pct_to_cap": 0},
+        "shares": {"count": 0, "cost_basis_per_share": None, "cap": config.SHARE_CAP,
+                   "pct_to_cap": 0, "acquisition_records": []},
         "short_calls": [],
         "kill_switch": {},
         "thesis": {"fundamentals": "", "intact": True},
@@ -480,6 +497,14 @@ def execute(payload: dict, now: datetime | None = None) -> dict:
         return _roll_leap(payload, ticker, stock_price, mode, price_source)
     if action == "close_position_atomic":
         return _close_position_atomic(payload, ticker, stock_price, mode, price_source)
+    if action == "close_shares_assigned":
+        return _commit_assignment(payload, ticker, strike, contracts, stock_price, mode, price_source)
+
+    # Shares base actions never transmit a live order under this migration — the
+    # equity order path is constructed + previewed only (see _commit_shares). They
+    # book as the logged path regardless of the live/Schwab-configured branch below.
+    if action in ("buy_shares", "sell_shares"):
+        return _commit_shares(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
 
     # Live single-leg orders go to the broker and resolve asynchronously (place ->
     # poll -> fill/cancel); they're committed to state only once they actually
@@ -1699,6 +1724,10 @@ def _build_leg(payload, ticker, action, strike, contracts, stock_price):
         return _sell_short(payload, ticker, strike, contracts, stock_price)
     if action == "close_leap":
         return _close_leap(payload, ticker, strike, contracts, stock_price)
+    if action == "buy_shares":
+        return _buy_shares(payload, ticker, stock_price)
+    if action == "sell_shares":
+        return _sell_shares(payload, ticker, stock_price)
     return _close_short(payload, ticker, strike, contracts, stock_price)
 
 
@@ -1727,6 +1756,9 @@ def _commit(payload, ticker, action, contracts, strike, stock_price, price_sourc
     _stamp_roll_linkage(execution, payload)
     _stamp_source_rec(execution, payload)
     stored = log.append_execution(execution)
+    # Reflect the assigned id back onto the builder's execution dict so an apply()
+    # closure that references it (e.g. buy_shares' acquisition_record) can stamp it.
+    execution["id"] = stored["id"]
 
     state = log.load_state()
     position = _ensure_position(state, ticker)
@@ -1743,6 +1775,103 @@ def _commit(payload, ticker, action, contracts, strike, stock_price, price_sourc
         "captured_price": stock_price,
         "execution": stored,
     }
+
+
+def _preview_equity_order(payload, ticker, action, contracts, stock_price):
+    """Construct the equity order for a shares base action and, when Schwab is
+    configured, run a READ-ONLY previewOrder against the live account — NEVER a
+    place_order. Returns {order, preview|preview_error} for operator inspection.
+    This migration enables no live equity submission; the preview exists so the
+    UNKNOWN equity-order fields (schwab_api.build_equity_order) can be verified
+    against a real accepted payload before any transmit path is wired."""
+    qty = int(payload.get("qty") or payload.get("shares")
+              or (int(contracts or 0) * config.SHARES_PER_LOT))
+    limit = payload.get("limit_price")
+    if limit is None and payload.get("price_per_share") is not None:
+        limit = payload.get("price_per_share")
+    order = schwab_api.build_equity_order(INSTRUCTION[action], qty, ticker,
+                                          float(limit) if limit is not None else None)
+    result = {"order": order, "transmitted": False}
+    if schwab_api.configured():
+        try:
+            client = data_handler.client()
+            result["preview"] = client.preview_order(client.primary_account_hash(), order)
+        except Exception as exc:  # noqa: BLE001 — preview is advisory, never blocks
+            result["preview_error"] = str(exc)
+    return result
+
+
+def _commit_shares(payload, ticker, action, contracts, strike, stock_price, price_source, mode):
+    """Commit a shares base action (buy_shares / sell_shares). Live equity
+    submission is NOT enabled by this migration: in a live session the equity
+    order is CONSTRUCTED and PREVIEWED only (never transmitted) and the fill is
+    booked as the honest logged path. Any preview is attached for inspection."""
+    preview = None
+    if mode == "live":
+        try:
+            preview = _preview_equity_order(payload, ticker, action, contracts, stock_price)
+        except Exception as exc:  # noqa: BLE001 — a preview must never block booking
+            preview = {"error": str(exc)}
+    result = _commit(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
+    if preview is not None:
+        result["equity_order_preview"] = preview
+    return result
+
+
+def _commit_one(execution, apply, ticker, mode, price_source):
+    """Append one immutable execution, apply its position mutation, recompute, and
+    persist — the append->load->apply->recompute->save contract of _commit, reused
+    when a committer stages several legs in sequence (e.g. an assignment)."""
+    execution["mode"] = mode
+    execution["price_source"] = price_source
+    stored = log.append_execution(execution)
+    execution["id"] = stored["id"]
+    state = log.load_state()
+    position = _ensure_position(state, ticker)
+    apply(position)
+    log.recompute_derived(state)
+    log.save_state(state)
+    return stored
+
+
+def _commit_assignment(payload, ticker, strike, contracts, stock_price, mode, price_source):
+    """Book a covered-call assignment on a SHARES base: the short call is exercised
+    (the full premium is kept) and owned shares are delivered at the strike — a
+    clean delivery, not a synthetic short. Two immutable records land so both the
+    juice ledger and realized share P&L stay correct:
+
+      1) a close_short at intrinsic (extrinsic_paid_back == 0 -> the full extrinsic
+         sold is realized juice), tagged ``assigned``, which drops the covering leg;
+      2) the CALLED_AWAY shares delivery at the strike (realized P&L vs lot basis).
+    """
+    state = log.load_state()
+    position = _ensure_position(state, ticker)
+    n = int(contracts or 0)
+    strike_f = float(strike or 0)
+    committed = []
+
+    match = None
+    for sc in position.get("short_calls", []):
+        if _strike_eq(sc.get("strike"), strike_f):
+            match = sc
+            break
+    if match is not None:
+        sc_contracts = n or int(match.get("contracts") or 0)
+        intrinsic_ps = max((stock_price or strike_f) - strike_f, 0)
+        se, sa = _close_short({"close_price_per_share": round(intrinsic_ps, 4),
+                               "expiration": match.get("expiration")},
+                              ticker, strike_f, sc_contracts, stock_price)
+        se["assigned"] = True
+        committed.append(_commit_one(se, sa, ticker, mode, price_source)["id"])
+        n = n or sc_contracts
+
+    de, da = _shares_assigned_leg(payload, ticker, strike_f, n, stock_price)
+    stored = _commit_one(de, da, ticker, mode, price_source)
+    committed.append(stored["id"])
+
+    return {"success": True, "status": "filled", "execution_ids": committed,
+            "execution_id": committed[-1], "mode": mode, "captured_price": stock_price,
+            "realized_pnl": de["realized_pnl"], "execution": stored}
 
 
 def _stamp_roll_linkage(execution: dict, source: dict) -> None:
@@ -2559,6 +2688,170 @@ def _close_short(payload, ticker, strike, contracts, stock_price):
             else:
                 remaining -= have  # leg fully closed -> dropped
         position["short_calls"] = kept
+    return execution, apply
+
+
+# ---- Shares base leg (schema v20) ------------------------------------------
+
+def _reduce_shares(position: dict, qty: int) -> None:
+    """Reduce a position's owned-share count by ``qty`` (a sale or a called-away
+    delivery). Cost basis per share is unchanged by a reduction; pct_to_cap and
+    status follow. The immutable execution is the source of truth — this just
+    keeps the position mirror in sync (positions are not replayed)."""
+    shares = position.setdefault("shares", {"count": 0, "cost_basis_per_share": None,
+                                            "cap": config.SHARE_CAP, "pct_to_cap": 0,
+                                            "acquisition_records": []})
+    new_count = max(int(shares.get("count") or 0) - int(qty or 0), 0)
+    shares["count"] = new_count
+    cap = int(shares.get("cap") or config.SHARE_CAP)
+    shares["pct_to_cap"] = round(new_count / cap * 100) if cap else 0
+    if new_count == 0:
+        shares["cost_basis_per_share"] = None
+    if (new_count == 0 and not log.leap_legs(position)
+            and not (position.get("short_calls") or [])):
+        position["status"] = "closed"
+
+
+def _buy_shares(payload, ticker, stock_price):
+    """Buy the real-share base leg (schema v20): delta == 1.0, zero extrinsic, no
+    DTE — the SHARES parallel to _buy_leap. Never reshapes a buy_leap record;
+    ``buy_shares`` is its own append-only action. Weighted-average cost basis, an
+    append-only acquisition_record, and the structure-agnostic line-in-the-sand /
+    dividend / entry-context scaffolding an entry needs."""
+    qty = int(payload.get("qty") or payload.get("shares") or 0)
+    price_per_share = float(payload.get("price_per_share")
+                            if payload.get("price_per_share") is not None else (stock_price or 0))
+    total = float(payload.get("execution_total") or price_per_share * qty)
+    acquired_date = log.utcnow()[:10]
+    execution = {
+        "ticker": ticker, "action": "buy_shares", "qty": qty,
+        "price_per_share": round(price_per_share, 4), "execution_total": round(total, 2),
+        "stock_price": stock_price,
+    }
+
+    gate = payload.get("_account_gate") or {}
+    if payload.get("override_reason"):
+        execution["override"] = {"reason": str(payload["override_reason"]).strip(),
+                                 "failed_checks": gate.get("blocking_failures", [])}
+
+    # Line-in-the-sand: the circuit breaker (drawdown / MA legs) is structure-
+    # agnostic and still applies to a shares base; resolve it exactly like an entry.
+    cb_price = payload.get("circuit_breaker_price")
+    cb_source = "operator"
+    if cb_price is None:
+        cb_price = (gate.get("suggested_circuit_breaker") or {}).get("price")
+        cb_source = "default"
+        if cb_price is None:
+            import account_gate
+            cb_price = account_gate.suggested_circuit_breaker(ticker).get("price")
+    circuit_breaker = ({"price": round(float(cb_price), 2), "source": cb_source,
+                        "set_at": acquired_date,
+                        "entry_price": round(float(stock_price), 2) if stock_price else None}
+                       if cb_price is not None else None)
+    execution["circuit_breaker_price"] = circuit_breaker["price"] if circuit_breaker else None
+
+    dividend = gate.get("dividend")
+    if dividend is None:
+        import dividends
+        try:
+            dividend = dividends.next_dividend(ticker)
+        except Exception:  # noqa: BLE001 — dividend data must never block an entry
+            dividend = {"ex_date": None, "amount": None, "source": "error"}
+
+    entry_context = _capture_entry_context(ticker, payload)
+    execution["entry_context"] = entry_context
+
+    def apply(position):
+        shares = position.setdefault("shares", {"count": 0, "cost_basis_per_share": None,
+                                                "cap": config.SHARE_CAP, "pct_to_cap": 0,
+                                                "acquisition_records": []})
+        shares.setdefault("acquisition_records", [])
+        old_count = int(shares.get("count") or 0)
+        old_cb = float(shares.get("cost_basis_per_share") or 0)
+        new_count = old_count + qty
+        if new_count > 0:
+            shares["cost_basis_per_share"] = round(
+                (old_count * old_cb + qty * price_per_share) / new_count, 4)
+        shares["count"] = new_count
+        cap = int(shares.get("cap") or config.SHARE_CAP)
+        shares["cap"] = cap
+        shares["pct_to_cap"] = round(new_count / cap * 100) if cap else 0
+        shares["acquisition_records"].append({
+            "date": acquired_date, "qty": qty, "price": round(price_per_share, 4),
+            "source": payload.get("source") or "app", "execution_id": execution.get("id"),
+        })
+        fresh = old_count == 0 and not log.leap_legs(position)
+        if fresh:
+            position["position_type"] = position_types.SHARES
+            position["entry_date"] = acquired_date
+            position["circuit_breaker"] = circuit_breaker
+            position["dividend"] = dividend
+            position["entry_context"] = entry_context
+        else:
+            position.setdefault("position_type", position_types.SHARES)
+            if position.get("circuit_breaker") is None:
+                position["circuit_breaker"] = circuit_breaker
+            if position.get("dividend") is None:
+                position["dividend"] = dividend
+        position["status"] = "active"
+    return execution, apply
+
+
+def _sell_shares(payload, ticker, stock_price):
+    """Sell shares from the base leg (operator rotation / trim). Realized P&L vs the
+    lot cost basis. NOT a called-away assignment — that is close_shares_assigned,
+    booked at the short strike with a CALLED_AWAY exit reason."""
+    qty = int(payload.get("qty") or payload.get("shares") or 0)
+    price_per_share = float(payload.get("price_per_share")
+                            if payload.get("price_per_share") is not None else (stock_price or 0))
+    proceeds = float(payload.get("execution_total") or price_per_share * qty)
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    shares = (position.get("shares") if position else {}) or {}
+    cost_ps = float(payload.get("cost_basis_per_share")
+                    if payload.get("cost_basis_per_share") is not None
+                    else shares.get("cost_basis_per_share") or 0)
+    realized_pnl = round(proceeds - cost_ps * qty, 2)
+    execution = {
+        "ticker": ticker, "action": "sell_shares", "qty": qty,
+        "price_per_share": round(price_per_share, 4), "execution_total": round(proceeds, 2),
+        "stock_price": stock_price, "cost_basis_per_share": round(cost_ps, 4),
+        "realized_pnl": realized_pnl,
+    }
+
+    def apply(position):
+        _reduce_shares(position, qty)
+    return execution, apply
+
+
+def _shares_assigned_leg(payload, ticker, strike, contracts, stock_price):
+    """The SHARES called-away exit-with-P&L (analog of _close_leap): owned shares
+    are delivered at the short strike — a clean covered-call assignment, not a
+    synthetic short. proceeds = strike x 100 x contracts; realized P&L vs the lot
+    cost basis; exit_reason = CALLED_AWAY (structure-agnostic, note-free)."""
+    import entry_context as _entry_context
+    import exit_reasons
+    qty = int(payload.get("qty") or (int(contracts or 0) * config.SHARES_PER_LOT))
+    strike = float(strike or 0)
+    proceeds = round(strike * qty, 2)
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    shares = (position.get("shares") if position else {}) or {}
+    cost_ps = float(payload.get("cost_basis_per_share")
+                    if payload.get("cost_basis_per_share") is not None
+                    else shares.get("cost_basis_per_share") or 0)
+    realized_pnl = round(proceeds - cost_ps * qty, 2)
+    execution = {
+        "ticker": ticker, "action": "close_shares_assigned", "strike": strike,
+        "contracts": int(contracts or 0), "qty": qty, "proceeds": proceeds,
+        "cost_basis_per_share": round(cost_ps, 4), "realized_pnl": realized_pnl,
+        "stock_price": stock_price,
+        "exit_reason": exit_reasons.ExitReason.CALLED_AWAY, "exit_note": None,
+        "exit_metrics": _entry_context.exit_metrics(ticker),
+    }
+
+    def apply(position):
+        _reduce_shares(position, qty)
     return execution, apply
 
 
