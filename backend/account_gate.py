@@ -20,6 +20,7 @@ import dividends
 import earnings
 import indicators
 import logging_handler as log
+import position_types
 import schwab_api
 
 
@@ -102,9 +103,12 @@ def juice_estimate(ticker: str, df=None) -> dict:
         "leap_strike": round(k_leap, 1),
         "leap_cost_per_share": round(leap_cost, 2),
         "weekly_yield_pct": round(extr_w / leap_cost * 100, 2),
-        "net_weekly_yield_pct": net["net_juice_weekly_pct"],
-        "burn_weekly_per_share": net["burn_per_week_ps"],
-        "net_weekly_extrinsic_per_share": net["net_juice_per_week_ps"],
+        # .get() not [] — the shares path removes burn from the net-juice contract
+        # (net == gross), so these keys may be absent/None. Hard-subscripting them
+        # was the single KeyError site flagged in the migration audit (§Burn).
+        "net_weekly_yield_pct": net.get("net_juice_weekly_pct"),
+        "burn_weekly_per_share": net.get("burn_per_week_ps"),
+        "net_weekly_extrinsic_per_share": net.get("net_juice_per_week_ps"),
         "hist_vol": round(hv, 1),
         "source": "estimate",
     }
@@ -239,7 +243,8 @@ def _check(id_: str, label: str, ok, blocking: bool, detail: dict) -> dict:
 def evaluate(ticker: str, contracts: int | None = None,
              leap_cost_per_share: float | None = None,
              weekly_extrinsic_per_share: float | None = None,
-             state: dict | None = None) -> dict:
+             state: dict | None = None,
+             position_type: str | None = None) -> dict:
     """Run every Level-5 check for a proposed entry.
 
     `leap_cost_per_share` / `weekly_extrinsic_per_share` come from the live
@@ -249,6 +254,10 @@ def evaluate(ticker: str, contracts: int | None = None,
     `state` lets a bulk caller (see evaluate_many) pass one already-loaded
     state dict across many tickers instead of re-reading state.json each
     time; a single-ticker caller can omit it and a fresh load is used.
+
+    `position_type` selects the base-leg profile (schema v20). SHARES adds the
+    round-lot SIZE-BLOCK; the default (None -> LEAP_PMCC_LEGACY) preserves the
+    exact legacy check set so existing callers are unaffected.
     """
     ticker = ticker.upper()
     contracts = int(contracts or config.LEAP_CONTRACTS)
@@ -304,6 +313,23 @@ def evaluate(ticker: str, contracts: int | None = None,
         proposed_cost is not None and after <= config.MAX_DEPLOYED_CAPITAL, True,
         {"capital_deployed": deployed, "proposed_cost": proposed_cost,
          "after": round(after, 2), "max": config.MAX_DEPLOYED_CAPITAL}))
+
+    # 2b) Round-lot SIZE-BLOCK (SHARES base, schema v20). A shares entry is round
+    #     lots only; block any underlying whose single 100-share lot cost exceeds
+    #     the per-position cap. No coded per-position dollar cap existed before the
+    #     migration (only book-wide MAX_DEPLOYED_CAPITAL); PER_POSITION_CAP_USD is a
+    #     PROPOSED_DEFAULT. Only appended for a SHARES entry — legacy callers keep
+    #     the exact prior check set. Missing spot degrades to pass (never a false block).
+    if position_type == position_types.SHARES:
+        spot = est.get("stock_price") if isinstance(est, dict) else None
+        lot_cost = round(float(spot) * config.SHARES_PER_LOT, 2) if spot else None
+        checks.append(_check(
+            "round_lot_size",
+            f"100-share lot ≤ ${config.PER_POSITION_CAP_USD:,.0f} (SIZE-BLOCKED)",
+            lot_cost is None or lot_cost <= config.PER_POSITION_CAP_USD, True,
+            {"spot": spot, "shares_per_lot": config.SHARES_PER_LOT, "lot_cost": lot_cost,
+             "per_position_cap": config.PER_POSITION_CAP_USD,
+             "size_blocked": bool(lot_cost is not None and lot_cost > config.PER_POSITION_CAP_USD)}))
 
     # 3) Sector concentration — the filters funnel into the hottest sector.
     import sector_data

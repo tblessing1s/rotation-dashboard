@@ -451,6 +451,19 @@ def _classify_missing(idx, exp, close_on_expiry, today) -> dict:
         **extra)
 
 
+def _is_share_reduction(d: dict) -> bool:
+    """True when an EQUITY diff represents fewer shares held at the broker than the
+    state expects — the signature of a covered-share called-away assignment. MISSING
+    is a full reduction to zero; a QUANTITY_MISMATCH counts only when the broker
+    holds strictly fewer (positive) shares than expected."""
+    if d["classification"] == MISSING_AT_BROKER:
+        return float(d.get("expected_qty") or 0) > 0
+    if d["classification"] == QUANTITY_MISMATCH:
+        exp_q, brk_q = float(d.get("expected_qty") or 0), float(d.get("broker_qty") or 0)
+        return exp_q > 0 and 0 <= brk_q < exp_q
+    return False
+
+
 def _suggest_resolutions(diffs: list[dict]) -> list[dict]:
     """One suggested resolution per non-benign diff, plus the one-click expiry
     path for the benign carve-out."""
@@ -464,16 +477,32 @@ def _suggest_resolutions(diffs: list[dict]) -> list[dict]:
                 "contracts": abs(int(d["expected_qty"] or 0)),
                 "label": f"Book {d['ticker']} {d['strike']} short expiry at $0.00 (worthless)."})
         elif cls == SHORT_STOCK_DETECTED:
+            # Legacy LEAP diagonal: a SHORT STOCK position at the broker means the
+            # short call was assigned against a LEAP (not owned shares). The shares-
+            # primary base never produces short stock — an assignment there reduces
+            # OWNED shares instead (handled by the EQUITY reduction branch below).
             out.append({
                 "diff_id": d["id"], "kind": "resolve_with_adjustment", "ticker": d["ticker"],
                 "instrument_type": EQUITY, "quantity_delta": d["broker_qty"],
                 "label": ("Record the assignment: buy back the short stock or close the "
-                          "position, then log a compensating adjustment. Do NOT exercise the LEAP.")})
+                          "position, then log a compensating adjustment. Do NOT exercise the "
+                          "LEAP. (Legacy LEAP diagonal — a shares base has no short stock.)")})
         elif cls in (MISSING_AT_BROKER, UNEXPECTED_AT_BROKER, QUANTITY_MISMATCH):
             out.append({
                 "diff_id": d["id"], "kind": "resolve_with_adjustment", "ticker": d["ticker"],
                 "instrument_type": d["instrument_type"],
                 "label": f"Resolve {d['ticker']} {cls} with a compensating adjustment or acknowledge."})
+            # SHARES base called-away: owned shares REDUCED at the broker (missing, or
+            # a downward quantity mismatch) on an EQUITY line is a clean covered-call
+            # assignment — offer to book it as close_shares_assigned at the short
+            # strike (a realized sale + CALLED_AWAY exit), not just a bare adjustment.
+            if d["instrument_type"] == EQUITY and _is_share_reduction(d):
+                out.append({
+                    "diff_id": d["id"], "kind": "record_called_away", "ticker": d["ticker"],
+                    "instrument_type": EQUITY, "action": "close_shares_assigned",
+                    "label": (f"If {d['ticker']} shares were called away, book a "
+                              f"close_shares_assigned at the short strike (clean delivery "
+                              f"of owned shares — a CALLED_AWAY exit, no short stock).")})
     return out
 
 

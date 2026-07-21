@@ -6,6 +6,7 @@ from __future__ import annotations
 import config
 import data_handler
 import earnings
+import position_types
 
 
 def _stock_price(ticker: str) -> float | None:
@@ -108,7 +109,8 @@ def enrich_leap(leap: dict, stock_price: float | None) -> dict:
 
 
 def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
-                 live_mark: float | None = None, today=None) -> dict:
+                 live_mark: float | None = None, today=None,
+                 position_type: str | None = None) -> dict:
     """Per-short management signals, all derived from stored execution data:
 
     - decay_pct + roll_now: the 75% buyback rule (HARD_CFM_RULE — when the short
@@ -222,28 +224,44 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
                       else today + timedelta(days=int(dte)) if dte is not None else None)
             extrinsic = max(float(current) - max(stock_price - float(strike), 0.0), 0.0)
             if expiry and today <= ex <= expiry and extrinsic < float(amount):
+                import position_types as _pt
+                if position_type == _pt.SHARES:
+                    note = ("Extrinsic below the dividend before ex-div — early assignment "
+                            "possible. The short is covered by REAL SHARES: assignment is a "
+                            "clean called-away delivery of your owned shares at the strike "
+                            "(the planned exit) — no synthetic short stock, no dividend "
+                            "liability. Roll only if you want to keep the shares.")
+                else:
+                    note = ("Extrinsic below the dividend before ex-div — early assignment "
+                            "likely. The short is covered by a LEAP, not stock: assignment "
+                            "creates SHORT STOCK that owes the dividend. Roll before ex-div "
+                            "(or accept the assignment mechanics deliberately).")
                 out["assignment_risk"] = {
                     "trigger": "dividend",
                     "extrinsic": round(extrinsic, 2), "dividend": float(amount),
-                    "ex_date": ex_date,
-                    "note": ("Extrinsic below the dividend before ex-div — early assignment "
-                             "likely. The short is covered by a LEAP, not stock: assignment "
-                             "creates SHORT STOCK that owes the dividend. Roll before ex-div "
-                             "(or accept the assignment mechanics deliberately)."),
+                    "ex_date": ex_date, "note": note,
                 }
         except (TypeError, ValueError):
             pass
     if (out["assignment_risk"] is None and itm and current is not None
             and current_extrinsic is not None and dte is not None and int(dte) > 0
             and current_extrinsic < config.ASSIGNMENT_EXTRINSIC_FLOOR):
+        import position_types as _pt
+        if position_type == _pt.SHARES:
+            note = ("Extrinsic has collapsed below a few cents while deep ITM — assignable "
+                    "any time, no ex-div required. The short is covered by REAL SHARES: "
+                    "assignment simply delivers your owned shares at the strike (a clean "
+                    "called-away exit). Roll the short up/out only if you want to keep them.")
+        else:
+            note = ("Extrinsic has collapsed below a few cents while deep ITM — assignable "
+                    "any time, no ex-div required. Roll the short up/out to re-establish "
+                    "time value. The short is covered by a LEAP, not stock: never exercise "
+                    "the LEAP to cover an assignment.")
         out["assignment_risk"] = {
             "trigger": "extrinsic",
             "extrinsic": round(current_extrinsic, 2),
             "floor": config.ASSIGNMENT_EXTRINSIC_FLOOR,
-            "note": ("Extrinsic has collapsed below a few cents while deep ITM — assignable "
-                     "any time, no ex-div required. Roll the short up/out to re-establish "
-                     "time value. The short is covered by a LEAP, not stock: never exercise "
-                     "the LEAP to cover an assignment."),
+            "note": note,
         }
     return out
 
@@ -263,6 +281,32 @@ def delta_coverage(position: dict, price: float | None, q: float = 0.0) -> dict:
     Returns None-valued fields when no long leg is priceable."""
     import indicators
     import logging_handler as log
+    import position_types
+    # SHARES base: coverage is a literal covered-LOT count, not a Greek. A shares
+    # delta is permanently 1.0, so the LEAP floor/inversion delta checks can never
+    # legitimately fire; the real guardrail is floor(shares/100) >= total short
+    # contracts. ``inverted``/``naked_short`` fires when the shorts exceed the
+    # coverable lots (a naked short — HARD_CFM_RULE: fragments never coverable).
+    if position_types.is_shares(position):
+        cl = covered_lots(int((position.get("shares") or {}).get("count") or 0))
+        lots = cl["coverable_lots"]
+        short_contracts = sum(int(sc.get("contracts") or 0)
+                              for sc in position.get("short_calls", []))
+        return {
+            "assessable": True,
+            "position_type": position_types.SHARES,
+            "coverable_lots": lots,
+            "fragment_shares": cl["fragment_shares"],
+            "short_contracts": short_contracts,
+            "min_leg_delta": 1.0,
+            "long_delta": round(float(lots), 4),
+            "long_contracts": lots,
+            "short_delta": round(float(short_contracts), 4) if position.get("short_calls") else None,
+            "floor": config.LEAP_DELTA_FLOOR,
+            "floor_breach": False,   # delta 1.0 — the LEAP floor is unreachable
+            "inverted": bool(short_contracts > lots),
+            "naked_short": bool(short_contracts > lots),
+        }
     long_total, long_contracts, min_leg_delta = 0.0, 0, None
     for leg in log.leap_legs(position):
         n = int(leg.get("contracts") or 0)
@@ -410,9 +454,11 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
     dividend = position.get("dividend")
     shorts = position.get("short_calls", [])
     marks = _live_short_marks(ticker, shorts)
+    ptype = position_types.of(position)
     out["short_calls"] = [
         enrich_short(sc, price, dividend,
-                     live_mark=marks.get((sc.get("strike"), sc.get("expiration"))))
+                     live_mark=marks.get((sc.get("strike"), sc.get("expiration"))),
+                     position_type=ptype)
         for sc in shorts]
     out["defend"] = any(sc["below_strike"] for sc in out["short_calls"])
     out["roll_summary"] = roll_summary or {"count": 0, "net_total": 0.0, "drag_total": 0.0}
@@ -447,6 +493,10 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
     shares["cap"] = cap
     shares["pct_to_cap"] = round(count / cap * 100, 1) if cap else 0
     shares["locked"] = count >= cap
+    # Covered-lot capacity (schema v20): floor(count/100) sellable lots + fragment
+    # flag. For a SHARES base this is the coverage guardrail (short count can never
+    # exceed coverable_lots); harmless/informational on a legacy sidecar.
+    shares.update(covered_lots(count))
     # Accumulation-vs-kill-switch guard (config flag; see can_add_shares).
     if config.BLOCK_ACCUMULATION_ON_RS_DETERIORATION:
         blocked, why = _accumulation_block(ticker)
@@ -482,6 +532,21 @@ def positions_view(state: dict) -> list[dict]:
         p["wash_sale_flag"] = (flagged.get(p.get("ticker", ""))
                                if p.get("status") != "closed" else None)
     return out
+
+
+def covered_lots(shares_count) -> dict:
+    """Covered-call capacity of an owned-share count (schema v20, SHARES base).
+
+    HARD_CFM_RULE: only whole 100-share round lots can be sold against — a
+    fragment below one lot is never coverable. 150 shares -> 1 coverable lot + a
+    50-share fragment, NEVER 2. This is the atomic 100-share -> 1-contract floor
+    the covered-short derivation keys off (a SHARES position's short-call count
+    can never exceed ``coverable_lots``)."""
+    n = max(int(shares_count or 0), 0)
+    lots = n // config.SHARES_PER_LOT
+    fragment = n - lots * config.SHARES_PER_LOT
+    return {"shares": n, "coverable_lots": lots, "fragment_shares": fragment,
+            "has_fragment": fragment > 0}
 
 
 def position_capital(p: dict) -> float:
