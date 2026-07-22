@@ -153,6 +153,57 @@ def parse_transaction(txn: dict) -> tuple[dict | None, str | None]:
     }, None
 
 
+# LIVE_VERIFY — the exact Schwab transaction ``type`` for a cash dividend is
+# UNCONFIRMED against a live feed; these are the believed candidates (the audit
+# names DIVIDEND_OR_INTEREST / RECEIVE_AND_DELIVER). Confirm the real type values
+# Schwab sends for a cash dividend before trusting this recognition path.
+DIVIDEND_TYPES = {"DIVIDEND_OR_INTEREST", "RECEIVE_AND_DELIVER", "CASH_DIVIDEND",
+                  "DIVIDEND", "ORDINARY_DIVIDEND", "QUALIFIED_DIVIDEND"}
+
+
+def parse_dividend(txn: dict) -> dict | None:
+    """Recognize a cash-dividend transaction and normalize it to a dividend income
+    record {transaction_id, ticker, amount, time, type}. Returns None for anything
+    that isn't a recognizable dividend. Cash dividends were previously DROPPED
+    (parse_transaction returns (None, None) for non-TRADE rows), so held-share
+    dividend income was silently discarded. LIVE_VERIFY — see DIVIDEND_TYPES."""
+    if not isinstance(txn, dict):
+        return None
+    if (txn.get("type") or "").upper() not in DIVIDEND_TYPES:
+        return None
+    txn_id = txn.get("activityId") or txn.get("transactionId") or txn.get("id")
+    if txn_id is None:
+        return None
+    amount = _num(txn.get("netAmount"))
+    if not amount:
+        return None
+    ticker = None
+    for it in (txn.get("transferItems") or txn.get("transactionItems") or []):
+        inst = it.get("instrument") or {}
+        sym = inst.get("symbol") or inst.get("underlyingSymbol")
+        if sym:
+            ticker = str(sym).upper()
+            break
+    return {"transaction_id": str(txn_id), "ticker": ticker,
+            "amount": round(float(amount), 2),
+            "time": txn.get("time") or txn.get("tradeDate") or txn.get("settlementDate"),
+            "type": (txn.get("type") or "").upper()}
+
+
+def dividend_proposals(feed: list, already: set) -> list[dict]:
+    """Not-yet-ingested cash-dividend rows from a feed, as one-click
+    dividend_income proposals (the app never auto-books — NO_AUTO_REMEDIATION)."""
+    out: list[dict] = []
+    for txn in feed or []:
+        d = parse_dividend(txn)
+        if d and d["transaction_id"] not in already:
+            out.append(dict(d, proposal_id=f"div_{d['transaction_id']}",
+                            action="dividend_income",
+                            summary=(f"cash dividend ${d['amount']:.2f} on "
+                                     f"{d['ticker'] or '?'} — adopt to book as dividend income")))
+    return out
+
+
 def parse_feed(feed: list) -> tuple[list[dict], list[str]]:
     """Parse a whole transactions feed. Returns ``(records, errors)``."""
     records: list[dict] = []
@@ -433,6 +484,9 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
         "parsed": len(records),
         "matched": matched,
         "proposals": proposals,
+        # Cash dividends on held shares (schema v20) — previously DROPPED. Surfaced
+        # as one-click dividend_income proposals; never auto-booked (NO_AUTO_REMEDIATION).
+        "dividend_proposals": dividend_proposals(feed, already),
         "skipped_duplicates": skipped,
         "errors": errors,
     }

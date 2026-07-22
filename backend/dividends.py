@@ -172,6 +172,11 @@ def _fetch_event(ticker: str) -> dict:
         try:
             import data_handler
             fund = data_handler.client().get_instrument_fundamental(ticker)
+            # LIVE_VERIFY — none of these ex-div key names is confirmed against a
+            # live Schwab fundamental payload; they are best-effort candidates. The
+            # whole covered-call assignment-risk surface depends on one resolving.
+            # Dump a live fundamental for a known payer (KO/JNJ) and confirm which
+            # key exists + its units before trusting it (see migration audit §6).
             ex = next((str(fund[k])[:10] for k in
                        ("nextDivExDate", "divExDate", "dividendDate", "divDate")
                        if fund.get(k)), None)
@@ -230,3 +235,29 @@ def next_dividend(ticker: str, refresh: bool = False) -> dict:
             _write_cache(cache)
     return {"ex_date": rec.get("ex_date"), "amount": rec.get("amount"),
             "source": rec.get("source", "none")}
+
+
+def cached_dividend(ticker: str) -> dict:
+    """Cache-only next-dividend read — NEVER triggers a live fetch. Mirrors
+    earnings.cached_earnings so a bulk scan over many payers can't cause a fetch
+    storm. Returns the day-cached value with a ``stale`` flag (True when the cached
+    record is older than the TTL, or when nothing is cached). Manual overrides in
+    state metadata still win, exactly as next_dividend resolves them."""
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return {"ex_date": None, "amount": None, "source": "none", "stale": True}
+    try:
+        meta = log.load_state().get("metadata", {})
+        ov = (meta.get("dividend_event_overrides") or {}).get(ticker)
+        if ov:
+            return {"ex_date": ov.get("ex_date"), "amount": ov.get("amount"),
+                    "source": "override", "stale": False}
+    except Exception:  # noqa: BLE001
+        pass
+    with _lock:
+        rec = (_read_cache().get("events") or {}).get(ticker)
+    if not rec:
+        return {"ex_date": None, "amount": None, "source": "none", "stale": True}
+    stale = (time.time() - float(rec.get("fetched_at") or 0)) >= _TTL_SECONDS
+    return {"ex_date": rec.get("ex_date"), "amount": rec.get("amount"),
+            "source": rec.get("source", "none"), "stale": stale}

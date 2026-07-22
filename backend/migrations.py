@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 19
+CURRENT_VERSION = 20
 
 
 class MigrationAbortedError(RuntimeError):
@@ -303,6 +303,32 @@ def _v18_to_v19(state: dict) -> dict:
     return state
 
 
+def _v19_to_v20(state: dict) -> dict:
+    """v20 (shares-primary migration): the active base leg becomes real shares.
+
+    Two additive changes, no historical rewrite:
+
+    - Every existing position is tagged ``position_type = "LEAP_PMCC_LEGACY"``.
+      All current positions are the legacy diagonal (deep-ITM LEAP + short call),
+      so the discriminator is a pure backfill — the SHARES path is opt-in by an
+      explicit tag written only by the new ``buy_shares`` action, never here.
+    - The per-position ``shares`` block gains an append-only ``acquisition_records``
+      lot log (date, qty, price, source, execution_id) so a shares base is
+      lot-aware. The legacy ``count``/``cost_basis_per_share``/``cap``/``pct_to_cap``
+      fields are preserved untouched — the new list sits beside them.
+
+    Immutability holds: executions are never rewritten (the new ``buy_shares`` /
+    ``sell_shares`` / called-away records are appended by the executor going
+    forward). Legacy records render read-only and are never made actionable."""
+    import position_types
+    for p in state.get("positions", []):
+        p.setdefault("position_type", position_types.LEAP_PMCC_LEGACY)
+        shares = p.get("shares")
+        if isinstance(shares, dict):
+            shares.setdefault("acquisition_records", [])
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -322,6 +348,7 @@ MIGRATIONS = {
     16: _v16_to_v17,
     17: _v17_to_v18,
     18: _v18_to_v19,
+    19: _v19_to_v20,
 }
 
 

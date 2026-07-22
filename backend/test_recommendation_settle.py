@@ -39,10 +39,12 @@ def test_migration_v17_to_v18_seeds_spread_baselines():
 
 
 def test_current_version_is_18():
-    # v19 adds the transaction-ingestion stores (ingested_transactions / ingestion).
-    assert migrations.CURRENT_VERSION == 19
+    # v20 adds the shares-primary base leg (position_type discriminator + lot-aware
+    # shares record); v19 added the transaction-ingestion stores.
+    assert migrations.CURRENT_VERSION == 20
     assert migrations.MIGRATIONS[17] is migrations._v17_to_v18
     assert migrations.MIGRATIONS[18] is migrations._v18_to_v19
+    assert migrations.MIGRATIONS[19] is migrations._v19_to_v20
 
 
 # ---- staging -----------------------------------------------------------------

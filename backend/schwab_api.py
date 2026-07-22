@@ -654,6 +654,38 @@ def build_roll_order(quantity: int, buy_to_close_symbol: str, sell_to_open_symbo
     }
 
 
+def build_equity_order(instruction: str, quantity: int, symbol: str,
+                       limit_price: float | None = None) -> dict:
+    """A single-leg equity order for the SHARES base leg (schema v20).
+
+    ``instruction`` is the equity verb ("BUY" / "SELL"); ``quantity`` is a SHARE
+    count (NOT option contracts x100); ``symbol`` is the plain ticker. A LIMIT
+    order when ``limit_price`` is given, else MARKET.
+
+    LIVE_VERIFY — the app has NEVER transmitted an equity order. Every field here
+    is the believed Schwab equity-order shape but is UNCONFIRMED against a live
+    ``previewOrder``: the equity instruction verbs ("BUY"/"SELL" vs the option
+    BUY_TO_OPEN family), ``assetType: "EQUITY"`` as an ORDER field (it appears only
+    in READ parsing today), and the share-count quantity semantics. This builder is
+    used ONLY to construct a previewOrder payload; NO equity order is transmitted by
+    this migration. Capture an accepted previewOrder JSON and reconcile before any
+    place_order path is enabled (see AUDIT_SHARES_PRIMARY_MIGRATION_PHASE0.md §7)."""
+    order = {
+        "orderType": "LIMIT" if limit_price is not None else "MARKET",
+        "session": "NORMAL",
+        "duration": "DAY",
+        "orderStrategyType": "SINGLE",
+        "orderLegCollection": [{
+            "instruction": instruction,
+            "quantity": int(quantity),
+            "instrument": {"symbol": symbol, "assetType": "EQUITY"},  # LIVE_VERIFY
+        }],
+    }
+    if limit_price is not None:
+        order["price"] = f"{float(limit_price):.2f}"
+    return order
+
+
 # ---------------------------------------------------------------------------
 # Chain parsing (module-level, provider-specific -> normalized dicts)
 # ---------------------------------------------------------------------------

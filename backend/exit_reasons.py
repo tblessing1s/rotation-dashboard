@@ -35,6 +35,11 @@ class ExitReason:
     EARNINGS_WINDOW = "EARNINGS_WINDOW"         # roll deep-ITM or exit before the report
     RECONCILIATION = "RECONCILIATION"           # broker divergence -> exit to resolve
     TARGET_REACHED = "TARGET_REACHED"           # cycle return target met
+    # Covered shares called away at the short strike — a CLEAN delivery of owned
+    # shares (the planned exit of a SHARES base), NOT a synthetic short. Structure-
+    # agnostic and note-free: the single commonest real-shares exit. See
+    # executor._close_shares_assigned.
+    CALLED_AWAY = "CALLED_AWAY"
     OPERATOR_DISCRETION = "OPERATOR_DISCRETION"  # manual close; typed note REQUIRED
 
     # Mechanical LEAP roll: the long leg is rolled (close_leap + buy_leap sharing
@@ -54,7 +59,8 @@ CLOSE_TIME = frozenset({
     ExitReason.CB_MA200_CLOSE, ExitReason.CB_MANUAL_LINE,
     ExitReason.WHIPSAW_BREAKER, ExitReason.DELTA_COVERAGE,
     ExitReason.EARNINGS_WINDOW, ExitReason.RECONCILIATION,
-    ExitReason.TARGET_REACHED, ExitReason.OPERATOR_DISCRETION,
+    ExitReason.TARGET_REACHED, ExitReason.CALLED_AWAY,
+    ExitReason.OPERATOR_DISCRETION,
     ExitReason.LEAP_ROLL,
 })
 

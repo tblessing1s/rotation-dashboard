@@ -667,6 +667,25 @@ def validate_payback(execs: list[dict]) -> list[dict]:
     return issues
 
 
+TXN_CORRECTION_ACTION = "txn_correction"
+
+
+def _correction_overlay(execs: list[dict]) -> dict[str, dict]:
+    """Map corrected-execution-id -> merged {field: value} from append-only
+    ``txn_correction`` records (applied in append order, last-write-wins). A
+    correction is an APPENDED typed event that carries an economic edit for an
+    earlier execution; the original execution is NEVER rewritten — the change is
+    applied only to the DERIVED view here (schema v20, Work Item 10c). This is what
+    replaced the old in-place History-edit mutation of the append-only log."""
+    overlay: dict[str, dict] = {}
+    for e in execs:
+        if e.get("action") == TXN_CORRECTION_ACTION:
+            tid = str(e.get("corrects") or "")
+            if tid:
+                overlay.setdefault(tid, {}).update(e.get("changes") or {})
+    return overlay
+
+
 def derived_executions(state: dict) -> list[dict]:
     """The executions that feed the DERIVED views — the theta ledger AND the payout
     view — with the ones that must leave no trace filtered out:
@@ -675,13 +694,28 @@ def derived_executions(state: dict) -> list[dict]:
     * ``reverses_execution_id`` — the ``adoption_reversal`` marker itself, and
     * ``excluded`` — a fill the operator has manually excluded.
 
+    ``txn_correction`` records are not trades — they are excluded from the returned
+    list, but their economic edits are OVERLAID onto the executions they correct
+    (append-only correction, never an in-place rewrite). A corrected execution is
+    returned as a merged COPY; the immutable original on the log is untouched.
+
     A reversed/excluded execution must read the same everywhere: absent from the
     per-week theta ledger AND absent from the monthly payout, so History and Payouts
     can't disagree about it. Its immutable record stays on the log for the audit
     trail (append-only, never rewritten)."""
-    return [e for e in state.get("executions", [])
-            if not e.get("reversed_by") and not e.get("reverses_execution_id")
-            and not e.get("excluded")]
+    raw = [e for e in state.get("executions", [])
+           if not e.get("reversed_by") and not e.get("reverses_execution_id")
+           and not e.get("excluded")]
+    overlay = _correction_overlay(raw)
+    if not overlay:
+        return [e for e in raw if e.get("action") != TXN_CORRECTION_ACTION]
+    out = []
+    for e in raw:
+        if e.get("action") == TXN_CORRECTION_ACTION:
+            continue
+        ch = overlay.get(str(e.get("id")))
+        out.append({**e, **ch} if ch else e)
+    return out
 
 
 def recompute_derived(state: dict) -> dict:
@@ -824,10 +858,17 @@ def recompute_derived(state: dict) -> dict:
 
     # Extrinsic payback meter per position: how much of the LEAP's entry
     # extrinsic the collected short juice has paid back (current cycle only).
+    import position_types
     payback: dict[str, dict] = {}
     agg_at_entry = agg_collected = agg_remaining = 0.0
     for p in state.get("positions", []):
         ticker = p.get("ticker", "")
+        # Extrinsic payback is LEAP-extrinsic denominated. A SHARES base has no
+        # extrinsic to pay back, so it gets NO payback meter (a zero-denominator
+        # meter would read pct_complete=0 forever — a meaningless income hurdle).
+        # Shares juice is immediately real; the meter is simply absent for them.
+        if position_types.is_shares(p):
+            continue
         leap = p.get("leap") or {}
         at_entry = float(cycle_target.get(ticker, leap.get("extrinsic_at_entry") or 0))
         collected = float(cycle_collected.get(ticker, 0.0))
@@ -880,6 +921,29 @@ def recompute_derived(state: dict) -> dict:
         "remaining_to_payback": round(agg_remaining, 2),
         "net_income": round(agg_collected - agg_at_entry, 2),
         "income_positive": agg_at_entry > 0 and agg_remaining <= 0,
+    }
+
+    # Dividend income ledger (schema v20) — held-share cash dividends, kept as a
+    # SEPARATE income taxonomy so they never contaminate the juice/theta ledger
+    # (which derives only extrinsic/juice). Held-share dividends would otherwise be
+    # invisible to P&L; a naive add would corrupt the juice numbers.
+    div_records: list[dict] = []
+    div_by_ticker: dict[str, float] = {}
+    div_by_month: dict[str, float] = {}
+    for e in execs:
+        if e.get("action") != "dividend_income":
+            continue
+        t = e.get("ticker", "")
+        amt = float(e.get("amount") or 0)
+        month = str(e.get("pay_date") or e.get("date") or "")[:7] or UNDATED
+        div_by_ticker[t] = round(div_by_ticker.get(t, 0.0) + amt, 2)
+        div_by_month[month] = round(div_by_month.get(month, 0.0) + amt, 2)
+        div_records.append({"id": e.get("id"), "ticker": t, "amount": round(amt, 2),
+                            "shares": int(e.get("shares") or 0), "per_share": e.get("per_share"),
+                            "ex_date": e.get("ex_date"), "month": month, "date": e.get("date")})
+    state["dividend_ledger"] = {
+        "records": div_records, "by_ticker": div_by_ticker, "by_month": div_by_month,
+        "total": round(sum(div_by_ticker.values()), 2),
     }
 
     # Roll-cost / whipsaw ledger — derived from the paired roll executions
