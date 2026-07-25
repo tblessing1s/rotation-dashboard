@@ -312,6 +312,18 @@ SCAN_DIFF_LOG_MAX = 5000         # PROPOSED_DEFAULT — retained transition even
 # Env-tunable (CFM_JUICE_FLOOR_WK) so the bar can be calibrated live.
 JUICE_FLOOR_WK = float(os.environ.get("CFM_JUICE_FLOOR_WK", "1.5"))   # PROPOSED_DEFAULT — GROSS juice/wk adequacy floor (%)
 
+# PROPOSED_DEFAULT — the SHARES-base adequacy-floor MODE (§4.6). Under a shares
+# base the adequacy denominator becomes full share notional (~4-5x the LEAP cost),
+# so the same 1.5% number would demand ~73-110% IV to clear at CFM strike depth.
+# The number must be re-set from real data, not guessed during this refactor, so
+# the adequacy tier ships in SHADOW: evaluated + LOGGED (juice_floor calibration
+# log) but NEVER blocking and NEVER affecting SCORE. ENFORCE restores the safety
+# block. The HARD floor (net juice <= 0) is a separate HARD_CFM_RULE that blocks in
+# BOTH modes. Env-tunable via CFM_JUICE_FLOOR_MODE.
+JUICE_FLOOR_MODE = (os.environ.get("CFM_JUICE_FLOOR_MODE", "SHADOW").strip().upper() or "SHADOW")
+# PROPOSED_DEFAULT — newest calibration evaluations retained per symbol.
+JUICE_FLOOR_LOG_MAX = int(os.environ.get("CFM_JUICE_FLOOR_LOG_MAX") or 500)
+
 # Weekly universe-intake screen (DATA_DIR/candidate_universe.json) — the internal
 # approximation of the operator's Finviz momentum screen over cached bars. The
 # candidate list + append-only change log + sector-diversity report are produced

@@ -331,6 +331,29 @@ def evaluate(ticker: str, contracts: int | None = None,
              "per_position_cap": config.PER_POSITION_CAP_USD,
              "size_blocked": bool(lot_cost is not None and lot_cost > config.PER_POSITION_CAP_USD)}))
 
+    # 2c) Juice adequacy floor on the SHARE-NOTIONAL denominator (§4.6), SHADOW by
+    #     default. Under a shares base the adequacy denominator is full notional, so
+    #     the 1.5% number does not carry over — it must be re-set from real data.
+    #     SHADOW: this check is advisory (non-blocking) and every evaluation is
+    #     LOGGED as a calibration datapoint; it never affects the verdict or SCORE.
+    #     ENFORCE: the adequacy tier blocks like the legacy safety floor. The HARD
+    #     floor (net juice <= 0) is unaffected and lives in scan_triggers as before.
+    #     Only appended for a SHARES entry — legacy callers are untouched.
+    if position_type == position_types.SHARES:
+        import juice_floor
+        jf_spot = est.get("stock_price") if isinstance(est, dict) else None
+        jf = juice_floor.evaluate(
+            ticker, weekly_extrinsic_per_share=weekly_extr, spot=jf_spot,
+            iv=est.get("iv") if isinstance(est, dict) else None,
+            ivr=est.get("iv_rank") if isinstance(est, dict) else None,
+            atr_depth_mult=config.SHORT_ATR_MULT)
+        juice_floor.record(jf)  # best-effort telemetry; never raises
+        checks.append(_check(
+            "shares_juice_floor",
+            f"Weekly juice ≥ {config.SHARES_JUICE_FLOOR_PCT:g}% of share notional "
+            f"[{jf['mode']}]",
+            not jf["adequacy_fail"], jf["mode"] == juice_floor.ENFORCE, jf))
+
     # 3) Sector concentration — the filters funnel into the hottest sector.
     import sector_data
     sector = sector_data.sector_for(ticker) or ""
