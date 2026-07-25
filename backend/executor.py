@@ -44,6 +44,35 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
 FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap",
                           "open_position_atomic", "buy_shares"}
 
+# Actions that OPEN or EXTEND active LEAP exposure — retired as an active structure
+# (v3.0). Rejected at the operator boundary (app.api_execute) while LEAP is
+# read-only legacy. NOT rejected in execute() itself: legacy history, out-of-band
+# adoption/rebuild, and the test surface all drive the executor primitive directly.
+# Closing/exiting a legacy LEAP (close_leap, close_position_atomic, roll_short) is
+# NOT here — winding down must always be possible.
+LEAP_OPEN_ACTIONS = frozenset({"buy_leap", "roll_leap", "open_position_atomic"})
+
+
+def leap_open_blocked(payload: dict) -> str | None:
+    """A rejection reason if this action would open/extend an ACTIVE LEAP while the
+    diagonal is read-only legacy (``config.LEAP_LEGACY_READ_ONLY``), else None.
+
+    An explicit ``allow_legacy_leap`` flag bypasses it (adoption/rebuild of a real
+    out-of-band legacy fill) and is logged onto the execution like any override.
+    Pure — no state, no I/O — so the operator endpoint can gate on it up front."""
+    action = (payload.get("action") or "").strip()
+    if action not in LEAP_OPEN_ACTIONS:
+        return None
+    if not getattr(config, "LEAP_LEGACY_READ_ONLY", True):
+        return None
+    if payload.get("allow_legacy_leap"):
+        return None
+    return (f"'{action}' is retired: the LEAP diagonal is read-only legacy — no new "
+            f"LEAP may be opened, rolled, or recommended. The active base leg is "
+            f"shares (buy_shares). Existing legacy positions still render and can be "
+            f"closed/exited. (Set allow_legacy_leap to adopt a real out-of-band "
+            f"legacy fill.)")
+
 
 class PositionFrozenError(RuntimeError):
     """A new-risk action was attempted on a position frozen by reconciliation

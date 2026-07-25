@@ -592,9 +592,11 @@ def test_api_execute_frozen_returns_409(store):
     _save(store, _frozen_position())
     import app as app_module
     client = app_module.app.test_client()
+    # buy_shares is the go-forward add-risk action (LEAP opens are read-only-legacy
+    # now); a frozen position rejects it with a 409 before any order is staged.
     resp = client.post("/api/execute", json={
-        "action": "buy_leap", "ticker": "NVDA", "strike": 90, "contracts": 5,
-        "execution_price": 2000, "stock_price": 128})
+        "action": "buy_shares", "ticker": "NVDA", "qty": 100,
+        "price_per_share": 128, "stock_price": 128})
     assert resp.status_code == 409
     body = resp.get_json()
     assert body["frozen"] is True and body["ticker"] == "NVDA"

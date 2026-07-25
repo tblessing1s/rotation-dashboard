@@ -493,6 +493,13 @@ def api_earnings():
 @app.route("/api/execute", methods=["POST"])
 def api_execute():
     payload = request.get_json(silent=True) or {}
+    # Read-only-legacy guard (v3.0): the LEAP diagonal is retired as an active
+    # structure, so the operator entry path refuses to open/roll a NEW LEAP. Closing
+    # / exiting a legacy position is never blocked here. (The executor primitive
+    # stays capable for adoption/rebuild/history.)
+    leap_blocked = executor.leap_open_blocked(payload)
+    if leap_blocked is not None:
+        return jsonify({"error": leap_blocked, "leap_read_only": True}), 400
     try:
         return jsonify(executor.execute(payload))
     except executor.PositionFrozenError as e:

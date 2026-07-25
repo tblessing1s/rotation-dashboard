@@ -454,6 +454,18 @@ PER_POSITION_CAP_USD = float(os.environ.get("PER_POSITION_CAP_USD") or 15000)
 # logged to the rejection log against the new denominator (see account_gate).
 SHARES_JUICE_FLOOR_PCT = 1.5
 
+# HARD_CFM_RULE (v3.0) — the LEAP diagonal is retired as an ACTIVE structure: no
+# NEW LEAP may be opened, rolled, or recommended. Existing legacy positions stay
+# fully renderable/priceable from the immutable log and can still be CLOSED/exited
+# (kill switch, close_leap, atomic close) — read-only means no new exposure, not
+# "can't wind down". Enforced at the operator boundary (app.api_execute); the
+# executor primitive stays capable so legacy history, adoption, rebuild and the
+# test surface are unaffected. A caller may bypass with an explicit
+# ``allow_legacy_leap`` payload flag (logged), for adoption/rebuild of real
+# out-of-band legacy fills. Env override CFM_LEAP_LEGACY_READ_ONLY.
+LEAP_LEGACY_READ_ONLY = (os.environ.get("CFM_LEAP_LEGACY_READ_ONLY", "1").strip().lower()
+                         not in ("0", "false", "no"))
+
 # ---- Weekly short strike selection: regime x posture table -----------------
 # HARD_CFM_RULE ("Genius System" market-timing table). The weekly short strike
 # distance below spot is set by BOTH an ATR multiplier and a minimum ITM% floor,
