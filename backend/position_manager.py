@@ -461,6 +461,11 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
                      position_type=ptype)
         for sc in shorts]
     out["defend"] = any(sc["below_strike"] for sc in out["short_calls"])
+    # SHARES base weekly juice (§4.3/§4.7): extrinsic - slippage, no burn. Computed
+    # off the just-enriched short legs so the Positions card can render it. Legacy
+    # positions keep their leap_health juice-vs-burn block instead.
+    if position_types.is_shares(position):
+        out["shares_juice"] = shares_weekly_juice(out)
     out["roll_summary"] = roll_summary or {"count": 0, "net_total": 0.0, "drag_total": 0.0}
     # Whipsaw circuit breaker: too many defensive rolls / too much cumulative drag
     # -> exit, not another defend (the roll-down spiral no single check owns).
@@ -626,6 +631,44 @@ def capital_summary(state: dict) -> dict:
     }
 
 
+def shares_weekly_juice(position: dict) -> dict | None:
+    """Weekly juice for a SHARES base (§4.3). A shares base carries NO burn (the
+    term is structurally removed, not zeroed), so:
+
+        net_juice_per_week = short_call_extrinsic_per_week
+                           - amortized_round_trip_slippage_per_week
+
+    Extrinsic per week is each open short call's CURRENT extrinsic (the theta still
+    to collect) amortized over its remaining weeks; slippage is the open+close
+    round trip amortized the same way (ASSUMED_SLIPPAGE_PCT of the collected
+    extrinsic per leg — a documented estimate, not an execution figure). Returns
+    None when no open short carries a priceable extrinsic. There is deliberately no
+    ``burn_per_week`` key — absence is the point."""
+    gross = slip = 0.0
+    have = False
+    for sc in position.get("short_calls") or []:
+        contracts = int(sc.get("contracts") or 0)
+        if not contracts:
+            continue
+        extr = sc.get("current_extrinsic_per_share")
+        if extr is None:
+            extr = sc.get("entry_extrinsic_per_share")
+        if extr is None:
+            continue
+        dte = sc.get("dte")
+        weeks = max((float(dte) / 7.0) if dte else 1.0, 1.0)
+        leg_gross = float(extr) * contracts * 100 / weeks
+        leg_slip = 2.0 * config.ASSUMED_SLIPPAGE_PCT * leg_gross  # open + close round trip
+        gross += leg_gross
+        slip += leg_slip
+        have = True
+    if not have:
+        return None
+    return {"gross_per_week": round(gross, 2),
+            "slippage_per_week": round(slip, 2),
+            "net_juice_per_week": round(gross - slip, 2)}
+
+
 def net_juice_rollup(positions: list[dict]) -> dict:
     """Portfolio income rollup on NET juice/week (juice collected - LEAP theta
     burn with slippage), summed across open positions — NEVER gross (spec §6,
@@ -637,6 +680,15 @@ def net_juice_rollup(positions: list[dict]) -> dict:
     counted = 0
     for p in positions or []:
         if p.get("status") == "closed":
+            continue
+        # SHARES base: no LEAP, no burn — juice is the short-call extrinsic minus
+        # slippage (§4.3). Branch INSIDE the single rollup, don't fork it per type.
+        if position_types.is_shares(p):
+            sj = shares_weekly_juice(p)
+            if sj is not None:
+                gross += float(sj["gross_per_week"]); have_gross = True
+                net += float(sj["net_juice_per_week"]); have_net = True
+                counted += 1
             continue
         h = p.get("leap_health_agg") or p.get("leap_health") or {}
         g = h.get("trailing_avg_weekly_juice")

@@ -153,6 +153,29 @@ def test_delta_coverage_shares_flags_naked_short(store):
     assert ok["naked_short"] is False
 
 
+# ---- Weekly juice for a SHARES base (§4.3: extrinsic - slippage, no burn) -----
+def test_shares_weekly_juice_is_extrinsic_minus_slippage_no_burn(store):
+    pos = {"position_type": position_types.SHARES, "short_calls": [
+        {"contracts": 1, "current_extrinsic_per_share": 0.70, "dte": 7}]}
+    j = pm.shares_weekly_juice(pos)
+    # gross = 0.70 * 1 * 100 / 1 week = 70.0; slippage = 2 * 5% * 70 = 7.0; net = 63.0
+    assert j["gross_per_week"] == 70.0
+    assert j["slippage_per_week"] == 7.0
+    assert j["net_juice_per_week"] == 63.0
+    assert "burn_per_week" not in j          # burn is structurally absent, not zero
+
+
+def test_net_juice_rollup_counts_shares_short_call_juice(store):
+    shares_pos = {"status": "active", "position_type": position_types.SHARES,
+                  "short_calls": [{"contracts": 1, "current_extrinsic_per_share": 0.70,
+                                   "dte": 7}]}
+    roll = pm.net_juice_rollup([shares_pos])
+    assert roll["net_juice_per_week"] == 63.0       # shares now contribute
+    assert roll["gross_juice_per_week"] == 70.0
+    assert roll["positions_counted"] == 1
+    assert roll["burn_per_week"] in (None, 0.0)     # a shares book carries no burn
+
+
 # ---- Covering-unit enforcement at sell-short (executor) ----------------------
 def test_sell_short_beyond_covered_lots_is_rejected(store):
     _buy_shares("KO", 100, 60.0)            # 1 coverable lot
