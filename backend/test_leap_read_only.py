@@ -72,6 +72,14 @@ def test_api_execute_rejects_roll_leap(client):
     assert resp.get_json()["leap_read_only"] is True
 
 
+def test_api_legacy_view_toggle_roundtrip(client):
+    # Default off; POST persists; GET reads back.
+    assert client.get("/api/legacy-view").get_json()["legacy_view"] is False
+    assert client.post("/api/legacy-view", json={"legacy_view": True}).get_json()["legacy_view"] is True
+    assert client.get("/api/legacy-view").get_json()["legacy_view"] is True
+    assert client.post("/api/legacy-view", json={"legacy_view": False}).get_json()["legacy_view"] is False
+
+
 def test_api_execute_allows_close_leap_through_the_guard(client):
     # close_leap is NOT blocked by the read-only guard — it may fail downstream for
     # other reasons (no position), but never with the leap_read_only rejection.

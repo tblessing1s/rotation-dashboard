@@ -89,6 +89,9 @@ export const api = {
   strikePosture: () => request("/api/strike-posture"),
   setStrikePosture: (posture) =>
     request("/api/strike-posture", { method: "POST", body: JSON.stringify({ posture }) }),
+  legacyView: () => request("/api/legacy-view"),
+  setLegacyView: (legacy_view) =>
+    request("/api/legacy-view", { method: "POST", body: JSON.stringify({ legacy_view }) }),
   rollOptions: (ticker) => request(`/api/roll-options?ticker=${ticker}`),
   coverage: (ticker) => request(`/api/coverage?ticker=${ticker}`),
   optionChain: (ticker, strategy = "atr") => request(`/api/option-chain/${ticker}?strategy=${strategy}`),

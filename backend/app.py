@@ -376,6 +376,21 @@ def api_strike_posture():
                     "table": config.STRIKE_TABLE})
 
 
+@app.route("/api/legacy-view", methods=["GET", "POST"])
+def api_legacy_view():
+    """Read or set the operator's Legacy-view toggle (§4.7). OFF by default: the
+    retired LEAP diagonal's affordances are hidden. ON reveals existing legacy
+    positions READ-ONLY for review — it never re-enables opening/rolling a LEAP."""
+    import ui_settings
+    if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        try:
+            return jsonify(ui_settings.set_legacy_view(bool(payload.get("legacy_view"))))
+        except Exception as e:  # noqa: BLE001
+            return _err(e)
+    return jsonify({"legacy_view": ui_settings.get_legacy_view()})
+
+
 @app.route("/api/roll-suggestion")
 def api_roll_suggestion():
     ticker = request.args.get("ticker", "")
@@ -1463,6 +1478,12 @@ def api_config():
             "share_cap": config.SHARE_CAP,
             "strike_table": config.STRIKE_TABLE,
             "strike_posture": strike_policy.get_posture(),
+            # §4.7 — the shares base is the go-forward structure; the LEAP diagonal
+            # is read-only legacy. legacy_view reveals it for review (default off).
+            "legacy_view": __import__("ui_settings").get_legacy_view(),
+            "leap_legacy_read_only": config.LEAP_LEGACY_READ_ONLY,
+            "shares_per_lot": config.SHARES_PER_LOT,
+            "juice_floor_mode": config.JUICE_FLOOR_MODE,
         },
         # Effective transmit capability, NOT the raw flag: in demo mode a trade
         # never reaches the broker (see executor.live_transmit), so the Paper/Live
