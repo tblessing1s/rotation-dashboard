@@ -14,6 +14,8 @@ estimate the Scorecard's juice-adequacy column shows.
 """
 from __future__ import annotations
 
+import logging
+
 import config
 import data_handler
 import dividends
@@ -22,6 +24,8 @@ import indicators
 import logging_handler as log
 import position_types
 import schwab_api
+
+logger = logging.getLogger("cfm.alerts")
 
 
 # ---------------------------------------------------------------------------
@@ -194,17 +198,53 @@ def _open_positions(state: dict) -> list[dict]:
     return [p for p in state.get("positions", []) if p.get("status") != "closed"]
 
 
+def _covered_shares(p: dict) -> int:
+    """The share-notional the position controls: a legacy LEAP is a stock proxy for
+    contracts x 100 shares; real shares (§4.5) control their literal count. The
+    defensive 2xATR buffer is sized against THIS, not just the LEAP legs."""
+    contracts = int((p.get("leap") or {}).get("contracts") or 0)
+    share_count = int((p.get("shares") or {}).get("count") or 0)
+    return contracts * 100 + share_count
+
+
 def _position_reserve(p: dict) -> float | None:
-    """One position's defensive reserve: RESERVE_ATR_MULT x ATR$ x contracts x 100."""
-    leap = p.get("leap") or {}
-    contracts = int(leap.get("contracts") or 0)
-    if not contracts:
+    """One position's defensive 2xATR reserve, sized against full share notional
+    (§4.5): RESERVE_ATR_MULT x ATR$ x covered-shares. Pre-migration this keyed only
+    off LEAP contracts, so a SHARES base — which controls the same notional it costs
+    — was left with a $0 buffer. Now it covers shares too."""
+    covered = _covered_shares(p)
+    if not covered:
         return 0.0
     p_df = data_handler.get_daily(p.get("ticker", ""))
     atr_val = indicators.atr(p_df) if p_df is not None else None
     if atr_val is None:
         return None
-    return config.RESERVE_ATR_MULT * atr_val * contracts * 100
+    return config.RESERVE_ATR_MULT * atr_val * covered
+
+
+def reserve_breakdown(p: dict) -> dict:
+    """Old-vs-new defensive reserve for one position (§4.5 calibration). ``legacy_*``
+    is the pre-migration LEAP-contract sizing (0 for a pure shares base — the gap the
+    shares path closes); the live figures size against full share notional. Read-only
+    telemetry: it logs the side-by-side but changes no sizing decision."""
+    contracts = int((p.get("leap") or {}).get("contracts") or 0)
+    share_count = int((p.get("shares") or {}).get("count") or 0)
+    legacy_shares = contracts * 100                       # old: LEAP legs only
+    covered_shares = legacy_shares + share_count          # new: + real shares
+    p_df = data_handler.get_daily(p.get("ticker", ""))
+    atr_val = indicators.atr(p_df) if p_df is not None else None
+    mult = config.RESERVE_ATR_MULT
+    reserve = round(mult * atr_val * covered_shares, 2) if atr_val is not None else None
+    legacy_reserve = round(mult * atr_val * legacy_shares, 2) if atr_val is not None else None
+    bd = {"ticker": p.get("ticker"), "atr": round(atr_val, 4) if atr_val is not None else None,
+          "reserve_atr_mult": mult, "covered_shares": covered_shares,
+          "legacy_equiv_shares": legacy_shares, "reserve": reserve,
+          "legacy_equiv_reserve": legacy_reserve}
+    if share_count and reserve is not None and reserve != legacy_reserve:
+        logger.info("reserve recompute (shares) %s: old(LEAP-equiv)=$%s new(share-notional)=$%s "
+                    "(%d shares x %.2f ATR x %g)", p.get("ticker"), legacy_reserve, reserve,
+                    covered_shares, atr_val or 0.0, mult)
+    return bd
 
 
 def suggested_circuit_breaker(ticker: str, df=None) -> dict:
@@ -282,6 +322,9 @@ def evaluate(ticker: str, contracts: int | None = None,
     cash_info = resolve_operating_cash(state)
     operating = cash_info["amount"]
     reserves = [_position_reserve(p) for p in open_pos]
+    # §4.5 — surface the 2xATR buffer old-vs-new (LEAP-contract sizing vs full share
+    # notional) for each open position; reserve_breakdown also logs the side-by-side.
+    reserves_breakdown = [reserve_breakdown(p) for p in open_pos]
     new_atr = indicators.atr(df) if df is not None else None
     reserves.append(config.RESERVE_ATR_MULT * new_atr * contracts * 100
                     if new_atr is not None else None)
@@ -296,7 +339,8 @@ def evaluate(ticker: str, contracts: int | None = None,
          "operating_cash_error": cash_info["error"], "proposed_cost": proposed_cost,
          "free_cash_after": round(free_after, 2) if free_after is not None else None,
          "reserve_required": round(reserve_required, 2),
-         "reserve_incomplete": any(r is None for r in reserves)}))
+         "reserve_incomplete": any(r is None for r in reserves),
+         "reserves_breakdown": reserves_breakdown}))
 
     # 2) Position count + deployed-capital caps.
     n_open = len(open_pos)

@@ -153,6 +153,37 @@ def test_delta_coverage_shares_flags_naked_short(store):
     assert ok["naked_short"] is False
 
 
+# ---- Defensive reserve recompute against share notional (§4.5) ---------------
+def test_reserve_covers_shares_not_just_leap(store, monkeypatch):
+    import data_handler
+    import indicators
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: object())
+    monkeypatch.setattr(indicators, "atr", lambda df: 2.0)
+    mult = config.RESERVE_ATR_MULT
+    # SHARES: 200 shares get a 2xATR buffer against full share notional (was 0.0
+    # pre-migration because _position_reserve keyed only off LEAP contracts).
+    shares_pos = {"ticker": "KO", "position_type": position_types.SHARES,
+                  "shares": {"count": 200}, "leap": None}
+    assert account_gate._position_reserve(shares_pos) == pytest.approx(mult * 2.0 * 200)
+    # LEGACY LEAP: 3 contracts -> 300 covered shares, unchanged.
+    leap_pos = {"ticker": "MSFT", "leap": {"contracts": 3}, "shares": {"count": 0}}
+    assert account_gate._position_reserve(leap_pos) == pytest.approx(mult * 2.0 * 300)
+
+
+def test_reserve_breakdown_logs_old_vs_new(store, monkeypatch):
+    import data_handler
+    import indicators
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: object())
+    monkeypatch.setattr(indicators, "atr", lambda df: 2.0)
+    # A shares position's legacy-equivalent reserve (LEAP-contract sizing) is 0 — the
+    # side-by-side that shows the buffer the shares path newly requires.
+    bd = account_gate.reserve_breakdown({"ticker": "KO", "position_type": position_types.SHARES,
+                                         "shares": {"count": 200}, "leap": None})
+    assert bd["covered_shares"] == 200 and bd["legacy_equiv_shares"] == 0
+    assert bd["reserve"] == pytest.approx(config.RESERVE_ATR_MULT * 2.0 * 200)
+    assert bd["legacy_equiv_reserve"] == 0.0
+
+
 # ---- Round-lot SIZE-BLOCK ----------------------------------------------------
 def _est(spot):
     return {"ticker": "X", "stock_price": spot, "weekly_extrinsic_per_share": 1.0,
