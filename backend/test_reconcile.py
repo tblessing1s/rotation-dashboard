@@ -130,6 +130,46 @@ def test_short_stock_needs_a_leap_else_plain_unexpected():
     assert _classes(r) == [reconcile.UNEXPECTED_AT_BROKER]
 
 
+def test_shares_base_assignment_is_called_away_not_short_stock():
+    """§3.5 — a SHARES base has no LEAP, so a covered-call assignment DELIVERS owned
+    shares at strike (owned count drops) rather than creating short stock. The
+    reconcile diff is a share REDUCTION that offers record_called_away, and
+    SHORT_STOCK_DETECTED must NOT fire (that node is legacy-LEAP-only)."""
+    # Full called-away: state expects 100 owned shares, broker holds none.
+    exp = [eq("KO", 100)]
+    brk = []
+    r = reconcile.reconcile(brk, exp, "t")
+    assert reconcile.SHORT_STOCK_DETECTED not in _classes(r)
+    assert reconcile.MISSING_AT_BROKER in _classes(r)
+    kinds = [s["kind"] for s in r["suggested_resolutions"]]
+    assert "record_called_away" in kinds
+    ca = next(s for s in r["suggested_resolutions"] if s["kind"] == "record_called_away")
+    assert ca["action"] == "close_shares_assigned" and ca["ticker"] == "KO"
+
+
+def test_shares_partial_reduction_offers_called_away():
+    # Partial: 200 owned expected, broker holds 100 -> a downward EQUITY quantity
+    # mismatch is still a called-away signature (one lot delivered).
+    exp = [eq("KO", 200)]
+    brk = [eq("KO", 100)]
+    r = reconcile.reconcile(brk, exp, "t")
+    assert reconcile.SHORT_STOCK_DETECTED not in _classes(r)
+    assert "record_called_away" in [s["kind"] for s in r["suggested_resolutions"]]
+
+
+def test_short_stock_still_fires_for_legacy_leap_diagonal():
+    # The legacy path is RETAINED: a short stock against an open LEAP is still the
+    # assignment signature and must not be swept away by the shares migration.
+    exp = [opt("NVDA", 90, "2026-12-18", 5)]
+    brk = [opt("NVDA", 90, "2026-12-18", 5), eq("NVDA", -500)]
+    r = reconcile.reconcile(brk, exp, "t")
+    assert reconcile.SHORT_STOCK_DETECTED in _classes(r)
+    sug = next(s for s in r["suggested_resolutions"]
+               if s["diff_id"] == next(d["id"] for d in r["diffs"]
+                                       if d["classification"] == reconcile.SHORT_STOCK_DETECTED))
+    assert "Do NOT exercise the LEAP" in sug["label"]
+
+
 def test_compound_assignment_scenario():
     """Short call missing + short stock present -> MISSING_AT_BROKER(assignment_
     suspected) paired with SHORT_STOCK_DETECTED."""
