@@ -44,6 +44,35 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
 FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap",
                           "open_position_atomic", "buy_shares"}
 
+# Actions that OPEN or EXTEND active LEAP exposure — retired as an active structure
+# (v3.0). Rejected at the operator boundary (app.api_execute) while LEAP is
+# read-only legacy. NOT rejected in execute() itself: legacy history, out-of-band
+# adoption/rebuild, and the test surface all drive the executor primitive directly.
+# Closing/exiting a legacy LEAP (close_leap, close_position_atomic, roll_short) is
+# NOT here — winding down must always be possible.
+LEAP_OPEN_ACTIONS = frozenset({"buy_leap", "roll_leap", "open_position_atomic"})
+
+
+def leap_open_blocked(payload: dict) -> str | None:
+    """A rejection reason if this action would open/extend an ACTIVE LEAP while the
+    diagonal is read-only legacy (``config.LEAP_LEGACY_READ_ONLY``), else None.
+
+    An explicit ``allow_legacy_leap`` flag bypasses it (adoption/rebuild of a real
+    out-of-band legacy fill) and is logged onto the execution like any override.
+    Pure — no state, no I/O — so the operator endpoint can gate on it up front."""
+    action = (payload.get("action") or "").strip()
+    if action not in LEAP_OPEN_ACTIONS:
+        return None
+    if not getattr(config, "LEAP_LEGACY_READ_ONLY", True):
+        return None
+    if payload.get("allow_legacy_leap"):
+        return None
+    return (f"'{action}' is retired: the LEAP diagonal is read-only legacy — no new "
+            f"LEAP may be opened, rolled, or recommended. The active base leg is "
+            f"shares (buy_shares). Existing legacy positions still render and can be "
+            f"closed/exited. (Set allow_legacy_leap to adopt a real out-of-band "
+            f"legacy fill.)")
+
 
 class PositionFrozenError(RuntimeError):
     """A new-risk action was attempted on a position frozen by reconciliation
@@ -477,6 +506,25 @@ def execute(payload: dict, now: datetime | None = None) -> dict:
             "Refusing single-leg close_leap while an open short remains — it would "
             "leave a naked short call. Use close_position_atomic to exit both legs "
             "on one ticket, or close/roll the short first.")
+
+    # Covering-unit ceiling (SHARES base, schema v20). The 100-share round lot is
+    # the atomic covering unit (HARD_CFM_RULE): the total short contracts written
+    # against a shares base can never exceed the number of WHOLE owned lots — a
+    # sub-100 fragment covers nothing. Enforced HERE, at the operator boundary,
+    # before any order is placed — not cleaned up downstream. A legacy LEAP base
+    # covers via the long option (delta_coverage), so it is not subject to this.
+    if action == "sell_short" and position_types.is_shares(position):
+        import position_manager
+        count = int((position.get("shares") or {}).get("count") or 0)
+        coverable = position_manager.covered_lots(count)["coverable_lots"]
+        existing = sum(int(sc.get("contracts") or 0)
+                       for sc in position.get("short_calls") or [])
+        if existing + int(contracts or 0) > coverable:
+            raise ValueError(
+                f"Refusing sell_short: {existing + int(contracts or 0)} short "
+                f"contract(s) would exceed {coverable} covered lot(s) "
+                f"({count} shares) — the 100-share lot is the atomic covering unit, "
+                f"a fragment covers nothing and this would leave a naked short.")
 
     # Coded exit reason (+ typed note for OPERATOR_DISCRETION) — validated here,
     # at the operator-facing boundary, so a bad reason is rejected BEFORE any

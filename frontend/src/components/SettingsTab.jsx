@@ -30,11 +30,24 @@ function ToggleRow({ title, desc, on, busy, onToggle, onLabel, offLabel, onTone,
   );
 }
 
-export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, postureBusy, onTogglePosture }) {
+export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, postureBusy, onTogglePosture,
+                                      legacyView, legacyBusy, onToggleLegacyView }) {
   return (
     <div className="grid gap-4">
       <Card title="Trading preferences">
         <div className="divide-y divide-slate-800">
+          <ToggleRow
+            title="Legacy view"
+            desc="The active base is 100-share lots (covered calls). The deep-ITM LEAP diagonal is retired: turn this on to review existing LEAP positions read-only. It never re-enables opening or rolling a LEAP."
+            on={!!legacyView}
+            busy={legacyBusy}
+            onToggle={onToggleLegacyView}
+            onLabel="Legacy on"
+            offLabel="Legacy off"
+            onTone="border-violet-500/50 bg-violet-500/10 text-violet-300 hover:bg-violet-500/20"
+            offTone="border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800"
+            trackOn="bg-violet-500/70"
+          />
           <ToggleRow
             title="Strike posture"
             desc="Aggressive = thinner ATR/ITM% floor on weekly-short strikes (more juice, less protection). Conservative = wider floor."

@@ -1100,7 +1100,52 @@ function BookSummary({ positions, diffsByTicker, payback, risk }) {
 // intrinsic balance, extrinsic burn-off, short-call capture. Expanded: those three
 // in full (orange, juice-battery, short list), plus any active safety alert
 // (reconciliation, defend, whipsaw) which also auto-opens the row.
+// Shares base (§4.7): the LEAP intrinsic/burn blocks are LEAP-only, so a shares
+// position renders its own compact card — quantity + lots, cost basis vs current,
+// unrealized, weekly juice (extrinsic − slippage, no burn), and the next ex-div.
+function SharesCard({ p }) {
+  const sh = p.shares || {};
+  const count = Number(sh.count || 0);
+  const lots = sh.coverable_lots != null ? sh.coverable_lots : Math.floor(count / 100);
+  const basis = sh.cost_basis_per_share;
+  const px = p.stock_price;
+  const unreal = (basis != null && px != null) ? (px - basis) * count : null;
+  const juice = p.shares_juice || {};
+  const div = p.dividend || {};
+  return (
+    <div className="grid gap-4 rounded-xl border border-slate-800 bg-slate-900/40 p-4 text-sm sm:grid-cols-3">
+      <div>
+        <div className="text-[10px] uppercase tracking-wide text-slate-500">Shares</div>
+        <div className="text-base font-semibold text-slate-100">
+          {count} <span className="text-xs font-normal text-slate-500">({lots} lot{lots === 1 ? "" : "s"}
+          {sh.fragment_shares ? ` + ${sh.fragment_shares} frag` : ""})</span>
+        </div>
+        <div className="mt-0.5 text-xs text-slate-500">
+          basis {basis != null ? `$${fmt(basis, 2)}` : "—"} · now {px != null ? `$${fmt(px, 2)}` : "—"}
+        </div>
+      </div>
+      <div className="sm:border-l sm:border-slate-800 sm:pl-4">
+        <div className="text-[10px] uppercase tracking-wide text-slate-500">Unrealized</div>
+        <div className={`text-base font-semibold ${unreal == null ? "text-slate-400" : unreal >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+          {unreal == null ? "—" : `${unreal >= 0 ? "+" : "−"}$${fmt(Math.abs(unreal), 0)}`}
+        </div>
+        <div className="mt-0.5 text-xs text-slate-500">delta 1.0 base · no burn</div>
+      </div>
+      <div className="sm:border-l sm:border-slate-800 sm:pl-4">
+        <div className="text-[10px] uppercase tracking-wide text-slate-500">Weekly juice (net)</div>
+        <div className="text-base font-semibold text-emerald-300">
+          {juice.net_juice_per_week != null ? `$${fmt(juice.net_juice_per_week, 2)}/wk` : "—"}
+        </div>
+        <div className="mt-0.5 text-xs text-slate-500">
+          next ex-div {div.ex_date || "—"}{div.amount != null ? ` · $${fmt(div.amount, 2)}` : ""}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focused, setRolling, onOpenTicket, afterResolve }) {
+  const isShares = p.position_type === "SHARES";
   const shorts = p.short_calls || [];
   const hasAlert = !!(p.needs_review || p.defend || p.whipsaw?.tripped || (diffs && diffs.length));
   // Collapsed by default for a clean, scannable list; a tapped-alert deep link
@@ -1144,7 +1189,26 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
                   className="rounded-full border border-rose-500/50 bg-rose-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-rose-300">⚠</span>
           )}
         </span>
-        {/* collapsed summary — the three things, each with its tiny visual */}
+        {/* collapsed summary — a shares base has no intrinsic/burn, so it shows
+            shares + weekly juice; a legacy LEAP keeps intrinsic/burn/short. */}
+        {isShares ? (
+          <span className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-xs">
+            <span className="flex items-center gap-1">
+              <span className="text-slate-500">shares</span>
+              <span className="font-semibold text-slate-200">{Number(p.shares?.count || 0)}</span>
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="text-slate-500">juice</span>
+              <span className="font-semibold text-emerald-300">
+                {p.shares_juice?.net_juice_per_week != null ? `$${fmt(p.shares_juice.net_juice_per_week, 0)}/wk` : "—"}
+              </span>
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="text-slate-500">short</span>
+              <span className="font-semibold text-slate-200">{shortPct == null ? "none" : `${fmt(shortPct, 0)}% cap`}</span>
+            </span>
+          </span>
+        ) : (
         <span className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-xs">
           <span className="flex items-center gap-1.5">
             <Orange uid={`mini-${p.ticker}`} pct={pulp.pct} maintenance="unknown" mini />
@@ -1165,6 +1229,7 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
             <span className="font-semibold text-slate-200">{shortPct == null ? "none" : `${fmt(shortPct, 0)}% cap`}</span>
           </span>
         </span>
+        )}
       </button>
 
       {/* Engine recommendations stay visible even when the row is collapsed —
@@ -1188,15 +1253,20 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
             </div>
           )}
 
-          {/* (1) intrinsic balance + (2) extrinsic burn-off */}
-          <div className="grid gap-4 rounded-xl border border-slate-800 bg-slate-900/40 p-4 sm:grid-cols-2">
-            <IntrinsicBalance p={p} onRepaired={afterResolve} />
-            <div className="sm:border-l sm:border-slate-800 sm:pl-4">
-              <ExtrinsicBurnoff ticker={p.ticker} payback={payback} />
+          {/* Base leg: a shares base has no LEAP intrinsic/burn, so it renders the
+              shares card; a legacy LEAP diagonal keeps intrinsic-balance + burn-off. */}
+          {isShares ? (
+            <SharesCard p={p} />
+          ) : (
+            <div className="grid gap-4 rounded-xl border border-slate-800 bg-slate-900/40 p-4 sm:grid-cols-2">
+              <IntrinsicBalance p={p} onRepaired={afterResolve} />
+              <div className="sm:border-l sm:border-slate-800 sm:pl-4">
+                <ExtrinsicBurnoff ticker={p.ticker} payback={payback} />
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* (3) short-call capture */}
+          {/* short-call capture — the covered call, shared by both base types */}
           <ShortCalls p={p} shorts={shorts} setRolling={setRolling} onOpenTicket={onOpenTicket} />
 
           {p.defend && (

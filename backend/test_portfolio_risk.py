@@ -144,6 +144,43 @@ def test_portfolio_view_aggregates_and_sectors(isolated_state, monkeypatch):
     assert view["capital"]["reserve_required"] > 0
 
 
+def test_notional_controlled_shares_vs_leap(isolated_state, monkeypatch):
+    # §4.5 — the derived read-only metric that makes the capital/notional shift
+    # visible: a LEAP controls contracts*100 shares of underlying for a fraction of
+    # notional; real shares control exactly their count. Same $-ish deployed, very
+    # different controlled notional.
+    import data_handler
+    spy = _trend_frame(seed=7)
+    frames = {"SPY": spy,
+              "SHR": _scaled_frame(spy, 1.0, base=100.0),
+              "LEG": _scaled_frame(spy, 1.0, base=100.0)}
+    monkeypatch.setattr(data_handler, "get_daily",
+                        lambda s, force=False: frames.get(s.upper()))
+    px = float(frames["SHR"]["Close"].iloc[-1])
+    state = log.load_state()
+    state["positions"] = [
+        {"ticker": "SHR", "sector": "XLK", "status": "active",
+         "position_type": "SHARES", "leap": None, "short_calls": [],
+         "shares": {"count": 200, "cost_basis_per_share": 100.0}},
+        {"ticker": "LEG", "sector": "XLE", "status": "active",
+         "position_type": "LEAP_PMCC_LEGACY",
+         "leap": {"strike": 60, "contracts": 3, "dte": 150,
+                  "current_bid": (max(px - 60, 0) + 4.0) * 300, "cost_basis": 12000},
+         "short_calls": [], "shares": {"count": 0}},
+    ]
+    log.save_state(state)
+
+    view = pr.portfolio_view(log.load_state())
+    rows = {r["ticker"]: r for r in view["positions"]}
+    # Shares: 200 shares control 200 * price of underlying notional.
+    assert rows["SHR"]["notional_controlled"] == pytest.approx(round(200 * px, 2), abs=0.01)
+    # LEAP legacy: 3 contracts control 300 shares of underlying notional (gross).
+    assert rows["LEG"]["notional_controlled"] == pytest.approx(round(300 * px, 2), abs=0.01)
+    # Book total is the sum, exposed on the capital card as a read-only figure.
+    total = round(200 * px + 300 * px, 2)
+    assert view["capital"]["notional_controlled"] == pytest.approx(total, abs=0.02)
+
+
 # ---- correlation / concentration -----------------------------------------------
 def test_correlation_of_scaled_series_is_high():
     spy = _trend_frame(seed=7)

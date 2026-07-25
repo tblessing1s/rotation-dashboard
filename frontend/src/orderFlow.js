@@ -12,6 +12,8 @@
 const ACTION_VERB = {
   open_position_atomic: "Open position",
   buy_leap: "Buy LEAP",
+  buy_shares: "Buy shares",
+  sell_shares: "Sell shares",
   sell_short: "Sell short",
   close_short: "Close short",
   close_leap: "Close LEAP",

@@ -96,7 +96,15 @@ def position_risk(p: dict, spy_df) -> dict | None:
         theta_day -= th * n * 100           # short theta is collected (th < 0)
         vega_total -= v * n * 100
 
-    share_equiv += int((p.get("shares") or {}).get("count") or 0)
+    share_count = int((p.get("shares") or {}).get("count") or 0)
+    share_equiv += share_count
+
+    # §4.5 — GROSS underlying notional this position controls, read-only. A LEAP is a
+    # stock proxy for contracts*100 shares; real shares control exactly their count.
+    # Deliberately NOT delta-adjusted (that is delta_dollars): this is the figure that
+    # shows the $38K cap now buying ~4-5x less notional on the shares path.
+    controlled_shares = contracts * 100 + share_count
+    notional_controlled = round(controlled_shares * price, 2)
 
     b = beta(df, spy_df)
     dollar_delta = share_equiv * price
@@ -107,6 +115,7 @@ def position_risk(p: dict, spy_df) -> dict | None:
         "beta": round(b, 2) if b is not None else None,
         "delta_shares": round(share_equiv, 1),
         "delta_dollars": round(dollar_delta, 2),
+        "notional_controlled": notional_controlled,
         "delta_dollars_spy_adj": round(dollar_delta * b, 2) if b is not None else None,
         "theta_per_day": round(theta_day, 2),
         "vega": round(vega_total, 2),
@@ -259,6 +268,12 @@ def portfolio_view(state: dict) -> dict:
             "operating_cash_source": cash_info["source"],
             "reserve_required": reserve_required,
             "reserve_ok": operating >= reserve_required,
+            # §4.5 — read-only: gross underlying notional the book controls, and how
+            # many dollars of notional each deployed dollar commands. Under LEAP this
+            # ran ~4-5x; under shares it converges toward 1x. Surfaced, not enforced.
+            "notional_controlled": _sum("notional_controlled"),
+            "notional_to_deployed": (round(_sum("notional_controlled") / deployed, 2)
+                                     if deployed and _sum("notional_controlled") else None),
         },
         "sector_exposure": [
             {"sector": s, "capital": c, "pct": round(c / total_cap * 100, 1)}

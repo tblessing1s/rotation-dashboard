@@ -26,6 +26,8 @@ export default function App() {
   const [modeBusy, setModeBusy] = React.useState(false);
   const [posture, setPosture] = React.useState(null);
   const [postureBusy, setPostureBusy] = React.useState(false);
+  const [legacyView, setLegacyView] = React.useState(false);
+  const [legacyBusy, setLegacyBusy] = React.useState(false);
   // null = still checking, true = signed in (or auth disabled), false = show login.
   const [authed, setAuthed] = React.useState(null);
   const [alertCount, setAlertCount] = React.useState(0);
@@ -139,6 +141,11 @@ export default function App() {
     api.strikePosture().then((p) => setPosture(p.posture)).catch(() => {});
   }, [authed, demo]); // re-read on demo/live switch — posture is per-store
 
+  React.useEffect(() => {
+    if (authed !== true) return;
+    api.legacyView().then((v) => setLegacyView(!!v.legacy_view)).catch(() => {});
+  }, [authed, demo]); // legacy-view is per-store, like posture
+
   async function logout() {
     try {
       await api.logout();
@@ -167,6 +174,19 @@ export default function App() {
       // leave the previous posture displayed on failure
     } finally {
       setPostureBusy(false);
+    }
+  }
+
+  async function toggleLegacyView() {
+    const next = !legacyView;
+    setLegacyBusy(true);
+    try {
+      const r = await api.setLegacyView(next);
+      setLegacyView(!!r.legacy_view);
+    } catch {
+      // leave the previous value displayed on failure
+    } finally {
+      setLegacyBusy(false);
     }
   }
 
@@ -238,6 +258,7 @@ export default function App() {
             {tab === "Positions" && (
               <PositionTracker key={execNonce} intent={positionIntent}
                                onIntentHandled={() => setPositionIntent(null)}
+                               legacyView={legacyView}
                                onOpenTicket={openTicket} />
             )}
             {tab === "History" && <HistoryTab key={execNonce} />}
@@ -245,7 +266,9 @@ export default function App() {
             {tab === "Settings" && (
               <SettingsTab demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo}
                            posture={posture} postureBusy={postureBusy}
-                           onTogglePosture={togglePosture} />
+                           onTogglePosture={togglePosture}
+                           legacyView={legacyView} legacyBusy={legacyBusy}
+                           onToggleLegacyView={toggleLegacyView} />
             )}
           </>
         )}

@@ -14,8 +14,9 @@ function bigDollars(n) {
 }
 
 const ACTION_LABELS = {
-  open_position_atomic: "Open position — buy LEAP + sell weekly",
-  buy_leap: "Buy LEAP only (deep ITM)",
+  buy_shares: "Buy shares — 100-share lots (base)",
+  open_position_atomic: "Open position — buy LEAP + sell weekly (legacy)",
+  buy_leap: "Buy LEAP only, deep ITM (legacy)",
   sell_short: "Sell weekly short call",
   close_short: "Close / roll short call",
   close_leap: "Close LEAP (sell to close)",
@@ -45,6 +46,8 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   // a blocked gate needs a typed, logged override reason before executing.
   const [cbPrice, setCbPrice] = React.useState("");
   const [overrideReason, setOverrideReason] = React.useState("");
+  // Shares base open: a per-share limit price (the lot count reuses `qty`).
+  const [limitPrice, setLimitPrice] = React.useState("");
   const tradeMode = useTradeMode(); // "paper" | "live" | null — is this ticket routed to Schwab?
   const [pendingLive, setPendingLive] = React.useState(null); // live order awaiting explicit confirm
 
@@ -75,7 +78,14 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
         // strike is available; "Buy LEAP only" stays selectable in the dropdown.
         const sa = c.suggested_action;
         const hasWeekly = (c.weekly?.strikes || []).length > 0;
-        setAction(sa === "buy_leap" && hasWeekly ? "open_position_atomic" : (sa || "buy_leap"));
+        // Shares-primary default: a FRESH open (no existing LEAP / short) opens the
+        // shares base, not a LEAP diagonal. The legacy LEAP actions stay selectable
+        // (server-blocked unless adopting) but are no longer the default.
+        const hasExisting = !!(c.position?.has_leap || c.position?.open_short_count);
+        const isOpenSuggestion = !sa || sa === "buy_leap";
+        setAction(!hasExisting && isOpenSuggestion
+          ? "buy_shares"
+          : (sa === "buy_leap" && hasWeekly ? "open_position_atomic" : (sa || "buy_leap")));
         const defQty =
           sa === "close_short" && c.position?.open_short?.contracts ? c.position.open_short.contracts
           : sa === "close_leap" && c.position?.existing_leap?.contracts ? c.position.existing_leap.contracts
@@ -102,7 +112,8 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
         ...(position?.has_leap ? { close_leap: ACTION_LABELS.close_leap } : {}),
       }
     : ACTION_LABELS;
-  const showPayoff = !mgmt && action !== "close_leap";
+  const isShares = action === "buy_shares";
+  const showPayoff = !mgmt && action !== "close_leap" && !isShares;
   // Weekly expiration groups: this week's boundary and next week's. Older chain
   // payloads (no `expirations`) collapse to a single group over weekly.strikes.
   const weeklyGroups = weekly?.expirations
@@ -128,6 +139,16 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   function buildPayload() {
     const base = { action, ticker: chain.ticker, contracts: qtyNum };
     if (chain.underlying_price != null) base.stock_price = chain.underlying_price;
+    if (action === "buy_shares") {
+      // Shares base open (§4.7): the atomic unit is a 100-share lot, so the qty
+      // input is LOTS. limit price is per share. No LEAP strike / DTE at all.
+      const limit = Number(limitPrice);
+      const px = !Number.isNaN(limit) && limit > 0 ? limit : chain.underlying_price;
+      base.qty = qtyNum * 100;
+      if (px != null) { base.price_per_share = px; base.stock_price = px; }
+      if (cbPrice !== "" && !Number.isNaN(Number(cbPrice))) base.circuit_breaker_price = Number(cbPrice);
+      return base;
+    }
     if (action === "open_position_atomic" && chosenLeap && chosenWeekly) {
       // LEAP leg (buy to open) — same keys as buy_leap so the gate + booking reuse.
       base.strike = chosenLeap.strike;
@@ -185,7 +206,9 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   const canExecute =
     qtyNum > 0 &&
     (!gateBlocked || overrideReason.trim().length > 0) &&
-    ((action === "open_position_atomic" && chosenLeap && chosenWeekly) ||
+    ((action === "buy_shares" &&
+        ((Number(limitPrice) > 0) || chain?.underlying_price != null)) ||
+      (action === "open_position_atomic" && chosenLeap && chosenWeekly) ||
       (action === "buy_leap" && chosenLeap) ||
       (action === "sell_short" && chosenWeekly) ||
       (action === "close_short" && openShort) ||
@@ -291,7 +314,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                     {Object.entries(actionOptions).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                   </select>
                 </label>
-                <label className="text-slate-400">Quantity (contracts)
+                <label className="text-slate-400">{isShares ? "Lots (100 sh each)" : "Quantity (contracts)"}
                   <input
                     value={qty}
                     onChange={(e) => setQty(e.target.value.replace(/[^0-9]/g, ""))}
@@ -300,6 +323,31 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                   />
                 </label>
               </div>
+
+              {/* Shares base open (§4.7): a per-share limit price. The 100-share lot
+                  is the atomic unit, so the qty above is LOTS -> {qtyNum*100} shares. */}
+              {isShares && (
+                <div className="mt-3 rounded-lg border border-emerald-800 bg-emerald-500/5 p-3 text-sm">
+                  <label className="text-slate-400">Limit price (per share)
+                    <input
+                      value={limitPrice}
+                      onChange={(e) => setLimitPrice(e.target.value.replace(/[^0-9.]/g, ""))}
+                      inputMode="decimal"
+                      placeholder={chain?.underlying_price != null ? `e.g. ${chain.underlying_price}` : "e.g. 128.00"}
+                      className="mt-1 w-40 rounded-lg border border-slate-700 bg-slate-950 px-3 py-1.5 text-slate-100"
+                    />
+                  </label>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {qtyNum > 0
+                      ? `${qtyNum} lot${qtyNum === 1 ? "" : "s"} = ${qtyNum * 100} shares`
+                      : "1 lot = 100 shares"}
+                    {Number(limitPrice) > 0 && qtyNum > 0
+                      ? ` · ~$${(qtyNum * 100 * Number(limitPrice)).toLocaleString()} notional`
+                      : ""}
+                    . Delta 1.0 base — the covered call is sold in a separate step.
+                  </p>
+                </div>
+              )}
 
               {/* Level 5 (Account & Juice): circuit breaker is REQUIRED at entry;
                   a blocked gate needs a typed override reason, logged with the fill. */}
@@ -395,8 +443,9 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
               {execErr && <p className="mt-2 text-right text-xs text-rose-400">{execErr}</p>}
             </div>
 
-            {/* LEAP — pick a strike in the preferred delta band (entry only) */}
-            {!mgmt && (
+            {/* LEAP — pick a strike in the preferred delta band (entry only).
+                Hidden for a shares base open: no LEAP strike / DTE selection. */}
+            {!mgmt && !isShares && (
             <div className={`rounded-lg border bg-slate-950 p-3 ${isEntry ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">LEAP (pick a strike)</h3>
@@ -488,8 +537,9 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
 
             {/* Weekly short — this week's boundary AND next week's. The comparison
                 week (full DTE) is the default so the Level-5 juice gate prices
-                against a real week's premium, not a 1–2 DTE stub. */}
-            {!mgmt && (
+                against a real week's premium, not a 1–2 DTE stub. Hidden for a
+                shares base open — the covered call is sold in a separate step. */}
+            {!mgmt && !isShares && (
             <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" || action === "open_position_atomic" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">Weekly short call ({weekly?.posture || "…"}-suggested)</h3>
