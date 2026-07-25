@@ -478,6 +478,25 @@ def execute(payload: dict, now: datetime | None = None) -> dict:
             "leave a naked short call. Use close_position_atomic to exit both legs "
             "on one ticket, or close/roll the short first.")
 
+    # Covering-unit ceiling (SHARES base, schema v20). The 100-share round lot is
+    # the atomic covering unit (HARD_CFM_RULE): the total short contracts written
+    # against a shares base can never exceed the number of WHOLE owned lots — a
+    # sub-100 fragment covers nothing. Enforced HERE, at the operator boundary,
+    # before any order is placed — not cleaned up downstream. A legacy LEAP base
+    # covers via the long option (delta_coverage), so it is not subject to this.
+    if action == "sell_short" and position_types.is_shares(position):
+        import position_manager
+        count = int((position.get("shares") or {}).get("count") or 0)
+        coverable = position_manager.covered_lots(count)["coverable_lots"]
+        existing = sum(int(sc.get("contracts") or 0)
+                       for sc in position.get("short_calls") or [])
+        if existing + int(contracts or 0) > coverable:
+            raise ValueError(
+                f"Refusing sell_short: {existing + int(contracts or 0)} short "
+                f"contract(s) would exceed {coverable} covered lot(s) "
+                f"({count} shares) — the 100-share lot is the atomic covering unit, "
+                f"a fragment covers nothing and this would leave a naked short.")
+
     # Coded exit reason (+ typed note for OPERATOR_DISCRETION) — validated here,
     # at the operator-facing boundary, so a bad reason is rejected BEFORE any
     # order is placed. Normalizes payload["exit_reason"]/["exit_note"] in place.

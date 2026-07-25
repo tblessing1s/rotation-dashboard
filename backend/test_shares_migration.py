@@ -153,6 +153,45 @@ def test_delta_coverage_shares_flags_naked_short(store):
     assert ok["naked_short"] is False
 
 
+# ---- Covering-unit enforcement at sell-short (executor) ----------------------
+def test_sell_short_beyond_covered_lots_is_rejected(store):
+    _buy_shares("KO", 100, 60.0)            # 1 coverable lot
+    _sell_short("KO", 62, 1, 1.5, 60.0)     # 1 short vs 1 lot -> covered, ok
+    before = log.load_state()
+    n_before = len(before["executions"])
+    with pytest.raises(ValueError, match="naked|cover|lot"):
+        _sell_short("KO", 62, 1, 1.5, 60.0)  # 2nd short, only 1 lot -> naked
+    after = log.load_state()
+    assert len(after["executions"]) == n_before        # no execution logged
+    scs = log.find_position(after, "KO").get("short_calls") or []
+    assert sum(int(s.get("contracts") or 0) for s in scs) == 1  # still just the 1
+
+
+def test_sell_short_two_lots_covers_two_contracts(store):
+    _buy_shares("KO", 200, 60.0)            # 2 coverable lots
+    res = _sell_short("KO", 62, 2, 1.5, 60.0)   # 2 shorts vs 2 lots -> ok
+    assert res.get("ok", True) is not False
+    scs = log.find_position(log.load_state(), "KO").get("short_calls") or []
+    assert sum(int(s.get("contracts") or 0) for s in scs) == 2
+
+
+def test_sell_short_fragment_lot_not_coverable(store):
+    _buy_shares("KO", 150, 60.0)           # 1 coverable lot, 50-share fragment
+    _sell_short("KO", 62, 1, 1.5, 60.0)    # ok against the 1 lot
+    with pytest.raises(ValueError, match="naked|cover|lot"):
+        _sell_short("KO", 62, 1, 1.5, 60.0)  # the 50 fragment can't cover a 2nd
+
+
+def test_sell_short_legacy_leap_not_subject_to_lot_ceiling(store):
+    executor.execute({"action": "buy_leap", "ticker": "MSFT", "strike": 300,
+                      "contracts": 1, "execution_price": 5000, "stock_price": 350,
+                      "override_reason": "test fixture — legacy LEAP"})
+    # A legacy LEAP position covers via the long option, not a share lot — the
+    # shares covering-unit ceiling must not fire here.
+    res = _sell_short("MSFT", 360, 1, 2.0, 350.0)
+    assert res.get("ok", True) is not False
+
+
 # ---- Defensive reserve recompute against share notional (§4.5) ---------------
 def test_reserve_covers_shares_not_just_leap(store, monkeypatch):
     import data_handler
