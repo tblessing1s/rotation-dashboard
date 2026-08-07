@@ -76,6 +76,50 @@ def test_absent_position_type_degrades_to_legacy():
     assert position_types.of({"position_type": None}) == position_types.LEAP_PMCC_LEGACY
 
 
+# ---- Read-only-legacy dispatch guard (no new LEAP may be opened) --------------
+@pytest.fixture()
+def leap_readonly(monkeypatch):
+    """Turn the shares-only enforcement back ON (the suite defaults it off so
+    pre-migration tests can seed legacy fixtures — see conftest)."""
+    monkeypatch.setattr(config, "LEGACY_LEAP_READONLY", True)
+
+
+@pytest.mark.parametrize("payload", [
+    {"action": "buy_leap", "ticker": "NVDA", "strike": 100, "contracts": 1,
+     "execution_price": 5000, "stock_price": 120, "override_reason": "x"},
+    {"action": "roll_leap", "ticker": "NVDA", "stock_price": 120},
+    {"action": "open_position_atomic", "ticker": "NVDA", "contracts": 1,
+     "stock_price": 120, "strike": 100, "short_strike": 118},
+])
+def test_leap_open_actions_blocked_when_readonly(store, leap_readonly, payload):
+    before = len(log.load_state().get("executions") or [])
+    with pytest.raises(executor.LegacyLeapBlocked) as exc:
+        executor.execute(payload)
+    assert exc.value.action == payload["action"]
+    # Refused up-front — no order path, no state mutation, no appended execution.
+    assert len(log.load_state().get("executions") or []) == before
+
+
+def test_shares_base_still_opens_when_readonly(store, leap_readonly):
+    # The active base leg is unaffected by the guard.
+    _buy_shares("KO", 100, 60.0)
+    p = log.find_position(log.load_state(), "KO")
+    assert p["position_type"] == position_types.SHARES and p["shares"]["count"] == 100
+
+
+def test_legacy_short_leg_still_manageable_when_readonly(store, monkeypatch):
+    # A legacy position (seeded with the guard off) can still have its SHORT leg
+    # closed once the guard is on — read-only legacy must never trap a wind-down.
+    executor.execute({"action": "buy_leap", "ticker": "MSFT", "strike": 300,
+                      "contracts": 1, "execution_price": 5000, "stock_price": 350,
+                      "override_reason": "test fixture — legacy LEAP"})
+    _sell_short("MSFT", 348.0, 1, 2.0, 350.0)
+    monkeypatch.setattr(config, "LEGACY_LEAP_READONLY", True)
+    res = executor.execute({"action": "close_short", "ticker": "MSFT", "strike": 348.0,
+                            "contracts": 1, "premium_per_share": 1.0, "stock_price": 350.0})
+    assert res["status"] == "filled"
+
+
 # ---- SHARES lifecycle --------------------------------------------------------
 def test_buy_shares_creates_shares_position_lot_aware(store):
     _buy_shares("KO", 200, 60.0)

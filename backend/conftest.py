@@ -1,11 +1,18 @@
 """Shared test scaffolding — a scriptable mock Schwab client.
 
 Purely additive: this file defines a reusable ``MockSchwabClient`` and an opt-in
-``mock_schwab`` fixture. It declares NO autouse fixtures and overrides nothing, so
-the existing per-file inline mocks keep working untouched. New tests (transaction
-ingestion, and any future consolidation of the inline fakes) can build on this one
-replayable surface, which — unlike the older inline mocks — can script the
-``get_transactions`` feed the §4 ingestion path consumes.
+``mock_schwab`` fixture. New tests (transaction ingestion, and any future
+consolidation of the inline fakes) can build on this one replayable surface,
+which — unlike the older inline mocks — can script the ``get_transactions`` feed
+the §4 ingestion path consumes.
+
+One autouse fixture (``_legacy_leap_open_in_tests``) relaxes the shares-primary
+read-only guard for the suite: many tests predate the migration and build LEGACY
+LEAP positions as *history fixtures* via ``execute(buy_leap / open_position_atomic
+/ roll_leap)`` to exercise the still-supported read-only machinery (payback meters,
+history, rolls of the short leg, reconciliation, exits). In production the guard is
+ON (``config.LEGACY_LEAP_READONLY`` defaults True) — ``test_shares_migration`` flips
+it back on to assert the block directly.
 
 No live Schwab call is ever made; every method returns scripted data.
 """
@@ -99,7 +106,22 @@ def _pytest_fixtures():
         """Return the MockSchwabClient class (tests instantiate with their script)."""
         return MockSchwabClient
 
-    return mock_schwab
+    @pytest.fixture(autouse=True)
+    def _legacy_leap_open_in_tests():
+        """Let the suite build LEGACY LEAP positions as history fixtures. The
+        shares-primary read-only guard (config.LEGACY_LEAP_READONLY) is ON in
+        production; here it is relaxed so pre-migration tests can seed legacy
+        state via execute(buy_leap/...). Tests that assert the guard set it back
+        on explicitly (see test_shares_migration)."""
+        import config
+        prev = config.LEGACY_LEAP_READONLY
+        config.LEGACY_LEAP_READONLY = False
+        try:
+            yield
+        finally:
+            config.LEGACY_LEAP_READONLY = prev
+
+    return mock_schwab, _legacy_leap_open_in_tests
 
 
-mock_schwab = _pytest_fixtures()
+mock_schwab, _legacy_leap_open_in_tests = _pytest_fixtures()

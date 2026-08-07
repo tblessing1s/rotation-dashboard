@@ -539,14 +539,24 @@ def seed_reconciliation() -> None:
 def seed() -> int:
     """(Re)build the demo dataset (synthetic cache + sample book). Always targets
     the demo store — never the live one — by switching the process into demo mode
-    first, so the handlers write to the demo paths. Returns the position count."""
+    first, so the handlers write to the demo paths. Returns the position count.
+
+    The demo book is a LEGACY LEAP diagonal (it predates the shares-primary
+    migration), so the read-only guard is relaxed for the rebuild only — this is
+    constructing historical fixtures, exactly the case config.LEGACY_LEAP_READONLY
+    exempts. The flag is restored in a finally so the live path stays shares-only."""
     config.set_demo_enabled(True)
-    strong = {s["ticker"] for s in BOOK}
-    anchors = {s["ticker"]: float(s["cur_px"]) for s in BOOK}
-    anchors[ALERT_DEMO["ticker"]] = float(ALERT_DEMO["cur_px"])
-    last_close = generate_market_cache(strong, anchors, weak_tickers={ALERT_DEMO["ticker"]})
-    seed_state(last_close)
-    seed_reconciliation()
+    prev_readonly = config.LEGACY_LEAP_READONLY
+    config.LEGACY_LEAP_READONLY = False
+    try:
+        strong = {s["ticker"] for s in BOOK}
+        anchors = {s["ticker"]: float(s["cur_px"]) for s in BOOK}
+        anchors[ALERT_DEMO["ticker"]] = float(ALERT_DEMO["cur_px"])
+        last_close = generate_market_cache(strong, anchors, weak_tickers={ALERT_DEMO["ticker"]})
+        seed_state(last_close)
+        seed_reconciliation()
+    finally:
+        config.LEGACY_LEAP_READONLY = prev_readonly
     return len(BOOK) + 1
 
 

@@ -198,8 +198,16 @@ def _exit_ticket(position: dict, tk: dict, q: float, exit_reason_code: str | Non
 
 
 def _enter_ticket(candidate: dict, market: dict) -> dict:
-    """An entry ticket: deep-ITM LEAP at the target delta/DTE + the policy short
-    strike, one NET_DEBIT diagonal (the atomic open the executor already routes)."""
+    """A shares-primary entry ticket (schema v20): buy the round-lot share base
+    (delta == 1.0, no extrinsic, no DTE) via ``buy_shares``, then sell the policy
+    covering short against it. Retires the LEAP diagonal as the active entry — the
+    LEAP long is read-only legacy now (see position_types.py / executor guard).
+
+    Two orders, not one combined ticket: an equity buy cannot ride the same Schwab
+    order as an option sell, so the base ``buy_shares`` is the executable action and
+    the covering short is carried as a follow-on leg + ``covering_short`` block. The
+    per-share net entry debit (share cost less the premium collected) is estimated
+    for display; the covering short re-prices from the live chain when it's sold."""
     tk = _tk(market, candidate.get("ticker", ""))
     price = tk.get("price") or tk.get("last_close")
     atr_value = tk.get("atr")
@@ -208,31 +216,32 @@ def _enter_ticket(candidate: dict, market: dict) -> dict:
     short = (strike_policy.suggest_strike(price, atr_value, regime, posture)
              if price is not None and atr_value is not None else {})
     q = tk.get("q") or 0.0
-    leap_strike = candidate.get("leap_strike")
-    leap_cost = _bs_premium(price, leap_strike, config.LEAP_TARGET_DTE, tk.get("hist_vol"), q)
     short_premium = _bs_premium(price, short.get("strike"), 5, tk.get("hist_vol"), q)
-    net = (round(short_premium - leap_cost, 2)
-           if leap_cost is not None and short_premium is not None else None)
-    limit, floor = _net_bounds(net)
     contracts = int(candidate.get("contracts") or 1)
+    qty = contracts * config.SHARES_PER_LOT   # shares that cover `contracts` short calls
+    share_cost = round(float(price), 2) if price is not None else None
+    notional = round(float(price) * qty, 2) if price is not None else None
+    net_debit_ps = (round(float(price) - short_premium, 2)
+                    if price is not None and short_premium is not None else None)
     return {
-        "action": "open_position_atomic",
+        "action": "buy_shares",
         "ticker": candidate.get("ticker"),
         "contracts": contracts,
+        "qty": qty,
         "legs": [
-            {"instruction": "BUY_TO_OPEN", "role": "leap", "strike": leap_strike,
-             "target_delta": config.LEAP_TARGET_DELTA, "target_dte": config.LEAP_TARGET_DTE,
-             "quantity": contracts},
+            {"instruction": "BUY", "role": "shares", "quantity": qty, "target_delta": 1.0},
             {"instruction": "SELL_TO_OPEN", "role": "short", "strike": short.get("strike"),
              "dte": 5, "quantity": contracts},
         ],
-        "order_type": "NET_DEBIT",
-        "limit_price": limit,
-        "min_acceptable_net_credit": floor,
+        "order_type": "EQUITY",
+        "covering_short": {"action": "sell_short", "strike": short.get("strike"),
+                           "dte": 5, "contracts": contracts,
+                           "premium_per_share": short_premium},
         "max_slippage_pct_of_mid": config.REC_MAX_SLIPPAGE_PCT_OF_MID,
-        "estimates": {"leap_cost_per_share": leap_cost, "short_premium_per_share": short_premium,
-                      "net_per_share": net, "strike_policy": short or None},
-        "price_source": "estimate" if net is not None else "unpriced",
+        "estimates": {"shares_cost_per_share": share_cost, "shares_notional": notional,
+                      "short_premium_per_share": short_premium,
+                      "net_debit_per_share": net_debit_ps, "strike_policy": short or None},
+        "price_source": "estimate" if share_cost is not None else "unpriced",
     }
 
 
