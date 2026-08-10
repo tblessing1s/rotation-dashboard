@@ -441,6 +441,13 @@ PER_POSITION_CAP_USD = float(os.environ.get("PER_POSITION_CAP_USD") or 15000)
 # floor number is unchanged from the LEAP path pending recalibration; this is
 # logged to the rejection log against the new denominator (see account_gate).
 SHARES_JUICE_FLOOR_PCT = 1.5
+# Shares-only enforcement (schema v20). With shares as the active base leg, the
+# LEAP diagonal is read-only LEGACY: existing history stays queryable and priced,
+# but no NEW LEAP may be opened, added to, or rolled. When True, executor.execute
+# rejects the LEAP-opening actions (buy_leap / roll_leap / open_position_atomic)
+# with LegacyLeapBlocked. Set False (env LEGACY_LEAP_READONLY=0) only to replay
+# historical LEAP fills or construct legacy fixtures. See position_types.py.
+LEGACY_LEAP_READONLY = (os.environ.get("LEGACY_LEAP_READONLY", "1") != "0")
 
 # ---- Weekly short strike selection: regime x posture table -----------------
 # HARD_CFM_RULE ("Genius System" market-timing table). The weekly short strike

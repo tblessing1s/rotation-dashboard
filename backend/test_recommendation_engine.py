@@ -241,7 +241,14 @@ def test_enter_emitted_when_every_gate_clear():
     assert len(enters) == 1
     assert enters[0]["trigger_rule"] == TriggerRule.GATE_ALL_PASS
     assert enters[0]["position_id"] is None
-    assert enters[0]["proposed_ticket"]["action"] == "open_position_atomic"
+    # Shares-primary entry (schema v20): the base leg is real shares, not a LEAP.
+    ticket = enters[0]["proposed_ticket"]
+    assert ticket["action"] == "buy_shares"
+    assert ticket["qty"] == ticket["contracts"] * config.SHARES_PER_LOT
+    roles = {(l["instruction"], l["role"]) for l in ticket["legs"]}
+    assert roles == {("BUY", "shares"), ("SELL_TO_OPEN", "short")}
+    assert not any(l["role"] == "leap" for l in ticket["legs"])
+    assert ticket["covering_short"]["action"] == "sell_short"
 
 
 @pytest.mark.parametrize("candidate,regime", [

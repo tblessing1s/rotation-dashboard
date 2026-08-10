@@ -44,6 +44,32 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
 FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap",
                           "open_position_atomic", "buy_shares"}
 
+# LEAP-opening actions retired by the shares-primary migration (schema v20). With
+# shares as the active base leg the LEAP diagonal is read-only LEGACY: existing
+# history renders and prices from the immutable log, but no NEW LEAP may be opened,
+# added to, or rolled. These are rejected up-front when config.LEGACY_LEAP_READONLY
+# is on. Closing legacy LEAPs (close_leap / close_position_atomic) is NOT here —
+# winding a legacy position down must always stay possible. See position_types.py.
+LEGACY_LEAP_OPEN_ACTIONS = {"buy_leap", "roll_leap", "open_position_atomic"}
+
+
+class LegacyLeapBlocked(ValueError):
+    """A NEW LEAP-opening action (buy_leap / roll_leap / open_position_atomic) was
+    attempted while the shares-primary migration has the LEAP diagonal in read-only
+    LEGACY mode (config.LEGACY_LEAP_READONLY). The active base leg is now real
+    shares — use buy_shares to establish it. Existing legacy positions still render,
+    price, close, and roll their SHORT leg; only opening/adding/rolling the LEAP
+    long is refused. A ValueError so the API surfaces it as an HTTP 400 (a real,
+    pre-submission validation stop), consistent with other unknown/invalid actions."""
+
+    def __init__(self, action: str):
+        self.action = action
+        super().__init__(
+            f"'{action}' is disabled — the LEAP diagonal is read-only legacy under the "
+            f"shares-primary migration; no new LEAP may be opened, added to, or rolled. "
+            f"Establish the base leg with buy_shares instead. (Set LEGACY_LEAP_READONLY=0 "
+            f"only to replay historical LEAP fills or build legacy fixtures.)")
+
 
 class PositionFrozenError(RuntimeError):
     """A new-risk action was attempted on a position frozen by reconciliation
@@ -436,6 +462,13 @@ def execute(payload: dict, now: datetime | None = None) -> dict:
         raise ValueError(f"unknown action '{action}' (expected one of {sorted(VALID_ACTIONS)})")
     if not ticker:
         raise ValueError("ticker is required")
+
+    # Shares-primary migration (schema v20): the LEAP diagonal is read-only legacy.
+    # Refuse any NEW LEAP-opening action BEFORE the freeze/gate/price machinery — a
+    # retired structure should never reach an order path. Closing/rolling the SHORT
+    # leg and closing the LEAP long stay allowed so legacy positions can wind down.
+    if config.LEGACY_LEAP_READONLY and action in LEGACY_LEAP_OPEN_ACTIONS:
+        raise LegacyLeapBlocked(action)
 
     # Reconciliation freeze: reject new-risk actions on a position whose state is
     # unverified against the broker (checked BEFORE the account gate so a freeze
