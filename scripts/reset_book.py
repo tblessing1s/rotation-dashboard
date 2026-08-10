@@ -16,7 +16,7 @@ append-only execution log — deleting position records alone would just be rebu
 by recompute_derived(). A real "start over" therefore clears the execution log and
 every derived surface, resetting the book to a clean empty state at the current
 schema version. This is a deliberate, one-time exception to the log's immutability,
-which is why it (a) snapshots the current state twice before touching anything and
+which is why it (a) snapshots the current state before touching anything and
 (b) refuses to run without an explicit --yes.
 
 WHAT IS CLEARED: executions, positions, theta_ledger, extrinsic_payback,
@@ -30,13 +30,17 @@ cash settings (metadata.operating_cash / reserve_required). Pass --wipe-all to
 reset those too for a bare state. VAPID keys live in a separate file
 (DATA_DIR/.vapid_keys.json) and are never touched.
 
+RECOVERABLE: before writing, a rotating copy of the current book is placed in the
+backups dir (and shipped off-machine when SMTP_*/CFM_BACKUP_S3 are configured),
+and the current file is written aside as state.json.pre-reset.<timestamp>. Undo a
+mistaken reset with the sibling script:
+
+    python scripts/restore_state.py --latest --yes
+
 Usage:
     python scripts/reset_book.py                 # DRY RUN — show what would clear
     python scripts/reset_book.py --yes           # do it (keeps push subs + cash)
     python scripts/reset_book.py --yes --wipe-all  # bare state, keep nothing
-
-Recover a mistaken reset with the sibling script:
-    python scripts/restore_state.py --latest --yes
 
 DATA_DIR controls which store is touched (defaults to the backend dir locally,
 /data on Fly). Set CFM demo mode via mode.json as usual to target the demo store.
@@ -45,9 +49,7 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sys
-from datetime import datetime
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "backend"))
 # Never let importing the app machinery start the scheduler or the startup check.
@@ -128,20 +130,27 @@ def main(argv: list[str] | None = None) -> int:
               f"{' --wipe-all' if args.wipe_all else ''}", file=sys.stderr)
         return 1
 
-    # Two independent snapshots before we touch anything: a rotation-EXEMPT sibling
-    # copy next to the state file, and a copy in the backups dir (visible to
-    # restore_state.py --latest). Either one fully recovers the pre-reset book.
-    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    sibling = f"{target}.pre-reset.{ts}"
-    shutil.copy2(target, sibling)
+    # Recoverable backup FIRST — a rotating copy in the backups dir (visible to
+    # restore_state.py --latest), then a copy shipped off-machine if configured. A
+    # failed off-machine copy is reported, not fatal: the backups-dir copy and the
+    # pre-reset aside copy (written by log.reset_book) are both still recoverable.
     backup = backups.make_nightly_backup(target)
+    print(f"\nBacked up current book -> {backup}")
+    off = backups.send_offmachine_copy(backup)
+    if off.get("ok"):
+        print(f"  off-machine copy: {off.get('method')} ok")
+    else:
+        why = off.get("detail") or off.get("error") or "unavailable"
+        print(f"  off-machine copy: NOT sent ({why}) — local backup still kept")
 
-    fresh = _fresh_state(old, args.wipe_all)
-    log.save_state(fresh)
+    # The write itself goes through the atomic save path and writes the current
+    # file aside as state.json.pre-reset.<ts> before overwriting (see reset_book).
+    report = log.reset_book(build_fresh=lambda prior: _fresh_state(prior, args.wipe_all))
 
     print("\nBOOK RESET.")
     print(_summary(log.load_state()))
-    print(f"\n  pre-reset snapshot : {sibling}")
+    if report["pre_reset"]:
+        print(f"\n  pre-reset snapshot : {report['pre_reset']}")
     print(f"  backups-dir copy   : {backup}")
     print("\nRestart the app now (fly scale count 1).")
     print("Undo with:  python scripts/restore_state.py --latest --yes")

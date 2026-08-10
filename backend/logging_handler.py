@@ -264,6 +264,50 @@ def restore_from_backup(backup_path: str) -> dict:
         return {"restored": target, "from": backup_path, "pre_restore": pre_restore}
 
 
+def reset_book(build_fresh=None) -> dict:
+    """One-time hard reset: replace the active state with a fresh empty book at
+    the current schema version — no positions, no executions, no derived ledgers.
+
+    A deliberate, operator-driven exception to the append-only-log invariant (used
+    to start over). The current file is written aside as
+    ``state.json.pre-reset.<timestamp>`` before anything is overwritten, and the
+    write goes through the atomic save path — so a mistaken reset is itself
+    recoverable (that aside copy, or any backup in the backups dir). Callers
+    (scripts/reset_book.py) should take a rotating backup first for off-machine
+    durability.
+
+    ``build_fresh`` is an optional ``callable(prior_state) -> new_state`` letting
+    the caller carry forward non-position settings (e.g. push subscriptions, cash);
+    it defaults to a bare ``_default_state()``. ``prior_state`` is ``{}`` when the
+    current file is missing or unreadable. Returns a report incl. cleared counts."""
+    with _lock:
+        target = config.active_state_path()
+        cleared = {"positions": 0, "executions": 0}
+        prior: dict = {}
+        pre_reset = None
+        if os.path.exists(target):
+            try:
+                with open(target, encoding="utf-8") as fh:
+                    prior = json.loads(fh.read())
+                cleared = {"positions": len(prior.get("positions") or []),
+                           "executions": len(prior.get("executions") or [])}
+            except (OSError, ValueError):
+                # A corrupt/unreadable current file is exactly what a reset fixes —
+                # still write it aside, just report the counts as unknown.
+                prior = {}
+                cleared = {"positions": None, "executions": None}
+            pre_reset = f"{target}.pre-reset.{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+            shutil.copy2(target, pre_reset)
+        fresh = build_fresh(prior) if build_fresh is not None else _default_state()
+        _atomic_write(target, json.dumps(fresh, indent=2))
+        logger.warning("RESET book -> fresh empty state at %s (schema v%s; previous "
+                       "saved aside as %s; cleared %s positions / %s executions)",
+                       target, fresh["schema_version"], pre_reset,
+                       cleared["positions"], cleared["executions"])
+        return {"reset": target, "schema_version": fresh["schema_version"],
+                "pre_reset": pre_reset, "cleared": cleared}
+
+
 def _next_exec_id(state: dict) -> str:
     return f"exec_{len(state.get('executions', [])) + 1:03d}"
 

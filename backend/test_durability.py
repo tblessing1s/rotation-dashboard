@@ -210,6 +210,58 @@ def test_restore_round_trip_and_pre_restore_copy(store):
     assert json.load(open(report["pre_restore"], encoding="utf-8"))["metadata"]["capital_deployed"] == 99999
 
 
+def test_reset_book_clears_to_fresh_state_and_keeps_pre_reset_copy(store):
+    populated = log.load_state()
+    populated["positions"] = [{"ticker": "KO", "shares": {"count": 100}}]
+    populated["executions"] = [{"id": "exec_001", "action": "buy_shares", "ticker": "KO"}]
+    populated["extrinsic_payback"] = {"KO": {"pct_complete": 10}}
+    log.save_state(populated)
+
+    report = log.reset_book()
+
+    # The active file is a fresh empty book at the current schema version.
+    fresh = json.load(open(config.STATE_PATH, encoding="utf-8"))
+    assert fresh["schema_version"] == migrations.CURRENT_VERSION
+    assert fresh["positions"] == [] and fresh["executions"] == []
+    assert fresh["extrinsic_payback"] == {} and fresh["theta_ledger"]["weeks"] == []
+    assert report["cleared"]["positions"] == 1 and report["cleared"]["executions"] >= 1
+    # The pre-reset safety copy holds the populated book (reset is recoverable).
+    assert report["pre_reset"] and os.path.exists(report["pre_reset"])
+    aside = json.load(open(report["pre_reset"], encoding="utf-8"))
+    assert aside["positions"] and aside["executions"]
+
+
+def test_reset_book_on_missing_file_writes_fresh_state(store):
+    assert not os.path.exists(config.STATE_PATH)            # store fixture creates no file
+    report = log.reset_book()
+    assert report["pre_reset"] is None                      # nothing to save aside
+    fresh = json.load(open(config.STATE_PATH, encoding="utf-8"))
+    assert fresh["schema_version"] == migrations.CURRENT_VERSION and fresh["positions"] == []
+
+
+def test_reset_book_build_fresh_carries_forward_settings(store):
+    # The build_fresh hook lets a caller keep non-position settings (the
+    # scripts/reset_book.py default: push subscriptions + account cash).
+    state = log.load_state()
+    state["positions"] = [{"ticker": "KO", "shares": {"count": 100}}]
+    state["executions"] = [{"id": "exec_001", "action": "buy_shares", "ticker": "KO"}]
+    state.setdefault("alerts", {})["push_subscriptions"] = [{"endpoint": "x"}]
+    state["metadata"]["operating_cash"] = 12345
+    log.save_state(state)
+
+    def carry(prior):
+        out = log._default_state()
+        out["alerts"]["push_subscriptions"] = prior["alerts"]["push_subscriptions"]
+        out["metadata"]["operating_cash"] = prior["metadata"]["operating_cash"]
+        return out
+
+    log.reset_book(build_fresh=carry)
+    fresh = json.load(open(config.STATE_PATH, encoding="utf-8"))
+    assert fresh["positions"] == [] and fresh["executions"] == []      # book cleared
+    assert fresh["alerts"]["push_subscriptions"] == [{"endpoint": "x"}]  # kept
+    assert fresh["metadata"]["operating_cash"] == 12345                 # kept
+
+
 # ---------------------------------------------------------------------------
 # 7. Demo/live path parity
 # ---------------------------------------------------------------------------
