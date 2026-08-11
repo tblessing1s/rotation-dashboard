@@ -161,6 +161,16 @@ def test_juice_floor_block_two_tiers():
     assert st.juice_floor_block(0.4, None) is None            # gross unknown -> no adequacy block
 
 
+def test_juice_floor_block_is_shadow_in_shares_mode(monkeypatch):
+    import config
+    monkeypatch.setattr(config, "LEGACY_LEAP_READONLY", True)
+    floor = config.JUICE_FLOOR_WK
+    # Shares-primary: the LEAP-calibrated floor never blocks (shadow) — even inputs
+    # that would trip either tier in legacy mode pass through as None.
+    assert st.juice_floor_block(-0.5, floor + 2) is None   # would be "hard" in legacy
+    assert st.juice_floor_block(0.4, floor - 0.1) is None  # would be "adequacy" in legacy
+
+
 def test_juice_block_is_safety_blocked_and_never_bench():
     composed = sv.compose_verdict("green", "green", BaseStage.EARLY_ADVANCE,
                                   InstFlow.ACCUMULATING)  # pristine -> READY signals

@@ -78,7 +78,7 @@ export default function ReadyToEnter({ onSelectStock, refreshKey }) {
             <button
               key={r.ticker}
               onClick={() => onSelectStock?.(r.ticker)}
-              title={`${r.sector || ""} · juice ${fmt(r.juice_weekly_pct, 2)}%/wk · lights 4/4 green · right spot ✓`}
+              title={`${r.sector || ""} · covered-call yield ${fmt(r.juice_weekly_pct, 2)}%/wk (weekly premium on 100 shares) · lights 4/4 green · right spot ✓`}
               className="flex items-center gap-2 rounded-lg border border-emerald-600/50 bg-emerald-500/10 px-3 py-1.5 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/20"
             >
               {r.ticker}
