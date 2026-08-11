@@ -83,19 +83,10 @@ def _summary(state: dict) -> str:
 
 
 def _fresh_state(old: dict, wipe_all: bool) -> dict:
-    """A clean default state, carrying forward only the non-position settings."""
-    fresh = log._default_state()
-    if wipe_all:
-        return fresh
-    old_alerts = old.get("alerts") or {}
-    subs = old_alerts.get("push_subscriptions") or []
-    if subs:
-        fresh.setdefault("alerts", {})["push_subscriptions"] = subs
-    old_meta = old.get("metadata") or {}
-    for key in ("operating_cash", "reserve_required"):
-        if old_meta.get(key) is not None:
-            fresh.setdefault("metadata", {})[key] = old_meta[key]
-    return fresh
+    """A clean default state, carrying forward only the non-position settings.
+    Shared with the /api/admin/reset-book endpoint via logging_handler so the CLI
+    and the API reset keep exactly the same things."""
+    return log.book_fresh_state(old, wipe_all)
 
 
 def main(argv: list[str] | None = None) -> int:

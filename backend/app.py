@@ -1637,6 +1637,46 @@ def api_maintenance_refresh():
         return _err(e)
 
 
+@app.route("/api/admin/reset-book", methods=["POST"])
+def api_admin_reset_book():
+    """One-time hard reset of the book — start over with an empty state.
+
+    Clears positions + the append-only execution log + every derived ledger,
+    returning a fresh book at the current schema version. Deliberately hard to
+    fire by accident: it needs (1) a valid login (the before_request auth gate),
+    (2) config.RESET_BOOK_ENABLED — a server env flag OFF by default, and (3) a
+    typed ``confirm: "RESET"`` in the body. Optional ``wipe_all`` also clears push
+    subscriptions + account cash (kept by default). SAFE for the single-writer
+    store: reset_book acquires the same in-process lock every save uses, so no
+    scheduler tick can race it — no need to stop the app. Recoverable: a rotating
+    backup is taken first (shipped off-machine when configured) and the prior file
+    is written aside as state.json.pre-reset.<ts>."""
+    if not config.RESET_BOOK_ENABLED:
+        return jsonify({"error": "book reset is disabled; set RESET_BOOK_ENABLED=1 "
+                        "to enable it (then unset it again afterwards)",
+                        "reset_disabled": True}), 403
+    body = request.get_json(silent=True) or {}
+    if str(body.get("confirm") or "") != "RESET":
+        return jsonify({"error": 'confirmation required: POST {"confirm": "RESET"}',
+                        "confirm_required": True}), 400
+    wipe_all = bool(body.get("wipe_all"))
+    try:
+        import backups
+        target = config.active_state_path()
+        # Recoverable backup FIRST — rotating copy in the backups dir, then a copy
+        # shipped off-machine if configured. A failed off-machine copy is reported,
+        # not fatal (the local backup + the pre-reset aside copy still recover it).
+        backup = backups.make_nightly_backup(target)
+        off = backups.send_offmachine_copy(backup)
+        report = log.reset_book(build_fresh=lambda prior: log.book_fresh_state(prior, wipe_all))
+        return jsonify({"ok": True, "cleared": report["cleared"],
+                        "schema_version": report["schema_version"],
+                        "wipe_all": wipe_all, "backup": backup,
+                        "off_machine": off, "pre_reset": report["pre_reset"]})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/refresh/hot", methods=["POST"])
 def api_refresh_hot():
     """Force-refresh the hot set (open positions + live entry/earnings candidates)
