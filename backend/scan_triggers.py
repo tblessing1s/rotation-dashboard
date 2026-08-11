@@ -304,7 +304,15 @@ def juice_floor_block(net_juice_weekly_pct: float | None,
     figures already on the row (no account state), so it folds into the memoized
     market sweep. ETFs pass through identically — no ETF branch. A ``None`` figure
     (insufficient history to price) is NOT blocked here; the structure/data gates
-    already handle a name we can't price."""
+    already handle a name we can't price.
+
+    SHARES-PRIMARY (config.LEGACY_LEAP_READONLY): both tiers are LEAP-denominated —
+    the hard tier keys off LEAP burn (shares have none) and the adequacy floor is
+    calibrated on LEAP-cost yield (several-fold above covered-call yield). So the
+    floor runs in SHADOW here (never blocks) until it's recalibrated against
+    share-cost yields; the row still carries and displays the covered-call yield."""
+    if config.LEGACY_LEAP_READONLY:
+        return None  # shadow — see docstring
     floor = config.JUICE_FLOOR_WK
     if net_juice_weekly_pct is not None and net_juice_weekly_pct <= 0:
         return {"level": 5, "id": "juice_floor", "label": "juice",

@@ -76,6 +76,44 @@ def test_juice_estimate_net_is_gross_minus_burn():
         net_extr / est["leap_cost_per_share"] * 100, abs=0.05)
 
 
+def test_juice_estimate_shares_mode_is_covered_call_yield(monkeypatch):
+    # Shares-primary: the return is a covered-call yield on 100 shares — weekly
+    # time premium / share cost (spot) — not weekly extrinsic / LEAP cost.
+    monkeypatch.setattr(config, "LEGACY_LEAP_READONLY", True)
+    df = _noisy_frame(sigma=0.02)
+    est = account_gate.juice_estimate("XYZ", df)
+    S = float(df["Close"].iloc[-1])
+    assert est["basis"] == "shares"
+    assert est["covered_call_yield_pct"] == pytest.approx(
+        est["weekly_extrinsic_per_share"] / S * 100, abs=0.01)
+    assert est["weekly_yield_pct"] == est["covered_call_yield_pct"]
+    # Shares don't decay: net == gross, zero burn. And the yield is denominated on
+    # share cost, so it is far below the LEAP-cost yield for the same premium.
+    assert est["net_weekly_yield_pct"] == est["weekly_yield_pct"]
+    assert est["burn_weekly_per_share"] == 0.0
+    assert est["weekly_yield_pct"] < est["weekly_extrinsic_per_share"] / est["leap_cost_per_share"] * 100
+    assert est["shares_cost_per_lot"] == pytest.approx(S * config.SHARES_PER_LOT, abs=1.0)
+
+
+def test_gate_juice_adequacy_is_shadow_and_sized_on_share_cost(isolated_state, monkeypatch):
+    # Shares-primary Level-5: the juice-adequacy check is SHADOW (never blocks,
+    # pending recalibration), and capital is sized on share cost (spot x 100), not
+    # a LEAP premium.
+    import data_handler
+    monkeypatch.setattr(config, "LEGACY_LEAP_READONLY", True)
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _rich_df())
+    _seed_state(operating_cash=1_000_000)  # ample cash: only juice/basis under test
+    est = account_gate.juice_estimate("NVDA", _rich_df())
+    g = account_gate.evaluate("NVDA", contracts=1)
+    ja = next(c for c in g["checks"] if c["id"] == "juice_adequacy")
+    assert ja["blocking"] is False and ja["detail"]["shadow"] is True
+    assert ja["detail"]["denominator"] == "share cost"
+    assert "juice_adequacy" not in g["blocking_failures"]
+    cap = next(c for c in g["checks"] if c["id"] == "capital_limit")
+    assert cap["detail"]["proposed_cost"] == pytest.approx(
+        est["stock_price"] * config.SHARES_PER_LOT, abs=1.0)
+
+
 def test_juice_estimate_missing_data():
     est = account_gate.juice_estimate("XYZ", None)
     assert est["weekly_yield_pct"] is None

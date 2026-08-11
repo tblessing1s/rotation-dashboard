@@ -53,11 +53,23 @@ def _leap_strike_for_delta(S: float, T: float, r: float, sigma: float,
 def juice_estimate(ticker: str, df=None) -> dict:
     """History-implied CFM income math for one ticker.
 
-    Prices the 1.5x-ATR weekly short and a LEAP_TARGET_DELTA LEAP with
-    Black-Scholes at the ticker's trailing 20d realized vol, then returns
-    weekly extrinsic / LEAP cost — the weekly yield on deployed capital the
-    strategy would earn if premium were priced exactly at realized vol.
-    Everything is per-share/per-contract, so contract count cancels out.
+    Prices the 1.5x-ATR weekly short with Black-Scholes at the ticker's trailing
+    20d realized vol and returns the weekly yield the strategy would earn if
+    premium were priced exactly at realized vol. Everything is per-share, so
+    contract count cancels out.
+
+    The RETURN BASIS follows the shares-primary switch (config.LEGACY_LEAP_READONLY):
+
+    - SHARES-PRIMARY (default): the base leg is 100 real shares, so the yield is a
+      COVERED-CALL yield — weekly time premium / share cost (spot). Shares don't
+      decay, so there is no burn: net == gross. This is the number the scanner
+      shows and ranks by.
+    - LEGACY: the base leg is a deep-ITM LEAP, so the yield is weekly extrinsic /
+      LEAP cost, and NET juice subtracts the LEAP's model theta burn/week.
+
+    LEAP economics are still priced best-effort in shares mode (so a legacy
+    position's gate can read leap_cost_per_share), but a name that can't be priced
+    as a LEAP is NOT dropped from the shares scan — only from the legacy one.
     """
     if df is None:
         df = data_handler.get_daily(ticker)
@@ -66,51 +78,75 @@ def juice_estimate(ticker: str, df=None) -> dict:
     hv = indicators.hist_vol(df) if df is not None else None  # annualized %
     none = {"ticker": ticker, "weekly_extrinsic_per_share": None,
             "leap_strike": None, "leap_cost_per_share": None,
-            "weekly_yield_pct": None, "source": "estimate"}
+            "shares_cost_per_share": None, "covered_call_yield_pct": None,
+            "weekly_yield_pct": None, "net_weekly_yield_pct": None, "source": "estimate"}
     if S is None or atr_val is None or not hv:
         return none
     sigma = hv / 100.0
     r = config.RISK_FREE_RATE
+    shares_mode = config.LEGACY_LEAP_READONLY
 
     k_short = indicators.short_strike(S, atr_val)
     t_week = 5 / 365.0
     price_w = indicators._bs_call_price(S, k_short, t_week, r, sigma)
     extr_w = max(price_w - max(S - k_short, 0.0), 0.0)
 
+    # LEAP economics — best-effort. Required to price the LEGACY yield; in shares
+    # mode it only backfills leap_* for a legacy position's gate and never blocks.
     t_leap = config.LEAP_TARGET_DTE / 365.0
     k_leap = _leap_strike_for_delta(S, t_leap, r, sigma)
-    if k_leap is None:
-        return none
-    leap_cost = indicators._bs_call_price(S, k_leap, t_leap, r, sigma)
-    if not leap_cost:
-        return none
-    # NET juice: subtract the LEAP's model theta burn/week (over a hypothetical
-    # entry at LEAP_ENTRY_DTE_DEFAULT held to PLANNED_EXIT_DTE, with fallback
-    # slippage) from the gross weekly extrinsic. Computed through the SAME
-    # burn.burn_projection the live position view uses, so the queue and the
-    # position panel can never disagree (single source of truth). This is the
-    # ranking key — it naturally penalizes high-IV candidates (more extrinsic
-    # bought => more burn) with no separate rule. hv is annualized vol in percent.
-    import burn
-    net = burn.candidate_net_juice(spot=S, iv=hv, leap_strike=k_leap,
-                                   leap_cost_per_share=leap_cost,
-                                   weekly_extrinsic_per_share=extr_w)
+    leap_cost = (indicators._bs_call_price(S, k_leap, t_leap, r, sigma)
+                 if k_leap is not None else None)
+    if not shares_mode and not leap_cost:
+        return none  # a legacy candidate we can't price as a LEAP is dropped
+
+    if shares_mode:
+        # Covered-call yield on a 100-share base: weekly time premium / share cost.
+        # No LEAP, no burn — net == gross.
+        gross_yield = round(extr_w / S * 100, 2) if S else None
+        net_yield = gross_yield
+        burn_ps = 0.0
+        net_extr_ps = round(extr_w, 3)
+    else:
+        # NET juice: subtract the LEAP's model theta burn/week (over a hypothetical
+        # entry at LEAP_ENTRY_DTE_DEFAULT held to PLANNED_EXIT_DTE, with fallback
+        # slippage) from the gross weekly extrinsic. Computed through the SAME
+        # burn.burn_projection the live position view uses, so the queue and the
+        # position panel can never disagree. Naturally penalizes high-IV candidates
+        # (more extrinsic bought => more burn). hv is annualized vol in percent.
+        import burn
+        net = burn.candidate_net_juice(spot=S, iv=hv, leap_strike=k_leap,
+                                       leap_cost_per_share=leap_cost,
+                                       weekly_extrinsic_per_share=extr_w)
+        gross_yield = round(extr_w / leap_cost * 100, 2)
+        net_yield = net.get("net_juice_weekly_pct")
+        burn_ps = net.get("burn_per_week_ps")
+        net_extr_ps = net.get("net_juice_per_week_ps")
+
     return {
         "ticker": ticker,
         "stock_price": round(S, 2),
         "short_strike": k_short,
         "weekly_extrinsic_per_share": round(extr_w, 3),
-        "leap_strike": round(k_leap, 1),
-        "leap_cost_per_share": round(leap_cost, 2),
-        "weekly_yield_pct": round(extr_w / leap_cost * 100, 2),
-        # .get() not [] — the shares path removes burn from the net-juice contract
-        # (net == gross), so these keys may be absent/None. Hard-subscripting them
-        # was the single KeyError site flagged in the migration audit (§Burn).
-        "net_weekly_yield_pct": net.get("net_juice_weekly_pct"),
-        "burn_weekly_per_share": net.get("burn_per_week_ps"),
-        "net_weekly_extrinsic_per_share": net.get("net_juice_per_week_ps"),
+        "leap_strike": round(k_leap, 1) if k_leap is not None else None,
+        "leap_cost_per_share": round(leap_cost, 2) if leap_cost else None,
+        # Shares base: the 100-share lot costs spot x 100; the covered-call yield is
+        # the weekly time premium as a % of share cost. Present in both modes so the
+        # UI can show the shares number regardless of the ranking basis.
+        "shares_cost_per_share": round(S, 2),
+        "shares_cost_per_lot": round(S * config.SHARES_PER_LOT, 2),
+        "covered_call_yield_pct": round(extr_w / S * 100, 2) if S else None,
+        # Primary ranking/display yield — shares (covered-call) or legacy (on LEAP).
+        "weekly_yield_pct": gross_yield,
+        # .get() not [] downstream — the shares path removes burn from the net-juice
+        # contract (net == gross), so these may be None. Hard-subscripting them was
+        # the single KeyError site flagged in the migration audit (§Burn).
+        "net_weekly_yield_pct": net_yield,
+        "burn_weekly_per_share": burn_ps,
+        "net_weekly_extrinsic_per_share": net_extr_ps,
         "hist_vol": round(hv, 1),
         "source": "estimate",
+        "basis": "shares" if shares_mode else "leap",
     }
 
 
@@ -272,7 +308,21 @@ def evaluate(ticker: str, contracts: int | None = None,
                    else est["weekly_extrinsic_per_share"])
     juice_source = "chain" if (leap_cost_per_share is not None
                                and weekly_extrinsic_per_share is not None) else "estimate"
-    proposed_cost = leap_cost * contracts * 100 if leap_cost is not None else None
+
+    # Base-leg profile (schema v20). An explicit position_type wins (a legacy
+    # position's health check keeps LEAP economics); with none given, the entry
+    # gate follows the shares-primary switch. SHARES sizes capital by share cost
+    # (spot x 100) — buying real shares costs the full share price, not a LEAP
+    # premium — and denominates juice against it.
+    if position_type is not None:
+        shares_mode = position_type == position_types.SHARES
+    else:
+        shares_mode = config.LEGACY_LEAP_READONLY
+    spot = est.get("stock_price") if isinstance(est, dict) else None
+    if shares_mode:
+        proposed_cost = spot * contracts * config.SHARES_PER_LOT if spot else None
+    else:
+        proposed_cost = leap_cost * contracts * 100 if leap_cost is not None else None
 
     checks = []
 
@@ -344,18 +394,27 @@ def evaluate(ticker: str, contracts: int | None = None,
 
     # 4) Juice adequacy vs the underlying's profile bar: growth stocks use the
     #    CFM cycle target (~1.9%/wk); ETFs run a lower steady-income bar.
+    #    SHARES: the yield is a covered-call yield (time premium / share cost), which
+    #    runs several-fold below the LEAP-cost yield the target was calibrated on. So
+    #    in shares mode this check is SHADOW — non-blocking — until the bar is
+    #    recalibrated against share-cost yields; it still reports the number.
     is_etf_underlying = sector_data.is_etf(ticker)
     target = weekly_yield_target_pct(ticker)
-    weekly_yield = (round(weekly_extr / leap_cost * 100, 2)
-                    if (weekly_extr is not None and leap_cost) else None)
+    denom = spot if shares_mode else leap_cost
+    weekly_yield = (round(weekly_extr / denom * 100, 2)
+                    if (weekly_extr is not None and denom) else None)
     profile_note = ("ETF income sleeve" if is_etf_underlying
                     else f"{config.CYCLE_RETURN_MIN * 100:g}% over {config.CYCLE_WEEKS_MAX} wks")
+    denom_label = "share cost" if shares_mode else "LEAP cost"
+    shadow_note = " — SHADOW, not enforced" if shares_mode else ""
     checks.append(_check(
         "juice_adequacy",
-        f"Weekly juice ≥ {target:g}% of LEAP cost ({profile_note})",
-        weekly_yield is not None and weekly_yield >= target, True,
-        {"weekly_yield_pct": weekly_yield, "target_pct": target,
+        f"Weekly juice ≥ {target:g}% of {denom_label} ({profile_note}){shadow_note}",
+        weekly_yield is not None and weekly_yield >= target,
+        not shares_mode,  # shares: shadow (non-blocking) pending recalibration
+        {"weekly_yield_pct": weekly_yield, "target_pct": target, "denominator": denom_label,
          "weekly_extrinsic_per_share": weekly_extr, "leap_cost_per_share": leap_cost,
+         "shares_cost_per_share": spot, "shadow": shares_mode,
          "source": juice_source, "estimate": est, "is_etf": is_etf_underlying,
          "profile": "etf" if is_etf_underlying else "stock"}))
 
