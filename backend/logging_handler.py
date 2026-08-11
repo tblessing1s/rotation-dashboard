@@ -308,6 +308,26 @@ def reset_book(build_fresh=None) -> dict:
                 "pre_reset": pre_reset, "cleared": cleared}
 
 
+def book_fresh_state(prior: dict | None, wipe_all: bool = False) -> dict:
+    """The state a book reset writes: a fresh empty book that carries forward only
+    the non-position settings — phone push subscriptions + account cash — unless
+    ``wipe_all``. Shared by scripts/reset_book.py and the /api/admin/reset-book
+    endpoint so both keep exactly the same things (positions are annoying to
+    re-enter, and the pre-reset backup has them regardless)."""
+    fresh = _default_state()
+    if wipe_all:
+        return fresh
+    prior = prior or {}
+    subs = (prior.get("alerts") or {}).get("push_subscriptions") or []
+    if subs:
+        fresh.setdefault("alerts", {})["push_subscriptions"] = subs
+    old_meta = prior.get("metadata") or {}
+    for key in ("operating_cash", "reserve_required"):
+        if old_meta.get(key) is not None:
+            fresh.setdefault("metadata", {})[key] = old_meta[key]
+    return fresh
+
+
 def _next_exec_id(state: dict) -> str:
     return f"exec_{len(state.get('executions', [])) + 1:03d}"
 

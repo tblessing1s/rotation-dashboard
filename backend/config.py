@@ -449,6 +449,13 @@ SHARES_JUICE_FLOOR_PCT = 1.5
 # historical LEAP fills or construct legacy fixtures. See position_types.py.
 LEGACY_LEAP_READONLY = (os.environ.get("LEGACY_LEAP_READONLY", "1") != "0")
 
+# One-time book reset via the API (POST /api/admin/reset-book). OFF by default —
+# a destructive "start over" (clears positions + the execution log + derived
+# ledgers) must never be reachable by accident. Turn it on only for the reset,
+# then turn it back off:  fly secrets set RESET_BOOK_ENABLED=1  (and later unset).
+# The endpoint still requires login + a typed "RESET" confirmation on top of this.
+RESET_BOOK_ENABLED = (os.environ.get("RESET_BOOK_ENABLED", "0") == "1")
+
 # ---- Weekly short strike selection: regime x posture table -----------------
 # HARD_CFM_RULE ("Genius System" market-timing table). The weekly short strike
 # distance below spot is set by BOTH an ATR multiplier and a minimum ITM% floor,
