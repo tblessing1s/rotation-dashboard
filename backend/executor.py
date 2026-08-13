@@ -288,6 +288,22 @@ def _enforce_spread_quality(ticker: str, payload: dict, verdict) -> None:
         raise SpreadAckRequiredError(ticker, sq)
 
 
+class StaleQuoteError(ValueError):
+    """A live single-leg order could not be priced from a FRESH quote at send time —
+    the re-read quote was missing / one-sided / crossed / stale. We refuse to
+    transmit a limit derived from the operator's minutes-old chain snapshot;
+    re-quoting and re-pricing at placement is the invariant. Surfaces as HTTP 400
+    (a real pre-submission validation stop); retry once the quote refreshes."""
+
+    def __init__(self, action: str, symbol: str, reason: str):
+        self.action = action
+        self.symbol = symbol
+        self.reason = reason
+        super().__init__(
+            f"Can't send {action} for {symbol} — {reason}. The order is priced off a "
+            f"fresh quote at send time, not the chain snapshot; retry once it updates.")
+
+
 class ResubmitLockedError(RuntimeError):
     """A new LIVE order for a position intent was blocked by the resubmission gate
     (order_lifecycle: NO_RESUBMIT_BEFORE_TERMINAL / MAX_RESUBMIT_ATTEMPTS). The API
@@ -2005,9 +2021,35 @@ def _limit_price(action, payload):
     return float(payload.get("close_price_per_share") or 0)  # close_short
 
 
+def _live_limit_price(client, action: str, option_symbol: str) -> float:
+    """Re-quote the leg at placement and price the LIMIT off the CURRENT bid/ask —
+    never the (possibly minutes-stale) chain snapshot the operator staged from. The
+    fresh tick-rounded mid (per-share), so the order fits the live market at the
+    instant it is sent. Refuses (StaleQuoteError) on a missing / one-sided / crossed
+    / stale quote rather than transmitting a bad limit. Mirrors the roll path's F1
+    quote validation (the single-leg path had trusted the payload price — the gap
+    that let a stale ticket be sent)."""
+    quotes = {}
+    try:
+        quotes = client.get_quotes([option_symbol]) or {}
+    except Exception as e:  # noqa: BLE001 — a fetch failure is treated as "no quote"
+        log.logger.warning("live re-quote fetch failed for %s: %s", option_symbol, e)
+    quote = quotes.get(option_symbol)
+    problem = order_pricing.validate_leg_quote(
+        quote, symbol=option_symbol, label=action,
+        now_ms=_now_ms(), max_age_s=config.QUOTE_MAX_AGE_FOR_ORDER_SECONDS)
+    if problem:
+        raise StaleQuoteError(action, option_symbol, problem)
+    return float(order_pricing.quote_mid(quote))
+
+
 def _place_live(payload, ticker, action, contracts, strike, stock_price, price_source):
     """Transmit a real single-leg LIMIT order and park it as pending. The fill is
-    confirmed (and committed) later via order_status; cancel_order drops it."""
+    confirmed (and committed) later via order_status; cancel_order drops it.
+
+    The limit is re-priced off a FRESH quote at send time (``_live_limit_price``),
+    not the operator's chain snapshot — so a ticket left open while the market moved
+    still transmits at the current bid/ask (or is refused if no fresh quote)."""
     _assert_transmit_allowed(action)
     _guard_resubmit(ticker, action)
     client = data_handler.client()
@@ -2020,7 +2062,8 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
             raise ValueError(f"{action} live order needs option_symbol or expiration to build the contract")
         option_symbol = schwab_api.occ_option_symbol(ticker, expiration, strike, call=True)
 
-    limit = _limit_price(action, payload)
+    staged = _limit_price(action, payload)                       # operator's snapshot price
+    limit = _live_limit_price(client, action, option_symbol)     # fresh mid at send time
     order = schwab_api.build_single_leg_order(INSTRUCTION[action], contracts, option_symbol, limit)
     placed = client.place_order(account_hash, order)
     order_id = placed.get("orderId")
@@ -2031,7 +2074,7 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
         "payload": payload, "ticker": ticker, "action": action, "contracts": contracts,
         "strike": strike, "stock_price": stock_price, "price_source": price_source,
         "account_hash": account_hash, "option_symbol": option_symbol,
-        "limit_price": limit, "placed_at": log.utcnow(),
+        "limit_price": limit, "staged_limit_price": staged, "placed_at": log.utcnow(),
     }
     # Preserve a legged roll's shared linkage so each leg commits into the roll ledger.
     for k in ("roll_group_id", "roll_leg", "roll_reason"):
@@ -2046,6 +2089,8 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
         "mode": "live",
         "option_symbol": option_symbol,
         "limit_price": limit,
+        "staged_limit_price": staged,
+        "repriced": bool(staged is not None and abs(limit - staged) > 1e-9),
     }
 
 

@@ -43,15 +43,17 @@ def _chain_lock(ticker: str) -> threading.Lock:
         return _chain_locks.setdefault(ticker, threading.Lock())
 
 
-def _fetch_chain(ticker: str) -> dict:
+def _fetch_chain(ticker: str, refresh: bool = False) -> dict:
     """Raw Schwab CALL chain spanning near-term through ~LEAP expirations, cached
-    for 5 minutes per ticker. One lock per ticker collapses concurrent opens."""
+    for 5 minutes per ticker. One lock per ticker collapses concurrent opens.
+    ``refresh`` bypasses the TTL for a forced live re-pull (the modal's bid/ask
+    poll) — it still takes the lock and refreshes the cache for everyone else."""
     hit = _chain_cache.get(ticker)
-    if hit and time.time() - hit[0] < _CHAIN_TTL:
+    if not refresh and hit and time.time() - hit[0] < _CHAIN_TTL:
         return hit[1]
     with _chain_lock(ticker):
         hit = _chain_cache.get(ticker)
-        if hit and time.time() - hit[0] < _CHAIN_TTL:
+        if not refresh and hit and time.time() - hit[0] < _CHAIN_TTL:
             return hit[1]
         if not schwab_api.configured():
             raise schwab_api.SchwabError(
@@ -505,9 +507,10 @@ def coverage(ticker: str) -> dict:
     }
 
 
-def option_chain(ticker: str, strategy: str = "atr") -> dict:
+def option_chain(ticker: str, strategy: str = "atr", refresh: bool = False) -> dict:
     """Build the option-chain view: regime banner, auto-picked LEAP, and the
-    ATR-suggested weekly short with nearby strikes.
+    ATR-suggested weekly short with nearby strikes. ``refresh`` forces a live
+    re-pull of the chain (the modal's bid/ask poll) instead of the 5-min cache.
 
     On a RED tape entries are blocked: if there's nothing to manage we raise
     RegimeBlocked, but an existing position drops into management-only mode so the
@@ -537,7 +540,7 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     suggested_action, action_reason = _detect_action(
         has_leap, open_shorts, management_only, shares_mode=shares_mode, has_shares=has_shares)
 
-    payload = _fetch_chain(ticker)
+    payload = _fetch_chain(ticker, refresh=refresh)
     underlying, contracts = schwab_api.parse_call_chain(payload)
     if not contracts:
         raise schwab_api.SchwabError(f"no call contracts returned for {ticker}")
