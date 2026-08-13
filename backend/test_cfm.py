@@ -223,6 +223,20 @@ def test_detect_action_follows_position_state():
     assert oc._detect_action(True, [], management_only=True)[0] == "close_leap"
 
 
+def test_detect_action_shares_mode_suggests_shares_base():
+    import option_chain as oc
+    # Shares-primary: a fresh entry is buy_shares (not buy_leap); the income leg is
+    # the same weekly short, sold as a covered call against the owned shares.
+    assert oc._detect_action(has_leap=False, open_shorts=[], shares_mode=True,
+                             has_shares=False)[0] == "buy_shares"
+    assert oc._detect_action(has_leap=False, open_shorts=[], shares_mode=True,
+                             has_shares=True)[0] == "sell_short"
+    assert oc._detect_action(has_leap=False, open_shorts=[{"strike": 50}], shares_mode=True,
+                             has_shares=True)[0] == "close_short"
+    # A legacy LEAP position in shares mode still counts as a base (no new LEAP suggested).
+    assert oc._detect_action(has_leap=True, open_shorts=[], shares_mode=True)[0] == "sell_short"
+
+
 def test_red_regime_blocks_entries_but_allows_managing_open_positions(monkeypatch):
     import option_chain as oc
     import data_handler
