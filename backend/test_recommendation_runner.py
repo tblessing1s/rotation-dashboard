@@ -87,3 +87,28 @@ def test_runner_emits_persists_dedups_and_dismisses(tmp_path, monkeypatch):
     third = runner.run(notify=False, include_entry=False)
     assert third["emitted"] == 1
     assert log.load_state()["recommendations"][1]["rec_id"] == "rec_00002"
+
+
+def test_entry_candidates_excludes_known_no_weeklies(monkeypatch):
+    """CFM sells a weekly covered call, so a name with no weekly options must never
+    become an ENTER candidate. Known-no-weeklies (has_weeklies is False) is dropped;
+    unknown (None) is kept — matching the Scorecard's default filter."""
+    import recommendation_runner as rr
+    from metrics import scorecard as scorecard_metrics
+    import account_gate
+
+    rows = [
+        {"ticker": "AAA", "suitability": "GO", "has_weeklies": True, "juice_weekly_pct": 1.0},
+        {"ticker": "BBB", "suitability": "GO", "has_weeklies": False, "juice_weekly_pct": 2.0},  # excluded
+        {"ticker": "CCC", "suitability": "GO", "has_weeklies": None, "juice_weekly_pct": 1.5},   # unknown -> kept
+        {"ticker": "DDD", "suitability": "CAUTION", "has_weeklies": True},                       # not GO
+    ]
+    monkeypatch.setattr(scorecard_metrics, "scorecard", lambda names, price_overrides=None: {"results": rows})
+    monkeypatch.setattr(account_gate, "evaluate_many", lambda tickers, contracts=None: {t: {"pass": True} for t in tickers})
+    monkeypatch.setattr(rr.data_handler, "get_daily", lambda t, force=False: None)
+    monkeypatch.setattr(rr, "_live_price", lambda t: None)
+    monkeypatch.setattr(rr, "_ticker_snapshot", lambda *a, **k: {})
+
+    out = rr._entry_candidates({"tickers": {}}, None)
+    tickers = {c["ticker"] for c in out}
+    assert tickers == {"AAA", "CCC"}   # BBB (no weeklies) and DDD (not GO) excluded
