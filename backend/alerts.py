@@ -996,11 +996,17 @@ def check_trust_coverage_miss(state: dict) -> list[dict]:
     return out
 
 
-def check_order_fidelity_fail(state: dict) -> list[dict]:
+def check_order_fidelity_fail(state: dict, now: datetime | None = None) -> list[dict]:
     """A graded order lifecycle failed a fidelity check. Reads the DERIVED
-    order_fidelity ledger; each failing ticket pages once (keyed by order id)."""
+    order_fidelity ledger; each failing ticket pages once (keyed by order id).
+
+    ``now`` is injectable (defaults to the ET wall clock) so a test can pin the
+    same instant it graded the fidelity records against — otherwise a fixed-date
+    fixture ages out of the TRUST_ALERT_WINDOW_DAYS window as real time advances.
+    The alert registry calls this with ``state`` only, so the default is unchanged."""
     out = []
-    cutoff = (datetime.now(ET) - timedelta(days=config.TRUST_ALERT_WINDOW_DAYS)).date().isoformat()
+    now = now or datetime.now(ET)
+    cutoff = (now - timedelta(days=config.TRUST_ALERT_WINDOW_DAYS)).date().isoformat()
     for rec in (state.get("order_fidelity") or {}).values():
         if rec.get("pass") is not False:
             continue

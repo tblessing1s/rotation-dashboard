@@ -83,7 +83,7 @@ def test_fill_during_cancel_orphan_leg_fails_and_pages():
     assert fid["pass"] is False
     # ... and the failure pages through the existing alert engine
     state["order_fidelity"] = {"o2": fid}
-    fired = alerts.check_order_fidelity_fail(state)
+    fired = alerts.check_order_fidelity_fail(state, now=NOW)
     assert fired and fired[0]["type"] == "ORDER_FIDELITY_FAIL"
     assert "ORPHAN_LEG" in fired[0]["message"]
 
