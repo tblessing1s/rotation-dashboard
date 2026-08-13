@@ -172,17 +172,31 @@ def _iv_view(weekly_iv: float | None, leap_iv: float | None, hv: float | None,
     return out
 
 
-def _detect_action(has_leap: bool, open_shorts: list, management_only: bool = False) -> tuple[str, str]:
+def _detect_action(has_leap: bool, open_shorts: list, management_only: bool = False,
+                   *, shares_mode: bool = False, has_shares: bool = False) -> tuple[str, str]:
     """Pick the action the user most likely wants next, given current positions.
 
     In management_only mode (RED tape) entries are off the table, so the only
-    move is closing/rolling an open short to de-risk or exit."""
+    move is closing/rolling an open short to de-risk or exit.
+
+    In shares-primary mode (``shares_mode``) the active base leg is 100 real
+    shares, not a LEAP: a fresh entry is ``buy_shares`` (establish the covered-call
+    base), and the income leg is the same weekly short sold as a COVERED CALL. LEAP
+    is read-only legacy — a legacy LEAP position can still be closed/rolled-short,
+    but no new LEAP is ever suggested."""
+    has_base = has_leap or has_shares
     if management_only:
         if open_shorts:
             return "close_short", "Market is RED — buy to close / roll the open short first to remove the obligation."
         if has_leap:
             return "close_leap", "Market is RED — sell the LEAP to close and exit the long."
         return "close_short", "Market is RED — entries blocked."
+    if shares_mode:
+        if not has_base:
+            return "buy_shares", "No base position yet — buy 100 shares to establish the covered-call base."
+        if not open_shorts:
+            return "sell_short", "Base held with no open short — sell this week's covered call for juice."
+        return "close_short", "A covered call is already open — roll it (buy to close)."
     if not has_leap:
         return "buy_leap", "No LEAP held yet — establish the deep-ITM long first."
     if not open_shorts:
@@ -510,13 +524,18 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
     pos = log.find_position(state, ticker)
     existing_leap = (pos or {}).get("leap") or None
     has_leap = bool(existing_leap)
+    shares_block = (pos or {}).get("shares") or {}
+    shares_count = int(shares_block.get("count") or 0)
+    has_shares = shares_count > 0
     open_shorts = [sc for sc in (pos or {}).get("short_calls", []) if sc] if pos else []
+    shares_mode = config.LEGACY_LEAP_READONLY
 
     management_only = regime_status == "red"
-    if management_only and not (has_leap or open_shorts):
+    if management_only and not (has_leap or has_shares or open_shorts):
         # Nothing to manage and entries are blocked — there's nothing to show.
         raise RegimeBlocked("Market is RED. No entries.")
-    suggested_action, action_reason = _detect_action(has_leap, open_shorts, management_only)
+    suggested_action, action_reason = _detect_action(
+        has_leap, open_shorts, management_only, shares_mode=shares_mode, has_shares=has_shares)
 
     payload = _fetch_chain(ticker)
     underlying, contracts = schwab_api.parse_call_chain(payload)
@@ -675,8 +694,15 @@ def option_chain(ticker: str, strategy: str = "atr") -> dict:
         "suggested_action": suggested_action,
         "action_reason": action_reason,
         "quantity_default": qty,
+        # Shares-primary: the active base leg is 100 real shares. The frontend uses
+        # this to render a shares entry (buy 100 shares -> sell the covered call)
+        # instead of the LEAP diagonal, and to price the covered-call yield off spot.
+        "shares_mode": shares_mode,
+        "shares_per_lot": config.SHARES_PER_LOT,
         "position": {
             "has_leap": has_leap,
+            "has_shares": has_shares,
+            "shares_count": shares_count,
             "leap_strike": (existing_leap or {}).get("strike"),
             "leap_contracts": (existing_leap or {}).get("contracts"),
             "open_short_count": len(open_shorts),
