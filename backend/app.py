@@ -164,7 +164,11 @@ def api_scan_ready():
         # regime + Symbol Genius + structure entrability all clear). A RED regime
         # forces every verdict to BLOCKED, so the shortlist correctly empties on a
         # red tape — the invisible-regime rule, now enforced here.
-        ready_rows = [r for r in sc["results"] if r.get("verdict") == "READY"]
+        # CFM sells a weekly covered call, so a name with NO weekly options can't be
+        # entered — exclude known-no-weeklies from the actionable shortlist (matches
+        # the Scorecard's default filter; unknown/None stays, never a false hide).
+        ready_rows = [r for r in sc["results"]
+                      if r.get("verdict") == "READY" and r.get("has_weeklies") is not False]
         level5 = account_gate.evaluate_many([r["ticker"] for r in ready_rows], contracts=contracts)
 
         # HARD_CFM_RULE (STALE_BLOCKS_GO): a GO that the operator would act on must

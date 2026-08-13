@@ -127,7 +127,12 @@ def _entry_candidates(market: dict, spy_bars) -> list[dict]:
         import account_gate
         from metrics import scorecard as scorecard_metrics
         sc = scorecard_metrics.scorecard(None)
-        go_rows = [r for r in sc.get("results", []) if r.get("suitability") == "GO"]
+        # CFM sells a weekly covered call — a name with no weekly options can't run
+        # the strategy, so it must never become an ENTER candidate. Exclude only
+        # KNOWN-no-weeklies (has_weeklies is False); unknown (None, e.g. unprobed
+        # offline) stays, matching the Scorecard's default filter.
+        go_rows = [r for r in sc.get("results", [])
+                   if r.get("suitability") == "GO" and r.get("has_weeklies") is not False]
         if not go_rows:
             return []
         level5 = account_gate.evaluate_many([r["ticker"] for r in go_rows])
