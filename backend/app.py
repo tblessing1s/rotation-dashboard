@@ -324,8 +324,10 @@ def api_account_gate():
 @app.route("/api/option-chain/<ticker>")
 def api_option_chain(ticker: str):
     strategy = request.args.get("strategy", "atr")
+    # ?refresh=1 forces a live re-pull (the modal's bid/ask poll) past the 5-min cache.
+    refresh = request.args.get("refresh", "").strip() in ("1", "true", "yes")
     try:
-        return jsonify(option_chain.option_chain(ticker, strategy))
+        return jsonify(option_chain.option_chain(ticker, strategy, refresh=refresh))
     except option_chain.RegimeBlocked as e:
         return jsonify({"error": str(e), "regime": "red"}), 403
     except Exception as e:  # noqa: BLE001

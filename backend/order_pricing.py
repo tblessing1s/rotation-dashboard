@@ -159,6 +159,18 @@ def validate_roll_quotes(close_quote: Optional[dict], new_quote: Optional[dict],
     return reasons
 
 
+def validate_leg_quote(quote: Optional[dict], *, symbol: str, label: str = "order",
+                       now_ms: Optional[float] = None,
+                       max_age_s: Optional[float] = None) -> Optional[str]:
+    """Pure single-leg pre-submit gate: the rejection reason, or None when the quote
+    is a two-sided, nonzero, non-crossed, fresh price fit to build a limit from. The
+    single-leg sibling of validate_roll_quotes — the single-leg live placement path
+    calls it before pricing an order off a re-read quote (never off a stale snapshot)."""
+    if max_age_s is None:
+        max_age_s = float(config.QUOTE_MAX_AGE_FOR_ORDER_SECONDS)
+    return _leg_quote_problem(label, symbol, quote, now_ms, max_age_s)
+
+
 def quote_mid(quote: dict):
     """Tick-rounded mid of a validated two-sided quote, as a Decimal. Assumes the
     quote already passed validate_roll_quotes (two-sided, nonzero)."""

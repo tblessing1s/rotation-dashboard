@@ -92,6 +92,17 @@ class FakeSchwab:
     def primary_account_hash(self):
         return "HASH"
 
+    def get_quotes(self, symbols):
+        # Fresh two-sided quote applied to every requested symbol. Default mid 6.0
+        # matches the sell payload's staged 6.0 so the send-time re-price prices
+        # identically. Set self.quote_override to a quote dict (e.g. a moved mid or a
+        # one-sided book) or the string "MISSING" to model an absent quote.
+        ov = getattr(self, "quote_override", None)
+        if ov == "MISSING":
+            return {}
+        base = ov if isinstance(ov, dict) else {"bid": 5.9, "ask": 6.1}
+        return {s: base for s in symbols}
+
     def place_order(self, account_hash, order):
         self._seq += 1
         self.placed.append((account_hash, order))
@@ -379,3 +390,32 @@ def test_transitions_are_appended_and_derived(live):
     assert seq == [olc.WORKING, olc.CANCEL_REQUESTED, olc.CANCELED]
     assert all(e.get("raw_status") for e in events)          # raw broker status carried
     assert log.load_state()["order_state"]["ORD1"]["state"] == olc.CANCELED
+
+
+# --- Send-time re-price: the limit is priced off a FRESH quote, not the ticket ---
+def test_live_order_reprices_off_fresh_quote(live):
+    fake = live(FakeSchwab(status="WORKING"))
+    fake.quote_override = {"bid": 4.9, "ask": 5.1}   # market moved: fresh mid 5.0
+    res = executor.execute(_sell_payload())           # ticket staged at 6.0
+    assert res["status"] == "working"
+    assert res["limit_price"] == 5.0                  # sent at the fresh mid...
+    assert res["staged_limit_price"] == 6.0           # ...not the stale snapshot
+    assert res["repriced"] is True
+    # The order transmitted to the broker carries the re-priced limit.
+    assert log.load_state()["pending_orders"][res["order_id"]]["limit_price"] == 5.0
+
+
+def test_live_order_refused_when_no_fresh_quote(live):
+    fake = live(FakeSchwab(status="WORKING"))
+    fake.quote_override = "MISSING"                    # broker returns no quote
+    with pytest.raises(executor.StaleQuoteError):
+        executor.execute(_sell_payload())
+    assert not log.load_state().get("pending_orders")  # nothing was transmitted
+
+
+def test_live_order_refused_on_one_sided_quote(live):
+    fake = live(FakeSchwab(status="WORKING"))
+    fake.quote_override = {"bid": 5.0, "ask": None}    # one-sided book
+    with pytest.raises(executor.StaleQuoteError):
+        executor.execute(_sell_payload())
+    assert not log.load_state().get("pending_orders")

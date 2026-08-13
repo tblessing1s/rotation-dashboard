@@ -56,6 +56,11 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   const [overrideReason, setOverrideReason] = React.useState("");
   const tradeMode = useTradeMode(); // "paper" | "live" | null — is this ticket routed to Schwab?
   const [pendingLive, setPendingLive] = React.useState(null); // live order awaiting explicit confirm
+  // Live bid/ask freshness: the chain is re-pulled every QUOTE_POLL_MS while the
+  // modal is open, so the operator prices off current quotes. lastUpdated/nowTs
+  // drive the "quotes Ns ago" indicator; the backend re-prices at send regardless.
+  const [lastUpdated, setLastUpdated] = React.useState(null);
+  const [nowTs, setNowTs] = React.useState(() => Date.now());
 
   React.useEffect(() => {
     const sug = accountGate?.suggested_circuit_breaker?.price;
@@ -96,11 +101,36 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
           : sa === "close_leap" && c.position?.existing_leap?.contracts ? c.position.existing_leap.contracts
           : c.quantity_default ?? 1;
         setQty(String(defQty));
+        setLastUpdated(Date.now());
       })
       .catch((e) => { if (live) setError(e.message); })
       .finally(() => { if (live) setLoading(false); });
     return () => { live = false; };
   }, [ticker]);
+
+  // Live bid/ask poll: re-pull the chain (past the 5-min cache) on a short cadence
+  // so the displayed quotes track the market. Only the chain data is replaced —
+  // the operator's action/strike/qty selections are separate state and persist.
+  // Paused while an order is in flight or a live confirm is open so prices don't
+  // shift under the ticket. The backend re-prices off a fresh quote at send anyway.
+  const QUOTE_POLL_MS = 10000;
+  React.useEffect(() => {
+    if (error) return undefined;
+    let alive = true;
+    const id = setInterval(() => {
+      if (busy || pendingLive) return;
+      api.optionChain(ticker, "atr", true)
+        .then((c) => { if (alive) { setChain(c); setLastUpdated(Date.now()); } })
+        .catch(() => { /* transient poll failure — keep the last good chain */ });
+    }, QUOTE_POLL_MS);
+    return () => { alive = false; clearInterval(id); };
+  }, [ticker, error, busy, pendingLive]);
+
+  // 1s tick so the "quotes Ns ago" freshness label counts up between polls.
+  React.useEffect(() => {
+    const id = setInterval(() => setNowTs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const leap = chain?.leap;
   const weekly = chain?.weekly;
@@ -320,7 +350,18 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
             <div className="rounded-lg border border-sky-800 bg-sky-500/5 p-3">
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className="text-xs uppercase tracking-wide text-sky-400">Order (auto-detected)</span>
-                <TradeModeBadge mode={tradeMode} />
+                <div className="flex items-center gap-2">
+                  {lastUpdated != null && (
+                    <span
+                      className="flex items-center gap-1 text-[11px] text-slate-500"
+                      title="Live bid/ask — the chain re-pulls every ~10s, and the order re-prices off a fresh quote when you send"
+                    >
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400/80" aria-hidden />
+                      quotes {Math.max(0, Math.round((nowTs - lastUpdated) / 1000))}s ago
+                    </span>
+                  )}
+                  <TradeModeBadge mode={tradeMode} />
+                </div>
               </div>
               <p className="mb-3 text-xs text-slate-400">{chain.action_reason}</p>
               {tradeMode === "paper" && (

@@ -97,7 +97,7 @@ def test_roll_options_supports_red_regime(isolated_state, monkeypatch):
     monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 150.0, "source": "t"})
     monkeypatch.setattr(log, "find_position", lambda s, t: {
         "short_calls": [{"strike": 148, "contracts": 5, "dte": 2, "expiration": "2026-07-03"}]})
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t: {
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {
         "status": "SUCCESS", "underlyingPrice": 150.0,
         "callExpDateMap": {"2026-07-10:8": {"142.5": [
             {"symbol": "C", "strikePrice": 142.5, "daysToExpiration": 8,

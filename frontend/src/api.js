@@ -91,7 +91,8 @@ export const api = {
     request("/api/strike-posture", { method: "POST", body: JSON.stringify({ posture }) }),
   rollOptions: (ticker) => request(`/api/roll-options?ticker=${ticker}`),
   coverage: (ticker) => request(`/api/coverage?ticker=${ticker}`),
-  optionChain: (ticker, strategy = "atr") => request(`/api/option-chain/${ticker}?strategy=${strategy}`),
+  optionChain: (ticker, strategy = "atr", refresh = false) =>
+    request(`/api/option-chain/${ticker}?strategy=${strategy}${refresh ? "&refresh=1" : ""}`),
   execute: (payload) => request("/api/execute", { method: "POST", body: JSON.stringify(payload) }),
   // Live order lifecycle (used when an order comes back "working"; paper fills immediately).
   orderStatus: (orderId) => request(`/api/order-status?order_id=${encodeURIComponent(orderId)}`),
