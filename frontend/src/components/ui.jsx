@@ -74,6 +74,64 @@ export function StockLights({ lights, size = "h-3 w-3", className = "" }) {
   );
 }
 
+// ── External candlestick charts ────────────────────────────────────────────
+// We don't draw charts in-app; we deep-link the ticker to a site that already
+// does it well. Each provider takes an uppercased ticker and returns its
+// quote/chart URL. Finviz is the default because its quote page bakes the whole
+// read we want into one URL with no login or per-user chart setup: a daily
+// candlestick chart (where price sits) PLUS "Avg Volume" and "Rel Volume"
+// (current vs. average) in the stat table — the buyers-vs-sellers interest cue.
+// Swap CHART_PROVIDER to retarget every ChartLink in the app at once.
+export const CHART_PROVIDERS = {
+  finviz: (t) => `https://finviz.com/quote.ashx?t=${encodeURIComponent(t)}`,
+  tradingview: (t) => `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(t)}`,
+  stockcharts: (t) => `https://stockcharts.com/h-sc/ui?s=${encodeURIComponent(t)}`,
+  barchart: (t) => `https://www.barchart.com/stocks/quotes/${encodeURIComponent(t)}/interactive-chart`,
+};
+export const CHART_PROVIDER = "finviz";
+
+export function chartUrl(ticker) {
+  if (!ticker) return null;
+  const build = CHART_PROVIDERS[CHART_PROVIDER] || CHART_PROVIDERS.finviz;
+  return build(String(ticker).trim().toUpperCase());
+}
+
+// A tiny two-candle glyph (one filled/down, one hollow/up) so a ChartLink reads
+// as "candlestick chart" at 16px without a label.
+export function CandlestickIcon({ className = "h-4 w-4" }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor"
+         strokeWidth="1.6" strokeLinecap="round" aria-hidden="true">
+      <line x1="8" y1="3" x2="8" y2="21" />
+      <rect x="5.5" y="7" width="5" height="9" rx="1" fill="currentColor" stroke="none" />
+      <line x1="16" y1="4" x2="16" y2="20" />
+      <rect x="13.5" y="9" width="5" height="7" rx="1" />
+    </svg>
+  );
+}
+
+// A candlestick icon that opens a ticker's external chart in a new tab (see
+// CHART_PROVIDER). stopPropagation so it never triggers a parent row/card click.
+// Safe to drop next to a ticker anywhere it's rendered.
+export function ChartLink({ ticker, size = "h-4 w-4", className = "" }) {
+  const href = chartUrl(ticker);
+  if (!href) return null;
+  const sym = String(ticker).trim().toUpperCase();
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+      onClick={(e) => e.stopPropagation()}
+      title={`Open ${sym} candlestick chart — price on the chart + volume vs. average (new tab)`}
+      aria-label={`Open ${sym} candlestick chart in a new tab`}
+      className={`inline-flex items-center justify-center rounded p-0.5 text-slate-500 hover:bg-slate-700/60 hover:text-sky-300 ${className}`}
+    >
+      <CandlestickIcon className={size} />
+    </a>
+  );
+}
+
 export function Card({ title, right, children, className = "" }) {
   return (
     // min-w-0: when a Card is a flex/grid item, let it shrink to its track so a
