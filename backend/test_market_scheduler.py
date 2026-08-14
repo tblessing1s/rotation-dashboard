@@ -297,3 +297,16 @@ def test_queue_adapter_no_free_slot(monkeypatch):
                         lambda state=None: ["X"] * config.MAX_CFM_POSITIONS)
     qs = queue_state.build_queue_state(state={})
     assert qs.candidates[0].slot_opens_within_days == float("inf")
+
+
+# --- Warm-scan interval gate (keeps the scorecard cache from ageing out) -------
+def test_warm_scan_due_gate():
+    from datetime import timedelta
+    import alert_scheduler as sched
+    noon = datetime(2026, 7, 8, 12, 0, tzinfo=ET)   # Wednesday, market open
+    assert sched.warm_scan_due(noon, None, interval_min=4) is True          # never warmed
+    assert sched.warm_scan_due(noon, noon - timedelta(minutes=2), 4) is False  # too soon
+    assert sched.warm_scan_due(noon, noon - timedelta(minutes=5), 4) is True   # due
+    # Outside market hours / weekend -> never due (no point warming when nobody scans).
+    assert sched.warm_scan_due(datetime(2026, 7, 8, 17, 0, tzinfo=ET), None, 4) is False
+    assert sched.warm_scan_due(datetime(2026, 7, 11, 12, 0, tzinfo=ET), None, 4) is False  # Sat
