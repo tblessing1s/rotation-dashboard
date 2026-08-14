@@ -348,6 +348,11 @@ HISTORY_DAYS = 400           # daily bars pulled / cached per symbol (calendar d
 # imminent — should stay current intraday. refresh_policy picks that small "hot"
 # set and the scheduler force-refreshes it on this cadence during market hours.
 HOT_REFRESH_MINUTES = 15     # market-hours cadence for refreshing the hot set
+# Market-hours cadence for re-warming the full-universe scan cache. Kept BELOW the
+# scorecard cache TTL (SCAN_CACHE_TTL, default 300s = 5 min) so the cache never
+# expires during the session — the operator's Scan/Ready-to-Enter always reads a
+# warm cache instead of paying the ~10s full recompute. Env: SCAN_WARM_INTERVAL_MINUTES.
+SCAN_WARM_INTERVAL_MINUTES = float(os.environ.get("SCAN_WARM_INTERVAL_MINUTES") or 4)
 HOT_TICKERS_MAX = 40         # cap on the hot set (open positions are never dropped)
 # Ignore a scorecard memo older than this (seconds) when reading the GO/earnings
 # candidate pool — so an overnight-stale sweep never drives the intraday picks.

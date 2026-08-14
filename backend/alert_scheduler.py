@@ -48,6 +48,9 @@ _last_reconcile: date | None = None
 # it ran. Rate-limited to RECONCILE_INTERVAL_MINUTES during market hours so the
 # minutes-based staleness clock has a cadence to be measured against.
 _last_interval_reconcile: datetime | None = None
+# Last time the full-universe scan cache was re-warmed on the interval cadence, so
+# the operator's Scan always reads a warm cache (SCAN_WARM_INTERVAL_MINUTES).
+_last_warm_scan: datetime | None = None
 
 
 def enabled() -> bool:
@@ -81,6 +84,32 @@ def _warm_scan() -> None:
             logger.warning("scan cache warm-up incomplete: %s", result.get("error"))
     except Exception as e:  # noqa: BLE001 — a warm-up must never break its caller
         logger.warning("scan cache warm-up failed: %s", e)
+
+
+def warm_scan_due(now: datetime, last: datetime | None,
+                  interval_min: float | None = None) -> bool:
+    """PURE: is an interval warm-scan due? True on market days/hours when the last
+    warm ran ≥ interval minutes ago (or never). Kept below the scorecard cache TTL
+    so the cache never ages out mid-session. Unit-testable without threads/clock."""
+    if not _market_hours(now):
+        return False
+    if interval_min is None:
+        interval_min = float(config.SCAN_WARM_INTERVAL_MINUTES)
+    if last is None:
+        return True
+    return (now - last).total_seconds() / 60.0 >= interval_min
+
+
+def _maybe_warm_scan(now: datetime) -> None:
+    """Re-warm the full-universe scan cache on the SCAN_WARM_INTERVAL_MINUTES cadence
+    during market hours, so the cache never expires between the sparse alert slots
+    and the operator's Scan/Ready-to-Enter always reads warm (no ~10s recompute on
+    the request path). Best-effort — logged, never fatal to the tick."""
+    global _last_warm_scan
+    if not warm_scan_enabled() or not warm_scan_due(now, _last_warm_scan):
+        return
+    _last_warm_scan = now
+    _warm_scan()
 
 
 def _market_hours(now: datetime) -> bool:
@@ -182,6 +211,7 @@ def _tick() -> None:
     _maybe_hot_refresh(now)
     _maybe_tier_poll(now)
     _maybe_interval_reconcile(now)
+    _maybe_warm_scan(now)  # keep the full-universe scan cache warm between slots
 
     due = due_slots(now)
     if not due:
