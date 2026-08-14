@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Light, Spinner, ErrorState, StockLights, fmt, pct, pctSigned, useApi } from "./ui.jsx";
+import { Card, Pill, Light, Spinner, ErrorState, StockLights, ChartLink, fmt, pct, pctSigned, useApi } from "./ui.jsx";
 
 // The per-symbol scan table, collapsed to the composable read:
 //
@@ -307,6 +307,7 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                     no weeklies
                   </span>
                 )}
+                <ChartLink ticker={row.ticker} size="h-3.5 w-3.5" />
                 <RefreshButton
                   onClick={onRefresh}
                   busy={refreshing}

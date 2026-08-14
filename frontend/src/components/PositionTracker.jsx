@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Meter, Loading, Modal, Light, money, fmt, useApi } from "./ui.jsx";
+import { Card, Meter, Loading, Modal, Light, ChartLink, money, fmt, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { Orange, pulpOf, balanceOf } from "./JuiceStand.jsx";
@@ -1117,8 +1117,12 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
 
   return (
     <div className={`min-w-0 rounded-xl border bg-slate-900/60 transition ${focused ? "border-emerald-400/70 ring-1 ring-emerald-400/40" : "border-slate-800"}`}>
-      <button onClick={() => setOpen((v) => !v)} aria-expanded={open}
-              className="flex w-full items-center justify-between gap-3 p-4 text-left hover:bg-slate-900/40">
+      <div className="flex items-center">
+        {/* Candlestick chart link sits outside the toggle button (no <a> nested
+            in a <button>); it opens the ticker's external chart in a new tab. */}
+        <ChartLink ticker={p.ticker} size="h-4 w-4" className="ml-3" />
+        <button onClick={() => setOpen((v) => !v)} aria-expanded={open}
+              className="flex min-w-0 flex-1 items-center justify-between gap-3 py-4 pr-4 pl-2 text-left hover:bg-slate-900/40">
         <span className="flex min-w-0 items-center gap-2">
           <span className={`text-slate-500 transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
           <span className="text-sm font-semibold text-slate-100">{p.ticker}</span>
@@ -1165,7 +1169,8 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
             <span className="font-semibold text-slate-200">{shortPct == null ? "none" : `${fmt(shortPct, 0)}% cap`}</span>
           </span>
         </span>
-      </button>
+        </button>
+      </div>
 
       {/* Engine recommendations stay visible even when the row is collapsed —
           they're the "act now" layer, not detail. */}

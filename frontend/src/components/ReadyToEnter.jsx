@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, StaleBadge, Spinner, Loading, ErrorState, StockLights, fmt, useApi } from "./ui.jsx";
+import { Card, Pill, StaleBadge, Spinner, Loading, ErrorState, StockLights, ChartLink, fmt, useApi } from "./ui.jsx";
 
 // Ready-to-enter shortlist: tickers that clear the Scorecard's GO verdict
 // (Level 3 beats peers + Level 4 consolidating + the scorecard's own
@@ -75,17 +75,25 @@ export default function ReadyToEnter({ onSelectStock, refreshKey }) {
       ) : (
         <div className="flex flex-wrap gap-2">
           {ready.map((r) => (
-            <button
+            // Wrapper carries the chip's border/bg so the ChartLink can sit
+            // beside the select button instead of nested inside it (no <a> in
+            // a <button>).
+            <div
               key={r.ticker}
-              onClick={() => onSelectStock?.(r.ticker)}
-              title={`${r.sector || ""} · covered-call yield ${fmt(r.juice_weekly_pct, 2)}%/wk (weekly premium on 100 shares) · lights 4/4 green · right spot ✓`}
-              className="flex items-center gap-2 rounded-lg border border-emerald-600/50 bg-emerald-500/10 px-3 py-1.5 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/20"
+              className="flex items-center rounded-lg border border-emerald-600/50 bg-emerald-500/10 pr-1.5 hover:bg-emerald-500/20"
             >
-              {r.ticker}
-              {/* The four Genius lights (a ready name is 4/4 green + in the right spot). */}
-              {r.lights ? <StockLights lights={r.lights} size="h-2.5 w-2.5" /> : null}
-              <span className="text-xs font-normal text-emerald-400/80">{fmt(r.juice_weekly_pct, 2)}%/wk</span>
-            </button>
+              <button
+                onClick={() => onSelectStock?.(r.ticker)}
+                title={`${r.sector || ""} · covered-call yield ${fmt(r.juice_weekly_pct, 2)}%/wk (weekly premium on 100 shares) · lights 4/4 green · right spot ✓`}
+                className="flex items-center gap-2 px-3 py-1.5 text-sm font-semibold text-emerald-300"
+              >
+                {r.ticker}
+                {/* The four Genius lights (a ready name is 4/4 green + in the right spot). */}
+                {r.lights ? <StockLights lights={r.lights} size="h-2.5 w-2.5" /> : null}
+                <span className="text-xs font-normal text-emerald-400/80">{fmt(r.juice_weekly_pct, 2)}%/wk</span>
+              </button>
+              <ChartLink ticker={r.ticker} size="h-3.5 w-3.5" className="text-emerald-400/70 hover:text-sky-300" />
+            </div>
           ))}
         </div>
       )}
@@ -110,6 +118,7 @@ export default function ReadyToEnter({ onSelectStock, refreshKey }) {
               return (
                 <li key={r.ticker} className="flex items-center gap-2 rounded-lg bg-amber-950/30 px-3 py-1.5 text-sm">
                   <Pill status="wait">{r.ticker}</Pill>
+                  <ChartLink ticker={r.ticker} size="h-3.5 w-3.5" />
                   <StaleBadge
                     stale
                     title={(r.stale_inputs || [])
@@ -149,6 +158,7 @@ export default function ReadyToEnter({ onSelectStock, refreshKey }) {
                 <li key={r.ticker} className="rounded-lg bg-slate-950/60 px-3 py-1.5 text-sm">
                   <div className="flex items-center gap-2">
                     <Pill status="avoid">{r.ticker}</Pill>
+                    <ChartLink ticker={r.ticker} size="h-3.5 w-3.5" />
                     <span className="text-xs text-slate-500">{r.sector}</span>
                     {r.lights ? <StockLights lights={r.lights} size="h-2.5 w-2.5" /> : null}
                     <span className="ml-auto text-xs text-rose-300">{reasonList(r.level5)}</span>
