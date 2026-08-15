@@ -442,10 +442,63 @@ SHARES_PER_LOT = 100
 # lot would blow the position envelope. Override via the PER_POSITION_CAP_USD env.
 PER_POSITION_CAP_USD = float(os.environ.get("PER_POSITION_CAP_USD") or 15000)
 # PROPOSED_DEFAULT — weekly juice adequacy floor for a SHARES base, denominated
-# against DEPLOYED SHARE CAPITAL (spot x shares) rather than LEAP cost. The gross
-# floor number is unchanged from the LEAP path pending recalibration; this is
-# logged to the rejection log against the new denominator (see account_gate).
-SHARES_JUICE_FLOOR_PCT = 1.5
+# against DEPLOYED SHARE CAPITAL (spot x shares) rather than LEAP cost.
+#
+# Recalibrated in v21 from the inherited LEAP number (1.5) down to 0.75. The LEAP
+# figure was a yield on a ~50%-of-spot premium; the same dollars of weekly
+# extrinsic measured against the FULL share cost land several-fold lower, so
+# carrying 1.5 across denominators would have rejected essentially the whole
+# universe. 0.75 is the midpoint of the 0.7-0.8%/wk band. Until v21 this constant
+# had NO consumer anywhere in the tree; it is now the JUICE_ENGINE arm of
+# scan_triggers.shadow_floor. SHADOW ONLY — see that function; it has zero
+# blocking authority and no switch exists to give it any.
+SHARES_JUICE_FLOOR_PCT = 0.75
+# ---- Dividend income profile (schema v21) ---------------------------------
+# TRAVIS_EXTENSION — NOT a CFM rule. The CFM source prefers volatile names for
+# their juice and warns against "safe" low-vol stocks; the dividend sleeve is an
+# extension made viable by the shares-primary model (dividends are actually
+# collected now, which was never true under a LEAP). Every constant below is a
+# PROPOSED_DEFAULT. See income_profile.py for the boundary this must not cross.
+
+# The dividend-peer RS3M benchmark that replaces the growth-tilted sector ETF for
+# a DIVIDEND_COMPOUNDER's SECTOR leg only. The RS3M-vs-SPY leg is never affected.
+DIVIDEND_PEER_BENCHMARK = (os.environ.get("CFM_DIVIDEND_BENCHMARK") or "SCHD").strip().upper()
+# The configured alternatives; anything else falls back to SCHD rather than
+# silently comparing against a symbol with no bars.
+DIVIDEND_PEER_BENCHMARKS = ("SCHD", "VYM", "NOBL")
+if DIVIDEND_PEER_BENCHMARK not in DIVIDEND_PEER_BENCHMARKS:
+    DIVIDEND_PEER_BENCHMARK = "SCHD"
+
+# Trailing annual dividend yield (PERCENT) at or above which an untagged candidate
+# is classified DIVIDEND_COMPOUNDER. An explicit operator assignment in
+# state.metadata.income_profile_overrides always wins; an UNKNOWN yield never
+# auto-enrolls (it falls back to JUICE_ENGINE).
+DIVIDEND_PROFILE_MIN_YIELD_PCT = 2.5
+
+# Weeks per year for the dividend leg of the combined weekly-equivalent yield.
+# [COMBINED_YIELD_DAY_COUNT] The dividend input is a QUOTED ANNUAL RATE, and /52
+# is the conventional weekly-equivalent reading of one. The juice leg rides the
+# 7-calendar-day base already pinned by burn.net_juice_per_week
+# ([NET_JUICE_TIME_BASE]); the two differ by ~1.8% OF THE DIVIDEND LEG (52 vs
+# 365/7 = 51.07 weeks), which is immaterial against the floors but is pinned by
+# test_dividend_profile so it cannot drift.
+DIVIDEND_WEEKS_PER_YEAR = 52
+
+# SHADOW combined weekly-equivalent yield floor for a DIVIDEND_COMPOUNDER (%/wk).
+COMBINED_YIELD_FLOOR_WK = 0.5
+# Sub-floor: the JUICE component alone must still clear the estimated round-trip
+# spread cost. A name whose weekly extrinsic can't pay for its own crossing is a
+# buy-and-hold, not a CFM position — logged as JUICE_BELOW_SLIPPAGE. Expressed as
+# an absolute per-share floor on the post-haircut weekly extrinsic, because a
+# PROPORTIONAL haircut can never flip the sign of a positive yield and so could
+# never trigger.
+MIN_WEEKLY_EXTRINSIC_AFTER_SLIPPAGE_PS = 0.05
+
+# Position builder: accrued cash must cover a fresh 100-share lot plus this buffer
+# before LOT_ADD_RECOMMENDED is emitted, so a recommendation isn't invalidated by
+# a tick between the alert and the fill.
+LOT_ADD_BUFFER_PCT = 0.02
+
 # Shares-only enforcement (schema v20). With shares as the active base leg, the
 # LEAP diagonal is read-only LEGACY: existing history stays queryable and priced,
 # but no NEW LEAP may be opened, added to, or rolled. When True, executor.execute
@@ -1051,7 +1104,14 @@ ETF_WEEKLY_JUICE_TARGET_PCT = 1.0
 # Tickers treated as ETFs for the income profile above, in addition to the 11
 # sector-ETF headers + SPY (which are always ETFs). Extend this as you add ETFs
 # to the universe so they get the ETF juice bar.
-KNOWN_ETFS = {"QQQ", "IWM", "DIA", "SMH", "ARKK", "XBI", "GDX", "XOP", "KRE", "XHB"}
+#
+# The three dividend-peer benchmarks (DIVIDEND_PEER_BENCHMARKS, schema v21) are
+# included so a compounder's comparison leg resolves as an ETF rather than as an
+# unknown single name — and so one of them HELD as a position gets the ETF income
+# sleeve. They are benchmarks, not scan candidates: they are not in
+# tickers_by_sector.txt and are not swept, only fetched as comparison frames.
+KNOWN_ETFS = {"QQQ", "IWM", "DIA", "SMH", "ARKK", "XBI", "GDX", "XOP", "KRE", "XHB",
+              "SCHD", "VYM", "NOBL"}
 
 # PROPOSED_DEFAULT — circuit-breaker (line-in-the-sand) default suggestion:
 # max(MA50, entry - CIRCUIT_BREAKER_ATR_MULT * ATR). Operator-editable at entry;

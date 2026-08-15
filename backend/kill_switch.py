@@ -15,7 +15,7 @@ import indicators
 import sector_data
 
 
-def _rs_pair(ticker: str) -> tuple[float | None, float | None]:
+def _rs_pair(ticker: str, profile: str | None = None) -> tuple[float | None, float | None]:
     """(RS3M vs SPY, RS3M vs Sector) for a ticker, in percent.
 
     RS3M vs Sector is the DIRECT relative strength of the stock against its
@@ -34,16 +34,26 @@ def _rs_pair(ticker: str) -> tuple[float | None, float | None]:
     since 0 is always < 2. So rs_vs_sector is None (not applicable) for an
     ETF's own position — the kill switch then relies solely on RS3M vs SPY,
     a fully meaningful check for an ETF against the broad market.
+
+    ``profile`` (schema v21) selects which peer group the SECTOR leg compares
+    against: the name's sector ETF for a JUICE_ENGINE position, the dividend-peer
+    benchmark for a DIVIDEND_COMPOUNDER. The rule is unchanged — the peer must
+    still be beaten — and the vs-SPY leg is NOT touched by this: it retains full,
+    unmodified exit authority for both profiles [HARD_CFM_RULE]. The
+    self-comparison guard is asked against the ACTIVE benchmark, so a compounder
+    whose ticker IS the dividend benchmark is caught by it too.
     """
+    import income_profile
     spy = data_handler.get_daily(config.BENCHMARK)
     stock = data_handler.get_daily(ticker)
     rs_vs_spy = indicators.rs3m(stock, spy) if stock is not None else None
 
     sector_etf = sector_data.sector_for(ticker)
-    is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
+    benchmark = income_profile.benchmark_for(profile, sector_etf)
+    is_own_benchmark = income_profile.is_own_benchmark(ticker, profile, sector_etf)
     rs_vs_sector = None
-    if sector_etf and not is_sector_etf and stock is not None:
-        sector_df = data_handler.get_daily(sector_etf)
+    if benchmark and not is_own_benchmark and stock is not None:
+        sector_df = data_handler.get_daily(benchmark)
         rs_vs_sector = indicators.rs3m(stock, sector_df) if sector_df is not None else None
     return rs_vs_spy, rs_vs_sector
 
@@ -79,8 +89,8 @@ def classify(ticker: str, rs_vs_spy: float | None,
     }
 
 
-def evaluate(ticker: str) -> dict:
-    rs_vs_spy, rs_vs_sector = _rs_pair(ticker)
+def evaluate(ticker: str, profile: str | None = None) -> dict:
+    rs_vs_spy, rs_vs_sector = _rs_pair(ticker, profile=profile)
     verdict = classify(ticker, rs_vs_spy, rs_vs_sector)
     action = verdict["suggested_action"]
     try:
@@ -94,11 +104,14 @@ def evaluate(ticker: str) -> dict:
 
 
 def evaluate_all(state: dict) -> list[dict]:
+    import income_profile
     out = []
     for p in state.get("positions", []):
         if p.get("status") == "closed":
             continue
-        out.append(evaluate(p.get("ticker", "")))
+        # The POSITION's stamped profile, not a re-derivation — an open position's
+        # peer group must not move underneath it on a yield print.
+        out.append(evaluate(p.get("ticker", ""), profile=income_profile.of(p)))
     return out
 
 

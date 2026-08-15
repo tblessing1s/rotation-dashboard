@@ -21,6 +21,7 @@ import time
 
 import alpha_vantage
 import config
+import dividend_calendar
 import logging_handler as log
 import schwab_api
 
@@ -116,6 +117,35 @@ def yield_for(ticker: str, refresh: bool = False) -> float:
     return q if isinstance(q, (int, float)) and q >= 0 else 0.0
 
 
+def cached_yield_with_source(ticker: str) -> tuple[float | None, str]:
+    """(annual yield as a decimal, source) read from CACHE ONLY — never a fetch.
+
+    Mirrors ``cached_dividend``: a bulk scan sweeps hundreds of names, and calling
+    ``yield_for`` across them on a cold cache would fire one provider request per
+    ticker on the request path. Returns ``(None, "unknown")`` when nothing is
+    cached, which callers must keep DISTINCT from a genuine non-payer — an
+    unresolved yield is never displayed as a confident 0 and never auto-enrols a
+    name into the dividend sleeve.
+
+    Manual overrides in state metadata still win, exactly as ``yield_for``
+    resolves them.
+    """
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        return None, "unknown"
+    override = _override(ticker)
+    if override is not None:
+        return override, "override"
+    with _lock:
+        rec = _read_cache().get(ticker)
+    if not rec or "yield" not in rec:
+        return None, "unknown"
+    q = rec.get("yield")
+    if not isinstance(q, (int, float)) or q < 0:
+        return None, "none"          # cached miss — a resolved non-payer/unknown
+    return (q, "dividend_yield") if q > 0 else (0.0, "none")
+
+
 def q_with_source(ticker: str, refresh: bool = False) -> tuple[float, str]:
     """(q, source) — the continuous dividend yield AND where it came from, so a
     risk path can LOG the provenance instead of silently defaulting q to 0.
@@ -193,17 +223,16 @@ def _fetch_event(ticker: str) -> dict:
                 return {"ex_date": ex, "amount": amount, "source": "schwab"}
         except Exception:  # noqa: BLE001 — degrade to the next source
             pass
-    if alpha_vantage.configured():
-        try:
-            ov = alpha_vantage.overview(ticker)
-            ex = str(ov.get("ExDividendDate") or "")[:10] or None
-            if ex in ("None", "0000-00-00"):
-                ex = None
-            amount = _parse_amount(ov.get("DividendPerShare"), 4)  # annual, quarterly payer
-            if ex or amount:
-                return {"ex_date": ex, "amount": amount, "source": "alpha_vantage"}
-        except Exception:  # noqa: BLE001
-            pass
+    # Everything else resolves through the contract-checked calendar
+    # (dividend_calendar), which owns the shape, the UNITS (per-share, per-payment
+    # — never annual, never a yield) and the never-invent-a-date rule. The Schwab
+    # probe above stays as a pre-step because it is the only place those unverified
+    # key names are still tried; the calendar's schwab_adapter is a documented TODO
+    # rather than the same guess repeated.
+    event = dividend_calendar.next_dividend(ticker)
+    if not dividend_calendar.is_empty(event):
+        return {"ex_date": event["ex_date"], "amount": event["amount"],
+                "pay_date": event.get("pay_date"), "source": event["source"]}
     return {"ex_date": None, "amount": None, "source": "none"}
 
 

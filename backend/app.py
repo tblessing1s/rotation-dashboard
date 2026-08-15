@@ -581,10 +581,29 @@ def api_order_submission_status():
 def api_positions():
     try:
         state = log.load_state()
+        views = position_manager.positions_view(state)
+        # Income profile + accrual progress per position (schema v21). Attached
+        # here rather than inside positions_view so the accrual read stays a
+        # display concern: nothing below feeds coverage, sizing or capital math —
+        # accrued cash is CASH, never exposure, until a real lot is bought.
+        try:
+            import accrual
+            import income_profile
+            for view in views:
+                ticker = view.get("ticker", "")
+                position = log.find_position(state, ticker) or {}
+                profile = income_profile.of(position)
+                view["income_profile"] = profile
+                view["income_profile_badge"] = income_profile.badge(profile)
+                view["accrual"] = accrual.lot_add_status(
+                    state, ticker, view.get("stock_price") or view.get("price"))
+        except Exception:  # noqa: BLE001 — a display readout never sinks the panel
+            pass
         return jsonify({
-            "positions": position_manager.positions_view(state),
+            "positions": views,
             "capital": position_manager.capital_summary(state),
             "extrinsic_payback": state.get("extrinsic_payback", {}),
+            "accrual_ledger": state.get("accrual_ledger", {}),
         })
     except Exception as e:  # noqa: BLE001
         return _err(e)

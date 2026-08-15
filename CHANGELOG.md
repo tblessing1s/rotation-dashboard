@@ -1,5 +1,106 @@
 # Changelog
 
+## v2.8.0 — Dividend income profile + position builder (state schema v21)
+
+**PROVENANCE — `TRAVIS_EXTENSION`, not a CFM rule.** The CFM source methodology
+(Mark Yegge) explicitly *prefers* volatile stocks because they carry more juice,
+and warns against "safe" low-volatility names. The dividend sleeve added here is
+Travis's extension, made economically viable only by the shares-primary model:
+with real shares as the base leg the dividends are actually collected, which was
+never true under a LEAP. It is implemented as a **separate, clearly-labeled income
+profile that never blends into or weakens the juice-engine verdict logic** —
+`JUICE_ENGINE` behavior is regression-locked byte-for-byte
+(`test_dividend_profile.py`, tests 1/2/9). Audit: `audit-dividend-profile-v1.md`.
+
+- **Income profile** (`income_profile.py`): `JUICE_ENGINE` (default, backfilled
+  onto every existing position) | `DIVIDEND_COMPOUNDER`. Anything that is not an
+  explicit dividend tag normalizes to `JUICE_ENGINE`, so the sleeve is entered only
+  by intent, never by omission or a typo. A position's profile is **stamped at
+  entry and never re-derived** — a yield print cannot move an open position's peer
+  group or floor underneath it.
+- **Entry gate — dividend branch** (`screening`, `stock_lights`, `kill_switch`,
+  `metrics/scorecard`): a parallel branch mirroring the ETF waiver pattern. It
+  changes **exactly two things**: the RS3M comparison benchmark for the *sector*
+  leg (`DIVIDEND_PEER_BENCHMARK`, default SCHD; VYM/NOBL configurable) and which
+  shadow floor a candidate is measured against. Trend quality is **not** waived —
+  the Genius four-light vote (per-stock and market regime), consolidation-near-MA21,
+  the ATR posture, the RSI band, the earnings-window exclusion and the YELLOW
+  watchlist lockout are identical for both profiles. **The RS3M-vs-SPY kill-switch
+  leg is untouched** and retains full exit authority. A payer lagging its *dividend*
+  peers is still vetoed at Level 3 (the AAPL lesson, covered for the new branch).
+  Entry snapshots now record `rs3m_vs_sector_benchmark` beside the existing
+  `rs3m_vs_sector_method`, so "direct against what?" can never be ambiguous.
+- **Combined weekly-equivalent yield, SHADOW ONLY** (`scan_triggers.shadow_floor`):
+  `juice %/wk + (trailing annual dividend % ÷ 52)`, with the two components kept
+  separable everywhere they are displayed. Floors: `JUICE_ENGINE` 0.75%/wk on juice
+  alone; `DIVIDEND_COMPOUNDER` 0.5%/wk combined, plus a `JUICE_BELOW_SLIPPAGE`
+  sub-floor requiring the juice component to still clear the estimated round-trip
+  spread cost. **Zero blocking authority, and no config switch exists that would
+  grant any** — `shadow`/`blocking` are literals, not config reads, and the
+  observation is deliberately never appended to the block list `compose_row_verdict`
+  derives authority from. Pass/fail is logged per candidate per day into the
+  existing `scan_rejection_log`, which is the evidence a future graduation decision
+  would rest on. Honest magnitude, pinned by test: a 3%/yr payer contributes only
+  ~0.06%/wk — the *lower floor*, not the dividend, does most of the admitting work.
+- **Accrual ledger + position builder** (`accrual.py`): a per-position balance fed
+  by exactly two whitelisted sources — realized extrinsic at short-call **cycle**
+  close, and `dividend_income` receipts. **Roll-down credits are excluded by
+  construction** (a roll leg carries a `roll_id` and is rejected in
+  `credit_for`): crediting a deferred intrinsic obligation is the Martingale trap,
+  scaling the book up precisely as a thesis deteriorates. Unrealized juice and every
+  intrinsic component are likewise excluded. At threshold
+  (`price × 100 × (1 + 2%)`) a `LOT_ADD_READY` alert fires — **blocked-with-reason**
+  when the Level 5 gate or a reconciliation freeze would refuse the add. **No
+  auto-execution**: an executed add is an operator-confirmed `buy_shares` carrying a
+  `lot_add` stamp, so it traverses the same freeze / Level-5 / execution-window /
+  spread path as any other new risk. Accrued cash is CASH, never exposure — it
+  changes no covered-call math until a whole lot is actually bought.
+- **Ex-dividend calendar contract** (`dividend_calendar.py`): the internal data
+  contract is now explicit (ex-date vs pay date; **per-share, per-payment** amounts,
+  never annualized, never a yield; never substitute a missing date), with Alpha
+  Vantage and a fixture-backed stub wired behind it. The **Schwab adapter is a
+  documented TODO that returns None on purpose** — its field names and units are
+  unconfirmed against a live account, and a wrong guess is indistinguishable from
+  "this stock pays no dividend", which would silently disarm the assignment guard.
+- **Early-assignment guard**: the existing `ASSIGNMENT_RISK` dividend escalation now
+  carries the typed code `EARLY_ASSIGNMENT_RISK` and defense-level styling on the
+  position card. Deliberately **not** a second alert type — it is the same condition
+  the extrinsic-vs-dividend guard has always raised, and forking the taxonomy would
+  double-alert for one event.
+- **UI**: JUICE/DIV sleeve badge on the scan table and position cards; a
+  combined-yield column whose components split on hover; a per-position accrual
+  progress bar ("$X / $Y toward next lot") with its source breakdown; a
+  shadow-floor calibration panel labeled NO AUTHORITY; ex-div dates and
+  roll-before-ex wording on the position card. Gross premium is never presented as
+  income anywhere — the juice half is extrinsic only.
+- Migration v20→v21 (additive: `income_profile` backfilled to `JUICE_ENGINE`;
+  `accrual_ledger` seeded empty — never back-filled, which would fabricate a
+  compounding record that never happened). Executions untouched; append-only holds.
+- Config: `DIVIDEND_PEER_BENCHMARK(S)`, `DIVIDEND_PROFILE_MIN_YIELD_PCT`,
+  `DIVIDEND_WEEKS_PER_YEAR`, `COMBINED_YIELD_FLOOR_WK`,
+  `MIN_WEEKLY_EXTRINSIC_AFTER_SLIPPAGE_PS`, `LOT_ADD_BUFFER_PCT`;
+  `SHARES_JUICE_FLOOR_PCT` recalibrated 1.5 → 0.75 and **wired for the first time**
+  (it had no consumer anywhere in the tree).
+
+### Also in this release — two Level 5 gate gaps closed
+
+Found by the Phase 0 audit and fixed with explicit approval. Both are pre-existing
+defects in the shares-primary path, independent of the dividend sleeve:
+
+- **`buy_shares` was never gated.** `executor.execute` ran the Level 5 account gate
+  only for `buy_leap` / `open_position_atomic`, so every shares entry reached the
+  book with cash reserve, position limit, deployed-capital cap, sector concentration
+  and the earnings-in-cycle block **all unenforced** — and `_buy_shares` read an
+  `_account_gate` key nothing ever set, so an override logged an empty
+  `failed_checks` list. Shares entries are now gated on a round-lot basis, sized by
+  the actual fill price.
+- **The round-lot SIZE-BLOCK never fired.** No caller passed `position_type`, so
+  `PER_POSITION_CAP_USD` was dead in production. Now armed on the shares path.
+- **Sub-lot share entries are refused** (`shares_entry_lots`): a `buy_shares` qty
+  that is not a whole multiple of 100 is rejected at the operator boundary, because
+  a fragment can never be sold against. Broker-side odd lots remain bookable through
+  the reconciliation `adjustment` path, which carries no size rule.
+
 ## v2.7.0 — Broker execution ingestion + reconciliation freeze gating (state schema v19)
 
 The reconciliation core the roll incident demanded: the app now reads Schwab's

@@ -60,6 +60,10 @@ export const api = {
   // and poll its status. The refresh POST returns immediately.
   scanRefresh: () => request("/api/scan/refresh", { method: "POST" }),
   scanStatus: () => request("/api/scan/status"),
+  // Calibration rollup over the append-only scan rejection log — including the
+  // SHADOW income-floor pass/fail tallies per profile. Read-only telemetry.
+  scanRejectionStats: (window) =>
+    request(`/api/scan/rejection-stats${window ? `?window=${window}` : ""}`),
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
   // they can clear the STALE_BLOCKS_GO gate on the next scan.
   refreshReadyQuote: (tickers) =>

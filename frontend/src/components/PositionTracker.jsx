@@ -614,6 +614,65 @@ function PaybackTank({ uid, pct, mini = false }) {
   );
 }
 
+// Accrual toward the next 100-share lot (schema v21, TRAVIS_EXTENSION).
+//
+// The balance is REALIZED extrinsic at cycle close plus received dividends —
+// nothing else. Roll-down credits are excluded by construction (they are a
+// deferred intrinsic obligation, and compounding them is the Martingale trap),
+// as are unrealized juice and every intrinsic component.
+//
+// Accrued cash is CASH, never exposure: it changes no covered-call math until a
+// whole lot is actually bought, and the app never auto-executes the add.
+function AccrualProgress({ accrual }) {
+  if (!accrual || accrual.threshold == null) return null;
+  const pct = accrual.pct_to_next_lot ?? 0;
+  const src = accrual.by_source || {};
+  const ready = accrual.ready;
+  const blocked = accrual.blocked;
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="mb-1.5 flex items-center justify-between text-xs">
+        <span className="uppercase tracking-wide text-slate-500">Accrual — next lot</span>
+        <span
+          className="cursor-help tabular-nums text-slate-400"
+          title={[
+            `realized extrinsic ${money(src.REALIZED_EXTRINSIC || 0)}`,
+            `dividends ${money(src.DIVIDEND || 0)}`,
+            "Excluded by construction: roll-down credits (deferred intrinsic obligation),",
+            "unrealized juice, and any intrinsic component.",
+          ].join("\n")}
+        >
+          {money(accrual.accrued_cash)} / {money(accrual.threshold)}
+        </span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
+        <div
+          className={`h-full rounded-full transition-all ${
+            ready && !blocked ? "bg-emerald-400" : ready ? "bg-amber-400" : "bg-sky-500/70"}`}
+          style={{ width: `${Math.min(Math.max(pct, 0), 100)}%` }}
+        />
+      </div>
+      <p className="mt-1 text-[11px] text-slate-500">
+        {!ready && (
+          <>{money(accrual.remaining)} more toward another {accrual.shares_per_lot}-share lot
+            {accrual.lot_cost != null && <> (lot {money(accrual.lot_cost)} + {fmt((accrual.buffer_pct || 0) * 100, 0)}% buffer)</>}.
+          </>
+        )}
+        {ready && !blocked && (
+          <span className="text-emerald-300">
+            Enough for another {accrual.shares_per_lot}-share lot — confirm the add. Never auto-executed.
+          </span>
+        )}
+        {ready && blocked && (
+          <span className="text-amber-300">
+            Lot add BLOCKED — {accrual.blocked_reason}. The cash keeps accruing.
+          </span>
+        )}
+      </p>
+    </div>
+  );
+}
+
 // Open shorts — the weekly income engine: each short's extrinsic capture (the
 // juice we're collecting) with its roll/assignment flags, each rollable in place.
 function ShortCalls({ p, shorts, setRolling, onOpenTicket }) {
@@ -689,13 +748,21 @@ function ShortCalls({ p, shorts, setRolling, onOpenTicket }) {
                   </span>
                 )}
                 {sc.assignment_risk && (
+                  /* The dividend-triggered variant (EARLY_ASSIGNMENT_RISK) is
+                     time-critical — it fires on a specific ex-date — so it carries
+                     DEFENSE-level severity styling, the same rose treatment as
+                     "below strike". The bare extrinsic-collapse trigger has no
+                     deadline and stays amber. */
                   <span
                     title={sc.assignment_risk.note}
-                    className="cursor-help rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300"
+                    className={`cursor-help rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+                      sc.assignment_risk.trigger === "dividend"
+                        ? "border-rose-500/50 bg-rose-500/15 text-rose-300"
+                        : "border-amber-500/40 bg-amber-500/15 text-amber-300"}`}
                   >
                     {sc.assignment_risk.trigger === "extrinsic"
                       ? `assignment risk (extrinsic ${fmt(sc.assignment_risk.extrinsic, 2)})`
-                      : `assignment risk (div ${fmt(sc.assignment_risk.dividend, 2)} ex ${sc.assignment_risk.ex_date})`}
+                      : `early assignment risk — roll before ex ${sc.assignment_risk.ex_date} (div ${fmt(sc.assignment_risk.dividend, 2)} > extrinsic ${fmt(sc.assignment_risk.extrinsic, 2)})`}
                   </span>
                 )}
                 {sc.dte != null && sc.dte <= 2 && (
@@ -1127,6 +1194,14 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
           <span className={`text-slate-500 transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
           <span className="text-sm font-semibold text-slate-100">{p.ticker}</span>
           <span className="truncate text-xs text-slate-500">{p.sector}</span>
+          {p.income_profile === "DIVIDEND_COMPOUNDER" && (
+            <span
+              className="rounded bg-cyan-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-cyan-300"
+              title={"DIVIDEND_COMPOUNDER — Travis's dividend sleeve (an EXTENSION, not a CFM rule). "
+                + "Its kill switch compares RS3M against the dividend-peer benchmark instead of the sector ETF; "
+                + "the RS3M-vs-SPY leg is unchanged and keeps full exit authority."}
+            >DIV</span>
+          )}
           {p.symbol_genius?.color && (
             <span
               className="flex items-center gap-1"
@@ -1203,6 +1278,9 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
 
           {/* (3) short-call capture */}
           <ShortCalls p={p} shorts={shorts} setRolling={setRolling} onOpenTicket={onOpenTicket} />
+
+          {/* (4) accrual toward the next lot — shares positions only */}
+          <AccrualProgress accrual={p.accrual} />
 
           {p.defend && (
             <DefendPanel ticker={p.ticker} onStage={() => setRolling({ ticker: p.ticker, reason: "defend" })} />
