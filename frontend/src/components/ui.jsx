@@ -179,6 +179,44 @@ export function Loading({ label = "Loading…", className = "" }) {
   );
 }
 
+// Income sleeve (schema v21) — the ONE place the badge text, tone and provenance
+// blurb live, so the disclaimer can't drift into contradicting itself across the
+// scan table and the position cards.
+export const SLEEVE = {
+  DIVIDEND_COMPOUNDER: {
+    badge: "DIV",
+    tone: "bg-cyan-500/15 text-cyan-300",
+    title: "DIVIDEND_COMPOUNDER — Travis's dividend sleeve. NOT a CFM rule: the source "
+      + "methodology prefers volatile names for their juice and warns against 'safe' "
+      + "low-vol stocks. It changes exactly two things — the RS peer benchmark for the "
+      + "sector leg, and which shadow floor the name is measured against. Trend quality, "
+      + "the YELLOW watchlist lockout, the earnings-window exclusion and the RS-vs-SPY "
+      + "kill switch are identical to JUICE_ENGINE.",
+  },
+  JUICE_ENGINE: {
+    badge: "JUICE",
+    tone: "bg-slate-500/15 text-slate-400",
+    title: "JUICE_ENGINE — the CFM default. Judged on weekly extrinsic alone against its "
+      + "own shadow floor.",
+  },
+};
+
+export function sleeveOf(profile) {
+  return SLEEVE[profile] || SLEEVE.JUICE_ENGINE;
+}
+
+export function SleeveBadge({ profile, className = "" }) {
+  const s = sleeveOf(profile);
+  return (
+    <span
+      title={s.title}
+      className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${s.tone} ${className}`}
+    >
+      {s.badge}
+    </span>
+  );
+}
+
 export function Meter({ pct, tone = "bg-emerald-500" }) {
   const w = Math.max(0, Math.min(100, pct || 0));
   return (

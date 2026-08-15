@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import config
 import data_handler
 import execution_gate
+import income_profile
 import indicators
 import logging_handler as log
 import order_lifecycle as olc
@@ -33,7 +34,14 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
                  "buy_shares", "sell_shares", "close_shares_assigned",
                  # Held-share cash dividend, booked as its OWN income event (kept out of
                  # the juice/theta ledger — derived into state['dividend_ledger']).
-                 "dividend_income"}
+                 "dividend_income",
+                 # Position builder (schema v21). LOT_ADD_RECOMMENDED is telemetry —
+                 # the record that the builder told the operator a lot was fundable,
+                 # and whether the Level 5 gate blocked it. There is deliberately no
+                 # lot_add_executed action: an EXECUTED add is a plain buy_shares
+                 # carrying a `lot_add` stamp, so it traverses the same freeze /
+                 # Level-5 / execution-window / spread path as any other new risk.
+                 "lot_add_recommended"}
 
 # Actions REJECTED on a frozen (needs_review) position — new risk cannot be added
 # to a position whose state is unverified. Closing actions (close_short,
@@ -457,6 +465,11 @@ def _ensure_position(state: dict, ticker: str) -> dict:
         # position_types.of; the builder's apply() stamps the concrete type
         # (buy_shares -> SHARES, buy_leap -> LEAP_PMCC_LEGACY) on the first leg.
         "position_type": None,
+        # Income-profile discriminator (schema v21). JUICE_ENGINE is the CFM
+        # default; a DIVIDEND_COMPOUNDER is stamped from the entry payload by
+        # _buy_shares. Absence resolves to JUICE_ENGINE (income_profile.of), so the
+        # dividend sleeve is entered only by an explicit tag, never by omission.
+        "income_profile": income_profile.JUICE_ENGINE,
         "leap": None,
         "leap_legs": [],
         "shares": {"count": 0, "cost_basis_per_share": None, "cap": config.SHARE_CAP,
@@ -502,16 +515,32 @@ def execute(payload: dict, now: datetime | None = None) -> dict:
     if action == "dividend_income":
         return _dividend_income(payload, ticker)
 
+    # Builder telemetry — a recommendation, not a trade: no gate, no price capture,
+    # no order, no position mutation. The ADD it recommends is a separate,
+    # fully-gated buy_shares the operator confirms (NO auto-execution).
+    if action == "lot_add_recommended":
+        return _lot_add_recommended(payload, ticker)
+
     contracts = int(payload.get("contracts") or 0)
     strike = payload.get("strike")
     stock_price, price_source = _capture_price(ticker, payload.get("stock_price"))
 
     # Level 5 gate (Account & Juice) — entry only. A blocking failure stops the
-    # buy_leap unless the payload carries an explicit override_reason, which is
-    # recorded on the immutable execution (see _buy_leap). Applies to the atomic
-    # open too — it establishes the same LEAP long.
+    # entry unless the payload carries an explicit override_reason, which is
+    # recorded on the immutable execution (see _buy_leap / _buy_shares). Applies to
+    # the atomic open too — it establishes the same LEAP long.
+    #
+    # SHARES (schema v21): buy_shares was NOT gated before — the tuple below listed
+    # only the LEAP-opening actions, so a shares entry reached the book with cash
+    # reserve, position limit, capital cap, sector concentration and the
+    # earnings-in-cycle block all unenforced, and _buy_shares read an
+    # ``_account_gate`` key nothing ever set (its override record logged an empty
+    # failed_checks list as a result). Now that shares ARE the active base leg that
+    # gap is the whole gate, so buy_shares runs the same gate on a lot basis.
     if action in ("buy_leap", "open_position_atomic"):
         _enforce_account_gate(payload, ticker, contracts)
+    elif action == "buy_shares":
+        _enforce_shares_account_gate(payload, ticker, stock_price)
 
     state = log.load_state()
     position = _ensure_position(state, ticker)
@@ -1739,19 +1768,11 @@ def acknowledge_diff(diff_id: str, ack_reason: str) -> dict:
     return {"success": True, "status": "acknowledged", "diff_id": diff_id, "diff": d}
 
 
-def _enforce_account_gate(payload, ticker, contracts):
-    """Run the Level 5 gate for an entry. Blocking failures raise ValueError
-    (HTTP 400) unless override_reason is supplied; the gate result is stashed on
-    the payload so _buy_leap can log the override + failed checks."""
-    import account_gate
-    leap_cost_ps = None
-    if payload.get("execution_price"):  # per-contract dollars -> per-share
-        leap_cost_ps = float(payload["execution_price"]) / 100.0
-    gate = account_gate.evaluate(
-        ticker, contracts=contracts,
-        leap_cost_per_share=leap_cost_ps,
-        weekly_extrinsic_per_share=payload.get("weekly_extrinsic_per_share"),
-    )
+def _stash_and_enforce_gate(payload, gate):
+    """Stash a Level 5 gate result on the payload (so the booking closure can log
+    the override + the checks it overrode) and raise on a blocking failure unless
+    an explicit override_reason is supplied. The single raise site for every entry
+    path — LEAP and SHARES alike — so the two can't drift apart."""
     payload["_account_gate"] = gate
     if gate["pass"]:
         return
@@ -1764,6 +1785,63 @@ def _enforce_account_gate(payload, ticker, contracts):
         raise ValueError(
             f"Level 5 gate blocked entry ({failed}) — {details}. "
             "Pass override_reason to enter anyway (logged).")
+
+
+def _enforce_account_gate(payload, ticker, contracts):
+    """Run the Level 5 gate for a LEGACY LEAP entry. Blocking failures raise
+    ValueError (HTTP 400) unless override_reason is supplied; the gate result is
+    stashed on the payload so _buy_leap can log the override + failed checks."""
+    import account_gate
+    leap_cost_ps = None
+    if payload.get("execution_price"):  # per-contract dollars -> per-share
+        leap_cost_ps = float(payload["execution_price"]) / 100.0
+    _stash_and_enforce_gate(payload, account_gate.evaluate(
+        ticker, contracts=contracts,
+        leap_cost_per_share=leap_cost_ps,
+        weekly_extrinsic_per_share=payload.get("weekly_extrinsic_per_share"),
+    ))
+
+
+def shares_entry_lots(payload) -> int:
+    """The round-lot count a ``buy_shares`` payload is buying.
+
+    HARD_CFM_RULE — 100-share atomic lots. A share count that is not a positive
+    whole multiple of ``config.SHARES_PER_LOT`` is REJECTED at the operator-facing
+    boundary: a fragment can never be sold against (see
+    position_manager.covered_lots), so buying one deliberately creates permanently
+    uncoverable exposure. This is the ENTRY path only — a broker-side odd lot
+    (a partial fill, a corporate action) is still bookable through the
+    reconciliation ``adjustment`` path, which carries no size rule."""
+    qty = int(payload.get("qty") or payload.get("shares") or 0)
+    if qty <= 0 or qty % config.SHARES_PER_LOT:
+        raise ValueError(
+            f"buy_shares qty must be a positive multiple of {config.SHARES_PER_LOT} "
+            f"(got {qty}) — HARD_CFM_RULE: 100-share atomic lots, a sub-lot fragment "
+            "can never be covered.")
+    return qty // config.SHARES_PER_LOT
+
+
+def _enforce_shares_account_gate(payload, ticker, stock_price):
+    """Run the Level 5 gate for a SHARES entry (schema v21).
+
+    Sized in ROUND LOTS, not contracts: in shares mode the gate's ``contracts``
+    argument denominates capital as ``spot x contracts x SHARES_PER_LOT``, so the
+    lot count is the right unit. The fill price is passed through as the sizing
+    spot — a shares entry costs what is actually being paid, not what a trailing-bar
+    estimate implies — and ``position_type=SHARES`` arms the round-lot SIZE-BLOCK,
+    which no caller previously enabled."""
+    import account_gate
+    import position_types
+    lots = shares_entry_lots(payload)
+    price_ps = payload.get("price_per_share")
+    price_ps = float(price_ps) if price_ps is not None else stock_price
+    _stash_and_enforce_gate(payload, account_gate.evaluate(
+        ticker, contracts=lots,
+        weekly_extrinsic_per_share=payload.get("weekly_extrinsic_per_share"),
+        position_type=position_types.SHARES,
+        stock_price=price_ps,
+        income_profile_tag=payload.get("income_profile"),
+    ))
 
 
 def _validate_exit_reason(payload):
@@ -1907,6 +1985,40 @@ def _dividend_income(payload, ticker):
     stored = log.append_execution(execution)
     return {"success": True, "status": "recorded", "execution_id": stored["id"],
             "amount": amount, "execution": stored}
+
+
+def _lot_add_recommended(payload, ticker):
+    """Record that the position builder recommended a 100-share lot add (schema
+    v21). Telemetry ONLY — this books no trade, mutates no position, and moves no
+    cash: accrued cash changes covered-call math at exactly one moment, when a real
+    lot is bought [HARD_CFM_RULE].
+
+    The Level 5 verdict is evaluated and STAMPED here so the record says whether
+    the recommendation was actionable or blocked-with-reason at the moment it was
+    made — a later gate change must not be able to rewrite that history. There is
+    NO auto-execution: acting on this is a separate, operator-confirmed
+    ``buy_shares`` carrying a ``lot_add`` stamp."""
+    import accrual
+    state = log.load_state()
+    price = payload.get("price_per_share")
+    if price is None:
+        price, _src = _capture_price(ticker, payload.get("stock_price"))
+    status = accrual.lot_add_status(state, ticker, float(price) if price is not None else None)
+    execution = {
+        "ticker": ticker, "action": "lot_add_recommended",
+        "accrued_cash": status.get("accrued_cash"),
+        "lot_cost": status.get("lot_cost"),
+        "threshold": status.get("threshold"),
+        "price_per_share": round(float(price), 4) if price is not None else None,
+        "actionable": bool(status.get("actionable")),
+        "blocked": bool(status.get("blocked")),
+        "blocked_reason": status.get("blocked_reason"),
+        "blocking_failures": status.get("blocking_failures") or [],
+    }
+    _stamp_source_rec(execution, payload)
+    stored = log.append_execution(execution)
+    return {"success": True, "status": "recorded", "execution_id": stored["id"],
+            "lot_add": status, "execution": stored}
 
 
 def _commit_shares(payload, ticker, action, contracts, strike, stock_price, price_source, mode):
@@ -2898,6 +3010,20 @@ def _buy_shares(payload, ticker, stock_price):
     entry_context = _capture_entry_context(ticker, payload)
     execution["entry_context"] = entry_context
 
+    # Income profile (schema v21) — stamped from the entry payload, never re-derived
+    # afterwards: once a position is open, a yield print must not be able to silently
+    # re-profile it. Anything that is not an explicit DIVIDEND_COMPOUNDER normalizes
+    # to JUICE_ENGINE (the CFM default), so omission can never enrol a position into
+    # the extension. Also recorded on the immutable execution so the sleeve a lot was
+    # bought under is a matter of record, not of current state.
+    profile = income_profile.normalize(payload.get("income_profile"))
+    execution["income_profile"] = profile
+    # Provenance for a builder-driven add (see accrual.py). A lot add is a plain
+    # buy_shares carrying this stamp — NOT its own action — so it traverses the same
+    # freeze / Level-5 / execution-window / spread path as any other new risk.
+    if payload.get("lot_add"):
+        execution["lot_add"] = True
+
     def apply(position):
         shares = position.setdefault("shares", {"count": 0, "cost_basis_per_share": None,
                                                 "cap": config.SHARE_CAP, "pct_to_cap": 0,
@@ -2924,8 +3050,14 @@ def _buy_shares(payload, ticker, stock_price):
             position["circuit_breaker"] = circuit_breaker
             position["dividend"] = dividend
             position["entry_context"] = entry_context
+            # Only a FRESH entry sets the sleeve. A scale-in (or a builder lot add)
+            # into an open position inherits whatever the position was opened as —
+            # re-profiling a live position mid-flight would move its benchmark leg
+            # and its shadow floor underneath it.
+            position["income_profile"] = profile
         else:
             position.setdefault("position_type", position_types.SHARES)
+            position.setdefault("income_profile", profile)
             if position.get("circuit_breaker") is None:
                 position["circuit_breaker"] = circuit_breaker
             if position.get("dividend") is None:

@@ -54,12 +54,24 @@ export const api = {
   // One-call landing payload: regime + positions/capital + theta + kill-switch.
   overview: () => request("/api/overview"),
   regime: () => request("/api/regime"),
-  scorecard: (tickers) => request(`/api/scan/scorecard${tickers ? `?tickers=${tickers}` : ""}`),
+  // opts.includeUnaffordable asks the server for the names it filters out by
+  // default (lot cost above the account's dry powder).
+  scorecard: (tickers, opts = {}) => {
+    const q = new URLSearchParams();
+    if (tickers) q.set("tickers", tickers);
+    if (opts.includeUnaffordable) q.set("include_unaffordable", "1");
+    const qs = q.toString();
+    return request(`/api/scan/scorecard${qs ? `?${qs}` : ""}`);
+  },
   scanReady: (tickers) => request(`/api/scan/ready${tickers ? `?tickers=${tickers}` : ""}`),
   // Kick a detached server-side scan (keeps running if the tab is backgrounded)
   // and poll its status. The refresh POST returns immediately.
   scanRefresh: () => request("/api/scan/refresh", { method: "POST" }),
   scanStatus: () => request("/api/scan/status"),
+  // Calibration rollup over the append-only scan rejection log — including the
+  // SHADOW income-floor pass/fail tallies per profile. Read-only telemetry.
+  scanRejectionStats: (window) =>
+    request(`/api/scan/rejection-stats${window ? `?window=${window}` : ""}`),
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
   // they can clear the STALE_BLOCKS_GO gate on the next scan.
   refreshReadyQuote: (tickers) =>

@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Light, Spinner, ErrorState, StockLights, ChartLink, fmt, pct, pctSigned, useApi } from "./ui.jsx";
+import { Card, Pill, Light, Spinner, ErrorState, StockLights, ChartLink, SleeveBadge, sleeveOf, fmt, pct, pctSigned, useApi } from "./ui.jsx";
 
 // The per-symbol scan table, collapsed to the composable read:
 //
@@ -96,10 +96,62 @@ const COLUMNS = [
     ) : <span className="text-slate-600">—</span>),
   },
   {
+    key: "income_profile", label: "Sleeve", sortVal: (r) => (r.income_profile === "DIVIDEND_COMPOUNDER" ? 1 : 0),
+    render: (r) => <SleeveBadge profile={r.income_profile} />,
+  },
+  {
+    key: "lot_cost", label: "Lot cost", sortVal: (r) => r.lot_cost,
+    render: (r) => {
+      if (r.lot_cost == null) return <span className="text-slate-600">—</span>;
+      const over = r.affordable === false;
+      return (
+        <span
+          className={`tabular-nums ${over ? "text-rose-300" : "text-slate-300"}`}
+          title={over
+            ? `100 shares costs $${Math.round(r.lot_cost).toLocaleString()} — $${Math.round(r.lot_cost_over_by || 0).toLocaleString()} more than you can deploy right now ($${Math.round(r.max_lot_cost || 0).toLocaleString()}).`
+            : `100 shares costs $${Math.round(r.lot_cost).toLocaleString()} — the whole lot a shares entry buys.`}
+        >
+          ${Math.round(r.lot_cost).toLocaleString()}
+          {over && <span className="ml-1 text-[10px] uppercase">over</span>}
+        </span>
+      );
+    },
+  },
+  {
     key: "juice_weekly_pct", label: "Gross/wk", sortVal: (r) => r.juice_weekly_pct,
     render: (r) => (r.juice_weekly_pct == null
       ? <span className="text-slate-600">—</span>
       : <span className="tabular-nums text-slate-300">{pctSigned(r.juice_weekly_pct, 2)}</span>),
+  },
+  {
+    key: "combined_weekly_yield_pct", label: "Combined/wk",
+    sortVal: (r) => r.combined_weekly_yield_pct,
+    render: (r) => {
+      if (r.combined_weekly_yield_pct == null) return <span className="text-slate-600">—</span>;
+      const floor = r.shadow_floor || {};
+      // The components stay SEPARABLE on hover — never one blended number, and
+      // never gross premium presented as income (this is extrinsic + dividend).
+      const parts = [
+        `juice (extrinsic only) ${fmt(r.juice_weekly_pct, 2)}%/wk`,
+        r.dividend_known
+          ? `dividend ${fmt(r.dividend_weekly_pct, 3)}%/wk (${fmt(r.annual_dividend_yield_pct, 2)}%/yr ÷ 52)`
+          : "dividend unknown — not counted",
+        floor.floor_pct != null
+          ? `SHADOW floor ${fmt(floor.floor_pct, 2)}%/wk on ${floor.basis}: ${
+              floor.pass == null ? "not measurable" : floor.pass ? "clears" : "below"}${
+              (floor.reasons || []).length ? ` (${floor.reasons.join(", ")})` : ""} — zero blocking authority`
+          : null,
+      ].filter(Boolean);
+      return (
+        <span
+          className={`tabular-nums ${floor.pass === false ? "text-amber-300/80" : "text-slate-300"}`}
+          title={parts.join("\n")}
+        >
+          {pctSigned(r.combined_weekly_yield_pct, 2)}
+          {!r.dividend_known && <span className="text-slate-600"> *</span>}
+        </span>
+      );
+    },
   },
   {
     key: "burn_weekly_pct", label: "Burn/wk", sortVal: (r) => r.burn_weekly_pct,
@@ -156,7 +208,17 @@ const COLUMN_HELP = {
   rs_state: "Two-speed relative strength vs the sector (SHADOW — does not affect the verdict).\n" +
     "Level = 3-month RS (leading ⊕ / lagging ⊖); slope = the 21-day EMA direction of the RS line.\n" +
     "⊕ rising (leading, improving) · ⊕ fading (leading, rolling over) · ⊖ turning (lagging, recovering) · ⊖ falling (lagging, worsening). vs SPY is in the row drawer.",
+  income_profile: "Income sleeve — which set of income expectations this name is judged against.\n" +
+    "JUICE = the CFM juice engine (the default; every existing name). DIV = Travis's DIVIDEND_COMPOUNDER extension, for lower-volatility payers held for juice AND dividend.\n" +
+    "Provenance: the dividend sleeve is NOT a CFM rule — the source methodology prefers volatile names for their juice and warns against 'safe' low-vol stocks. It is an extension the shares-primary model makes viable (dividends are actually collected now; under a LEAP they never were).\n" +
+    "The sleeve changes exactly two things: the RS peer benchmark for the sector leg (a dividend ETF instead of the growth-tilted sector ETF), and which SHADOW floor the row is measured against. Trend quality, the YELLOW watchlist lockout, the earnings-window exclusion and the RS-vs-SPY kill switch are IDENTICAL for both.",
+  lot_cost: "What one 100-share lot costs — spot x 100. A shares-primary entry buys the WHOLE lot, so this, not the share price, is the capital a position actually needs.\n" +
+    "Names whose lot costs more than your current dry powder are hidden by default (see the bar above the table); a shown row marked OVER is one you asked to see anyway.",
   juice_weekly_pct: "Gross juice / week — the weekly short extrinsic as % of LEAP cost, BEFORE the LEAP's own decay. The strategy's stated income bar; the juice ADEQUACY floor gates on this (below the floor → BLOCKED).",
+  combined_weekly_yield_pct: "Combined weekly-equivalent yield — weekly juice + (trailing annual dividend ÷ 52). Hover a cell to split it back into its two components.\n" +
+    "The juice half is EXTRINSIC ONLY — time value actually captured. Intrinsic passes through and nets to zero, and gross premium is never income.\n" +
+    "A '*' means the dividend yield could not be resolved, so it is NOT counted (an unknown is never shown as a confident zero).\n" +
+    "SHADOW: the floors this is compared against are logged and displayed for calibration and have ZERO blocking authority — no candidate is ever rejected on them, and there is no switch to enable that.",
   burn_weekly_pct: "LEAP burn / week — theta decay of the LEAP's remaining EXTRINSIC, as % of LEAP cost (gross − net). Priced at ENTRY (a fresh ~0.90-delta LEAP) at flat spot, so it's the cost of WAITING and the MOST burn the position ever carries.\n" +
     "In a good stock it shrinks toward zero: price rises → LEAP goes deep ITM → extrinsic → 0 → burn → 0, and Net climbs toward Gross. The structure/SYM/RS columns are your read on whether that will happen; the Positions view shows it as the real LEAP deepens.",
   net_juice_weekly_pct: "Net juice / week — gross minus the LEAP burn and slippage. The income the setup actually pays (gross − burn); the Ready-to-Enter ranking key. Net ≤ 0 (burn exceeds income) is a hard BLOCK.",
@@ -438,11 +500,14 @@ function sortBench(rows) {
 }
 
 export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFocusHandled }) {
-  const { data, error, loading, reload } = useApi(api.scorecard, [refreshKey]);
+  const { data, error, loading, reload } = useApi(
+    () => api.scorecard(null, { includeUnaffordable: showPricedOut }),
+    [refreshKey, showPricedOut]);
   const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
   const [sectorFilter, setSectorFilter] = React.useState("ALL");
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);
+  const [showPricedOut, setShowPricedOut] = React.useState(false);
   const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
   const rowRefs = React.useRef({});
@@ -643,6 +708,11 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
           Weeklies only{noWeeklies > 0 ? ` (${noWeeklies} hidden)` : ""}
         </label>
       </div>
+      <AffordabilityBar
+        affordability={data?.affordability}
+        showPricedOut={showPricedOut}
+        onToggle={setShowPricedOut}
+      />
       {error && <ErrorState error={error} onRetry={reload} />}
       <div className="max-h-[70vh] overflow-auto">
         <table className="w-full text-sm">
@@ -684,6 +754,139 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
           </tbody>
         </table>
       </div>
+      <ShadowFloorLog />
     </Card>
+  );
+}
+
+// Affordability (schema v21). A shares entry buys a WHOLE 100-share lot, so a name
+// whose lot costs more than the dry powder available right now is not a candidate —
+// it is filtered out of the scan by default. This states the bar and what it
+// excluded, because a name absent because it is too expensive today is a different
+// fact from a name that failed the gate, and neither should vanish silently.
+const BINDING_LABEL = {
+  cash_above_reserve: "cash above your defensive reserve",
+  capital_cap: "the deployed-capital cap",
+  per_position_cap: "the per-position lot cap",
+};
+
+function AffordabilityBar({ affordability, showPricedOut, onToggle }) {
+  if (!affordability) return null;
+  const { active, max_lot_cost: bar, priced_out: hidden, binding } = affordability;
+  if (!active) {
+    return (
+      <div className="mt-2 rounded-lg border border-amber-700/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
+        Affordability filter is <strong>off</strong> — no operating cash is set, so the app
+        can&apos;t tell what you can afford. Set your cash in Settings and the scan will hide
+        names whose 100-share lot is out of reach.
+      </div>
+    );
+  }
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs">
+      <span className="text-slate-400">
+        Dry powder — you can buy a lot up to{" "}
+        <strong className="tabular-nums text-slate-200">
+          {bar == null ? "—" : `$${Math.round(bar).toLocaleString()}`}
+        </strong>
+        <span className="text-slate-500">
+          {" "}({BINDING_LABEL[binding] || "your limits"} is the binding limit)
+        </span>
+      </span>
+      {hidden > 0 ? (
+        <button
+          onClick={() => onToggle(!showPricedOut)}
+          className="rounded border border-slate-700 px-2 py-0.5 text-slate-300 hover:bg-slate-800"
+        >
+          {showPricedOut ? "Hide" : "Show"} {hidden} priced out
+        </button>
+      ) : (
+        <span className="text-slate-600">nothing priced out</span>
+      )}
+    </div>
+  );
+}
+
+// The SHADOW income-floor calibration surface (schema v21, TRAVIS_EXTENSION).
+//
+// Every floor in this feature is logged and displayed but has ZERO blocking
+// authority — no candidate is ever rejected on one, and no config switch exists
+// that would change that. Graduating a floor to real authority is a future work
+// item that is CONTINGENT on this data: it is the evidence, gathered per
+// candidate per day from the append-only scan rejection log, that a calibration
+// decision would rest on. Which is why it is reviewable here rather than only
+// computed.
+function ShadowFloorLog() {
+  const [open, setOpen] = React.useState(false);
+  const { data, error, loading } = useApi(
+    () => (open ? api.scanRejectionStats() : Promise.resolve(null)), [open], null);
+  const floors = data?.shadow_floor || {};
+  const reasons = data?.shadow_floor_reasons || {};
+  const profiles = Object.keys(floors);
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-500 hover:text-slate-300"
+      >
+        <span className={`transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
+        Shadow income floors — calibration log
+        <span className="rounded bg-slate-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-slate-400">
+          NO AUTHORITY
+        </span>
+      </button>
+      {open && (
+        <div className="mt-2 text-xs">
+          {loading && <Spinner />}
+          {error && <ErrorState error={error} />}
+          {data && profiles.length === 0 && (
+            <p className="text-slate-500">
+              No floor evaluations recorded yet. The nightly scan sweep appends one
+              record per candidate per day.
+            </p>
+          )}
+          {data && profiles.length > 0 && (
+            <>
+              <table className="w-full">
+                <thead>
+                  <tr className="text-left text-[10px] uppercase tracking-wide text-slate-500">
+                    <th className="py-1 pr-3">Sleeve</th>
+                    <th className="py-1 pr-3">Evaluated</th>
+                    <th className="py-1 pr-3">Would clear</th>
+                    <th className="py-1 pr-3">Would fail</th>
+                    <th className="py-1">Pass rate</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {profiles.map((p) => (
+                    <tr key={p} className="border-t border-slate-800/60">
+                      <td className="py-1 pr-3 text-slate-300">{sleeveOf(p).badge}</td>
+                      <td className="py-1 pr-3 tabular-nums text-slate-400">{floors[p].evaluated}</td>
+                      <td className="py-1 pr-3 tabular-nums text-emerald-300/80">{floors[p].pass}</td>
+                      <td className="py-1 pr-3 tabular-nums text-amber-300/80">{floors[p].fail}</td>
+                      <td className="py-1 tabular-nums text-slate-300">
+                        {floors[p].pass_rate == null ? "—" : `${fmt(floors[p].pass_rate, 1)}%`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {Object.keys(reasons).length > 0 && (
+                <p className="mt-2 text-[11px] text-slate-500">
+                  Reasons:{" "}
+                  {Object.entries(reasons).map(([r, n], i) => (
+                    <span key={r}>{i > 0 && " · "}{r} ×{n}</span>
+                  ))}
+                </p>
+              )}
+              <p className="mt-2 text-[11px] text-slate-600">
+                “Would clear/fail” is counterfactual. These floors block nothing today;
+                this is the record a future decision to give one authority would rest on.
+              </p>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

@@ -35,6 +35,13 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DEMO_STATE_PATH", str(tmp_path / "state.demo.json"))
     monkeypatch.setattr(config, "_demo_mode", False)
     monkeypatch.setattr(executor, "live_enabled", lambda: False)  # paper path
+    # A funded account. buy_shares now runs the Level 5 gate (schema v21) — before
+    # that fix the shares entry path was ungated entirely, so these lifecycle tests
+    # opened positions against a $0 book. The gate is the behavior under test
+    # elsewhere; here the account simply has to be able to afford the lots.
+    st = log.load_state()
+    st["metadata"]["operating_cash"] = 100000
+    log.save_state(st)
     return tmp_path
 
 
@@ -59,7 +66,9 @@ def test_schema_v19_to_v20_backfills_legacy_and_lot_record():
     }
     before = list(v19["executions"])
     out, changed = migrations.migrate(v19)
-    assert changed and out["schema_version"] == 20 == migrations.CURRENT_VERSION
+    # migrate() walks the whole chain, so this lands at CURRENT_VERSION (>= 20);
+    # what this test pins is the v20 BACKFILL below, not the head version number.
+    assert changed and out["schema_version"] == migrations.CURRENT_VERSION >= 20
     p = out["positions"][0]
     # Legacy positions are backfilled to LEAP_PMCC_LEGACY (read-only).
     assert p["position_type"] == position_types.LEAP_PMCC_LEGACY

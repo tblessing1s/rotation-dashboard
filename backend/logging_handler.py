@@ -89,6 +89,11 @@ def _default_state() -> dict:
         "recommendations": [],
         "recommendation_overrides": [],
         "order_fidelity": {},
+        # Per-position accrual ledger (schema v21) — realized extrinsic at cycle
+        # close plus received dividends, compounding toward the next 100-share lot.
+        # DERIVED from executions by recompute_derived; seeded here so a reader on
+        # a fresh book never key-errors.
+        "accrual_ledger": {"by_ticker": {}, "records": [], "recommendations": []},
     }
 
 
@@ -1009,6 +1014,13 @@ def recompute_derived(state: dict) -> dict:
         "records": div_records, "by_ticker": div_by_ticker, "by_month": div_by_month,
         "total": round(sum(div_by_ticker.values()), 2),
     }
+
+    # Accrual ledger (schema v21) — realized extrinsic at cycle close + received
+    # dividends, compounding toward the next 100-share lot. The whitelist that
+    # keeps roll-down credits, unrealized juice and intrinsic OUT of it lives in
+    # accrual.credit_for; derived here so it can never be bypassed by a writer.
+    import accrual
+    state["accrual_ledger"] = accrual.derive(state, execs)
 
     # Roll-cost / whipsaw ledger — derived from the paired roll executions
     # (executor stamps both legs with roll_id + roll_reason). This is the data

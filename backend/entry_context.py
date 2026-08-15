@@ -276,6 +276,14 @@ def _stock_section(ticker: str, gate: dict | None, row: dict | None,
         # v1/v2 snapshots (which predate the switch) stay distinguishable. RS3M is
         # now display/kill-switch only; RS1M is the ranking key.
         "rs3m_vs_sector_method": "direct",
+        # WHICH peer group the vs-sector leg was measured against (schema v21). The
+        # method above says HOW the ratio was computed; this says against WHAT. A
+        # DIVIDEND_COMPOUNDER substitutes a dividend-peer benchmark for the
+        # growth-tilted sector ETF, so "direct" alone would be ambiguous — direct
+        # against which benchmark? Recorded additively, so v1/v2/v3 snapshots (which
+        # predate the sleeve) stay readable and simply carry None here.
+        "rs3m_vs_sector_benchmark": d.get("peer_benchmark"),
+        "income_profile": d.get("income_profile"),
         "atr_pct": track("stock.atr_pct", d.get("atr_pct"), reason),
         "atr_value": track("stock.atr_value", atr_value, reason),
         "rsi": track("stock.rsi", rsi, reason),

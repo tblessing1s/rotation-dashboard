@@ -186,11 +186,27 @@ def sector_size_suggestion(ticker: str, full_contracts: int | None = None) -> di
             "suggested_contracts": suggested, "reason": reason}
 
 
-def weekly_yield_target_pct(ticker: str | None = None) -> float:
+def weekly_yield_target_pct(ticker: str | None = None,
+                            profile: str | None = None) -> float:
     """Minimum weekly juice as % of LEAP cost. Growth stocks use the CFM cycle
     target (low end of 15-25% over the slow end of 4-8 weeks, ~1.9%/wk); ETFs
-    (lower IV, steadier-income sleeve) clear the lower ETF bar instead."""
+    (lower IV, steadier-income sleeve) clear the lower ETF bar instead.
+
+    `profile` (schema v21) adds the DIVIDEND_COMPOUNDER arm: the juice bar for a
+    compounder is the COMBINED-yield floor, because a dividend name is judged on
+    juice plus dividend, not on juice alone. Omitted / JUICE_ENGINE -> the exact
+    prior behavior, ETF arm included. TRAVIS_EXTENSION."""
+    import income_profile
     import sector_data
+    # PRECEDENCE, stated deliberately rather than left to arm order: the sleeve wins
+    # over ETF-ness. A dividend ETF tagged DIVIDEND_COMPOUNDER (SCHD held as a
+    # position is the obvious case) is judged on its COMBINED yield, not the ETF
+    # juice bar — the explicit operator tag is the more specific statement of intent
+    # than "this happens to be an ETF". `is_etf` and `income_profile` remain two
+    # independent discriminators here; unifying them is a larger change than this
+    # feature warrants (six load-bearing ETF sites, regression-locked).
+    if income_profile.normalize(profile) == income_profile.DIVIDEND_COMPOUNDER:
+        return config.COMBINED_YIELD_FLOOR_WK
     if ticker and sector_data.is_etf(ticker):
         return config.ETF_WEEKLY_JUICE_TARGET_PCT
     return round(config.CYCLE_RETURN_MIN / config.CYCLE_WEEKS_MAX * 100, 2)
@@ -280,7 +296,9 @@ def evaluate(ticker: str, contracts: int | None = None,
              leap_cost_per_share: float | None = None,
              weekly_extrinsic_per_share: float | None = None,
              state: dict | None = None,
-             position_type: str | None = None) -> dict:
+             position_type: str | None = None,
+             stock_price: float | None = None,
+             income_profile_tag: str | None = None) -> dict:
     """Run every Level-5 check for a proposed entry.
 
     `leap_cost_per_share` / `weekly_extrinsic_per_share` come from the live
@@ -294,6 +312,17 @@ def evaluate(ticker: str, contracts: int | None = None,
     `position_type` selects the base-leg profile (schema v20). SHARES adds the
     round-lot SIZE-BLOCK; the default (None -> LEAP_PMCC_LEGACY) preserves the
     exact legacy check set so existing callers are unaffected.
+
+    `stock_price` overrides the history-implied spot used to SIZE a shares entry
+    (schema v21). A shares entry's real cost is the price actually being paid, not
+    a trailing-bar estimate, so the executor passes the fill price through; it also
+    keeps the gate meaningful when a name has no cached bars. Omitted -> the
+    estimate, exactly as before, so legacy callers are unaffected.
+
+    `income_profile_tag` selects the income sleeve (schema v21, TRAVIS_EXTENSION).
+    It changes ONLY which yield the juice-adequacy check reports and which bar it
+    is measured against — never whether that check can block, and never any other
+    check. Omitted -> JUICE_ENGINE, i.e. the exact prior behavior.
     """
     ticker = ticker.upper()
     contracts = int(contracts or config.LEAP_CONTRACTS)
@@ -318,7 +347,10 @@ def evaluate(ticker: str, contracts: int | None = None,
         shares_mode = position_type == position_types.SHARES
     else:
         shares_mode = config.LEGACY_LEAP_READONLY
-    spot = est.get("stock_price") if isinstance(est, dict) else None
+    est_spot = est.get("stock_price") if isinstance(est, dict) else None
+    # The caller's real price wins for SIZING (see the docstring); the estimate is
+    # the fallback so every existing caller keeps its exact numbers.
+    spot = float(stock_price) if stock_price is not None else est_spot
     if shares_mode:
         proposed_cost = spot * contracts * config.SHARES_PER_LOT if spot else None
     else:
@@ -371,7 +403,6 @@ def evaluate(ticker: str, contracts: int | None = None,
     #     PROPOSED_DEFAULT. Only appended for a SHARES entry — legacy callers keep
     #     the exact prior check set. Missing spot degrades to pass (never a false block).
     if position_type == position_types.SHARES:
-        spot = est.get("stock_price") if isinstance(est, dict) else None
         lot_cost = round(float(spot) * config.SHARES_PER_LOT, 2) if spot else None
         checks.append(_check(
             "round_lot_size",
@@ -398,25 +429,57 @@ def evaluate(ticker: str, contracts: int | None = None,
     #    runs several-fold below the LEAP-cost yield the target was calibrated on. So
     #    in shares mode this check is SHADOW — non-blocking — until the bar is
     #    recalibrated against share-cost yields; it still reports the number.
+    #    v21: a DIVIDEND_COMPOUNDER is measured on the COMBINED weekly-equivalent
+    #    yield (juice + annual dividend / 52) against the combined floor, because a
+    #    dividend name is held for both halves. Still SHADOW in shares mode — the
+    #    dividend arm changes only WHICH number is reported and against which bar,
+    #    never whether the check can block.
+    import income_profile
+    import scan_triggers
     is_etf_underlying = sector_data.is_etf(ticker)
-    target = weekly_yield_target_pct(ticker)
+    profile = income_profile.normalize(income_profile_tag)
+    is_compounder = profile == income_profile.DIVIDEND_COMPOUNDER
+    target = weekly_yield_target_pct(ticker, profile=profile)
     denom = spot if shares_mode else leap_cost
     weekly_yield = (round(weekly_extr / denom * 100, 2)
                     if (weekly_extr is not None and denom) else None)
-    profile_note = ("ETF income sleeve" if is_etf_underlying
-                    else f"{config.CYCLE_RETURN_MIN * 100:g}% over {config.CYCLE_WEEKS_MAX} wks")
+    # CACHE-ONLY, and reusing the state already in hand: evaluate_many runs this
+    # across every ready row, and the dividend leg feeds a SHADOW readout, never a
+    # blocking decision — not worth a provider request or a state re-read per name.
+    annual_div_pct = dividends.cached_annual_yield_pct(ticker, state)
+    # shadow_floor computes the combined parts internally; read them back off it
+    # rather than deriving the same numbers a second time.
+    shadow = scan_triggers.shadow_floor(profile, weekly_yield, annual_div_pct, weekly_extr)
+    # The number the check is MEASURED on follows the profile; both stay visible.
+    measured = (shadow["combined_weekly_yield_pct"] if is_compounder else weekly_yield)
+    if is_compounder:
+        profile_note = "dividend sleeve — juice + dividend"
+    elif is_etf_underlying:
+        profile_note = "ETF income sleeve"
+    else:
+        profile_note = f"{config.CYCLE_RETURN_MIN * 100:g}% over {config.CYCLE_WEEKS_MAX} wks"
     denom_label = "share cost" if shares_mode else "LEAP cost"
     shadow_note = " — SHADOW, not enforced" if shares_mode else ""
+    yield_label = "Combined weekly yield" if is_compounder else "Weekly juice"
     checks.append(_check(
         "juice_adequacy",
-        f"Weekly juice ≥ {target:g}% of {denom_label} ({profile_note}){shadow_note}",
-        weekly_yield is not None and weekly_yield >= target,
+        f"{yield_label} ≥ {target:g}% of {denom_label} ({profile_note}){shadow_note}",
+        measured is not None and measured >= target,
         not shares_mode,  # shares: shadow (non-blocking) pending recalibration
         {"weekly_yield_pct": weekly_yield, "target_pct": target, "denominator": denom_label,
          "weekly_extrinsic_per_share": weekly_extr, "leap_cost_per_share": leap_cost,
          "shares_cost_per_share": spot, "shadow": shares_mode,
          "source": juice_source, "estimate": est, "is_etf": is_etf_underlying,
-         "profile": "etf" if is_etf_underlying else "stock"}))
+         "profile": "etf" if is_etf_underlying else "stock",
+         # v21 — separable components so the UI never has to show one blended number,
+         # and the shadow-floor observation for the calibration log.
+         "income_profile": profile,
+         "measured_pct": measured,
+         "combined_weekly_yield_pct": shadow["combined_weekly_yield_pct"],
+         "dividend_weekly_pct": shadow["dividend_weekly_pct"],
+         "annual_dividend_yield_pct": annual_div_pct,
+         "dividend_known": shadow["dividend_known"],
+         "shadow_floor": shadow}))
 
     # 4b) Juice too rich (warning): actual premium far above what the ticker's
     #     own realized vol implies = the market is pricing an event/risk.
@@ -490,6 +553,10 @@ def evaluate(ticker: str, contracts: int | None = None,
         "juice": {"weekly_yield_pct": weekly_yield, "target_pct": target,
                   "source": juice_source, "is_etf": is_etf_underlying,
                   "profile": "etf" if is_etf_underlying else "stock"},
+        "income_profile": profile,
+        "income_profile_badge": income_profile.badge(profile),
+        # SHADOW ONLY — reported for calibration, never in blocking_failures.
+        "shadow_floor": shadow,
         # Advisory sector-strength size suggestion (never enforced — the checks
         # above use the caller's `contracts`; this is a recommendation only).
         "sizing": sector_size_suggestion(ticker, contracts),

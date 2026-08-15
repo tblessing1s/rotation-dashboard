@@ -43,7 +43,7 @@ MA200_WINDOW = 200
 # Vetoes (any one -> RED, evaluated before the vote)
 # ---------------------------------------------------------------------------
 def evaluate_vetoes(df, sector_df, ivr_percentile: float | None,
-                    is_etf: bool) -> list[dict]:
+                    is_etf: bool, benchmark: str | None = None) -> list[dict]:
     """The three entry vetoes, each recorded as {id, value, applicable, tripped}
     whether or not it fires (so ``entry_context`` can freeze every evaluation).
     Any ``tripped`` -> the verdict is RED.
@@ -53,6 +53,14 @@ def evaluate_vetoes(df, sector_df, ivr_percentile: float | None,
       2. atr_expanding AND ivr_percentile >= VETO_IVR_PERCENTILE_MIN  (a volatile
          name into rich IV — the wrong tape for a new CFM entry)
       3. close < ma200        (the trend-is-broken line)
+
+    ``sector_df`` is the COMPARISON frame for veto 1, whatever the caller decided
+    that should be — the name's sector ETF for a JUICE_ENGINE candidate, or the
+    dividend-peer benchmark for a DIVIDEND_COMPOUNDER (schema v21). This function
+    does not resolve it; ``benchmark`` is carried purely as PROVENANCE so a frozen
+    entry snapshot records which benchmark actually gated the entry and a variant
+    change can never be silent. The RULE is unchanged for both profiles — the
+    comparison must still be beaten, only the peer group differs.
     """
     out: list[dict] = []
 
@@ -66,6 +74,7 @@ def evaluate_vetoes(df, sector_df, ivr_percentile: float | None,
         "value": rs_sec,
         "applicable": applicable,
         "tripped": bool(applicable and rs_sec is not None and rs_sec < 0),
+        "benchmark": benchmark,
     })
 
     # 2. atr_expanding AND ivr_percentile >= threshold
@@ -146,13 +155,20 @@ def right_spot(df) -> dict:
 # Pure core — lights + verdict + vetoes + right-spot over frames/scalars
 # ---------------------------------------------------------------------------
 def compute(df, sector_df=None, ivr_percentile: float | None = None,
-            is_etf: bool = False, params: dict | None = None) -> dict:
+            is_etf: bool = False, params: dict | None = None,
+            benchmark: str | None = None) -> dict:
     """The full per-name evaluation over already-fetched frames + IVR scalar.
     PURE (no I/O). Returns the four lights, the green count, the stock verdict, the
     veto evaluations, and the right-spot gate — everything a caller needs to gate
-    and everything ``entry_context`` freezes."""
+    and everything ``entry_context`` freezes.
+
+    ``benchmark`` is the symbol whose frame the caller passed as ``sector_df``,
+    recorded as provenance only (schema v21). The four lights, the verdict mapping,
+    the YELLOW lockout and the right-spot gate are IDENTICAL for every profile —
+    trend quality is never waived or relaxed by the dividend sleeve [HARD_CFM_RULE].
+    """
     engine = genius_lights.compute(df, params=params)
-    vetoes = evaluate_vetoes(df, sector_df, ivr_percentile, is_etf)
+    vetoes = evaluate_vetoes(df, sector_df, ivr_percentile, is_etf, benchmark=benchmark)
     trip = tripped_vetoes(vetoes)
     v = verdict(engine["greens"], engine["insufficient"], bool(trip))
     spot = right_spot(df)
@@ -168,17 +184,24 @@ def compute(df, sector_df=None, ivr_percentile: float | None = None,
         "veto_reasons": [f"veto:{vid}" for vid in trip],
         "right_spot": spot,
         "is_etf": bool(is_etf),
+        "benchmark": benchmark,
     }
 
 
 # ---------------------------------------------------------------------------
 # Input-gathering wrapper — reads caches only, never a fresh provider call
 # ---------------------------------------------------------------------------
-def evaluate(ticker: str, *, df=None, spy_df=None, sector_df=None) -> dict:
+def evaluate(ticker: str, *, df=None, spy_df=None, sector_df=None,
+             profile: str | None = None) -> dict:
     """Gather this name's cached inputs and run ``compute``. Frames may be passed
     in (the scan already has them warm) or are read from ``data_handler``'s cache.
-    IVR percentile comes from the local IV history file (never a provider call)."""
+    IVR percentile comes from the local IV history file (never a provider call).
+
+    ``profile`` (schema v21) selects the vs-peer BENCHMARK for the rs3m veto: the
+    name's sector ETF for JUICE_ENGINE, the dividend-peer benchmark for a
+    DIVIDEND_COMPOUNDER. Nothing else about the evaluation changes."""
     import data_handler
+    import income_profile
     import iv_history
     import sector_data
 
@@ -187,13 +210,19 @@ def evaluate(ticker: str, *, df=None, spy_df=None, sector_df=None) -> dict:
         df = data_handler.get_daily(ticker)
 
     sector_etf = sector_data.sector_for(ticker)
-    is_sector_etf = bool(sector_etf) and ticker == (sector_etf or "").upper()
     is_etf = sector_data.is_etf(ticker)
-    if sector_df is None and sector_etf and not is_sector_etf:
-        sector_df = data_handler.get_daily(sector_etf)
+    # For JUICE_ENGINE the benchmark IS the sector ETF, so this reproduces the
+    # pre-v21 behavior exactly. is_own_benchmark is the anti-tautology guard — a
+    # self-comparison computes to 0.0, which reads as a real number and silently
+    # breaks the veto — asked against the ACTIVE benchmark, so a compounder whose
+    # ticker is the dividend benchmark is caught too, not just a sector ETF.
+    peer = income_profile.resolve(ticker, profile, sector_etf)
+    benchmark, is_own_benchmark = peer["benchmark"], peer["is_own_benchmark"]
+    if sector_df is None and benchmark and not is_own_benchmark:
+        sector_df = data_handler.get_daily(benchmark)
     # A sector ETF (or any ETF's) vs-sector veto is waived, so its sector frame is
     # irrelevant to the veto; leave it None for those.
-    if is_etf:
+    if is_etf or is_own_benchmark:
         sector_df = None
 
     try:
@@ -201,8 +230,10 @@ def evaluate(ticker: str, *, df=None, spy_df=None, sector_df=None) -> dict:
     except Exception:  # noqa: BLE001 — IVR is advisory; a missing file just skips the veto
         ivr_percentile = None
 
-    out = compute(df, sector_df=sector_df, ivr_percentile=ivr_percentile, is_etf=is_etf)
+    out = compute(df, sector_df=sector_df, ivr_percentile=ivr_percentile, is_etf=is_etf,
+                  benchmark=None if sector_df is None else benchmark)
     out["ticker"] = ticker
     out["sector"] = sector_etf
-    out["is_sector_etf"] = is_sector_etf
+    out["is_sector_etf"] = peer["is_sector_etf"]
+    out["income_profile"] = peer["profile"]
     return out

@@ -38,6 +38,7 @@ ALERT_TYPES = {
     "DEFEND_POSITION": ("HIGH", "HARD_CFM_RULE: underlying closed below the short strike -> defensive roll-down"),
     "WHIPSAW_EXIT": ("CRITICAL", "HARD_CFM_RULE: defend whipsaw (too many roll-downs / too much cumulative drag) -> exit, not another defend"),
     "ASSIGNMENT_RISK": ("HIGH", "HARD_CFM_RULE: short extrinsic below the coming dividend invites early assignment"),
+    "LOT_ADD_READY": ("MEDIUM", "TRAVIS_EXTENSION: accrued realized juice + dividends now cover another 100-share lot -> confirm the add (never auto-executed)"),
     "TOKEN_EXPIRY": ("HIGH", "PROPOSED_DEFAULT: Schwab refresh token dies at ~7 days; re-auth by day 5"),
     "BUYBACK_75": ("MEDIUM", "HARD_CFM_RULE: 75% of the sale premium captured with >2 DTE -> roll early"),
     "EARNINGS_WINDOW": ("MEDIUM", "HARD_CFM_RULE: roll deep-ITM or exit before the report"),
@@ -99,7 +100,7 @@ _FOCUS_ACTIONS = {
     "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
     "WHIPSAW_EXIT", "JUICE_INADEQUATE", "EARNINGS_DATE_STALE", "ROLL_LEG_IMBALANCE",
     "EXTRINSIC_ABOVE_ENTRY", "RECOMMENDATION", "TRUST_COVERAGE_MISS",
-    "ORDER_FIDELITY_FAIL",
+    "ORDER_FIDELITY_FAIL", "LOT_ADD_READY",
 }
 
 
@@ -480,6 +481,13 @@ def check_assignment_risk(state: dict) -> list[dict]:
                      "is covered by a LEAP, not stock, so assignment creates SHORT STOCK that "
                      "owes the dividend — usually roll)."),
                     {"strike": strike, "extrinsic": round(extrinsic, 2), "trigger": "dividend",
+                     # The spec's named condition, as a first-class code on the
+                     # dividend-triggered variant. It is NOT a separate alert TYPE:
+                     # this is the same condition the extrinsic-vs-dividend guard has
+                     # always raised, and forking the taxonomy would double-alert the
+                     # operator for one event. ASSIGNMENT_RISK already carries HIGH
+                     # severity and routes to the defensive roll ticket.
+                     "code": "EARLY_ASSIGNMENT_RISK",
                      "dividend": float(amount), "ex_date": ex_date,
                      "extrinsic_source": extrinsic_source, "q_source": q_src},
                     key=f"{strike}:{ex_date}"))
@@ -1027,6 +1035,55 @@ def check_order_fidelity_fail(state: dict, now: datetime | None = None) -> list[
     return out
 
 
+def check_lot_add_ready(state: dict) -> list[dict]:
+    """Position builder (schema v21, TRAVIS_EXTENSION): accrued realized extrinsic
+    plus received dividends now cover another 100-share lot.
+
+    Fires only for a SHARES position whose accrual balance clears the lot threshold.
+    An add that the Level 5 account gate (or a reconciliation freeze) would block is
+    still surfaced — as blocked-with-reason, so the operator sees WHY the compounding
+    milestone isn't actionable rather than the alert silently never arriving.
+
+    NEVER auto-executes. The alert is an invitation to confirm a lot add; the add
+    itself is an operator-confirmed ``buy_shares`` that traverses the full gate."""
+    import accrual
+    import position_types
+    out = []
+    for p in _open_positions(state):
+        if not position_types.is_shares(p):
+            continue  # a legacy LEAP position has no share lot to add to
+        t = p.get("ticker", "")
+        price = _last_close(t)
+        if price is None:
+            continue
+        status = accrual.lot_add_status(state, t, price)
+        if not status.get("ready"):
+            continue
+        accrued, lot_cost = status["accrued_cash"], status["lot_cost"]
+        head = (f"{t} accrued ${accrued:,.0f} — enough for another "
+                f"{config.SHARES_PER_LOT}-share lot (${lot_cost:,.0f})")
+        if status.get("actionable"):
+            message = f"{head}."
+            action = (f"Confirm the lot add: buy {config.SHARES_PER_LOT} shares and sell "
+                      "a covered call against it. Never auto-executed — you confirm.")
+        else:
+            message = f"{head}, but the add is BLOCKED: {status.get('blocked_reason')}"
+            action = ("Resolve the blocking condition before adding, or leave the cash "
+                      "accruing. The lot add is not actionable as it stands.")
+        out.append(_alert(
+            "LOT_ADD_READY", t, message, action,
+            {"accrued_cash": accrued, "lot_cost": lot_cost,
+             "threshold": status.get("threshold"),
+             "by_source": status.get("by_source"),
+             "actionable": bool(status.get("actionable")),
+             "blocked": bool(status.get("blocked")),
+             "blocked_reason": status.get("blocked_reason"),
+             "blocking_failures": status.get("blocking_failures")},
+            # Re-fires when the affordable lot count changes, not on every run.
+            key=f"lots:{int(accrued // lot_cost) if lot_cost else 0}"))
+    return out
+
+
 EVALUATORS = [
     check_kill_switch,
     check_circuit_breaker,
@@ -1035,6 +1092,7 @@ EVALUATORS = [
     check_defend_position,
     check_buyback_75,
     check_assignment_risk,
+    check_lot_add_ready,
     check_extrinsic_above_entry,
     check_earnings_window,
     check_earnings_date_stale,

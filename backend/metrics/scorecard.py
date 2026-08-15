@@ -405,7 +405,10 @@ def _ext_trigger_context(df: pd.DataFrame | None) -> dict:
 def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                  sector_df: pd.DataFrame | None, gate: dict | None = None,
                  has_weeklies: bool | None = None, price_override: float | None = None,
-                 regime_color: str | None = None) -> dict:
+                 regime_color: str | None = None,
+                 profile_overrides: dict | None = None,
+                 profile: str | None = None,
+                 annual_dividend_yield_pct: float | None = None) -> dict:
     """One scorecard row: numeric metrics + the composite verdict.
 
     Only the stock's own gate legs decide it: a beats-peers (L3) or consolidating
@@ -423,20 +426,43 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     `price_override` (a live quote) replaces the last daily-bar close before the
     metrics are computed, so an on-demand refresh shows the CURRENT price and the
     price-derived legs (%>MA, below-MA, ATR extension) all reflect it together —
-    daily bars are end-of-day and would otherwise leave the row stale intraday."""
+    daily bars are end-of-day and would otherwise leave the row stale intraday.
+
+    `profile` / `annual_dividend_yield_pct` are the income sleeve and the trailing
+    yield the bulk caller already resolved for this ticker (schema v21) — passing
+    them avoids resolving the same thing twice per row. Omitted, they are resolved
+    here from `profile_overrides` (the operator's explicit ticker -> profile map)."""
     df = data_handler.get_daily(ticker)
     df = _apply_price_override(df, price_override)
-    metrics = metrics_for(df, spy_df, sector_df)
-    # A sector ETF scored as its own candidate has no distinct peer sector to
-    # beat — rs3m_vs_sector would otherwise compute to a tautological ~0 every
-    # time (same frame vs itself), which reads as a real number, not "N/A".
-    is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
-    if is_sector_etf:
+
+    # --- Income profile + peer benchmark (schema v21, TRAVIS_EXTENSION) ---------
+    # Resolved BEFORE the metrics so the vs-peer leg is computed against the right
+    # peer group. The bulk caller resolves the profile once and passes it in; the
+    # standalone path resolves it here. For JUICE_ENGINE the benchmark IS the sector
+    # ETF, so every line below reduces to the pre-v21 behavior exactly.
+    import income_profile
+    import screening
+    if profile is None or annual_dividend_yield_pct is None:
+        profile, annual_div_pct = screening.resolve_profile_detail(
+            ticker, overrides=profile_overrides)
+    else:
+        annual_div_pct = annual_dividend_yield_pct
+    peer = income_profile.resolve(ticker, profile, sector_etf)
+    profile = peer["profile"]
+    peer_df = sector_df if peer["use_sector_df"] else data_handler.get_daily(peer["benchmark"])
+
+    metrics = metrics_for(df, spy_df, peer_df)
+    # A name scored against ITSELF has no distinct peer to beat — rs3m_vs_sector
+    # would otherwise compute to a tautological ~0 every time (same frame vs
+    # itself), which reads as a real number, not "N/A".
+    if peer["is_sector_etf"] or peer["is_own_benchmark"]:
         metrics["rs3m_vs_sector"] = None
     row = _round_row(metrics)
     row["ticker"] = ticker.upper()
     row["sector"] = sector_etf
-    row["is_sector_etf"] = is_sector_etf
+    row["is_sector_etf"] = peer["is_sector_etf"]
+    row["peer_benchmark"] = peer["benchmark"]
+    row["is_own_benchmark"] = peer["is_own_benchmark"]
     row["has_weeklies"] = has_weeklies
     if gate is not None:
         row["gate_cleared_level"] = gate.get("cleared_level", 0)
@@ -462,6 +488,12 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # ETFs are judged against the lower ETF income-sleeve bar, not the growth bar.
     row["is_etf"] = sector_data.is_etf(ticker)
     target = account_gate.weekly_yield_target_pct(ticker)
+    # What one 100-share lot of this name actually COSTS (schema v21). Pure — spot
+    # x SHARES_PER_LOT, no account state — so the memoized market sweep stays
+    # account-free and this row can be cached across requests. The affordability
+    # COMPARISON happens at the API boundary, where the account context lives.
+    row["lot_cost"] = est.get("shares_cost_per_lot")
+    row["shares_per_lot"] = config.SHARES_PER_LOT
     row["juice_weekly_pct"] = est["weekly_yield_pct"]
     # NET juice/week (gross minus LEAP model burn, with slippage) — the ranking
     # key. Kept alongside gross so the panel can show both; ranking sorts on net.
@@ -479,6 +511,24 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     earn = earnings_mod.cached_earnings(ticker)
     row["earnings_date"] = earn.get("date")
     row["earnings_days"] = earn.get("days_until")
+
+    # --- Combined weekly-equivalent yield (schema v21) --------------------------
+    # TRAVIS_EXTENSION. Purely ADDITIVE row keys, using the profile already
+    # resolved above: nothing here is appended to `blocks` below, so the canonical
+    # verdict is bit-for-bit what it was before this block existed.
+    import scan_triggers as _st
+    row["annual_dividend_yield_pct"] = annual_div_pct
+    row["income_profile"] = profile
+    row["income_profile_badge"] = income_profile.badge(profile)
+    combined = _st.combined_weekly_yield(row["juice_weekly_pct"], annual_div_pct)
+    row["combined_weekly_yield_pct"] = combined["combined_weekly_yield_pct"]
+    row["dividend_weekly_pct"] = combined["dividend_weekly_pct"]
+    row["dividend_known"] = combined["dividend_known"]
+    # SHADOW ONLY — see scan_triggers.shadow_floor. Deliberately NOT appended to
+    # `blocks`: that list is what carries verdict authority.
+    row["shadow_floor"] = _st.shadow_floor(
+        profile, row["juice_weekly_pct"], annual_div_pct,
+        est.get("weekly_extrinsic_per_share"))
 
     # IV Rank (drawer context) — sourced from the local IV-history store the app
     # already accrues (option-chain views + nightly maintenance); NO new provider
@@ -554,7 +604,13 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # reuses the displayed RS3M; slope is the RS-line-EMA direction. A sector ETF has
     # no distinct peer sector, so its vs-Sector RS is N/A (same rule as rs3m_vs_sector).
     # SHADOW ONLY: never feeds the composed verdict above, never blocks, never sizes.
-    rs_sec = (rss.rs_state(df, sector_df) if (not is_sector_etf and sector_df is not None)
+    # NOTE: this shadow read still keys off the SECTOR frame, not the profile's peer
+    # frame — so for a DIVIDEND_COMPOUNDER the drawer's RS column and the row's
+    # rs3m_vs_sector are measured against different benchmarks. Left as-is
+    # deliberately: it is the pre-v21 behavior and this is a shadow readout with no
+    # authority. Worth reconciling in its own change, not silently here.
+    rs_sec = (rss.rs_state(df, sector_df)
+              if (not peer["is_sector_etf"] and sector_df is not None)
               else {"state": None, "level": None, "slope": None})
     rs_spy = rss.rs_state(df, spy_df) if spy_df is not None else {"state": None, "level": None, "slope": None}
     row["rs_state"] = rs_sec["state"]            # vs Sector — the table column
@@ -605,6 +661,73 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     return row
 
 
+def affordability(state: dict) -> dict:
+    """The account's current lot-affordability bar (schema v21).
+
+    A shares-primary entry buys a whole 100-share lot, so a name is only a real
+    candidate if one lot fits the dry powder available RIGHT NOW. This reads the
+    bar from ``position_manager.capital_summary`` — the same operating cash,
+    defensive reserve and capital-cap figures Level 5 gates on — so the scan and
+    the Execute gate can never disagree about what is affordable."""
+    import position_manager
+    cap = position_manager.capital_summary(state)
+    return {
+        "max_lot_cost": cap.get("max_lot_cost"),
+        "deployable": cap.get("deployable"),
+        "operating_cash": cap.get("operating_cash"),
+        "operating_cash_source": cap.get("operating_cash_source"),
+        "cash_above_reserve": cap.get("cash_above_reserve"),
+        "capital_headroom": cap.get("capital_headroom"),
+        "per_position_cap": cap.get("per_position_cap"),
+        "slots_open": cap.get("slots_open"),
+        "shares_per_lot": cap.get("shares_per_lot"),
+        # Which ceiling is binding, so the UI explains the number instead of just
+        # showing it. "unknown" means operating cash was never configured, and the
+        # filter is therefore INACTIVE — not that nothing is affordable.
+        "binding": (
+            "unknown" if cap.get("max_lot_cost") is None
+            else "per_position_cap" if cap.get("per_position_cap", 0) <= cap.get("deployable", 0)
+            else "capital_cap" if cap.get("capital_headroom", 0) <= cap.get("cash_above_reserve", 0)
+            else "cash_above_reserve"),
+        "active": cap.get("max_lot_cost") is not None,
+    }
+
+
+def affordable(row: dict, max_lot_cost: float | None) -> bool | None:
+    """Does one 100-share lot of this row fit the bar? None when the lot cost
+    can't be priced — an UNKNOWN is never treated as unaffordable, because hiding a
+    name we simply failed to price would be a silent, invisible exclusion."""
+    if max_lot_cost is None:
+        return None
+    lot_cost = row.get("lot_cost")
+    if lot_cost is None:
+        return None
+    return float(lot_cost) <= float(max_lot_cost)
+
+
+def split_by_affordability(rows: list[dict], state: dict) -> tuple[list[dict], list[dict], dict]:
+    """``(affordable_rows, priced_out_rows, affordability)``.
+
+    Rows are ANNOTATED in place with ``affordable`` / ``lot_cost_over_by`` so a
+    priced-out name can explain itself wherever it is shown. An unpriceable lot
+    cost stays in the affordable list (see ``affordable``) — this filter removes
+    only names we can positively say are too expensive."""
+    bar = affordability(state)
+    max_lot_cost = bar.get("max_lot_cost")
+    keep, priced_out = [], []
+    for row in rows:
+        ok = affordable(row, max_lot_cost)
+        row["affordable"] = ok
+        row["max_lot_cost"] = max_lot_cost
+        row["lot_cost_over_by"] = (
+            round(float(row["lot_cost"]) - float(max_lot_cost), 2)
+            if ok is False else None)
+        (priced_out if ok is False else keep).append(row)
+    bar["priced_out"] = len(priced_out)
+    bar["shown"] = len(keep)
+    return keep, priced_out, bar
+
+
 def _compute_scorecard(names: list[str], price_overrides: dict | None = None) -> dict:
     import logging_handler as log
     import screening  # local imports avoid any import-time cycle
@@ -616,7 +739,7 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
     sector_of = {t: (sector_data.sector_for(t) or "") for t in names}
     etfs = sorted({e for e in sector_of.values() if e})
 
-    data_handler.prefetch([config.BENCHMARK] + etfs + names)
+    data_handler.prefetch(config.scan_base_frames() + etfs + names)
     weeklies.prefetch(names)  # warm the weeklies cache in parallel (no-op if disabled)
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_frames = {e: data_handler.get_daily(e) for e in etfs}
@@ -629,17 +752,35 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
     except Exception:  # noqa: BLE001
         regime_color = None
 
+    # State is loaded ONCE for the whole sweep (schema v21) and threaded into the
+    # profile resolution, which uses it for BOTH the assignment lookup and the
+    # dividend override check. Resolving per ticker would mean a state.json read per
+    # name — ~500 of them on a full sweep, on the request path.
+    try:
+        sweep_state = log.load_state()
+    except Exception:  # noqa: BLE001 — no state just means the heuristic decides
+        sweep_state = None
+
     rows = []
     for t in names:
         etf = sector_of[t]
+        # Resolved ONCE per ticker and threaded into both the gate and the row —
+        # re-resolving inside score_ticker cost a second cache read per name.
         try:
-            gate = screening.entry_gate(t) if etf else None
+            profile, annual_div_pct = screening.resolve_profile_detail(
+                t, state=sweep_state)
+        except Exception:  # noqa: BLE001 — an unresolvable profile is the CFM default
+            profile, annual_div_pct = None, None
+        try:
+            gate = screening.entry_gate(t, profile=profile) if etf else None
         except Exception:  # noqa: BLE001 — a gate failure must never sink the row
             gate = None
         rows.append(score_ticker(t, spy, etf, sector_frames.get(etf), gate,
                                  has_weeklies=weeklies.has_weeklies(t),
                                  price_override=price_overrides.get(t.upper()),
-                                 regime_color=regime_color))
+                                 regime_color=regime_color,
+                                 profile=profile,
+                                 annual_dividend_yield_pct=annual_div_pct))
 
     rows.sort(key=lambda r: (r["sector"], r["ticker"]))
     return {"as_of": log.utcnow(), "results": rows}

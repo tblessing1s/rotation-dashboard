@@ -122,12 +122,29 @@ def api_scan_status():
 @app.route("/api/scan/scorecard")
 def api_scorecard():
     """Numeric CFM scorecard, one row per ticker (default: all holdings). Optional
-    ?tickers=AAPL,MSFT narrows it to a subset."""
+    ?tickers=AAPL,MSFT narrows it to a subset.
+
+    AFFORDABILITY (schema v21): a shares-primary entry buys a whole 100-share lot,
+    so names whose lot costs more than the account's current dry powder are not
+    real candidates and are filtered out by default. Pass ?include_unaffordable=1
+    to see them anyway. The filter is applied HERE, not inside the sweep, so the
+    memoized market scan stays account-free and shared across requests — only the
+    per-request account overlay differs.
+    """
     raw = request.args.get("tickers")
     tickers = [t for t in raw.split(",") if t.strip()] if raw else None
+    include_unaffordable = request.args.get("include_unaffordable", "").strip() in ("1", "true", "yes")
     try:
         from metrics import scorecard as scorecard_metrics
-        return jsonify(scorecard_metrics.scorecard(tickers))
+        out = dict(scorecard_metrics.scorecard(tickers))
+        # Annotate every row, then filter — so the priced-out rows carry their
+        # reason whether or not they are being shown.
+        keep, priced_out, bar = scorecard_metrics.split_by_affordability(
+            list(out.get("results") or []), log.load_state())
+        out["affordability"] = bar
+        out["results"] = (keep + priced_out) if include_unaffordable else keep
+        out["priced_out_tickers"] = [r["ticker"] for r in priced_out]
+        return jsonify(out)
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
@@ -169,6 +186,14 @@ def api_scan_ready():
         # the Scorecard's default filter; unknown/None stays, never a false hide).
         ready_rows = [r for r in sc["results"]
                       if r.get("verdict") == "READY" and r.get("has_weeklies") is not False]
+        # AFFORDABILITY (schema v21): a shares entry buys a whole 100-share lot, so a
+        # name whose lot costs more than the dry powder available right now is not
+        # actionable at any conviction — it is not a near-miss with a path either,
+        # it simply cannot be bought today. Priced-out names are removed from the
+        # shortlist and reported separately so nothing vanishes silently. An
+        # unpriceable lot cost is never treated as unaffordable.
+        ready_rows, priced_out, afford = scorecard_metrics.split_by_affordability(
+            ready_rows, log.load_state())
         level5 = account_gate.evaluate_many([r["ticker"] for r in ready_rows], contracts=contracts)
 
         # HARD_CFM_RULE (STALE_BLOCKS_GO): a GO that the operator would act on must
@@ -228,6 +253,9 @@ def api_scan_ready():
                      "l5_triggers": l5_triggers,
                      "l5_path_to_ready": scan_triggers.path_to_ready(l5_triggers),
                      "l5_eligible_days": scan_triggers.earliest_eligible_days(l5_triggers),
+                     # What a lot actually costs, and the bar it cleared.
+                     "lot_cost": r.get("lot_cost"), "affordable": r.get("affordable"),
+                     "max_lot_cost": r.get("max_lot_cost"),
                      "stale": blocked, "stale_inputs": stale_inputs}
             if blocked:
                 stale_blocked.append(entry)
@@ -239,7 +267,14 @@ def api_scan_ready():
                                   if r.get("net_juice_weekly_pct") is not None
                                   else r.get("juice_weekly_pct") or 0), reverse=True)
         return jsonify({"as_of": sc["as_of"], "ready": ready, "near_misses": near_misses,
-                        "stale_blocked": stale_blocked})
+                        "stale_blocked": stale_blocked,
+                        # The affordability bar + what it excluded. Reported, never
+                        # silent: a name absent because it is too expensive today is
+                        # a different fact from a name that failed the gate.
+                        "affordability": afford,
+                        "priced_out": [{"ticker": r["ticker"], "lot_cost": r.get("lot_cost"),
+                                        "over_by": r.get("lot_cost_over_by")}
+                                       for r in priced_out]})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
@@ -581,10 +616,35 @@ def api_order_submission_status():
 def api_positions():
     try:
         state = log.load_state()
+        views = position_manager.positions_view(state)
+        # Income profile + accrual progress per position (schema v21). Attached
+        # here rather than inside positions_view so the accrual read stays a
+        # display concern: nothing below feeds coverage, sizing or capital math —
+        # accrued cash is CASH, never exposure, until a real lot is bought.
+        #
+        # Uses the CHEAP pure `progress`, not `lot_add_status`. This is a polled
+        # read-only endpoint; running the Level 5 gate here would fire a live Schwab
+        # cash_balance() call (and potentially a state.json WRITE, via
+        # resolve_operating_cash) once per accrual-ready position on every poll. The
+        # gate verdict belongs to the paths that act on it — the alert sweep and the
+        # executor — which is where it is evaluated.
+        try:
+            import accrual
+            import income_profile
+            for view in views:
+                profile = income_profile.of(view)   # the view IS the position dict
+                view["income_profile"] = profile
+                view["income_profile_badge"] = income_profile.badge(profile)
+                view["accrual"] = accrual.progress(
+                    state, view.get("ticker", ""),
+                    view.get("stock_price") or view.get("price"))
+        except Exception:  # noqa: BLE001 — a display readout never sinks the panel
+            pass
         return jsonify({
-            "positions": position_manager.positions_view(state),
+            "positions": views,
             "capital": position_manager.capital_summary(state),
             "extrinsic_payback": state.get("extrinsic_payback", {}),
+            "accrual_ledger": state.get("accrual_ledger", {}),
         })
     except Exception as e:  # noqa: BLE001
         return _err(e)

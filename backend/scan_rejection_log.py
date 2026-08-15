@@ -87,6 +87,7 @@ def binding_constraint(row: dict) -> str | None:
 def _record_from_row(row: dict) -> dict:
     """The persisted fields for one scan row (compact but calibration-sufficient)."""
     binding = row.get("binding") or {}
+    floor = row.get("shadow_floor") or {}
     return {
         "verdict": row.get("verdict"),
         "bench": bool(row.get("bench")),
@@ -114,6 +115,22 @@ def _record_from_row(row: dict) -> dict:
         "sym": row.get("sym"),
         "sector_rs1m": row.get("sector_rs1m"),
         "iv_rank": row.get("iv_rank"),
+        # --- Income profile + SHADOW floor (schema v21) -----------------------
+        # The calibration dataset for the floors. They have ZERO blocking authority
+        # today (scan_triggers.shadow_floor), and graduating one to blocking is a
+        # future work item CONTINGENT on this logged record — which is exactly why
+        # the pass/fail is persisted per candidate per day here rather than only
+        # rendered. Recording changes no behavior: these are a READ of the row.
+        "income_profile": row.get("income_profile"),
+        "annual_dividend_yield_pct": row.get("annual_dividend_yield_pct"),
+        "combined_weekly_yield_pct": row.get("combined_weekly_yield_pct"),
+        "dividend_weekly_pct": row.get("dividend_weekly_pct"),
+        "juice_weekly_pct": row.get("juice_weekly_pct"),
+        "shadow_floor_pass": floor.get("pass"),
+        "shadow_floor_pct": floor.get("floor_pct"),
+        "shadow_floor_measured_pct": floor.get("measured_pct"),
+        "shadow_floor_basis": floor.get("basis"),
+        "shadow_floor_reasons": floor.get("reasons"),
     }
 
 
@@ -145,6 +162,9 @@ def summary(window: int | None = None) -> dict:
     data = _load()["symbols"]
     binding_counts: dict[str, int] = {}
     verdict_counts: dict[str, int] = {}
+    # Shadow-floor calibration tallies, per profile (schema v21).
+    floor: dict[str, dict] = {}
+    floor_reasons: dict[str, int] = {}
     total = 0
     for recs in data.values():
         for rec in (recs[-window:] if window else recs):
@@ -154,7 +174,18 @@ def summary(window: int | None = None) -> dict:
             bc = rec.get("binding_constraint")
             if bc is not None:
                 binding_counts[bc] = binding_counts.get(bc, 0) + 1
+            prof = rec.get("income_profile")
+            passed = rec.get("shadow_floor_pass")
+            if prof and passed is not None:
+                agg = floor.setdefault(prof, {"pass": 0, "fail": 0})
+                agg["pass" if passed else "fail"] += 1
+            for reason in rec.get("shadow_floor_reasons") or []:
+                floor_reasons[reason] = floor_reasons.get(reason, 0) + 1
     ready = verdict_counts.get("READY", 0)
+    for agg in floor.values():
+        seen = agg["pass"] + agg["fail"]
+        agg["evaluated"] = seen
+        agg["pass_rate"] = round(agg["pass"] / seen * 100, 1) if seen else None
     return {
         "records": total,
         "symbols": len(data),
@@ -162,6 +193,12 @@ def summary(window: int | None = None) -> dict:
         "binding_counts": dict(sorted(binding_counts.items(),
                                       key=lambda kv: kv[1], reverse=True)),
         "ready_rate": round(ready / total * 100, 1) if total else None,
+        # SHADOW-floor calibration read: how often each profile's floor would have
+        # bound had it any authority. This is the evidence a future graduation
+        # decision needs; it does not itself grant any.
+        "shadow_floor": floor,
+        "shadow_floor_reasons": dict(sorted(floor_reasons.items(),
+                                            key=lambda kv: kv[1], reverse=True)),
     }
 
 

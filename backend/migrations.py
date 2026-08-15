@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 20
+CURRENT_VERSION = 21
 
 
 class MigrationAbortedError(RuntimeError):
@@ -329,6 +329,38 @@ def _v19_to_v20(state: dict) -> dict:
     return state
 
 
+def _v20_to_v21(state: dict) -> dict:
+    """v21 (dividend income profile): the second income sleeve.
+
+    TRAVIS_EXTENSION — the dividend sleeve is NOT a CFM rule (the source prefers
+    volatile names for their juice); it is an extension made viable by the
+    shares-primary model. This migration only makes room for it.
+
+    Two additive changes, no historical rewrite:
+
+    - Every existing position is tagged ``income_profile = "JUICE_ENGINE"``. All
+      current positions are CFM juice-engine positions, so the discriminator is a
+      pure backfill — the DIVIDEND_COMPOUNDER path is opt-in by an explicit tag,
+      never by omission (see income_profile.normalize, which resolves anything
+      else to JUICE_ENGINE).
+    - ``accrual_ledger`` is seeded empty. It is fully DERIVED from executions by
+      recompute_derived (like the theta / payback / dividend / roll ledgers); the
+      migration only seeds the key so a reader on an un-recomputed load never
+      key-errors. Nothing here credits anything — the accrual writer accepts only
+      realized extrinsic at cycle close and DIVIDEND_RECEIPT.
+
+    Immutability holds: executions are never rewritten. The new typed events
+    (ACCRUAL_CREDIT / LOT_ADD_RECOMMENDED / LOT_ADD_EXECUTED) are APPENDED by the
+    executor going forward, never synthesized from history here — back-filling
+    them would fabricate a compounding record that never happened."""
+    import income_profile
+    for p in state.get("positions", []):
+        p.setdefault("income_profile", income_profile.JUICE_ENGINE)
+    state.setdefault("accrual_ledger", {"by_ticker": {}, "records": [],
+                                        "recommendations": []})
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -349,6 +381,7 @@ MIGRATIONS = {
     17: _v17_to_v18,
     18: _v18_to_v19,
     19: _v19_to_v20,
+    20: _v20_to_v21,
 }
 
 

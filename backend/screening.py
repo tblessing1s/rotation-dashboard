@@ -52,7 +52,8 @@ def warm_scan_cache() -> dict:
         # constituent; the sweeps below then read from the now-warm per-symbol
         # cache instead of fetching one name at a time.
         data_handler.prefetch(
-            [config.BENCHMARK] + sector_data.sector_etfs() + sector_data.all_tickers()
+            config.scan_base_frames()
+            + sector_data.sector_etfs() + sector_data.all_tickers()
         )
         regime()
         sectors()
@@ -232,7 +233,8 @@ def _compute_sectors() -> dict:
     # Warm SPY + every sector ETF + every constituent in one parallel batch, so
     # the per-sector breadth loop below reads from cache instead of fetching
     # 500 symbols one at a time.
-    data_handler.prefetch([config.BENCHMARK] + sector_data.sector_etfs() + sector_data.all_tickers())
+    data_handler.prefetch(config.scan_base_frames()
+                          + sector_data.sector_etfs() + sector_data.all_tickers())
     spy = data_handler.get_daily(config.BENCHMARK)
     out = {}
     for etf in sector_data.sector_etfs():
@@ -284,23 +286,41 @@ def _compute_sectors() -> dict:
 # Levels 3 & 4 — stock filter
 # ---------------------------------------------------------------------------
 def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
-               regime_green: bool = False, sector_strong: bool = False) -> dict:
+               regime_green: bool = False, sector_strong: bool = False,
+               profile: str | None = None) -> dict:
+    """One scan/gate row for a name.
+
+    ``profile`` (schema v21, TRAVIS_EXTENSION) swaps ONLY the vs-peer comparison
+    benchmark: a DIVIDEND_COMPOUNDER is measured against the dividend-peer
+    benchmark instead of the growth-tilted sector ETF, because a dividend payer
+    compared against a growth sector is rejected for being the wrong KIND of stock
+    rather than for being a laggard within its own peer group. Everything else on
+    this row — the four lights, the vetoes' rules, the right-spot gate, the RS
+    vs SPY leg — is identical for both profiles [HARD_CFM_RULE].
+    """
+    import income_profile
     df = data_handler.get_daily(ticker)
-    is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
     is_etf = sector_data.is_etf(ticker)
+    # The whole vs-peer comparison decision, derived once. For JUICE_ENGINE the
+    # benchmark IS the sector ETF, so the caller's already-warm sector frame is
+    # reused untouched and this reduces to the pre-v21 behavior exactly.
+    peer = income_profile.resolve(ticker, profile, sector_etf)
+    profile, benchmark = peer["profile"], peer["benchmark"]
+    is_sector_etf, is_own_benchmark = peer["is_sector_etf"], peer["is_own_benchmark"]
+    peer_df = sector_df if peer["use_sector_df"] else data_handler.get_daily(benchmark)
 
     # RS3M (3-month) is DISPLAY / kill-switch only now — kept on the row so the UI
     # and snapshot still show it, but it no longer gates entry. A sector ETF has
     # no distinct peer sector to beat (tautologically itself), so its vs-sector RS
     # is N/A.
     rs3m_vs_spy = indicators.rs3m(df, spy) if df is not None else None
-    rs3m_vs_sector = (indicators.rs3m(df, sector_df)
-                      if (not is_sector_etf and df is not None and sector_df is not None) else None)
+    _peer_applicable = (not is_sector_etf and not is_own_benchmark
+                        and df is not None and peer_df is not None)
+    rs3m_vs_sector = indicators.rs3m(df, peer_df) if _peer_applicable else None
     # RS1M (1-month) is the RANKING key within GREENs: rs1m_vs_sector desc for
     # stocks, rs1m_vs_spy desc for ETFs (item F).
     rs1m_vs_spy = indicators.rs1m(df, spy) if df is not None else None
-    rs1m_vs_sector = (indicators.rs1m(df, sector_df)
-                      if (not is_sector_etf and df is not None and sector_df is not None) else None)
+    rs1m_vs_sector = indicators.rs1m(df, peer_df) if _peer_applicable else None
     atrp = indicators.atr_pct(df) if df is not None else None
 
     # The per-name Genius lights + vetoes + right-spot gate. The vs-sector veto is
@@ -311,8 +331,10 @@ def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
         ivr_percentile = (iv_history.iv_rank(ticker) or {}).get("iv_percentile")
     except Exception:  # noqa: BLE001
         ivr_percentile = None
-    sl = stock_lights.compute(df, sector_df=(None if is_etf else sector_df),
-                              ivr_percentile=ivr_percentile, is_etf=is_etf)
+    _veto_frame = None if (is_etf or is_own_benchmark) else peer_df
+    sl = stock_lights.compute(df, sector_df=_veto_frame,
+                              ivr_percentile=ivr_percentile, is_etf=is_etf,
+                              benchmark=None if _veto_frame is None else benchmark)
     stock_green = sl["verdict"] == stock_lights.GREEN
     spot = sl["right_spot"]
 
@@ -349,6 +371,12 @@ def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
         "is_sector_etf": is_sector_etf,
         "is_etf": is_etf,
         "atr_pct": atrp,
+        # Income profile + the benchmark the vs-peer legs were actually measured
+        # against (schema v21). Recorded explicitly so "rs3m_vs_sector" can never be
+        # read without knowing which peer group produced it.
+        "income_profile": profile,
+        "peer_benchmark": benchmark,
+        "is_own_benchmark": is_own_benchmark,
         # Per-name Genius light block (mirrors the market regime's four lights).
         "lights": sl["lights"],
         "greens": sl["greens"],
@@ -378,7 +406,10 @@ def stock_filter(sector: str | None = None) -> list[dict]:
 def _compute_stock_filter(sector: str | None = None) -> list[dict]:
     etfs = [sector.upper()] if sector else sector_data.sector_etfs()
     # Parallel-warm SPY + the sector ETF(s) + their constituents first.
-    universe = [config.BENCHMARK] + etfs
+    # The dividend-peer benchmark is warmed alongside SPY so a DIVIDEND_COMPOUNDER
+    # row's comparison frame is a cache hit, not a cold per-request fetch inside
+    # the memoized sweep (schema v21).
+    universe = config.scan_base_frames() + etfs
     for etf in etfs:
         universe += sector_data.constituents(etf)
     data_handler.prefetch(universe)
@@ -387,6 +418,13 @@ def _compute_stock_filter(sector: str | None = None) -> list[dict]:
     # the filter's status agrees with the gate verdict.
     regime_green = regime().get("status") == "green"
     sector_status = sectors()
+    # One state read for the whole sweep (schema v21) — resolving the profile per
+    # ticker would mean a state.json load per name.
+    try:
+        import logging_handler as log
+        sweep_state = log.load_state()
+    except Exception:  # noqa: BLE001 — no state just means no explicit assignments
+        sweep_state = None
     rows = []
     for etf in etfs:
         sector_df = data_handler.get_daily(etf)
@@ -394,10 +432,12 @@ def _compute_stock_filter(sector: str | None = None) -> list[dict]:
         # The ETF itself is a valid CFM candidate alongside its constituents —
         # liquid, weekly-optionable, and a real entry choice in its own right.
         rows.append(_stock_row(etf, spy, sector_df, etf,
-                               regime_green=regime_green, sector_strong=sector_strong))
+                               regime_green=regime_green, sector_strong=sector_strong,
+                               profile=resolve_profile(etf, state=sweep_state)))
         for ticker in sector_data.constituents(etf):
             rows.append(_stock_row(ticker, spy, sector_df, etf,
-                                   regime_green=regime_green, sector_strong=sector_strong))
+                                   regime_green=regime_green, sector_strong=sector_strong,
+                                   profile=resolve_profile(ticker, state=sweep_state)))
     # Ranking (item F): GREENs first, then by the RS1M rank key descending
     # (rs1m_vs_sector for stocks, rs1m_vs_spy for ETFs); None last within a group.
     rows.sort(key=lambda r: (r.get("verdict") != stock_lights.GREEN,
@@ -417,9 +457,53 @@ def _all(checks: list[dict]) -> bool:
     return all(c["pass"] for c in checks)
 
 
-def entry_gate(ticker: str) -> dict:
+def resolve_profile_detail(ticker: str, state: dict | None = None,
+                           overrides: dict | None = None) -> tuple[str, float | None]:
+    """``(income_profile, trailing_annual_dividend_yield_pct)`` for a scan candidate.
+
+    Resolution: explicit operator assignment -> the trailing-yield heuristic ->
+    JUICE_ENGINE (schema v21). Cache-only on the dividend side — a bulk sweep must
+    never trigger a fundamentals fetch storm — and an unresolved yield falls back to
+    JUICE_ENGINE rather than auto-enrolling a name into the extension.
+
+    Returns the yield alongside the profile because every caller needs both: the
+    scan row displays it, the gate feeds it into the combined metric, and resolving
+    it twice was costing a second cache read per ticker.
+
+    A BULK caller passes ``state`` (or just ``overrides``) so neither the assignment
+    lookup nor the yield's override check re-reads ``state.json`` per ticker."""
+    import dividends
+    import income_profile
+    if state is None and overrides is None:
+        try:
+            import logging_handler as log
+            state = log.load_state()
+        except Exception:  # noqa: BLE001 — no state just means no explicit assignments
+            state = None
+    annual_pct = dividends.cached_annual_yield_pct(ticker, state)
+    profile = income_profile.profile_for(ticker, state=state, overrides=overrides,
+                                         annual_dividend_yield_pct=annual_pct)
+    return profile, annual_pct
+
+
+def resolve_profile(ticker: str, state: dict | None = None) -> str:
+    """The income profile alone — see ``resolve_profile_detail``."""
+    return resolve_profile_detail(ticker, state=state)[0]
+
+
+def entry_gate(ticker: str, profile: str | None = None) -> dict:
+    """The 4-level entry gate (stop on first fail).
+
+    ``profile`` (schema v21) is resolved when omitted. It swaps ONLY the Level-3
+    vs-peer comparison benchmark (see _stock_row). Levels 1, 2, 3.5 and 4 — market
+    regime, sector deterioration, structure entrability and the right-spot
+    consolidation gate — are byte-identical for both profiles, as is the YELLOW
+    lockout at Level 3 [HARD_CFM_RULE]. TRAVIS_EXTENSION.
+    """
     ticker = ticker.upper()
     sector_etf = sector_data.sector_for(ticker)
+    if profile is None:
+        profile = resolve_profile(ticker)
     levels = []
 
     # Level 1 — market regime. The Genius four-light regime: Level 1 passes iff the
@@ -477,7 +561,8 @@ def entry_gate(ticker: str) -> dict:
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_df = data_handler.get_daily(sector_etf) if sector_etf else None
     row = _stock_row(ticker, spy, sector_df, sector_etf or "",
-                     regime_green=regime_green, sector_strong=_all(l2_checks))
+                     regime_green=regime_green, sector_strong=_all(l2_checks),
+                     profile=profile)
     row_lights = row.get("lights") or {}
 
     def _row_light_check(label: str, key: str) -> dict:
@@ -544,4 +629,6 @@ def entry_gate(ticker: str) -> dict:
             break
     verdict = "READY TO ENTER" if cleared == 4 else "WAIT"
     return {"ticker": ticker, "sector": sector_etf, "levels": levels,
-            "cleared_level": cleared, "verdict": verdict}
+            "cleared_level": cleared, "verdict": verdict,
+            "income_profile": row.get("income_profile"),
+            "peer_benchmark": row.get("peer_benchmark")}
