@@ -82,27 +82,19 @@ are where every unit/shape rule is enforced.
 """
 from __future__ import annotations
 
-FIELDS = ("ex_date", "pay_date", "amount", "frequency", "source")
-
 EMPTY = {"ex_date": None, "pay_date": None, "amount": None,
          "frequency": None, "source": "none"}
 
 
 def _clean_date(value) -> str | None:
-    """A ``YYYY-MM-DD`` date, or None. Rejects the provider sentinels that would
-    otherwise read as real dates ('None', '0000-00-00', ''). Never substitutes."""
-    text = str(value or "")[:10]
-    if not text or text in ("None", "none", "0000-00-00", "N/A", "-"):
-        return None
-    parts = text.split("-")
-    if len(parts) != 3 or not all(p.isdigit() for p in parts):
-        return None
-    try:
-        from datetime import date
-        date(int(parts[0]), int(parts[1]), int(parts[2]))
-    except ValueError:
-        return None
-    return text
+    """A ``YYYY-MM-DD`` date, or None. Never substitutes a fallback.
+
+    Delegates to ``logging_handler._parse_ymd``, the codebase's single strict
+    date parser (CLAUDE.md: never re-derive a bespoke one). It already rejects
+    every provider sentinel that would otherwise read as a real date — 'None',
+    '', '0000-00-00', 'N/A' and out-of-range values all raise and become None."""
+    import logging_handler as log
+    return None if log._parse_ymd(value) is None else str(value)[:10]
 
 
 def _clean_amount(value) -> float | None:

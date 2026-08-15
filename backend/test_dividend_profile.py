@@ -313,7 +313,9 @@ def test_5_accrual_accumulates_and_recommends_a_lot_add(store):
     assert ko["by_source"][accrual.SOURCE_REALIZED_EXTRINSIC] == 80.0
     assert ko["by_source"][accrual.SOURCE_DIVIDEND] == 48.0
     assert ko["accrued_cash"] == 128.0
-    assert sorted(ledger["accepted_sources"]) == sorted(accrual.ACCEPTED_SOURCES)
+    # The whitelist is a module constant, not persisted state — the per-ticker
+    # by_source keys are derived from it, so they are what pins it.
+    assert sorted(ko["by_source"]) == sorted(accrual.ACCEPTED_SOURCES)
 
     # Not yet a lot: 128 < 60 * 100 * 1.02.
     state = log.load_state()
@@ -445,7 +447,6 @@ def test_7_sub_lot_accrual_changes_no_coverage_or_per_contract_math(store):
     assert pm.position_capital(p) == before_capital
     prog = accrual.progress(state, "KO", 60.0)
     assert prog["ready"] is False
-    assert prog["coverable_lots_added"] == 0
 
     # And a fragment can never round up into coverage.
     assert pm.covered_lots(199)["coverable_lots"] == 1

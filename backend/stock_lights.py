@@ -211,15 +211,13 @@ def evaluate(ticker: str, *, df=None, spy_df=None, sector_df=None,
 
     sector_etf = sector_data.sector_for(ticker)
     is_etf = sector_data.is_etf(ticker)
-    # The comparison benchmark under this profile. For JUICE_ENGINE this IS the
-    # sector ETF, so the pre-existing behavior is reproduced exactly.
-    benchmark = income_profile.benchmark_for(profile, sector_etf)
-    # A name that IS its own benchmark has no distinct peer to beat — the
-    # comparison computes to a tautological 0.0, which reads as a real number and
-    # silently breaks the veto. Asked against the ACTIVE benchmark, so a compounder
-    # whose ticker is the dividend benchmark is caught too, not just a sector ETF.
-    is_sector_etf = bool(sector_etf) and ticker == (sector_etf or "").upper()
-    is_own_benchmark = income_profile.is_own_benchmark(ticker, profile, sector_etf)
+    # For JUICE_ENGINE the benchmark IS the sector ETF, so this reproduces the
+    # pre-v21 behavior exactly. is_own_benchmark is the anti-tautology guard — a
+    # self-comparison computes to 0.0, which reads as a real number and silently
+    # breaks the veto — asked against the ACTIVE benchmark, so a compounder whose
+    # ticker is the dividend benchmark is caught too, not just a sector ETF.
+    peer = income_profile.resolve(ticker, profile, sector_etf)
+    benchmark, is_own_benchmark = peer["benchmark"], peer["is_own_benchmark"]
     if sector_df is None and benchmark and not is_own_benchmark:
         sector_df = data_handler.get_daily(benchmark)
     # A sector ETF (or any ETF's) vs-sector veto is waived, so its sector frame is
@@ -236,6 +234,6 @@ def evaluate(ticker: str, *, df=None, spy_df=None, sector_df=None,
                   benchmark=None if sector_df is None else benchmark)
     out["ticker"] = ticker
     out["sector"] = sector_etf
-    out["is_sector_etf"] = is_sector_etf
-    out["income_profile"] = income_profile.normalize(profile)
+    out["is_sector_etf"] = peer["is_sector_etf"]
+    out["income_profile"] = peer["profile"]
     return out

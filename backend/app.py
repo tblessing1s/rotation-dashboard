@@ -586,17 +586,23 @@ def api_positions():
         # here rather than inside positions_view so the accrual read stays a
         # display concern: nothing below feeds coverage, sizing or capital math —
         # accrued cash is CASH, never exposure, until a real lot is bought.
+        #
+        # Uses the CHEAP pure `progress`, not `lot_add_status`. This is a polled
+        # read-only endpoint; running the Level 5 gate here would fire a live Schwab
+        # cash_balance() call (and potentially a state.json WRITE, via
+        # resolve_operating_cash) once per accrual-ready position on every poll. The
+        # gate verdict belongs to the paths that act on it — the alert sweep and the
+        # executor — which is where it is evaluated.
         try:
             import accrual
             import income_profile
             for view in views:
-                ticker = view.get("ticker", "")
-                position = log.find_position(state, ticker) or {}
-                profile = income_profile.of(position)
+                profile = income_profile.of(view)   # the view IS the position dict
                 view["income_profile"] = profile
                 view["income_profile_badge"] = income_profile.badge(profile)
-                view["accrual"] = accrual.lot_add_status(
-                    state, ticker, view.get("stock_price") or view.get("price"))
+                view["accrual"] = accrual.progress(
+                    state, view.get("ticker", ""),
+                    view.get("stock_price") or view.get("price"))
         except Exception:  # noqa: BLE001 — a display readout never sinks the panel
             pass
         return jsonify({

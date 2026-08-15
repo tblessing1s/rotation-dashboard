@@ -87,6 +87,7 @@ def binding_constraint(row: dict) -> str | None:
 def _record_from_row(row: dict) -> dict:
     """The persisted fields for one scan row (compact but calibration-sufficient)."""
     binding = row.get("binding") or {}
+    floor = row.get("shadow_floor") or {}
     return {
         "verdict": row.get("verdict"),
         "bench": bool(row.get("bench")),
@@ -125,11 +126,11 @@ def _record_from_row(row: dict) -> dict:
         "combined_weekly_yield_pct": row.get("combined_weekly_yield_pct"),
         "dividend_weekly_pct": row.get("dividend_weekly_pct"),
         "juice_weekly_pct": row.get("juice_weekly_pct"),
-        "shadow_floor_pass": (row.get("shadow_floor") or {}).get("pass"),
-        "shadow_floor_pct": (row.get("shadow_floor") or {}).get("floor_pct"),
-        "shadow_floor_measured_pct": (row.get("shadow_floor") or {}).get("measured_pct"),
-        "shadow_floor_basis": (row.get("shadow_floor") or {}).get("basis"),
-        "shadow_floor_reasons": (row.get("shadow_floor") or {}).get("reasons"),
+        "shadow_floor_pass": floor.get("pass"),
+        "shadow_floor_pct": floor.get("floor_pct"),
+        "shadow_floor_measured_pct": floor.get("measured_pct"),
+        "shadow_floor_basis": floor.get("basis"),
+        "shadow_floor_reasons": floor.get("reasons"),
     }
 
 

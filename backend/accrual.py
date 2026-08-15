@@ -35,12 +35,11 @@ bypassed by any future writer, whereas an append-time whitelist can. Each derive
 record still names its ``source`` and its ``execution_id``, so the provenance the
 event type was for is fully preserved.
 
-The two events that ARE genuinely new facts — ``LOT_ADD_RECOMMENDED`` (the app
-recommended an add at a moment in time) and ``LOT_ADD_EXECUTED`` (the operator
-acted) — are appended, because neither is derivable from trade history.
-``LOT_ADD_EXECUTED`` is a ``buy_shares`` carrying a ``lot_add`` stamp rather than
-its own action, so a lot add traverses the SAME freeze / Level-5 / execution-window
-/ spread-quality path as any other new risk.
+``LOT_ADD_RECOMMENDED`` — the fact that the app recommended an add at a moment in
+time — IS appended, because it is not derivable from trade history. An EXECUTED add
+is deliberately not its own action: it is a ``buy_shares`` carrying a ``lot_add``
+stamp, so it traverses the SAME freeze / Level-5 / execution-window / spread-quality
+path as any other new risk.
 
 ACCRUED CASH IS NOT EXPOSURE. Nothing here ever touches ``shares.count``,
 ``covered_lots`` or ``position_capital``. Accrued cash changes covered-call math at
@@ -63,7 +62,6 @@ ACCEPTED_SOURCES = frozenset({SOURCE_REALIZED_EXTRINSIC, SOURCE_DIVIDEND})
 # Appended typed events (see the module docstring for why ACCRUAL_CREDIT is not
 # among them).
 LOT_ADD_RECOMMENDED = "lot_add_recommended"
-LOT_ADD_EXECUTED = "lot_add_executed"
 
 
 def credit_for(execution: dict) -> dict | None:
@@ -120,19 +118,6 @@ def credit_for(execution: dict) -> dict | None:
     return None
 
 
-def spent_on_lot_adds(execs: list[dict]) -> dict[str, float]:
-    """Accrued cash already CONSUMED by executed lot adds, per ticker. A lot add
-    spends the balance it was funded by, so without this the same dollars would
-    fund an unbounded series of adds."""
-    out: dict[str, float] = {}
-    for e in execs:
-        if e.get("action") != "buy_shares" or not e.get("lot_add"):
-            continue
-        t = e.get("ticker", "")
-        out[t] = round(out.get(t, 0.0) + float(e.get("execution_total") or 0), 2)
-    return out
-
-
 def derive(state: dict, execs: list[dict]) -> dict:
     """Rebuild ``state['accrual_ledger']`` from the immutable execution log.
 
@@ -141,65 +126,65 @@ def derive(state: dict, execs: list[dict]) -> dict:
     into the accrual balance with no separate reconciliation path.
     """
     records: list[dict] = []
+    recommendations: list[dict] = []
     by_ticker: dict[str, dict] = {}
+
+    def agg_for(ticker: str) -> dict:
+        return by_ticker.setdefault(ticker, {
+            "ticker": ticker, "credited": 0.0,
+            "by_source": {src: 0.0 for src in sorted(ACCEPTED_SOURCES)},
+            "spent_on_lots": 0.0, "accrued_cash": 0.0, "credits": 0})
+
+    # ONE pass: credits, the lot-adds that spend them, and the recommendation log.
     for e in execs:
-        credit = credit_for(e)
-        if credit is None:
+        if e.get("action") == LOT_ADD_RECOMMENDED:
+            recommendations.append(
+                {"execution_id": e.get("id"), "ticker": e.get("ticker", ""),
+                 "date": e.get("date"), "accrued_cash": e.get("accrued_cash"),
+                 "lot_cost": e.get("lot_cost"), "blocked": e.get("blocked"),
+                 "blocked_reason": e.get("blocked_reason")})
             continue
-        if credit["source"] not in ACCEPTED_SOURCES:  # belt and braces
+        if e.get("action") == "buy_shares" and e.get("lot_add"):
+            # A lot add SPENDS the balance it was funded by — without this the same
+            # dollars would fund an unbounded series of adds.
+            spent = agg_for(e.get("ticker", ""))
+            spent["spent_on_lots"] = round(
+                spent["spent_on_lots"] + float(e.get("execution_total") or 0), 2)
+            continue
+        credit = credit_for(e)
+        if credit is None or credit["source"] not in ACCEPTED_SOURCES:
             continue
         records.append(credit)
-        agg = by_ticker.setdefault(credit["ticker"], {
-            "ticker": credit["ticker"], "credited": 0.0,
-            "by_source": {s: 0.0 for s in sorted(ACCEPTED_SOURCES)},
-            "spent_on_lots": 0.0, "accrued_cash": 0.0, "credits": 0})
+        agg = agg_for(credit["ticker"])
         agg["credited"] = round(agg["credited"] + credit["amount"], 2)
         agg["by_source"][credit["source"]] = round(
             agg["by_source"][credit["source"]] + credit["amount"], 2)
         agg["credits"] += 1
 
-    spent = spent_on_lot_adds(execs)
-    for ticker, amount in spent.items():
-        agg = by_ticker.setdefault(ticker, {
-            "ticker": ticker, "credited": 0.0,
-            "by_source": {s: 0.0 for s in sorted(ACCEPTED_SOURCES)},
-            "spent_on_lots": 0.0, "accrued_cash": 0.0, "credits": 0})
-        agg["spent_on_lots"] = amount
     for agg in by_ticker.values():
         # Never negative: an add priced above the accrued balance (an operator
         # override, or a fill above the recommendation price) leaves zero, not a debt.
         agg["accrued_cash"] = round(max(agg["credited"] - agg["spent_on_lots"], 0.0), 2)
 
-    # Appended recommendation events, newest last — the record of what the builder
-    # told the operator and when.
-    recommendations = [
-        {"execution_id": e.get("id"), "ticker": e.get("ticker", ""),
-         "date": e.get("date"), "accrued_cash": e.get("accrued_cash"),
-         "lot_cost": e.get("lot_cost"), "blocked": e.get("blocked"),
-         "blocked_reason": e.get("blocked_reason")}
-        for e in execs if e.get("action") == LOT_ADD_RECOMMENDED
-    ]
     return {
         "by_ticker": by_ticker,
         "records": records,
         "recommendations": recommendations,
         "total_accrued": round(sum(a["accrued_cash"] for a in by_ticker.values()), 2),
-        "accepted_sources": sorted(ACCEPTED_SOURCES),
     }
 
 
 # ---------------------------------------------------------------------------
 # The lot builder
 # ---------------------------------------------------------------------------
-def lot_threshold(price_per_share: float | None,
-                  buffer_pct: float | None = None) -> float | None:
+def lot_threshold(price_per_share: float | None) -> float | None:
     """Accrued cash required before a lot add is recommended:
-    ``price x SHARES_PER_LOT x (1 + buffer)``. The buffer keeps a recommendation
-    from being invalidated by a tick between the alert and the fill."""
+    ``price x SHARES_PER_LOT x (1 + LOT_ADD_BUFFER_PCT)``. The buffer keeps a
+    recommendation from being invalidated by a tick between the alert and the fill."""
     if price_per_share is None:
         return None
-    buffer_pct = config.LOT_ADD_BUFFER_PCT if buffer_pct is None else buffer_pct
-    return round(float(price_per_share) * config.SHARES_PER_LOT * (1 + buffer_pct), 2)
+    return round(float(price_per_share) * config.SHARES_PER_LOT
+                 * (1 + config.LOT_ADD_BUFFER_PCT), 2)
 
 
 def progress(state: dict, ticker: str, price_per_share: float | None) -> dict:
@@ -226,10 +211,10 @@ def progress(state: dict, ticker: str, price_per_share: float | None) -> dict:
         "remaining": (round(max(threshold - accrued, 0.0), 2)
                       if threshold is not None else None),
         "ready": bool(threshold is not None and accrued >= threshold),
-        "by_source": agg.get("by_source") or {},
         # A partial balance is CASH, never exposure: it changes no covered-call
-        # math until a whole lot is actually bought [HARD_CFM_RULE].
-        "coverable_lots_added": 0,
+        # math until a whole lot is actually bought [HARD_CFM_RULE]. Nothing here
+        # feeds covered_lots or position_capital — pinned by test_7.
+        "by_source": agg.get("by_source") or {},
     }
 
 

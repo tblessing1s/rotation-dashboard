@@ -68,11 +68,6 @@ def of(obj) -> str:
     return normalize(obj.get("income_profile"))
 
 
-def is_dividend(obj) -> bool:
-    """True only for something explicitly tagged DIVIDEND_COMPOUNDER."""
-    return of(obj) == DIVIDEND_COMPOUNDER
-
-
 def badge(profile: str | None) -> str:
     return BADGE.get(normalize(profile), BADGE[JUICE_ENGINE])
 
@@ -89,7 +84,8 @@ def assignments(state: dict | None) -> dict:
 
 
 def profile_for(ticker: str, state: dict | None = None,
-                annual_dividend_yield_pct: float | None = None) -> str:
+                annual_dividend_yield_pct: float | None = None,
+                overrides: dict | None = None) -> str:
     """Resolve a SCAN CANDIDATE's profile: explicit assignment -> yield heuristic
     -> JUICE_ENGINE.
 
@@ -97,9 +93,14 @@ def profile_for(ticker: str, state: dict | None = None,
     a 3.1% payer). Passing None (unknown yield) yields JUICE_ENGINE — an unknown is
     never auto-enrolled into the dividend sleeve, so a fundamentals outage can only
     ever fall back to the CFM default, never into the extension.
+
+    The assignment map may be given directly as ``overrides`` or extracted from
+    ``state``. Taking the map is the primary form — a caller that has already
+    pulled it (a bulk sweep) should not have to fabricate a state wrapper to hand
+    it back.
     """
     t = (ticker or "").strip().upper()
-    explicit = assignments(state).get(t)
+    explicit = (overrides if overrides is not None else assignments(state)).get(t)
     if explicit is not None:
         return normalize(explicit)
     if (annual_dividend_yield_pct is not None
@@ -129,6 +130,41 @@ def benchmark_for(profile: str | None, sector_etf: str | None) -> str | None:
     if normalize(profile) == DIVIDEND_COMPOUNDER:
         return config.DIVIDEND_PEER_BENCHMARK
     return sector_etf
+
+
+def resolve(ticker: str, profile: str | None, sector_etf: str | None) -> dict:
+    """The whole vs-peer comparison decision for one name, as data.
+
+    Four call sites (the scan row, the scorecard row, the stock-lights wrapper and
+    the kill switch) each need the same three answers — which benchmark, is this
+    name its own benchmark, and can the caller reuse the sector frame it already
+    holds. Deriving them independently at each site is four chances to drift on the
+    load-bearing anti-tautology guard, so they are derived once here.
+
+    Returns:
+      ``profile``          — normalized
+      ``benchmark``        — the RS3M comparison symbol for the SECTOR leg
+      ``is_sector_etf``    — the name IS its own sector ETF (display/back-compat)
+      ``is_own_benchmark`` — the name IS its active benchmark, so the peer leg is
+                             not applicable (a self-comparison computes to exactly
+                             0.0, which reads as a real number and silently breaks
+                             both the veto and the kill switch's thinning leg)
+      ``use_sector_df``    — the benchmark IS the sector ETF, so a caller holding a
+                             warm sector frame can use it as-is rather than fetching
+    PURE.
+    """
+    t = (ticker or "").strip().upper()
+    prof = normalize(profile)
+    bench = benchmark_for(prof, sector_etf)
+    sector = (sector_etf or "").strip().upper()
+    bench_u = (bench or "").strip().upper()
+    return {
+        "profile": prof,
+        "benchmark": bench,
+        "is_sector_etf": bool(sector) and t == sector,
+        "is_own_benchmark": bool(t) and bool(bench_u) and t == bench_u,
+        "use_sector_df": bool(bench_u) and bench_u == sector,
+    }
 
 
 def is_own_benchmark(ticker: str, profile: str | None, sector_etf: str | None) -> bool:

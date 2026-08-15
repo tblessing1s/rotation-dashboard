@@ -444,13 +444,13 @@ def shadow_floor(profile: str | None,
         # crossing is still visibly flagged.
         if slip["clears"] is False:
             reasons.append("JUICE_BELOW_SLIPPAGE")
-        passed = None if measured is None else not reasons
     else:
         floor, measured, basis = (config.SHARES_JUICE_FLOOR_PCT,
                                   parts["juice_weekly_pct"], "juice")
         if measured is not None and measured < floor:
             reasons.append("JUICE_BELOW_FLOOR")
-        passed = None if measured is None else not reasons
+    # An unmeasurable name is UNMEASURED (None), never a recorded failure.
+    passed = None if measured is None else not reasons
 
     return {
         "profile": profile,

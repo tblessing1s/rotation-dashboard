@@ -198,6 +198,13 @@ def weekly_yield_target_pct(ticker: str | None = None,
     prior behavior, ETF arm included. TRAVIS_EXTENSION."""
     import income_profile
     import sector_data
+    # PRECEDENCE, stated deliberately rather than left to arm order: the sleeve wins
+    # over ETF-ness. A dividend ETF tagged DIVIDEND_COMPOUNDER (SCHD held as a
+    # position is the obvious case) is judged on its COMBINED yield, not the ETF
+    # juice bar — the explicit operator tag is the more specific statement of intent
+    # than "this happens to be an ETF". `is_etf` and `income_profile` remain two
+    # independent discriminators here; unifying them is a larger change than this
+    # feature warrants (six load-bearing ETF sites, regression-locked).
     if income_profile.normalize(profile) == income_profile.DIVIDEND_COMPOUNDER:
         return config.COMBINED_YIELD_FLOOR_WK
     if ticker and sector_data.is_etf(ticker):
@@ -436,20 +443,15 @@ def evaluate(ticker: str, contracts: int | None = None,
     denom = spot if shares_mode else leap_cost
     weekly_yield = (round(weekly_extr / denom * 100, 2)
                     if (weekly_extr is not None and denom) else None)
-    annual_div_pct = None
-    try:
-        # CACHE-ONLY: evaluate_many runs this across every ready row, and the
-        # dividend leg feeds a SHADOW readout, never a blocking decision — not worth
-        # a provider request per name on the request path.
-        q, q_src = dividends.cached_yield_with_source(ticker)
-        if q is not None and q_src != "unknown":
-            annual_div_pct = round(q * 100, 4)
-    except Exception:  # noqa: BLE001 — a fundamentals hiccup never blocks the gate
-        annual_div_pct = None
-    combined = scan_triggers.combined_weekly_yield(weekly_yield, annual_div_pct)
+    # CACHE-ONLY, and reusing the state already in hand: evaluate_many runs this
+    # across every ready row, and the dividend leg feeds a SHADOW readout, never a
+    # blocking decision — not worth a provider request or a state re-read per name.
+    annual_div_pct = dividends.cached_annual_yield_pct(ticker, state)
+    # shadow_floor computes the combined parts internally; read them back off it
+    # rather than deriving the same numbers a second time.
     shadow = scan_triggers.shadow_floor(profile, weekly_yield, annual_div_pct, weekly_extr)
     # The number the check is MEASURED on follows the profile; both stay visible.
-    measured = (combined["combined_weekly_yield_pct"] if is_compounder else weekly_yield)
+    measured = (shadow["combined_weekly_yield_pct"] if is_compounder else weekly_yield)
     if is_compounder:
         profile_note = "dividend sleeve — juice + dividend"
     elif is_etf_underlying:
@@ -473,10 +475,10 @@ def evaluate(ticker: str, contracts: int | None = None,
          # and the shadow-floor observation for the calibration log.
          "income_profile": profile,
          "measured_pct": measured,
-         "combined_weekly_yield_pct": combined["combined_weekly_yield_pct"],
-         "dividend_weekly_pct": combined["dividend_weekly_pct"],
+         "combined_weekly_yield_pct": shadow["combined_weekly_yield_pct"],
+         "dividend_weekly_pct": shadow["dividend_weekly_pct"],
          "annual_dividend_yield_pct": annual_div_pct,
-         "dividend_known": combined["dividend_known"],
+         "dividend_known": shadow["dividend_known"],
          "shadow_floor": shadow}))
 
     # 4b) Juice too rich (warning): actual premium far above what the ticker's
@@ -550,12 +552,7 @@ def evaluate(ticker: str, contracts: int | None = None,
         "dividend": div,
         "juice": {"weekly_yield_pct": weekly_yield, "target_pct": target,
                   "source": juice_source, "is_etf": is_etf_underlying,
-                  "profile": "etf" if is_etf_underlying else "stock",
-                  # v21 — the combined metric's separable components. The juice leg
-                  # above is UNCHANGED; these sit beside it.
-                  "combined_weekly_yield_pct": combined["combined_weekly_yield_pct"],
-                  "dividend_weekly_pct": combined["dividend_weekly_pct"],
-                  "dividend_known": combined["dividend_known"]},
+                  "profile": "etf" if is_etf_underlying else "stock"},
         "income_profile": profile,
         "income_profile_badge": income_profile.badge(profile),
         # SHADOW ONLY — reported for calibration, never in blocking_failures.

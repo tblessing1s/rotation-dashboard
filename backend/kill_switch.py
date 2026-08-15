@@ -48,12 +48,10 @@ def _rs_pair(ticker: str, profile: str | None = None) -> tuple[float | None, flo
     stock = data_handler.get_daily(ticker)
     rs_vs_spy = indicators.rs3m(stock, spy) if stock is not None else None
 
-    sector_etf = sector_data.sector_for(ticker)
-    benchmark = income_profile.benchmark_for(profile, sector_etf)
-    is_own_benchmark = income_profile.is_own_benchmark(ticker, profile, sector_etf)
+    peer = income_profile.resolve(ticker, profile, sector_data.sector_for(ticker))
     rs_vs_sector = None
-    if benchmark and not is_own_benchmark and stock is not None:
-        sector_df = data_handler.get_daily(benchmark)
+    if peer["benchmark"] and not peer["is_own_benchmark"] and stock is not None:
+        sector_df = data_handler.get_daily(peer["benchmark"])
         rs_vs_sector = indicators.rs3m(stock, sector_df) if sector_df is not None else None
     return rs_vs_spy, rs_vs_sector
 

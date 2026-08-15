@@ -52,7 +52,7 @@ def warm_scan_cache() -> dict:
         # constituent; the sweeps below then read from the now-warm per-symbol
         # cache instead of fetching one name at a time.
         data_handler.prefetch(
-            [config.BENCHMARK, config.DIVIDEND_PEER_BENCHMARK]
+            config.scan_base_frames()
             + sector_data.sector_etfs() + sector_data.all_tickers()
         )
         regime()
@@ -233,7 +233,7 @@ def _compute_sectors() -> dict:
     # Warm SPY + every sector ETF + every constituent in one parallel batch, so
     # the per-sector breadth loop below reads from cache instead of fetching
     # 500 symbols one at a time.
-    data_handler.prefetch([config.BENCHMARK, config.DIVIDEND_PEER_BENCHMARK]
+    data_handler.prefetch(config.scan_base_frames()
                           + sector_data.sector_etfs() + sector_data.all_tickers())
     spy = data_handler.get_daily(config.BENCHMARK)
     out = {}
@@ -300,17 +300,14 @@ def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
     """
     import income_profile
     df = data_handler.get_daily(ticker)
-    is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
     is_etf = sector_data.is_etf(ticker)
-    profile = income_profile.normalize(profile)
-    benchmark = income_profile.benchmark_for(profile, sector_etf)
-    is_own_benchmark = income_profile.is_own_benchmark(ticker, profile, sector_etf)
-    # The comparison FRAME follows the benchmark. For JUICE_ENGINE benchmark ==
-    # sector_etf, so the caller's already-warm sector frame is reused untouched and
-    # this reduces to the pre-v21 behavior exactly.
-    peer_df = sector_df
-    if benchmark and sector_etf and benchmark.upper() != (sector_etf or "").upper():
-        peer_df = data_handler.get_daily(benchmark)
+    # The whole vs-peer comparison decision, derived once. For JUICE_ENGINE the
+    # benchmark IS the sector ETF, so the caller's already-warm sector frame is
+    # reused untouched and this reduces to the pre-v21 behavior exactly.
+    peer = income_profile.resolve(ticker, profile, sector_etf)
+    profile, benchmark = peer["profile"], peer["benchmark"]
+    is_sector_etf, is_own_benchmark = peer["is_sector_etf"], peer["is_own_benchmark"]
+    peer_df = sector_df if peer["use_sector_df"] else data_handler.get_daily(benchmark)
 
     # RS3M (3-month) is DISPLAY / kill-switch only now — kept on the row so the UI
     # and snapshot still show it, but it no longer gates entry. A sector ETF has
@@ -412,7 +409,7 @@ def _compute_stock_filter(sector: str | None = None) -> list[dict]:
     # The dividend-peer benchmark is warmed alongside SPY so a DIVIDEND_COMPOUNDER
     # row's comparison frame is a cache hit, not a cold per-request fetch inside
     # the memoized sweep (schema v21).
-    universe = [config.BENCHMARK, config.DIVIDEND_PEER_BENCHMARK] + etfs
+    universe = config.scan_base_frames() + etfs
     for etf in etfs:
         universe += sector_data.constituents(etf)
     data_handler.prefetch(universe)
@@ -460,35 +457,38 @@ def _all(checks: list[dict]) -> bool:
     return all(c["pass"] for c in checks)
 
 
-def resolve_profile(ticker: str, state: dict | None = None) -> str:
-    """The income profile for a scan candidate: explicit operator assignment, else
-    the trailing-yield heuristic, else JUICE_ENGINE (schema v21). Cache-only on the
-    dividend side — a bulk gate sweep must never trigger a fundamentals fetch storm,
-    and an unresolved yield falls back to JUICE_ENGINE rather than auto-enrolling a
-    name into the extension.
+def resolve_profile_detail(ticker: str, state: dict | None = None,
+                           overrides: dict | None = None) -> tuple[str, float | None]:
+    """``(income_profile, trailing_annual_dividend_yield_pct)`` for a scan candidate.
 
-    ``state`` lets a BULK caller pass one already-loaded state dict across many
-    tickers. Omitting it costs a state.json read per call, which is fine for the
-    single-ticker API paths and is emphatically not fine inside a ~500-name sweep —
-    see _compute_scorecard, which loads once and threads it through."""
+    Resolution: explicit operator assignment -> the trailing-yield heuristic ->
+    JUICE_ENGINE (schema v21). Cache-only on the dividend side — a bulk sweep must
+    never trigger a fundamentals fetch storm — and an unresolved yield falls back to
+    JUICE_ENGINE rather than auto-enrolling a name into the extension.
+
+    Returns the yield alongside the profile because every caller needs both: the
+    scan row displays it, the gate feeds it into the combined metric, and resolving
+    it twice was costing a second cache read per ticker.
+
+    A BULK caller passes ``state`` (or just ``overrides``) so neither the assignment
+    lookup nor the yield's override check re-reads ``state.json`` per ticker."""
+    import dividends
     import income_profile
-    if state is None:
+    if state is None and overrides is None:
         try:
             import logging_handler as log
             state = log.load_state()
         except Exception:  # noqa: BLE001 — no state just means no explicit assignments
             state = None
-    annual_pct = None
-    try:
-        import dividends
-        # CACHE-ONLY — the gate sweep must never trigger a fundamentals fetch storm.
-        q, q_src = dividends.cached_yield_with_source(ticker)
-        if q is not None and q_src != "unknown":
-            annual_pct = round(q * 100, 4)
-    except Exception:  # noqa: BLE001 — a fundamentals hiccup never re-profiles a name
-        annual_pct = None
-    return income_profile.profile_for(ticker, state=state,
-                                      annual_dividend_yield_pct=annual_pct)
+    annual_pct = dividends.cached_annual_yield_pct(ticker, state)
+    profile = income_profile.profile_for(ticker, state=state, overrides=overrides,
+                                         annual_dividend_yield_pct=annual_pct)
+    return profile, annual_pct
+
+
+def resolve_profile(ticker: str, state: dict | None = None) -> str:
+    """The income profile alone — see ``resolve_profile_detail``."""
+    return resolve_profile_detail(ticker, state=state)[0]
 
 
 def entry_gate(ticker: str, profile: str | None = None) -> dict:

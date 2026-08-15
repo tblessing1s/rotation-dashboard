@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Meter, Loading, Modal, Light, ChartLink, money, fmt, useApi } from "./ui.jsx";
+import { Card, Meter, Loading, Modal, Light, ChartLink, SleeveBadge, money, fmt, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { Orange, pulpOf, balanceOf } from "./JuiceStand.jsx";
@@ -625,10 +625,8 @@ function PaybackTank({ uid, pct, mini = false }) {
 // whole lot is actually bought, and the app never auto-executes the add.
 function AccrualProgress({ accrual }) {
   if (!accrual || accrual.threshold == null) return null;
-  const pct = accrual.pct_to_next_lot ?? 0;
   const src = accrual.by_source || {};
   const ready = accrual.ready;
-  const blocked = accrual.blocked;
   return (
     <div className="mt-4 border-t border-slate-800 pt-3">
       <div className="mb-1.5 flex items-center justify-between text-xs">
@@ -645,28 +643,17 @@ function AccrualProgress({ accrual }) {
           {money(accrual.accrued_cash)} / {money(accrual.threshold)}
         </span>
       </div>
-      <div className="h-1.5 overflow-hidden rounded-full bg-slate-800">
-        <div
-          className={`h-full rounded-full transition-all ${
-            ready && !blocked ? "bg-emerald-400" : ready ? "bg-amber-400" : "bg-sky-500/70"}`}
-          style={{ width: `${Math.min(Math.max(pct, 0), 100)}%` }}
-        />
-      </div>
+      <Meter pct={accrual.pct_to_next_lot} tone={ready ? "bg-emerald-400" : "bg-sky-500/70"} />
       <p className="mt-1 text-[11px] text-slate-500">
-        {!ready && (
+        {ready ? (
+          <span className="text-emerald-300">
+            Enough for another {accrual.shares_per_lot}-share lot. Whether the add clears
+            the Level 5 gate is checked when you act — and never auto-executed.
+          </span>
+        ) : (
           <>{money(accrual.remaining)} more toward another {accrual.shares_per_lot}-share lot
             {accrual.lot_cost != null && <> (lot {money(accrual.lot_cost)} + {fmt((accrual.buffer_pct || 0) * 100, 0)}% buffer)</>}.
           </>
-        )}
-        {ready && !blocked && (
-          <span className="text-emerald-300">
-            Enough for another {accrual.shares_per_lot}-share lot — confirm the add. Never auto-executed.
-          </span>
-        )}
-        {ready && blocked && (
-          <span className="text-amber-300">
-            Lot add BLOCKED — {accrual.blocked_reason}. The cash keeps accruing.
-          </span>
         )}
       </p>
     </div>
@@ -1195,12 +1182,7 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
           <span className="text-sm font-semibold text-slate-100">{p.ticker}</span>
           <span className="truncate text-xs text-slate-500">{p.sector}</span>
           {p.income_profile === "DIVIDEND_COMPOUNDER" && (
-            <span
-              className="rounded bg-cyan-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-cyan-300"
-              title={"DIVIDEND_COMPOUNDER — Travis's dividend sleeve (an EXTENSION, not a CFM rule). "
-                + "Its kill switch compares RS3M against the dividend-peer benchmark instead of the sector ETF; "
-                + "the RS3M-vs-SPY leg is unchanged and keeps full exit authority."}
-            >DIV</span>
+            <SleeveBadge profile={p.income_profile} />
           )}
           {p.symbol_genius?.color && (
             <span

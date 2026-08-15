@@ -469,6 +469,13 @@ DIVIDEND_PEER_BENCHMARKS = ("SCHD", "VYM", "NOBL")
 if DIVIDEND_PEER_BENCHMARK not in DIVIDEND_PEER_BENCHMARKS:
     DIVIDEND_PEER_BENCHMARK = "SCHD"
 
+# Every non-sector comparison frame a scan sweep must warm before it runs — SPY
+# plus whichever dividend peer is configured. One tuple so adding a third
+# benchmark later does not mean finding four hand-maintained prefetch lists.
+def scan_base_frames() -> list:
+    return [BENCHMARK, DIVIDEND_PEER_BENCHMARK]
+
+
 # Trailing annual dividend yield (PERCENT) at or above which an untagged candidate
 # is classified DIVIDEND_COMPOUNDER. An explicit operator assignment in
 # state.metadata.income_profile_overrides always wins; an UNKNOWN yield never
@@ -1110,8 +1117,8 @@ ETF_WEEKLY_JUICE_TARGET_PCT = 1.0
 # unknown single name — and so one of them HELD as a position gets the ETF income
 # sleeve. They are benchmarks, not scan candidates: they are not in
 # tickers_by_sector.txt and are not swept, only fetched as comparison frames.
-KNOWN_ETFS = {"QQQ", "IWM", "DIA", "SMH", "ARKK", "XBI", "GDX", "XOP", "KRE", "XHB",
-              "SCHD", "VYM", "NOBL"}
+KNOWN_ETFS = {"QQQ", "IWM", "DIA", "SMH", "ARKK", "XBI", "GDX", "XOP", "KRE",
+              "XHB"} | set(DIVIDEND_PEER_BENCHMARKS)
 
 # PROPOSED_DEFAULT — circuit-breaker (line-in-the-sand) default suggestion:
 # max(MA50, entry - CIRCUIT_BREAKER_ATR_MULT * ATR). Operator-editable at entry;

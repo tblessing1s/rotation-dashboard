@@ -44,28 +44,57 @@ def _normalize(value) -> float | None:
     return q if q < 1.0 else None  # a yield ≥ 100% is bad data
 
 
+# Parsed-cache memo, keyed on the cache file's mtime+size (the same invalidation
+# trick data_handler uses for frames). A full-universe sweep asks for hundreds of
+# tickers; re-opening and re-parsing the whole JSON per ticker was the dominant
+# cost of the cache-only read path.
+_parsed: tuple[tuple[float, int], dict] | None = None
+
+
 def _read_cache() -> dict:
+    global _parsed
+    try:
+        stat = os.stat(_CACHE_FILE)
+        stamp = (stat.st_mtime, stat.st_size)
+    except OSError:
+        return {}
+    if _parsed is not None and _parsed[0] == stamp:
+        return _parsed[1]
     try:
         with open(_CACHE_FILE, encoding="utf-8") as fh:
-            return json.load(fh) or {}
+            data = json.load(fh) or {}
     except (FileNotFoundError, ValueError):
         return {}
+    _parsed = (stamp, data)
+    return data
 
 
 def _write_cache(data: dict) -> None:
+    global _parsed
     os.makedirs(config.DATA_DIR, exist_ok=True)
     tmp = _CACHE_FILE + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
     os.replace(tmp, _CACHE_FILE)
+    _parsed = None  # force a re-read; the mtime stamp is now stale
 
 
-def _override(ticker: str) -> float | None:
+def _metadata(state: dict | None = None) -> dict:
+    """State metadata, from an already-loaded state when the caller has one.
+
+    ``state`` matters: a bulk caller (a ~500-name scan sweep) passes the state it
+    already holds instead of triggering a full ``state.json`` load — which parses
+    the entire execution log and runs the migration chain — once per ticker."""
+    if state is not None:
+        return state.get("metadata") or {}
     try:
-        meta = log.load_state().get("metadata", {})
+        return log.load_state().get("metadata", {})
     except Exception:  # noqa: BLE001
-        return None
-    overrides = meta.get("dividend_overrides") or {}
+        return {}
+
+
+def _override(ticker: str, state: dict | None = None) -> float | None:
+    overrides = _metadata(state).get("dividend_overrides") or {}
     raw = overrides.get(ticker) or overrides.get(ticker.upper())
     return _normalize(raw) if raw is not None else None
 
@@ -117,7 +146,7 @@ def yield_for(ticker: str, refresh: bool = False) -> float:
     return q if isinstance(q, (int, float)) and q >= 0 else 0.0
 
 
-def cached_yield_with_source(ticker: str) -> tuple[float | None, str]:
+def cached_yield_with_source(ticker: str, state: dict | None = None) -> tuple[float | None, str]:
     """(annual yield as a decimal, source) read from CACHE ONLY — never a fetch.
 
     Mirrors ``cached_dividend``: a bulk scan sweeps hundreds of names, and calling
@@ -128,12 +157,13 @@ def cached_yield_with_source(ticker: str) -> tuple[float | None, str]:
     name into the dividend sleeve.
 
     Manual overrides in state metadata still win, exactly as ``yield_for``
-    resolves them.
+    resolves them; pass ``state`` from a bulk caller so the override lookup does
+    not re-load ``state.json`` per ticker.
     """
     ticker = (ticker or "").strip().upper()
     if not ticker:
         return None, "unknown"
-    override = _override(ticker)
+    override = _override(ticker, state)
     if override is not None:
         return override, "override"
     with _lock:
@@ -144,6 +174,21 @@ def cached_yield_with_source(ticker: str) -> tuple[float | None, str]:
     if not isinstance(q, (int, float)) or q < 0:
         return None, "none"          # cached miss — a resolved non-payer/unknown
     return (q, "dividend_yield") if q > 0 else (0.0, "none")
+
+
+def cached_annual_yield_pct(ticker: str, state: dict | None = None) -> float | None:
+    """Trailing annual dividend yield in PERCENT from cache only, or None when it
+    is unresolved. Never raises, never fetches.
+
+    The one place the decimal->percent conversion and the "unknown is not zero"
+    rule live: the entry gate, the scan row and the profile heuristic all read
+    through here, so they can never disagree about whether a name pays a dividend.
+    """
+    try:
+        q, _src = cached_yield_with_source(ticker, state)
+    except Exception:  # noqa: BLE001 — a fundamentals hiccup is an unknown, not a 0
+        return None
+    return None if q is None else round(q * 100, 4)
 
 
 def q_with_source(ticker: str, refresh: bool = False) -> tuple[float, str]:
@@ -178,20 +223,10 @@ def cache_health() -> dict:
 # ---------------------------------------------------------------------------
 # Next dividend EVENT (ex-date + per-payment amount) — assignment-risk input.
 # ---------------------------------------------------------------------------
-def _parse_amount(annual, freq) -> float | None:
-    """Per-payment dividend from an annual amount and payment frequency
-    (defaults to quarterly when the provider omits the frequency)."""
-    try:
-        a = float(annual)
-    except (TypeError, ValueError):
-        return None
-    if a != a or a <= 0:
-        return None
-    try:
-        f = int(freq) or 4
-    except (TypeError, ValueError):
-        f = 4
-    return round(a / f, 4)
+# The annual->per-payment conversion the assignment guard's UNITS depend on lives
+# in ONE place (dividend_calendar), so the Schwab probe below and the calendar's
+# adapters can never drift apart on it.
+_parse_amount = dividend_calendar.per_payment_amount
 
 
 def _fetch_event(ticker: str) -> dict:
@@ -246,14 +281,14 @@ def next_dividend(ticker: str, refresh: bool = False) -> dict:
     ticker = (ticker or "").strip().upper()
     if not ticker:
         return {"ex_date": None, "amount": None, "source": "none"}
-    try:
-        meta = log.load_state().get("metadata", {})
-        ov = (meta.get("dividend_event_overrides") or {}).get(ticker)
-        if ov:
-            return {"ex_date": ov.get("ex_date"), "amount": ov.get("amount"),
-                    "source": "override"}
-    except Exception:  # noqa: BLE001
-        pass
+    # Operator overrides resolve THROUGH the calendar contract, so a hand-entered
+    # ex-date or amount gets the same unit checks and sentinel-date rejection every
+    # provider value does — previously they were returned raw, unvalidated.
+    ov = dividend_calendar.next_dividend(
+        ticker, fixtures=_metadata().get("dividend_event_overrides"))
+    if not dividend_calendar.is_empty(ov):
+        return {"ex_date": ov["ex_date"], "amount": ov["amount"],
+                "pay_date": ov.get("pay_date"), "source": "override"}
     with _lock:
         cache = _read_cache()
         rec = (cache.get("events") or {}).get(ticker)
@@ -275,14 +310,11 @@ def cached_dividend(ticker: str) -> dict:
     ticker = (ticker or "").strip().upper()
     if not ticker:
         return {"ex_date": None, "amount": None, "source": "none", "stale": True}
-    try:
-        meta = log.load_state().get("metadata", {})
-        ov = (meta.get("dividend_event_overrides") or {}).get(ticker)
-        if ov:
-            return {"ex_date": ov.get("ex_date"), "amount": ov.get("amount"),
-                    "source": "override", "stale": False}
-    except Exception:  # noqa: BLE001
-        pass
+    ov = dividend_calendar.next_dividend(
+        ticker, fixtures=_metadata().get("dividend_event_overrides"))
+    if not dividend_calendar.is_empty(ov):
+        return {"ex_date": ov["ex_date"], "amount": ov["amount"],
+                "source": "override", "stale": False}
     with _lock:
         rec = (_read_cache().get("events") or {}).get(ticker)
     if not rec:

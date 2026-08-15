@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Light, Spinner, ErrorState, StockLights, ChartLink, fmt, pct, pctSigned, useApi } from "./ui.jsx";
+import { Card, Pill, Light, Spinner, ErrorState, StockLights, ChartLink, SleeveBadge, sleeveOf, fmt, pct, pctSigned, useApi } from "./ui.jsx";
 
 // The per-symbol scan table, collapsed to the composable read:
 //
@@ -97,20 +97,7 @@ const COLUMNS = [
   },
   {
     key: "income_profile", label: "Sleeve", sortVal: (r) => (r.income_profile === "DIVIDEND_COMPOUNDER" ? 1 : 0),
-    render: (r) => {
-      const div = r.income_profile === "DIVIDEND_COMPOUNDER";
-      return (
-        <span
-          className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
-            div ? "bg-cyan-500/15 text-cyan-300" : "bg-slate-500/15 text-slate-400"}`}
-          title={div
-            ? "DIVIDEND_COMPOUNDER — Travis's dividend sleeve (an EXTENSION, not a CFM rule). Changes only the RS peer benchmark and which shadow floor the row is measured against. Trend quality, the YELLOW lockout and the earnings-window exclusion are identical to JUICE_ENGINE."
-            : "JUICE_ENGINE — the CFM default. Judged on weekly extrinsic alone against its own shadow floor."}
-        >
-          {r.income_profile_badge || "JUICE"}
-        </span>
-      );
-    },
+    render: (r) => <SleeveBadge profile={r.income_profile} />,
   },
   {
     key: "juice_weekly_pct", label: "Gross/wk", sortVal: (r) => r.juice_weekly_pct,
@@ -797,7 +784,7 @@ function ShadowFloorLog() {
                 <tbody>
                   {profiles.map((p) => (
                     <tr key={p} className="border-t border-slate-800/60">
-                      <td className="py-1 pr-3 text-slate-300">{p === "DIVIDEND_COMPOUNDER" ? "DIV" : "JUICE"}</td>
+                      <td className="py-1 pr-3 text-slate-300">{sleeveOf(p).badge}</td>
                       <td className="py-1 pr-3 tabular-nums text-slate-400">{floors[p].evaluated}</td>
                       <td className="py-1 pr-3 tabular-nums text-emerald-300/80">{floors[p].pass}</td>
                       <td className="py-1 pr-3 tabular-nums text-amber-300/80">{floors[p].fail}</td>

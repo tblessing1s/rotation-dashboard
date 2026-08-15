@@ -1060,15 +1060,14 @@ def check_lot_add_ready(state: dict) -> list[dict]:
         if not status.get("ready"):
             continue
         accrued, lot_cost = status["accrued_cash"], status["lot_cost"]
+        head = (f"{t} accrued ${accrued:,.0f} — enough for another "
+                f"{config.SHARES_PER_LOT}-share lot (${lot_cost:,.0f})")
         if status.get("actionable"):
-            message = (f"{t} accrued ${accrued:,.0f} — enough for another "
-                       f"{config.SHARES_PER_LOT}-share lot (${lot_cost:,.0f}).")
+            message = f"{head}."
             action = (f"Confirm the lot add: buy {config.SHARES_PER_LOT} shares and sell "
                       "a covered call against it. Never auto-executed — you confirm.")
         else:
-            message = (f"{t} accrued ${accrued:,.0f} — enough for another "
-                       f"{config.SHARES_PER_LOT}-share lot (${lot_cost:,.0f}), but the "
-                       f"add is BLOCKED: {status.get('blocked_reason')}")
+            message = f"{head}, but the add is BLOCKED: {status.get('blocked_reason')}"
             action = ("Resolve the blocking condition before adding, or leave the cash "
                       "accruing. The lot add is not actionable as it stands.")
         out.append(_alert(

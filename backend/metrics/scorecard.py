@@ -406,7 +406,9 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                  sector_df: pd.DataFrame | None, gate: dict | None = None,
                  has_weeklies: bool | None = None, price_override: float | None = None,
                  regime_color: str | None = None,
-                 profile_overrides: dict | None = None) -> dict:
+                 profile_overrides: dict | None = None,
+                 profile: str | None = None,
+                 annual_dividend_yield_pct: float | None = None) -> dict:
     """One scorecard row: numeric metrics + the composite verdict.
 
     Only the stock's own gate legs decide it: a beats-peers (L3) or consolidating
@@ -426,52 +428,41 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     price-derived legs (%>MA, below-MA, ATR extension) all reflect it together —
     daily bars are end-of-day and would otherwise leave the row stale intraday.
 
-    `profile_overrides` is the operator's explicit ticker -> income_profile map,
-    resolved ONCE by the bulk caller rather than re-reading state per ticker
-    (schema v21). Omitted -> the yield heuristic alone decides."""
+    `profile` / `annual_dividend_yield_pct` are the income sleeve and the trailing
+    yield the bulk caller already resolved for this ticker (schema v21) — passing
+    them avoids resolving the same thing twice per row. Omitted, they are resolved
+    here from `profile_overrides` (the operator's explicit ticker -> profile map)."""
     df = data_handler.get_daily(ticker)
     df = _apply_price_override(df, price_override)
 
     # --- Income profile + peer benchmark (schema v21, TRAVIS_EXTENSION) ---------
     # Resolved BEFORE the metrics so the vs-peer leg is computed against the right
-    # peer group. The dividend yield is cache-only (a bulk sweep must never trigger
-    # a fundamentals fetch storm) and an unresolved yield never auto-enrols a name
-    # into the dividend sleeve. For JUICE_ENGINE the benchmark IS the sector ETF, so
-    # every line below reduces to the pre-v21 behavior exactly.
+    # peer group. The bulk caller resolves the profile once and passes it in; the
+    # standalone path resolves it here. For JUICE_ENGINE the benchmark IS the sector
+    # ETF, so every line below reduces to the pre-v21 behavior exactly.
     import income_profile
-    annual_div_pct = None
-    try:
-        import dividends
-        # CACHE-ONLY. A full sweep touches hundreds of names; q_with_source would
-        # fire one provider request per ticker on a cold cache, on the request path.
-        q, q_src = dividends.cached_yield_with_source(ticker)
-        if q is not None and q_src != "unknown":
-            annual_div_pct = round(q * 100, 4)
-    except Exception:  # noqa: BLE001 — a fundamentals hiccup never sinks a scan row
-        annual_div_pct = None
-    profile = income_profile.profile_for(
-        ticker, state={"metadata": {"income_profile_overrides": profile_overrides or {}}},
-        annual_dividend_yield_pct=annual_div_pct)
-    benchmark = income_profile.benchmark_for(profile, sector_etf)
-    peer_df = sector_df
-    if benchmark and sector_etf and benchmark.upper() != (sector_etf or "").upper():
-        peer_df = data_handler.get_daily(benchmark)
+    import screening
+    if profile is None or annual_dividend_yield_pct is None:
+        profile, annual_div_pct = screening.resolve_profile_detail(
+            ticker, overrides=profile_overrides)
+    else:
+        annual_div_pct = annual_dividend_yield_pct
+    peer = income_profile.resolve(ticker, profile, sector_etf)
+    profile = peer["profile"]
+    peer_df = sector_df if peer["use_sector_df"] else data_handler.get_daily(peer["benchmark"])
 
     metrics = metrics_for(df, spy_df, peer_df)
     # A name scored against ITSELF has no distinct peer to beat — rs3m_vs_sector
     # would otherwise compute to a tautological ~0 every time (same frame vs
-    # itself), which reads as a real number, not "N/A". Asked against the ACTIVE
-    # benchmark so a compounder whose ticker IS the dividend benchmark is caught.
-    is_sector_etf = bool(sector_etf) and ticker.upper() == sector_etf.upper()
-    is_own_benchmark = income_profile.is_own_benchmark(ticker, profile, sector_etf)
-    if is_sector_etf or is_own_benchmark:
+    # itself), which reads as a real number, not "N/A".
+    if peer["is_sector_etf"] or peer["is_own_benchmark"]:
         metrics["rs3m_vs_sector"] = None
     row = _round_row(metrics)
     row["ticker"] = ticker.upper()
     row["sector"] = sector_etf
-    row["is_sector_etf"] = is_sector_etf
-    row["peer_benchmark"] = benchmark
-    row["is_own_benchmark"] = is_own_benchmark
+    row["is_sector_etf"] = peer["is_sector_etf"]
+    row["peer_benchmark"] = peer["benchmark"]
+    row["is_own_benchmark"] = peer["is_own_benchmark"]
     row["has_weeklies"] = has_weeklies
     if gate is not None:
         row["gate_cleared_level"] = gate.get("cleared_level", 0)
@@ -607,7 +598,13 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # reuses the displayed RS3M; slope is the RS-line-EMA direction. A sector ETF has
     # no distinct peer sector, so its vs-Sector RS is N/A (same rule as rs3m_vs_sector).
     # SHADOW ONLY: never feeds the composed verdict above, never blocks, never sizes.
-    rs_sec = (rss.rs_state(df, sector_df) if (not is_sector_etf and sector_df is not None)
+    # NOTE: this shadow read still keys off the SECTOR frame, not the profile's peer
+    # frame — so for a DIVIDEND_COMPOUNDER the drawer's RS column and the row's
+    # rs3m_vs_sector are measured against different benchmarks. Left as-is
+    # deliberately: it is the pre-v21 behavior and this is a shadow readout with no
+    # authority. Worth reconciling in its own change, not silently here.
+    rs_sec = (rss.rs_state(df, sector_df)
+              if (not peer["is_sector_etf"] and sector_df is not None)
               else {"state": None, "level": None, "slope": None})
     rs_spy = rss.rs_state(df, spy_df) if spy_df is not None else {"state": None, "level": None, "slope": None}
     row["rs_state"] = rs_sec["state"]            # vs Sector — the table column
@@ -669,8 +666,7 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
     sector_of = {t: (sector_data.sector_for(t) or "") for t in names}
     etfs = sorted({e for e in sector_of.values() if e})
 
-    data_handler.prefetch([config.BENCHMARK, config.DIVIDEND_PEER_BENCHMARK]
-                          + etfs + names)
+    data_handler.prefetch(config.scan_base_frames() + etfs + names)
     weeklies.prefetch(names)  # warm the weeklies cache in parallel (no-op if disabled)
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_frames = {e: data_handler.get_daily(e) for e in etfs}
@@ -683,23 +679,25 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
     except Exception:  # noqa: BLE001
         regime_color = None
 
-    # State is loaded ONCE for the whole sweep (schema v21) and threaded into both
-    # the profile resolution and the entry gate. Resolving per ticker would mean a
-    # state.json read per name — ~500 of them on a full sweep, on the request path.
+    # State is loaded ONCE for the whole sweep (schema v21) and threaded into the
+    # profile resolution, which uses it for BOTH the assignment lookup and the
+    # dividend override check. Resolving per ticker would mean a state.json read per
+    # name — ~500 of them on a full sweep, on the request path.
     try:
-        import income_profile
         sweep_state = log.load_state()
-        profile_overrides = income_profile.assignments(sweep_state)
-    except Exception:  # noqa: BLE001 — no assignments just means the heuristic decides
-        sweep_state, profile_overrides = None, {}
+    except Exception:  # noqa: BLE001 — no state just means the heuristic decides
+        sweep_state = None
 
     rows = []
     for t in names:
         etf = sector_of[t]
+        # Resolved ONCE per ticker and threaded into both the gate and the row —
+        # re-resolving inside score_ticker cost a second cache read per name.
         try:
-            profile = screening.resolve_profile(t, state=sweep_state)
+            profile, annual_div_pct = screening.resolve_profile_detail(
+                t, state=sweep_state)
         except Exception:  # noqa: BLE001 — an unresolvable profile is the CFM default
-            profile = None
+            profile, annual_div_pct = None, None
         try:
             gate = screening.entry_gate(t, profile=profile) if etf else None
         except Exception:  # noqa: BLE001 — a gate failure must never sink the row
@@ -708,7 +706,8 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
                                  has_weeklies=weeklies.has_weeklies(t),
                                  price_override=price_overrides.get(t.upper()),
                                  regime_color=regime_color,
-                                 profile_overrides=profile_overrides))
+                                 profile=profile,
+                                 annual_dividend_yield_pct=annual_div_pct))
 
     rows.sort(key=lambda r: (r["sector"], r["ticker"]))
     return {"as_of": log.utcnow(), "results": rows}
