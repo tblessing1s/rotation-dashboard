@@ -693,3 +693,134 @@ def test_round_lot_size_block_now_fires_on_the_shares_path(store):
     position_type, so the SIZE-BLOCK was never appended."""
     with pytest.raises(ValueError, match="round_lot_size"):
         _buy_shares("RICH", 100, 400.0)   # a $40,000 lot vs the $15,000 cap
+
+
+# ===========================================================================
+# Affordability — a shares entry buys a WHOLE lot, so a name whose lot costs
+# more than the dry powder available right now is not a candidate.
+# ===========================================================================
+def _row(ticker, lot_cost):
+    return {"ticker": ticker, "lot_cost": lot_cost}
+
+
+def _funded(cash, deployed_positions=()):
+    """Fund the book with `cash`. NOTE the real formula: dry powder is cash MINUS
+    the defensive reserve (config.RESERVE_REQUIRED, $13k), so $22k of cash is $9k
+    of deployable capital — not $22k. The numbers below are chosen against the real
+    reserve rather than zeroing it out, because zeroing it would test a formula the
+    app never runs (capital_summary reads `meta.get(...) or RESERVE_REQUIRED`, so a
+    0 falls back to the config default anyway)."""
+    st = log.load_state()
+    st["metadata"]["operating_cash"] = cash
+    st["positions"] = list(deployed_positions)
+    log.save_state(st)
+    return log.load_state()
+
+
+def test_affordability_bar_is_the_tighter_of_cash_and_the_per_position_cap(store, monkeypatch):
+    from metrics import scorecard as sc
+    monkeypatch.setattr(config, "PER_POSITION_CAP_USD", 15000.0)
+    # Cash is the binding limit: $22k cash - $13k reserve = $9k deployable.
+    bar = sc.affordability(_funded(22000))
+    assert bar["active"] is True
+    assert bar["max_lot_cost"] == 9000
+    assert bar["binding"] == "cash_above_reserve"
+    # The per-position cap binds once the cash above reserve exceeds it.
+    bar = sc.affordability(_funded(60000))
+    assert bar["max_lot_cost"] == 15000.0
+    assert bar["binding"] == "per_position_cap"
+
+
+def test_cash_below_the_defensive_reserve_affords_nothing(store, monkeypatch):
+    """A real consequence worth pinning: the reserve comes off the top. With less
+    cash than the reserve there is no dry powder and every name is priced out —
+    correctly, and the binding reason says so rather than looking like a bug."""
+    from metrics import scorecard as sc
+    bar = sc.affordability(_funded(config.RESERVE_REQUIRED - 1000))
+    assert bar["active"] is True          # cash IS known...
+    assert bar["max_lot_cost"] == 0       # ...there just isn't any deployable
+    assert bar["binding"] == "cash_above_reserve"
+    keep, priced_out, _ = sc.split_by_affordability([_row("ANY", 100)], log.load_state())
+    assert keep == [] and priced_out[0]["ticker"] == "ANY"
+
+
+def test_unset_operating_cash_disables_the_filter_rather_than_hiding_everything(store):
+    """state.metadata.operating_cash defaults to 0, so a zero is ambiguous between
+    'no money' and 'never configured'. Filtering everything out on that reading
+    would make a fresh book look broken rather than broke."""
+    from metrics import scorecard as sc
+    st = log.load_state()
+    st["metadata"]["operating_cash"] = 0
+    log.save_state(st)
+
+    bar = sc.affordability(log.load_state())
+    assert bar["active"] is False
+    assert bar["max_lot_cost"] is None
+    assert bar["binding"] == "unknown"
+
+    rows = [_row("CHEAP", 6000), _row("RICH", 90000)]
+    keep, priced_out, _ = sc.split_by_affordability(rows, log.load_state())
+    assert [r["ticker"] for r in keep] == ["CHEAP", "RICH"]   # nothing hidden
+    assert priced_out == []
+
+
+def test_split_removes_only_names_we_can_prove_are_too_expensive(store, monkeypatch):
+    from metrics import scorecard as sc
+    monkeypatch.setattr(config, "PER_POSITION_CAP_USD", 15000.0)
+    state = _funded(23000)   # -> $10k deployable
+    rows = [_row("CHEAP", 6000), _row("RICH", 45000), _row("UNPRICED", None)]
+    keep, priced_out, bar = sc.split_by_affordability(rows, state)
+
+    assert [r["ticker"] for r in keep] == ["CHEAP", "UNPRICED"]
+    assert [r["ticker"] for r in priced_out] == ["RICH"]
+    # An UNPRICEABLE lot cost is never hidden — a silent exclusion of a name we
+    # merely failed to price is worse than showing it.
+    assert next(r for r in keep if r["ticker"] == "UNPRICED")["affordable"] is None
+    # A priced-out row explains itself wherever it is shown.
+    rich = priced_out[0]
+    assert rich["affordable"] is False
+    assert rich["lot_cost_over_by"] == 35000.0
+    assert rich["max_lot_cost"] == 10000
+    assert bar["priced_out"] == 1 and bar["shown"] == 2
+
+
+def test_affordability_agrees_with_the_level5_size_block(store, monkeypatch):
+    """The scan must not show a name the Execute gate would then reject on size —
+    both read the same PER_POSITION_CAP_USD."""
+    from metrics import scorecard as sc
+    monkeypatch.setattr(config, "PER_POSITION_CAP_USD", 15000.0)
+    state = _funded(100000)          # cash is not the constraint; the cap is
+    bar = sc.affordability(state)
+    assert bar["max_lot_cost"] == 15000.0
+    # A $40,000 lot is priced out of the scan...
+    keep, priced_out, _ = sc.split_by_affordability([_row("RICH", 40000)], state)
+    assert keep == [] and priced_out[0]["ticker"] == "RICH"
+    # ...and the Level 5 gate independently SIZE-BLOCKS the same entry.
+    with pytest.raises(ValueError, match="round_lot_size"):
+        _buy_shares("RICH", 100, 400.0)
+
+
+def test_scan_endpoint_filters_by_default_and_reports_what_it_hid(store, monkeypatch):
+    import app as flask_app
+    from metrics import scorecard as sc
+    monkeypatch.setattr(config, "PER_POSITION_CAP_USD", 15000.0)
+    _funded(23000)   # -> $10k deployable
+    monkeypatch.setattr(sc, "scorecard", lambda tickers=None, **k: {
+        "as_of": "2026-08-15T00:00:00Z",
+        "results": [dict(_row("CHEAP", 6000), verdict="READY"),
+                    dict(_row("RICH", 45000), verdict="READY")]})
+
+    client = flask_app.app.test_client()
+    with client.session_transaction() as sess:
+        sess["authed"] = True
+
+    body = client.get("/api/scan/scorecard").get_json()
+    assert [r["ticker"] for r in body["results"]] == ["CHEAP"]
+    assert body["priced_out_tickers"] == ["RICH"]
+    assert body["affordability"]["priced_out"] == 1
+    assert body["affordability"]["max_lot_cost"] == 10000
+
+    # The escape hatch returns everything, still annotated.
+    body = client.get("/api/scan/scorecard?include_unaffordable=1").get_json()
+    assert {r["ticker"] for r in body["results"]} == {"CHEAP", "RICH"}
+    assert next(r for r in body["results"] if r["ticker"] == "RICH")["affordable"] is False

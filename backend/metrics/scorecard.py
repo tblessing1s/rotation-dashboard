@@ -488,6 +488,12 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # ETFs are judged against the lower ETF income-sleeve bar, not the growth bar.
     row["is_etf"] = sector_data.is_etf(ticker)
     target = account_gate.weekly_yield_target_pct(ticker)
+    # What one 100-share lot of this name actually COSTS (schema v21). Pure — spot
+    # x SHARES_PER_LOT, no account state — so the memoized market sweep stays
+    # account-free and this row can be cached across requests. The affordability
+    # COMPARISON happens at the API boundary, where the account context lives.
+    row["lot_cost"] = est.get("shares_cost_per_lot")
+    row["shares_per_lot"] = config.SHARES_PER_LOT
     row["juice_weekly_pct"] = est["weekly_yield_pct"]
     # NET juice/week (gross minus LEAP model burn, with slippage) — the ranking
     # key. Kept alongside gross so the panel can show both; ranking sorts on net.
@@ -653,6 +659,73 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["suitability"] = suitability["verdict"]
     row["suitability_reasons"] = suitability["reasons"]
     return row
+
+
+def affordability(state: dict) -> dict:
+    """The account's current lot-affordability bar (schema v21).
+
+    A shares-primary entry buys a whole 100-share lot, so a name is only a real
+    candidate if one lot fits the dry powder available RIGHT NOW. This reads the
+    bar from ``position_manager.capital_summary`` — the same operating cash,
+    defensive reserve and capital-cap figures Level 5 gates on — so the scan and
+    the Execute gate can never disagree about what is affordable."""
+    import position_manager
+    cap = position_manager.capital_summary(state)
+    return {
+        "max_lot_cost": cap.get("max_lot_cost"),
+        "deployable": cap.get("deployable"),
+        "operating_cash": cap.get("operating_cash"),
+        "operating_cash_source": cap.get("operating_cash_source"),
+        "cash_above_reserve": cap.get("cash_above_reserve"),
+        "capital_headroom": cap.get("capital_headroom"),
+        "per_position_cap": cap.get("per_position_cap"),
+        "slots_open": cap.get("slots_open"),
+        "shares_per_lot": cap.get("shares_per_lot"),
+        # Which ceiling is binding, so the UI explains the number instead of just
+        # showing it. "unknown" means operating cash was never configured, and the
+        # filter is therefore INACTIVE — not that nothing is affordable.
+        "binding": (
+            "unknown" if cap.get("max_lot_cost") is None
+            else "per_position_cap" if cap.get("per_position_cap", 0) <= cap.get("deployable", 0)
+            else "capital_cap" if cap.get("capital_headroom", 0) <= cap.get("cash_above_reserve", 0)
+            else "cash_above_reserve"),
+        "active": cap.get("max_lot_cost") is not None,
+    }
+
+
+def affordable(row: dict, max_lot_cost: float | None) -> bool | None:
+    """Does one 100-share lot of this row fit the bar? None when the lot cost
+    can't be priced — an UNKNOWN is never treated as unaffordable, because hiding a
+    name we simply failed to price would be a silent, invisible exclusion."""
+    if max_lot_cost is None:
+        return None
+    lot_cost = row.get("lot_cost")
+    if lot_cost is None:
+        return None
+    return float(lot_cost) <= float(max_lot_cost)
+
+
+def split_by_affordability(rows: list[dict], state: dict) -> tuple[list[dict], list[dict], dict]:
+    """``(affordable_rows, priced_out_rows, affordability)``.
+
+    Rows are ANNOTATED in place with ``affordable`` / ``lot_cost_over_by`` so a
+    priced-out name can explain itself wherever it is shown. An unpriceable lot
+    cost stays in the affordable list (see ``affordable``) — this filter removes
+    only names we can positively say are too expensive."""
+    bar = affordability(state)
+    max_lot_cost = bar.get("max_lot_cost")
+    keep, priced_out = [], []
+    for row in rows:
+        ok = affordable(row, max_lot_cost)
+        row["affordable"] = ok
+        row["max_lot_cost"] = max_lot_cost
+        row["lot_cost_over_by"] = (
+            round(float(row["lot_cost"]) - float(max_lot_cost), 2)
+            if ok is False else None)
+        (priced_out if ok is False else keep).append(row)
+    bar["priced_out"] = len(priced_out)
+    bar["shown"] = len(keep)
+    return keep, priced_out, bar
 
 
 def _compute_scorecard(names: list[str], price_overrides: dict | None = None) -> dict:

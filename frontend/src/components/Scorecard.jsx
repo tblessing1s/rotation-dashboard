@@ -100,6 +100,24 @@ const COLUMNS = [
     render: (r) => <SleeveBadge profile={r.income_profile} />,
   },
   {
+    key: "lot_cost", label: "Lot cost", sortVal: (r) => r.lot_cost,
+    render: (r) => {
+      if (r.lot_cost == null) return <span className="text-slate-600">—</span>;
+      const over = r.affordable === false;
+      return (
+        <span
+          className={`tabular-nums ${over ? "text-rose-300" : "text-slate-300"}`}
+          title={over
+            ? `100 shares costs $${Math.round(r.lot_cost).toLocaleString()} — $${Math.round(r.lot_cost_over_by || 0).toLocaleString()} more than you can deploy right now ($${Math.round(r.max_lot_cost || 0).toLocaleString()}).`
+            : `100 shares costs $${Math.round(r.lot_cost).toLocaleString()} — the whole lot a shares entry buys.`}
+        >
+          ${Math.round(r.lot_cost).toLocaleString()}
+          {over && <span className="ml-1 text-[10px] uppercase">over</span>}
+        </span>
+      );
+    },
+  },
+  {
     key: "juice_weekly_pct", label: "Gross/wk", sortVal: (r) => r.juice_weekly_pct,
     render: (r) => (r.juice_weekly_pct == null
       ? <span className="text-slate-600">—</span>
@@ -194,6 +212,8 @@ const COLUMN_HELP = {
     "JUICE = the CFM juice engine (the default; every existing name). DIV = Travis's DIVIDEND_COMPOUNDER extension, for lower-volatility payers held for juice AND dividend.\n" +
     "Provenance: the dividend sleeve is NOT a CFM rule — the source methodology prefers volatile names for their juice and warns against 'safe' low-vol stocks. It is an extension the shares-primary model makes viable (dividends are actually collected now; under a LEAP they never were).\n" +
     "The sleeve changes exactly two things: the RS peer benchmark for the sector leg (a dividend ETF instead of the growth-tilted sector ETF), and which SHADOW floor the row is measured against. Trend quality, the YELLOW watchlist lockout, the earnings-window exclusion and the RS-vs-SPY kill switch are IDENTICAL for both.",
+  lot_cost: "What one 100-share lot costs — spot x 100. A shares-primary entry buys the WHOLE lot, so this, not the share price, is the capital a position actually needs.\n" +
+    "Names whose lot costs more than your current dry powder are hidden by default (see the bar above the table); a shown row marked OVER is one you asked to see anyway.",
   juice_weekly_pct: "Gross juice / week — the weekly short extrinsic as % of LEAP cost, BEFORE the LEAP's own decay. The strategy's stated income bar; the juice ADEQUACY floor gates on this (below the floor → BLOCKED).",
   combined_weekly_yield_pct: "Combined weekly-equivalent yield — weekly juice + (trailing annual dividend ÷ 52). Hover a cell to split it back into its two components.\n" +
     "The juice half is EXTRINSIC ONLY — time value actually captured. Intrinsic passes through and nets to zero, and gross premium is never income.\n" +
@@ -480,11 +500,14 @@ function sortBench(rows) {
 }
 
 export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFocusHandled }) {
-  const { data, error, loading, reload } = useApi(api.scorecard, [refreshKey]);
+  const { data, error, loading, reload } = useApi(
+    () => api.scorecard(null, { includeUnaffordable: showPricedOut }),
+    [refreshKey, showPricedOut]);
   const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
   const [sectorFilter, setSectorFilter] = React.useState("ALL");
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);
+  const [showPricedOut, setShowPricedOut] = React.useState(false);
   const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
   const rowRefs = React.useRef({});
@@ -685,6 +708,11 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
           Weeklies only{noWeeklies > 0 ? ` (${noWeeklies} hidden)` : ""}
         </label>
       </div>
+      <AffordabilityBar
+        affordability={data?.affordability}
+        showPricedOut={showPricedOut}
+        onToggle={setShowPricedOut}
+      />
       {error && <ErrorState error={error} onRetry={reload} />}
       <div className="max-h-[70vh] overflow-auto">
         <table className="w-full text-sm">
@@ -728,6 +756,54 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
       </div>
       <ShadowFloorLog />
     </Card>
+  );
+}
+
+// Affordability (schema v21). A shares entry buys a WHOLE 100-share lot, so a name
+// whose lot costs more than the dry powder available right now is not a candidate —
+// it is filtered out of the scan by default. This states the bar and what it
+// excluded, because a name absent because it is too expensive today is a different
+// fact from a name that failed the gate, and neither should vanish silently.
+const BINDING_LABEL = {
+  cash_above_reserve: "cash above your defensive reserve",
+  capital_cap: "the deployed-capital cap",
+  per_position_cap: "the per-position lot cap",
+};
+
+function AffordabilityBar({ affordability, showPricedOut, onToggle }) {
+  if (!affordability) return null;
+  const { active, max_lot_cost: bar, priced_out: hidden, binding } = affordability;
+  if (!active) {
+    return (
+      <div className="mt-2 rounded-lg border border-amber-700/40 bg-amber-500/5 px-3 py-2 text-xs text-amber-200/90">
+        Affordability filter is <strong>off</strong> — no operating cash is set, so the app
+        can&apos;t tell what you can afford. Set your cash in Settings and the scan will hide
+        names whose 100-share lot is out of reach.
+      </div>
+    );
+  }
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2 text-xs">
+      <span className="text-slate-400">
+        Dry powder — you can buy a lot up to{" "}
+        <strong className="tabular-nums text-slate-200">
+          {bar == null ? "—" : `$${Math.round(bar).toLocaleString()}`}
+        </strong>
+        <span className="text-slate-500">
+          {" "}({BINDING_LABEL[binding] || "your limits"} is the binding limit)
+        </span>
+      </span>
+      {hidden > 0 ? (
+        <button
+          onClick={() => onToggle(!showPricedOut)}
+          className="rounded border border-slate-700 px-2 py-0.5 text-slate-300 hover:bg-slate-800"
+        >
+          {showPricedOut ? "Hide" : "Show"} {hidden} priced out
+        </button>
+      ) : (
+        <span className="text-slate-600">nothing priced out</span>
+      )}
+    </div>
   );
 }
 

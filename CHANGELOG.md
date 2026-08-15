@@ -82,6 +82,35 @@ profile that never blends into or weakens the juice-engine verdict logic** —
   `SHARES_JUICE_FLOOR_PCT` recalibrated 1.5 → 0.75 and **wired for the first time**
   (it had no consumer anywhere in the tree).
 
+### Affordability — the scan only shows lots you can actually buy
+
+A shares-primary entry buys a **whole 100-share lot**, so a name whose lot costs
+more than the dry powder available right now is not a candidate at any conviction.
+The scan now filters those out by default.
+
+- **One bar, derived from the numbers Level 5 already gates on**
+  (`position_manager.capital_summary.max_lot_cost`): the tighter of `deployable`
+  (itself the tighter of the deployed-capital headroom and the cash above the
+  defensive reserve) and `PER_POSITION_CAP_USD`. The scan therefore cannot show a
+  name the Execute gate would then reject on size, and vice versa.
+- **Rows carry `lot_cost`** (spot × 100) — computed in the sweep, which stays pure
+  and account-free so it remains memoized and shared across requests. The
+  affordability *comparison* happens at the API boundary where the account context
+  lives, mirroring the existing Level-5 overlay in `/api/scan/ready`.
+- **Nothing vanishes silently.** `/api/scan/scorecard` reports the bar, the count,
+  and `priced_out_tickers`; `/api/scan/ready` reports `priced_out` with how much
+  each name is over by. `?include_unaffordable=1` returns them, still annotated. A
+  new Lot-cost column shows the number and marks an over-budget row.
+- **An UNKNOWN is never treated as unaffordable.** A lot cost that can't be priced
+  stays visible — hiding a name we merely failed to price would be an invisible
+  exclusion. And because `state.metadata.operating_cash` defaults to 0, a zero is
+  ambiguous between "no money" and "never configured": the filter reads it as the
+  latter and **deactivates entirely**, with a banner saying so. Without that a
+  fresh book would show an empty scan and look broken rather than broke.
+- A free position slot is deliberately NOT part of the bar — that is the
+  `position_limit` gate's job and it already surfaces as a near-miss with a path.
+  A full book should still show the pipeline it will draw from.
+
 ### Also in this release — two Level 5 gate gaps closed
 
 Found by the Phase 0 audit and fixed with explicit approval. Both are pre-existing

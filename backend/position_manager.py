@@ -596,6 +596,28 @@ def capital_summary(state: dict) -> dict:
     cash_above_reserve = round(max(0.0, operating - reserve), 2)
     deployable = round(min(capital_headroom, cash_above_reserve), 2)
     slots_open = max(0, config.MAX_CFM_POSITIONS - open_positions)
+    # The most a SINGLE 100-share lot may cost right now — the affordability bar
+    # the scan filters against (schema v21). The tighter of two ceilings:
+    #   * `deployable`   — the dry powder above, itself min(capital cap headroom,
+    #                      cash above the defensive reserve);
+    #   * PER_POSITION_CAP_USD — the per-position lot-cost SIZE-BLOCK Level 5
+    #                      enforces (round_lot_size).
+    # Derived from the SAME inputs account_gate's cash_reserve / capital_limit /
+    # round_lot_size checks use, so a name the scan shows can't be one the Execute
+    # gate would then reject on size, and vice versa.
+    #
+    # None when operating cash is UNKNOWN — i.e. never configured and never read
+    # from Schwab. state.metadata.operating_cash defaults to 0, so a zero is
+    # ambiguous between "I have no money" and "I never told the app", and the safe
+    # reading is the second: an unknown bar filters NOTHING. Without this the whole
+    # scan would come back empty on a fresh book and look broken rather than broke.
+    #
+    # A free position SLOT is deliberately NOT a term here. Whether a slot is open
+    # is the position_limit gate's job, and it already surfaces as a near-miss with
+    # a path ("a position slot frees") — a full book should still show the pipeline
+    # it will draw from, not an empty screen.
+    max_lot_cost = (round(min(deployable, config.PER_POSITION_CAP_USD), 2)
+                    if operating > 0 else None)
     return {
         "capital_deployed": deployed,
         "reserve_required": reserve,
@@ -610,6 +632,12 @@ def capital_summary(state: dict) -> dict:
         "cash_above_reserve": cash_above_reserve,
         "deployable": deployable,
         "slots_open": slots_open,
+        # Affordability bar for a single 100-share lot (see above). The scan hides
+        # names whose lot costs more than this; `per_position_cap` is carried so the
+        # UI can say WHICH ceiling is binding rather than just showing a number.
+        "max_lot_cost": max_lot_cost,
+        "per_position_cap": config.PER_POSITION_CAP_USD,
+        "shares_per_lot": config.SHARES_PER_LOT,
         "milestones": {
             "half_nut": {
                 "target": config.MILESTONE_HALF_NUT,

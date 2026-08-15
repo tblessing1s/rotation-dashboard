@@ -54,7 +54,15 @@ export const api = {
   // One-call landing payload: regime + positions/capital + theta + kill-switch.
   overview: () => request("/api/overview"),
   regime: () => request("/api/regime"),
-  scorecard: (tickers) => request(`/api/scan/scorecard${tickers ? `?tickers=${tickers}` : ""}`),
+  // opts.includeUnaffordable asks the server for the names it filters out by
+  // default (lot cost above the account's dry powder).
+  scorecard: (tickers, opts = {}) => {
+    const q = new URLSearchParams();
+    if (tickers) q.set("tickers", tickers);
+    if (opts.includeUnaffordable) q.set("include_unaffordable", "1");
+    const qs = q.toString();
+    return request(`/api/scan/scorecard${qs ? `?${qs}` : ""}`);
+  },
   scanReady: (tickers) => request(`/api/scan/ready${tickers ? `?tickers=${tickers}` : ""}`),
   // Kick a detached server-side scan (keeps running if the tab is backgrounded)
   // and poll its status. The refresh POST returns immediately.
