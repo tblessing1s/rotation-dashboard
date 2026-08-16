@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 import os
 import threading
 import time
@@ -62,8 +63,69 @@ _accounts_cache: tuple[float, list] | None = None
 _accounts_lock = threading.Lock()
 
 
+logger = logging.getLogger(__name__)
+
+
 class SchwabError(RuntimeError):
     pass
+
+
+# HTTP statuses worth retrying: rate-limit (429) + transient server/gateway
+# errors. Any OTHER 4xx (401 re-auth, 403 entitlement, 404) is a durable error a
+# retry won't fix, so it falls straight through to the caller's status check.
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
+def _request(method: str, url: str, *, sleep=time.sleep, **kwargs):
+    """Issue an HTTP request with bounded exponential backoff on TRANSIENT
+    failures — connection resets / read timeouts (which ``requests`` raises) and
+    the retryable HTTP statuses above (429 + 5xx). Honors a ``Retry-After`` header
+    when the server sends one, else backs off ``SCHWAB_BACKOFF_BASE_SECONDS``
+    doubling to ``SCHWAB_BACKOFF_MAX_SECONDS`` for at most ``SCHWAB_MAX_RETRIES``
+    attempts. Reuses the scheduler path's knobs (``data_transport`` already backs
+    off with the same three) so on-demand and background fetches behave alike.
+    ``sleep`` is injectable for tests.
+
+    Read/idempotent calls only. Order *submission* (``place_order`` /
+    ``submit_order``) is deliberately NOT routed through here: a retried POST could
+    double-submit a live order, so that path keeps its own single-attempt,
+    structured-outcome handling.
+
+    Returns the final ``requests.Response`` (retryable or not on the last
+    attempt); the caller does its own status check + ``SchwabError`` raising, so
+    error messages and parsing stay exactly as before.
+    """
+    http_fn = getattr(requests, method.lower())
+    delay = config.SCHWAB_BACKOFF_BASE_SECONDS
+    attempts = max(1, int(config.SCHWAB_MAX_RETRIES))
+    for attempt in range(attempts):
+        last_attempt = attempt >= attempts - 1
+        try:
+            resp = http_fn(url, **kwargs)
+        except requests.exceptions.RequestException as e:
+            if last_attempt:
+                raise
+            wait = min(delay, config.SCHWAB_BACKOFF_MAX_SECONDS)
+            logger.warning("schwab %s %s failed (%s); retrying in %.1fs (attempt %d/%d)",
+                           method.upper(), url, e.__class__.__name__, wait,
+                           attempt + 1, attempts)
+            sleep(wait)
+            delay = min(delay * 2, config.SCHWAB_BACKOFF_MAX_SECONDS)
+            continue
+        if resp.status_code in _RETRYABLE_STATUS and not last_attempt:
+            retry_after = getattr(resp, "headers", {}).get("Retry-After")
+            try:
+                ra = float(retry_after) if retry_after else None
+            except (TypeError, ValueError):
+                ra = None
+            wait = min(ra if ra is not None else delay, config.SCHWAB_BACKOFF_MAX_SECONDS)
+            logger.warning("schwab %s %s HTTP %s; backing off %.1fs (attempt %d/%d)",
+                           method.upper(), url, resp.status_code, wait,
+                           attempt + 1, attempts)
+            sleep(wait)
+            delay = min(delay * 2, config.SCHWAB_BACKOFF_MAX_SECONDS)
+            continue
+        return resp
 
 
 # ---------------------------------------------------------------------------
@@ -209,8 +271,8 @@ class SchwabClient:
         if not refresh:
             raise SchwabError("no schwab refresh token — re-authorize at /auth/schwab")
         basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
-        resp = requests.post(
-            TOKEN_URL,
+        resp = _request(
+            "post", TOKEN_URL,
             headers={"Authorization": f"Basic {basic}",
                      "Content-Type": "application/x-www-form-urlencoded",
                      "User-Agent": USER_AGENT},
@@ -245,8 +307,8 @@ class SchwabClient:
     def get_daily_bars(self, symbol: str, start: str) -> pd.DataFrame:
         schwab_symbol = SYMBOL_MAP.get(symbol, symbol)
         start_ms = int(pd.Timestamp(start).timestamp() * 1000)
-        resp = requests.get(
-            PRICE_HISTORY_URL,
+        resp = _request(
+            "get", PRICE_HISTORY_URL,
             headers=self._auth_headers(),
             params={"symbol": schwab_symbol, "periodType": "year", "frequencyType": "daily",
                     "frequency": 1, "startDate": start_ms, "needExtendedHoursData": "false"},
@@ -278,8 +340,8 @@ class SchwabClient:
         if not symbols:
             return {}
         mapped = {s: SYMBOL_MAP.get(s, s) for s in symbols}
-        resp = requests.get(
-            QUOTES_URL,
+        resp = _request(
+            "get", QUOTES_URL,
             headers=self._auth_headers(),
             params={"symbols": ",".join(mapped.values()), "fields": "quote"},
             timeout=20,
@@ -316,7 +378,7 @@ class SchwabClient:
             params["fromDate"] = from_date
         if to_date:
             params["toDate"] = to_date
-        resp = requests.get(OPTION_CHAIN_URL, headers=self._auth_headers(), params=params, timeout=20)
+        resp = _request("get", OPTION_CHAIN_URL, headers=self._auth_headers(), params=params, timeout=20)
         if resp.status_code == 403 and "Access Denied" in (resp.text or ""):
             # Akamai edge block (HTML body), distinct from an app-level 403. If it
             # persists with a browser User-Agent set, it points at the Schwab app's
@@ -332,8 +394,8 @@ class SchwabClient:
     def get_instrument_fundamental(self, symbol: str) -> dict:
         """Fundamental block for one symbol (projection=fundamental). Carries the
         dividend yield (`divYield`, in percent) used to adjust call deltas."""
-        resp = requests.get(
-            INSTRUMENTS_URL, headers=self._auth_headers(),
+        resp = _request(
+            "get", INSTRUMENTS_URL, headers=self._auth_headers(),
             params={"symbol": symbol.upper(), "projection": "fundamental"}, timeout=20,
         )
         if resp.status_code != 200:
@@ -346,7 +408,7 @@ class SchwabClient:
                   "Trading Production' and the refresh token is current")
 
     def _get_json(self, url: str, params: dict | None = None):
-        resp = requests.get(url, headers=self._auth_headers(), params=params, timeout=30)
+        resp = _request("get", url, headers=self._auth_headers(), params=params, timeout=30)
         if resp.status_code == 200:
             return resp.json()
         hint = self._ACCT_HINT if resp.status_code in (401, 403) else ""

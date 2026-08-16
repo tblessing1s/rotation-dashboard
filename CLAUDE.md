@@ -36,8 +36,10 @@ Match the surrounding style; don't introduce a linter unless asked.
 ## Conventions worth knowing
 
 - **Units:** LEAP prices and extrinsic are stored **per-contract** but displayed
-  **per-share** (÷100). Short premiums/extrinsic are per-share. When editing either
-  layer, keep both consistent (see `executor._apply_txn_edit`, `HistoryTab.jsx`).
+  **per-share** (÷100). Short premiums/extrinsic are per-share. The ×100 / ÷100
+  factor lives in one place per side — `backend/units.py` and `frontend/src/units.js`
+  (`leap_per_contract` / `leapPerShare` / `leapExtrinsicPerShare` / `totalDollars`);
+  route conversions through them rather than open-coding `* 100` at a new boundary.
 - **Period bucketing:** bucket executions by date→expiration via
   `logging_handler.bucket_datetime()` — both the theta ledger and the Payouts view
   key off it so they can't disagree. Never re-derive week/month with a bespoke

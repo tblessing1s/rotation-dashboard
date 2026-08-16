@@ -1,5 +1,6 @@
 import React from "react";
 import { api } from "./api.js";
+import { leapPerShare } from "./units.js";
 
 // Whether a submitted order will actually be transmitted to Schwab ("live") or
 // only captured to the local ledger ("paper"). Mirrors the backend routing in
@@ -76,8 +77,8 @@ export function describeOrder(payload = {}) {
   } else {
     rows.push(["Strike", payload.strike != null ? `${payload.strike}C` : "—"]);
     if (payload.expiration) rows.push(["Expiration", payload.expiration]);
-    const limit = payload.action === "buy_leap" ? (payload.execution_price || 0) / 100
-      : payload.action === "close_leap" ? (payload.close_price || 0) / 100
+    const limit = payload.action === "buy_leap" ? leapPerShare(payload.execution_price || 0)
+      : payload.action === "close_leap" ? leapPerShare(payload.close_price || 0)
       : payload.action === "sell_short" ? payload.premium_per_share
       : payload.close_price_per_share;
     rows.push(["Limit / share", money(limit)]);

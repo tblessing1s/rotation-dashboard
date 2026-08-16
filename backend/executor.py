@@ -25,6 +25,7 @@ import schwab_api
 import sector_data
 import session
 import spread_monitor
+import units
 
 VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_short",
                  "roll_leap", "open_position_atomic", "close_position_atomic", "adjustment",
@@ -889,9 +890,9 @@ def _adopt_payload_for_leg(leg, ticker, action, stock_price, roll_group_id, prop
     elif action == "close_short":
         payload["close_price_per_share"] = price
     elif action == "buy_leap":
-        payload["execution_price"] = round(price * 100, 2)
+        payload["execution_price"] = round(units.leap_per_contract(price), 2)
     elif action == "close_leap":
-        payload["close_price"] = round(price * 100, 2)
+        payload["close_price"] = round(units.leap_per_contract(price), 2)
         payload["exit_reason"] = "OPERATOR_DISCRETION"
         payload["exit_note"] = "adopted out-of-band broker close (transaction ingestion)"
     if roll_group_id is not None:
@@ -1032,7 +1033,7 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
                                  "econ_source": econ.get("source")})
             elif qty > 0:  # long call (LEAP)
                 econ = _match_leap_econ(state, ticker, strike, avg)
-                cost_pc = float(avg) * 100 if avg is not None else econ["price_per_contract"]
+                cost_pc = units.leap_per_contract(avg) if avg is not None else econ["price_per_contract"]
                 entry_price = econ.get("stock_price")
                 proposal.append({"leg_type": "leap", "strike": strike, "contracts": qty,
                                  "expiration": expiry, "cost_per_contract": round(cost_pc, 2),
@@ -1153,14 +1154,14 @@ def _match_leap_econ(state: dict, ticker: str, strike, avg_price) -> dict:
              if e.get("action") == "buy_leap" and (e.get("ticker") or "").upper() == ticker
              and _strike_eq(e.get("strike"), strike)
              and not e.get("excluded") and not e.get("reversed_by")]  # voided/undone are not truth
-    target = float(avg_price) * 100 if avg_price is not None else None
+    target = units.leap_per_contract(avg_price) if avg_price is not None else None
     def score(e):
         ppc = float(e.get("execution_price") or 0)
         no_stock = 0 if e.get("stock_price") is not None else 1
         return (abs(ppc - target) if target is not None else 0) + no_stock * 0.01
     best = min(cands, key=score) if cands else None
     if best is None:
-        return {"price_per_contract": float(avg_price or 0) * 100, "stock_price": None,
+        return {"price_per_contract": units.leap_per_contract(avg_price or 0), "stock_price": None,
                 "source": "no log match — enter the entry price"}
     return {"price_per_contract": float(best.get("execution_price") or (target or 0)),
             "stock_price": best.get("stock_price"), "source": best.get("id")}
@@ -1232,7 +1233,7 @@ def repair_leap_cost_scale(ticker: str, reason: str | None = None) -> dict:
             continue
         contracts = int(lg.get("contracts") or 0)
         old_cb = float(lg.get("cost_basis") or 0)
-        new_cb = round(old_cb * 100, 2)
+        new_cb = round(units.leap_per_contract(old_cb), 2)
         cost_pc = new_cb / contracts if contracts else 0.0
         epc = _leap_extrinsic_pc(cost_pc, lg.get("entry_stock_price"), lg.get("strike"))
         lg["cost_basis"] = new_cb
@@ -1399,7 +1400,7 @@ def _compute_txn_changes(e: dict, ed: dict) -> dict:
             ch["execution_price"] = round(price, 2)
             ch["execution_total"] = round(price * c, 2)
         if ext_ps is not None:
-            ch["extrinsic_captured"] = round(ext_ps * 100 * c, 2)  # per-share -> per-contract -> total
+            ch["extrinsic_captured"] = round(units.leap_per_contract(ext_ps) * c, 2)  # per-share -> per-contract -> total
     elif a == "sell_short":
         if price is not None:
             ch["premium_per_share"] = round(price, 4)

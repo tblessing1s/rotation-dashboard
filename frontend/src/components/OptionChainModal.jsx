@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import { Pill, Loading, fmt } from "./ui.jsx";
 import { useTradeMode, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
+import { leapPerContract, totalDollars } from "../units.js";
 
 // Dollar formatter that tolerates nulls (—) for thin/closed quotes.
 function dollars(n) {
@@ -181,8 +182,8 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   const buyingLeap = action === "open_position_atomic" || action === "buy_leap";
   const coverTotal = position?.has_leap && !buyingLeap
     ? chain?.payoff?.leap_extrinsic_to_cover
-    : chosenLeap?.extrinsic != null ? chosenLeap.extrinsic * 100 * qtyNum : null;
-  const weeklyJuice = chosenWeekly?.extrinsic != null ? chosenWeekly.extrinsic * 100 * qtyNum : null;
+    : chosenLeap?.extrinsic != null ? totalDollars(chosenLeap.extrinsic, qtyNum) : null;
+  const weeklyJuice = chosenWeekly?.extrinsic != null ? totalDollars(chosenWeekly.extrinsic, qtyNum) : null;
   const weeks = coverTotal && weeklyJuice && weeklyJuice > 0 ? Math.ceil(coverTotal / weeklyJuice) : null;
 
   // Shares-primary economics: a 100-share base costs spot × 100 × lots; the
@@ -204,7 +205,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       if (chosenLeap.expiration) base.expiration = chosenLeap.expiration;
       if (chosenLeap.symbol) base.option_symbol = chosenLeap.symbol;
       if (chosenLeap.dte != null) base.dte = chosenLeap.dte;
-      if (chosenLeap.mark != null) base.execution_price = Math.round(chosenLeap.mark * 100 * 100) / 100;
+      if (chosenLeap.mark != null) base.execution_price = Math.round(leapPerContract(chosenLeap.mark) * 100) / 100;
       if (cbPrice !== "" && !Number.isNaN(Number(cbPrice))) base.circuit_breaker_price = Number(cbPrice);
       if (chosenWeekly.extrinsic != null) base.weekly_extrinsic_per_share = chosenWeekly.extrinsic;
       if (overrideReason.trim()) base.override_reason = overrideReason.trim();
@@ -220,7 +221,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       if (chosenLeap.expiration) base.expiration = chosenLeap.expiration;
       if (chosenLeap.symbol) base.option_symbol = chosenLeap.symbol;
       if (chosenLeap.dte != null) base.dte = chosenLeap.dte;
-      if (chosenLeap.mark != null) base.execution_price = Math.round(chosenLeap.mark * 100 * 100) / 100;
+      if (chosenLeap.mark != null) base.execution_price = Math.round(leapPerContract(chosenLeap.mark) * 100) / 100;
       // Level 5 context: the stored line-in-the-sand, real weekly juice for the
       // server-side gate, and the typed override reason when the gate is red.
       if (cbPrice !== "" && !Number.isNaN(Number(cbPrice))) base.circuit_breaker_price = Number(cbPrice);
@@ -251,7 +252,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       if (existingLeap.expiration) base.expiration = existingLeap.expiration;
       if (existingLeap.symbol) base.option_symbol = existingLeap.symbol;
       // close_price is per-contract total dollars (mirrors buy_leap).
-      if (existingLeap.current_mark != null) base.close_price = Math.round(existingLeap.current_mark * 100 * 100) / 100;
+      if (existingLeap.current_mark != null) base.close_price = Math.round(leapPerContract(existingLeap.current_mark) * 100) / 100;
       if (existingLeap.cost_basis != null) base.cost_basis = existingLeap.cost_basis;
     }
     return base;
@@ -577,7 +578,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                       {chosenLeap.expiration ? ` exp ${chosenLeap.expiration}` : ""} · delta {fmt(chosenLeap.delta, 2)} · IV{" "}
                       {chosenLeap.volatility != null ? `${fmt(chosenLeap.volatility, 1)}%` : "—"}
                       {chosenLeap.extrinsic != null && qtyNum > 0
-                        ? ` · total extrinsic ${bigDollars(chosenLeap.extrinsic * 100 * qtyNum)}` : ""}
+                        ? ` · total extrinsic ${bigDollars(totalDollars(chosenLeap.extrinsic, qtyNum))}` : ""}
                     </div>
                   )}
                 </>
@@ -608,7 +609,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                 <div className="mt-1 text-xs text-slate-500">
                   Cost basis {bigDollars(existingLeap.cost_basis)}
                   {existingLeap.current_mark != null && existingLeap.contracts != null && (
-                    <> · est. proceeds {bigDollars(existingLeap.current_mark * 100 * existingLeap.contracts)}</>
+                    <> · est. proceeds {bigDollars(totalDollars(existingLeap.current_mark, existingLeap.contracts))}</>
                   )}
                   {existingLeap.extrinsic_remaining != null && (
                     <> · {bigDollars(existingLeap.extrinsic_remaining)} extrinsic still unrecovered</>
