@@ -1,6 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { Card, Pill, Stat, Loading, money, fmt, pct, useApi } from "./ui.jsx";
+import { leapPerContract, leapPerShare, leapExtrinsicPerShare } from "../units.js";
 
 // Closed-cycle history: the learning loop. Every number derives from the
 // immutable execution log (see logging_handler.recompute_derived).
@@ -261,7 +262,7 @@ const _FILL = new Set(["buy_leap", "sell_short", "close_short", "close_leap"]);
 // LEAP prices are stored per-contract (execution_price / close_price); show them
 // per-share (÷100) so the PRICE column reads the same units as the shorts.
 function _price(e) {
-  const ps = (v) => (v === null || v === undefined ? v : v / 100);
+  const ps = (v) => (v === null || v === undefined ? v : leapPerShare(v));
   return e.action === "buy_leap" ? ps(e.execution_price)
     : e.action === "sell_short" ? e.premium_per_share
     : e.action === "close_short" ? e.close_price_per_share : ps(e.close_price);
@@ -272,7 +273,7 @@ function _extr(e) {
   const c = e.contracts || 1;
   return e.action === "buy_leap"
     ? (e.extrinsic_captured === null || e.extrinsic_captured === undefined
-        ? e.extrinsic_captured : +(e.extrinsic_captured / (100 * c)).toFixed(4))
+        ? e.extrinsic_captured : +leapExtrinsicPerShare(e.extrinsic_captured, c).toFixed(4))
     : e.action === "sell_short" ? e.entry_extrinsic_per_share : null;
 }
 function _toRow(e) {
@@ -328,10 +329,10 @@ function TransactionEditor() {
         // The backend stores LEAP price per-contract and extrinsic per-contract
         // total; the table edits both per-share, so scale LEAPs back up on the
         // way out (price ×100, extrinsic ×100×contracts).
-        price: r.price === "" ? null : (r.isLeap ? Number(r.price) * 100 : Number(r.price)),
+        price: r.price === "" ? null : (r.isLeap ? leapPerContract(Number(r.price)) : Number(r.price)),
         stock_price: r.stock_price === "" ? null : Number(r.stock_price),
         extrinsic: r.extrinsic === "" ? null
-          : (r.isLeap ? Number(r.extrinsic) * 100 * (Number(r.contracts) || 1) : Number(r.extrinsic)),
+          : (r.isLeap ? leapPerContract(Number(r.extrinsic)) * (Number(r.contracts) || 1) : Number(r.extrinsic)),
       }));
       const res = await api.saveTransactions(edits);
       setMsg(`Saved ${res.edited} transaction(s); position derived for ${(res.tickers || []).join(", ") || "—"}.`);

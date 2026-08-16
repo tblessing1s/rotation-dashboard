@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import { Pill, Loading, fmt } from "./ui.jsx";
 import { useTradeMode, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
+import { totalDollars } from "../units.js";
 
 function dollars(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -115,8 +116,8 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
   const sameStrike = cur && chosen && cur.strike === chosen.strike;
   const sameWeek = cur && selectedExp && cur.expiration === selectedExp.expiration;
 
-  const buyback = cur?.current_mark != null ? cur.current_mark * 100 * qtyNum : null;
-  const newCredit = chosen?.mark != null ? chosen.mark * 100 * qtyNum : null;
+  const buyback = cur?.current_mark != null ? totalDollars(cur.current_mark, qtyNum) : null;
+  const newCredit = chosen?.mark != null ? totalDollars(chosen.mark, qtyNum) : null;
   const netCredit = buyback != null && newCredit != null ? newCredit - buyback : null;
 
   const canExecute = qtyNum > 0 && cur && chosen && selectedExp
