@@ -149,8 +149,8 @@ export default function PortfolioRisk({ data: dataProp } = {}) {
           tone={thetaPos ? "text-emerald-300" : "text-rose-300"}
           visual={<Meter pct={weeklyYield != null ? Math.min((weeklyYield / 2) * 100, 100) : 0} tone={thetaPos ? "bg-emerald-500" : "bg-rose-500"} />}
           meaning={thetaPos
-            ? <>collecting more decay than the LEAPs burn{weeklyYield != null && <> — ≈ {fmt(weeklyYield, 1)}%/wk of deployed</>}. The machine is earning.</>
-            : <>the LEAPs are burning faster than the shorts collect — roll shorts up/out.</>}
+            ? <>collecting decay on the covered calls{weeklyYield != null && <> — ≈ {fmt(weeklyYield, 1)}%/wk of deployed</>}. The machine is earning.</>
+            : <>the calls aren't collecting — roll them up/out.</>}
         />
         <Tile
           label="Capacity used"
@@ -172,10 +172,10 @@ export default function PortfolioRisk({ data: dataProp } = {}) {
         />
       </div>
 
-      {/* Vega is secondary for a LEAP book — one plain line, not a tile. */}
+      {/* Vega is secondary for a shares + covered-call book — one plain line, not a tile. */}
       {t.vega != null && (
         <p className="mt-2 text-xs text-slate-500">
-          Volatility: a 1-point drop in IV trims the book by <span className="text-slate-300">{money(Math.abs(t.vega))}</span> (vega {money(t.vega)}) — LEAP-heavy, usually a minor drag.
+          Volatility: a 1-point drop in IV trims the book by <span className="text-slate-300">{money(Math.abs(t.vega))}</span> (vega {money(t.vega)}) — shares carry no vega, so this is the short calls only.
         </p>
       )}
 
@@ -199,7 +199,7 @@ export default function PortfolioRisk({ data: dataProp } = {}) {
 
       {open && (
         <div className="mt-4 border-t border-slate-800 pt-3">
-          <div className="mb-1 text-xs text-slate-400">Sector exposure (LEAP capital)</div>
+          <div className="mb-1 text-xs text-slate-400">Sector exposure (deployed capital)</div>
           <div className="flex h-3 w-full overflow-hidden rounded-full bg-slate-800">
             {sectors.map((s, i) => (
               <div

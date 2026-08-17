@@ -315,7 +315,7 @@ function IngestionPanel() {
   };
   const reverse = async (pid) => {
     if (!window.confirm("Undo this adoption? It reverses exactly the executions it booked "
-      + "(restoring any removed LEAP leg with its original extrinsic). Append-only — nothing is deleted.")) return;
+      + "(restoring any removed leg with its original economics). Append-only — nothing is deleted.")) return;
     setReversing(pid); setErr(null);
     try { await api.reverseAdoption(pid); await reload(); await reloadAdoptions(); }
     catch (e) { setErr(String(e.message || e)); }
@@ -371,7 +371,7 @@ function IngestionPanel() {
         <div className="mt-3 border-t border-slate-800/60 pt-2">
           <p className="text-xs uppercase tracking-wide text-slate-500">Adopted trades — undo</p>
           <p className="mt-1 text-[11px] text-slate-500">
-            Reversing restores the exact legs an adoption changed (a removed LEAP comes back with its
+            Reversing restores the exact legs an adoption changed (a removed leg comes back with its
             original entry extrinsic). Append-only — nothing is deleted.
           </p>
           {adoptions.map((a) => (

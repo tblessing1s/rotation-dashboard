@@ -1,17 +1,14 @@
 import React from "react";
 import { api } from "../api.js";
 import { Card, Pill, Stat, Loading, money, fmt, pct, useApi } from "./ui.jsx";
-import { leapPerContract, leapPerShare, leapExtrinsicPerShare } from "../units.js";
 
 // Closed-cycle history: the learning loop. Every number derives from the
 // immutable execution log (see logging_handler.recompute_derived).
-// Also home to the theta ledger (absorbed from the old Theta tab): the LEAP
-// extrinsic hurdle, roll totals, and the per-week closes table. Live juice
-// totals and per-ticker payback meters stay on Overview.
+// Also home to the theta ledger (absorbed from the old Theta tab): roll totals
+// and the per-week closes table — the weekly covered-call juice record. Live
+// juice totals stay on Overview.
 
 function ThetaLedgerCards({ theta }) {
-  const summary = theta?.extrinsic_summary || {};
-  const hurdle = summary.leap_extrinsic_at_entry || 0;
   const weeks = theta?.weeks || [];
   const rollByTicker = theta?.roll_ledger?.by_ticker || {};
   const rollTotals = Object.values(rollByTicker).reduce(
@@ -19,7 +16,7 @@ function ThetaLedgerCards({ theta }) {
     { count: 0, net: 0, drag: 0 },
   );
   const slip = theta?.slippage;
-  if (!hurdle && !rollTotals.count && weeks.length === 0) return null;
+  if (!rollTotals.count && weeks.length === 0) return null;
 
   return (
     <>
@@ -45,20 +42,10 @@ function ThetaLedgerCards({ theta }) {
           )}
         </div>
       )}
-      {(hurdle > 0 || rollTotals.count > 0) && (
+      {rollTotals.count > 0 && (
         <Card title="Theta ledger">
-          {hurdle > 0 && (
-            <div className="grid grid-cols-3 gap-4">
-              <Stat label="LEAP extrinsic hurdle" value={money(hurdle)} sub="income needed to net positive" />
-              <Stat label="Remaining to fill" value={money(summary.remaining_to_payback)}
-                    tone={summary.income_positive ? "text-emerald-300" : "text-amber-300"} />
-              <Stat label="Net income" value={money(summary.net_income)}
-                    tone={summary.income_positive ? "text-emerald-300" : "text-rose-300"}
-                    sub={summary.income_positive ? "income-positive ✓" : "still filling the LEAP"} />
-            </div>
-          )}
           {rollTotals.count > 0 && (
-            <div className={`grid grid-cols-3 gap-4 ${hurdle > 0 ? "mt-4 border-t border-slate-800 pt-4" : ""}`}>
+            <div className="grid grid-cols-3 gap-4">
               <Stat label="Rolls executed" value={rollTotals.count} sub="paired close+open tickets" />
               <Stat label="Roll net" value={money(rollTotals.net)}
                     tone={rollTotals.net >= 0 ? "text-emerald-300" : "text-rose-300"}
@@ -86,10 +73,10 @@ function ThetaLedgerCards({ theta }) {
             </thead>
             <tbody>
               {weeks.map((w, i) => {
-                // When a short went ITM→OTM, the LEAP gave back that intrinsic, so
-                // it must be covered before the week's extrinsic is income. Net
-                // juice here is after that coverage (can go negative); the raw
-                // extrinsic capture stays w.net_juice for the other metrics.
+                // When a covered call went ITM→OTM, the shares gave back that
+                // intrinsic, so it must be covered before the week's extrinsic is
+                // income. Net juice here is after that coverage (can go negative);
+                // the raw extrinsic capture stays w.net_juice for the other metrics.
                 const covered = Number(w.intrinsic_covered || 0);
                 const net = w.net_juice_after_intrinsic != null
                   ? w.net_juice_after_intrinsic : w.net_juice;
@@ -101,7 +88,7 @@ function ThetaLedgerCards({ theta }) {
                     <td className="py-2 pr-3">{money(w.extrinsic_paid_back)}</td>
                     <td className="py-2 pr-3 text-amber-300/80"
                         title={covered > 0
-                          ? "Intrinsic the covering LEAP gave back when this short went ITM→OTM — covered before the juice counts as income"
+                          ? "Intrinsic the shares gave back when this call went ITM→OTM — covered before the juice counts as income"
                           : "No ITM→OTM intrinsic to cover this week"}>
                       {covered > 0 ? `−${money(covered)}` : "—"}
                     </td>
@@ -182,7 +169,6 @@ function CycleRow({ c }) {
         <td className="py-2 pr-3 text-slate-300">{money(c.capital_deployed)}</td>
         <td className="py-2 pr-3 text-emerald-300">{money(c.gross_juice)}</td>
         <td className={`py-2 pr-3 ${c.roll_drag < 0 ? "text-rose-300" : "text-slate-400"}`}>{money(c.roll_drag)}</td>
-        <td className={`py-2 pr-3 ${c.leap_pnl >= 0 ? "text-slate-300" : "text-rose-300"}`}>{money(c.leap_pnl)}</td>
         <td className={`py-2 pr-3 font-semibold ${retTone}`}>{pct(ret)}</td>
         <td className="py-2 pr-3">
           <Pill status={c.target_met ? "go" : ret != null && ret < 0 ? "avoid" : "caution"}>
@@ -258,36 +244,26 @@ function cell(v) {
 // row; edit strike/qty/expiry/price and the linked entry-stock-price <-> extrinsic
 // pair (edit either, the other computes). Save applies the edits AND derives the
 // open position from the transactions — the transactions are the source of truth.
-const _FILL = new Set(["buy_leap", "sell_short", "close_short", "close_leap"]);
-// LEAP prices are stored per-contract (execution_price / close_price); show them
-// per-share (÷100) so the PRICE column reads the same units as the shorts.
+// The covered-call legs — everything this table edits is per-share already, so
+// no unit conversion happens on the way in or out.
+const _FILL = new Set(["sell_short", "close_short"]);
 function _price(e) {
-  const ps = (v) => (v === null || v === undefined ? v : leapPerShare(v));
-  return e.action === "buy_leap" ? ps(e.execution_price)
-    : e.action === "sell_short" ? e.premium_per_share
-    : e.action === "close_short" ? e.close_price_per_share : ps(e.close_price);
+  return e.action === "sell_short" ? e.premium_per_share : e.close_price_per_share;
 }
-// LEAP extrinsic is stored per-contract total (extrinsic_captured); show it
-// per-share (÷100÷contracts) so the column matches the shorts.
 function _extr(e) {
-  const c = e.contracts || 1;
-  return e.action === "buy_leap"
-    ? (e.extrinsic_captured === null || e.extrinsic_captured === undefined
-        ? e.extrinsic_captured : +leapExtrinsicPerShare(e.extrinsic_captured, c).toFixed(4))
-    : e.action === "sell_short" ? e.entry_extrinsic_per_share : null;
+  return e.action === "sell_short" ? e.entry_extrinsic_per_share : null;
 }
 function _toRow(e) {
   return {
     id: e.id, date: (e.date || "").slice(0, 10), action: e.action,
-    isLeap: e.action === "buy_leap" || e.action === "close_leap",
-    isOpen: e.action === "buy_leap" || e.action === "sell_short",
+    isOpen: e.action === "sell_short",
     source: e.source, roll: e.roll_group_id,
     strike: e.strike ?? "", contracts: e.contracts ?? 1, expiration: e.expiration || "",
     price: _price(e) ?? "", stock_price: e.stock_price ?? "", extrinsic: _extr(e) ?? "",
   };
 }
 function _calcExt(r, stock) {
-  // price and extrinsic are both per-share here (LEAPs are displayed ÷100).
+  // price and extrinsic are both per-share.
   const perShare = Number(r.price), strike = Number(r.strike);
   if (stock === "" || isNaN(Number(stock)) || isNaN(perShare) || isNaN(strike)) return "";
   const extPs = Math.max(perShare - Math.max(Number(stock) - strike, 0), 0);
@@ -326,13 +302,9 @@ function TransactionEditor() {
       const edits = rows.map((r) => ({
         id: r.id, strike: Number(r.strike), contracts: Number(r.contracts),
         expiration: r.expiration || null,
-        // The backend stores LEAP price per-contract and extrinsic per-contract
-        // total; the table edits both per-share, so scale LEAPs back up on the
-        // way out (price ×100, extrinsic ×100×contracts).
-        price: r.price === "" ? null : (r.isLeap ? leapPerContract(Number(r.price)) : Number(r.price)),
+        price: r.price === "" ? null : Number(r.price),
         stock_price: r.stock_price === "" ? null : Number(r.stock_price),
-        extrinsic: r.extrinsic === "" ? null
-          : (r.isLeap ? leapPerContract(Number(r.extrinsic)) * (Number(r.contracts) || 1) : Number(r.extrinsic)),
+        extrinsic: r.extrinsic === "" ? null : Number(r.extrinsic),
       }));
       const res = await api.saveTransactions(edits);
       setMsg(`Saved ${res.edited} transaction(s); position derived for ${(res.tickers || []).join(", ") || "—"}.`);
@@ -352,7 +324,7 @@ function TransactionEditor() {
         One row per fill. App-ordered fills come pre-filled; for a trade done in ToS you usually only
         need the <span className="text-amber-300">entry stock price</span> or <span className="text-amber-300">extrinsic</span> —
         edit either and the other is computed. Set the <span className="font-mono">expiration</span> so same-strike weeklies stay separate.
-        Prices and extrinsic are <span className="text-slate-400">per share</span> (LEAPs too — a $53.05 LEAP shows as 53.05, extrinsic 6.49).
+        Prices and extrinsic are <span className="text-slate-400">per share</span>.
         Save derives your open position from these transactions.
       </p>
       <div className="overflow-x-auto">
@@ -365,7 +337,7 @@ function TransactionEditor() {
             {rows.map((r, i) => (
               <tr key={r.id} className="border-t border-slate-800/50">
                 <td className="py-1 pr-2 font-sans text-slate-500">{r.date}</td>
-                <td className={`py-1 pr-2 ${r.isLeap ? "text-emerald-300" : "text-amber-300"}`}>{r.action}</td>
+                <td className="py-1 pr-2 text-amber-300">{r.action}</td>
                 <td className="py-1 pr-2"><input value={r.strike} onChange={(e) => set(i, "strike", e.target.value)} className={`${inp} w-16`} /></td>
                 <td className="py-1 pr-2"><input value={r.contracts} onChange={(e) => set(i, "contracts", e.target.value)} className={`${inp} w-10`} /></td>
                 <td className="py-1 pr-2"><input value={r.expiration} placeholder="YYYY-MM-DD" onChange={(e) => set(i, "expiration", e.target.value)} className={`${inp} w-28`} /></td>
@@ -399,7 +371,7 @@ function RawData() {
   // "Fulfilled orders only" = the actual broker fills, hiding bookkeeping noise:
   // reversal / rebuild / adjustment markers and any execution that was undone
   // (reversed_by) — i.e. legs that didn't actually end up on the books.
-  const FILL_ACTIONS = new Set(["buy_leap", "sell_short", "close_short", "close_leap", "resolve_expiry"]);
+  const FILL_ACTIONS = new Set(["buy_shares", "sell_shares", "sell_short", "close_short", "resolve_expiry"]);
   const execs = fulfilledOnly
     ? allExecs.filter((e) => FILL_ACTIONS.has(e.action) && !e.reversed_by && !e.excluded)
     : allExecs;
@@ -529,7 +501,6 @@ export default function HistoryTab() {
                 <th className="py-2 pr-3">Capital</th>
                 <th className="py-2 pr-3">Juice</th>
                 <th className="py-2 pr-3">Roll drag</th>
-                <th className="py-2 pr-3">LEAP P&L</th>
                 <th className="py-2 pr-3">Return</th>
                 <th className="py-2 pr-3">vs 15–25%</th>
                 <th className="py-2 pr-3">Exit</th>
@@ -539,7 +510,7 @@ export default function HistoryTab() {
             <tbody>
               {cycles.map((c) => <CycleRow key={c.id} c={c} />)}
               {cycles.length === 0 && (
-                <tr><td colSpan={11} className="py-6 text-center text-slate-500">No cycles closed yet.</td></tr>
+                <tr><td colSpan={10} className="py-6 text-center text-slate-500">No cycles closed yet.</td></tr>
               )}
             </tbody>
           </table>

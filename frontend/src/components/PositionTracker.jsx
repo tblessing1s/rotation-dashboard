@@ -3,7 +3,6 @@ import { api } from "../api.js";
 import { Card, Meter, Loading, Modal, Light, ChartLink, SleeveBadge, money, fmt, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
-import { Orange, pulpOf, balanceOf } from "./JuiceStand.jsx";
 import { useToast } from "./Toast.jsx";
 import { submitOrder } from "../orderFlow.js";
 
@@ -98,8 +97,7 @@ function DiffRow({ ticker, diff, toast, onDone }) {
       <p className="mt-1 text-slate-300">{diff.summary}</p>
       {critical && (
         <p className="mt-1 text-xs font-medium text-rose-300">
-          Do NOT exercise the LEAP to cover — buy back the short stock or close the position.
-          Exercising forfeits all remaining LEAP extrinsic.
+          Short stock is naked risk — buy back the short shares or close the position.
         </p>
       )}
 
@@ -542,78 +540,6 @@ function RecSection({ p, recs, onRecsChanged, focusCard }) {
   );
 }
 
-// The card hero — the position's BALANCE, the thing the page is for now that
-// income tracking lives on its own page: is the initial investment staying whole?
-// Two halves tell it. INTRINSIC (left): the LEAP orange (pulp = intrinsic vs cost
-// basis, leaf = self-funding) beside whether the LEAP's intrinsic still covers the
-// shorts' intrinsic, so a stock move washes out. EXTRINSIC PAID BACK (right): how
-// much of the LEAP's entry extrinsic the collected juice has recovered — the burn
-// being earned back. The verdict badge sits above as the one-line roll-up.
-// The extrinsic-payback "juice battery": the LEAP's burned time-value being earned
-// back. Fills green from the bottom as collected juice recovers it — waves at the
-// surface, bubbles rising — and the whole cell glows once the extrinsic is fully
-// paid off. It keeps filling over the life of the position until 100% (or the
-// position closes and the card drops away). Reuses the global juice-rise /
-// juice-wave / juice-bubble animations so it reads as family with the stand.
-function PaybackTank({ uid, pct, mini = false }) {
-  const fill = pct == null ? 0 : Math.max(0, Math.min(100, pct));
-  const full = pct != null && pct >= 100;
-  const innerTop = 15;
-  const innerBottom = 110;
-  const surfaceY = innerBottom - ((innerBottom - innerTop) * fill) / 100;
-  const bubbles = fill >= 15 && !mini;
-  return (
-    <svg
-      viewBox="0 0 72 122"
-      className={`${mini ? "h-8 w-5" : "h-24 w-[3.4rem]"} shrink-0 ${full ? "drop-shadow-[0_0_8px_rgba(52,211,153,0.55)]" : ""}`}
-      role="img"
-      aria-label={pct == null ? "payback unknown" : `${fmt(pct, 0)}% of the LEAP extrinsic paid back`}
-    >
-      <defs>
-        <linearGradient id={`pb-${uid}`} x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0" stopColor="#34d399" />
-          <stop offset="1" stopColor="#059669" />
-        </linearGradient>
-        <clipPath id={`pbc-${uid}`}><rect x="10" y="15" width="52" height="95" rx="8" /></clipPath>
-        <clipPath id={`pbl-${uid}`}><rect x="8" y={surfaceY} width="56" height={innerBottom - surfaceY} /></clipPath>
-      </defs>
-      {/* terminal cap — reads as a battery/tank */}
-      <rect x="27" y="2" width="18" height="7" rx="2" fill="#475569" />
-      {/* liquid: gradient body + animated wave crest + rising bubbles, clipped */}
-      <g clipPath={`url(#pbc-${uid})`}>
-        <g className="juice-rise">
-          <rect x="8" y={surfaceY + 2} width="56" height={Math.max(0, innerBottom - surfaceY - 2) + 3} fill={`url(#pb-${uid})`} />
-          {fill > 0 && (
-            <g transform={`translate(0 ${surfaceY})`}>
-              <path className="juice-wave"
-                    d="M-40 0 Q-30 -4 -20 0 T0 0 T20 0 T40 0 T60 0 T80 0 T100 0 T120 0 V8 H-40 Z"
-                    fill="#6ee7b7" />
-            </g>
-          )}
-          {bubbles && (
-            <g clipPath={`url(#pbl-${uid})`} fill="#a7f3d0" opacity="0.8">
-              <circle className="juice-bubble" cx="26" cy={innerBottom - 6} r="1.7" />
-              <circle className="juice-bubble" cx="38" cy={innerBottom - 4} r="2.2" style={{ animationDelay: "0.9s" }} />
-              <circle className="juice-bubble" cx="48" cy={innerBottom - 8} r="1.4" style={{ animationDelay: "1.8s" }} />
-            </g>
-          )}
-        </g>
-      </g>
-      {/* tank outline on top of the liquid */}
-      <rect x="6" y="11" width="60" height="103" rx="11" fill="rgba(148,163,184,0.05)"
-            stroke={full ? "#34d399" : "#475569"} strokeWidth="2" />
-      {/* direct % label with a dark keyline so it reads on the liquid (full size
-          only; the mini battery's number lives in the summary text beside it) */}
-      {!mini && (
-        <text x="36" y="67" textAnchor="middle" fontSize="15" fontWeight="700"
-              fill="#f8fafc" stroke="#0f172a" strokeWidth="3" paintOrder="stroke">
-          {pct == null ? "—" : `${fmt(Math.min(pct, 100), 0)}%`}
-        </text>
-      )}
-    </svg>
-  );
-}
-
 // Accrual toward the next 100-share lot (schema v21, TRAVIS_EXTENSION).
 //
 // The balance is REALIZED extrinsic at cycle close plus received dividends —
@@ -887,210 +813,147 @@ function MathRow({ label, value, strong = false, tone = "" }) {
   );
 }
 
-// Derivation of the intrinsic balance: each LEAP leg's intrinsic (the asset) and
-// each short's intrinsic (the liability), max(spot − strike,0) × contracts × 100,
-// netting to the cushion. Per-line results are the payload's own enriched fields,
-// so the pieces shown sum exactly to the totals above them.
-function IntrinsicBalanceMath({ p, bal }) {
+// Derivation of the share base: the owned lot's cost against its current market
+// value, and the covered-lot capacity the short leg is allowed to sell into.
+// Per-line results are the payload's own enriched fields (position_manager's
+// covered_lots), so the pieces shown sum exactly to the totals above them.
+function SharesBaseMath({ p }) {
   const spot = p.stock_price;
-  const legs = p.leap_legs && p.leap_legs.length ? p.leap_legs : (p.leap ? [p.leap] : []);
+  const sh = p.shares || {};
+  const cov = p.coverage || {};
+  const count = Number(sh.count || 0);
+  const cps = sh.cost_basis_per_share;
+  const cost = cps != null ? cps * count : null;
+  const value = spot != null ? spot * count : null;
   const shorts = p.short_calls || [];
+  const sold = cov.short_contracts != null
+    ? cov.short_contracts
+    : shorts.reduce((s, sc) => s + Number(sc.contracts || 0), 0);
+  const lots = cov.coverable_lots ?? sh.coverable_lots;
+  const fragment = cov.fragment_shares ?? sh.fragment_shares;
   return (
     <>
       <MathRow label="Spot price" value={fmt(spot, 2)} strong />
-      <div className="pt-1 text-slate-500">LEAP intrinsic (asset) = max(spot − strike, 0) × contracts × 100</div>
-      {legs.map((leg, i) => (
-        <MathRow key={`l${i}`}
-          label={`  ${leg.contracts || 0}×${fmt(leg.strike, 0)}C`}
-          value={`max(${fmt(spot, 2)} − ${fmt(leg.strike, 2)}, 0) × ${leg.contracts || 0} × 100 = ${dollars(leg.intrinsic)}`} />
-      ))}
-      <MathRow label="  = LEAP intrinsic" value={dollars(bal.longIntrinsic)} strong />
-      <div className="pt-1 text-slate-500">Short intrinsic (liability) = max(spot − strike, 0) × contracts × 100</div>
-      {shorts.length === 0 && <div className="text-slate-600">  (no open shorts — liability $0)</div>}
-      {shorts.map((sc, i) => (
-        <MathRow key={`s${i}`}
-          label={`  ${sc.contracts || 0}×${fmt(sc.strike, 0)}C`}
-          value={`max(${fmt(spot, 2)} − ${fmt(sc.strike, 2)}, 0) × ${sc.contracts || 0} × 100 = ${dollars(sc.current_intrinsic_total)}`} />
-      ))}
-      <MathRow label="  = short intrinsic" value={dollars(bal.shortIntrinsic)} strong />
+      <div className="pt-1 text-slate-500">Share base = shares × cost basis per share</div>
+      <MathRow label={`  ${count} sh × ${dollars(cps)}`} value={dollars(cost)} strong />
+      <MathRow label={`  market value = ${count} sh × ${fmt(spot, 2)}`} value={dollars(value)} />
+      <MathRow label="  = unrealized"
+        value={cost != null && value != null ? `${dollars(value)} − ${dollars(cost)} = ${signedDollars(value - cost)}` : "—"}
+        strong tone={cost != null && value != null && value >= cost ? "text-emerald-300" : "text-rose-300"} />
       <div className="border-t border-slate-800 pt-1" />
-      <MathRow label="Net cushion = LEAP − short"
-        value={`${dollars(bal.longIntrinsic)} − ${dollars(bal.shortIntrinsic)} = ${signedDollars(bal.net)}`}
-        strong tone={bal.covered ? "text-emerald-300" : "text-rose-300"} />
-      <div className="text-slate-600">{bal.covered
-        ? "≥ 0 → covered: a stock move changes both legs together and washes out."
-        : "< 0 → uncovered: the short's intrinsic has outrun the LEAP's."}</div>
+      <div className="text-slate-500">Coverable lots = floor(shares ÷ 100) — a fragment is never coverable</div>
+      <MathRow label={`  floor(${count} ÷ 100)`} value={`${lots ?? "—"} lot${lots === 1 ? "" : "s"}`} strong />
+      {fragment > 0 && (
+        <MathRow label="  fragment (uncoverable)" value={`${fragment} sh`} tone="text-amber-300" />
+      )}
+      <MathRow label="  short contracts sold" value={`${sold}`} />
+      <MathRow label="Covered = lots − sold"
+        value={lots != null ? `${lots} − ${sold} = ${lots - sold}` : "—"}
+        strong tone={cov.naked_short ? "text-rose-300" : "text-emerald-300"} />
+      <div className="text-slate-600">{cov.naked_short
+        ? "< 0 → NAKED: more calls sold than owned lots. Buy one back."
+        : "≥ 0 → every short call is backed by 100 owned shares."}</div>
     </>
   );
 }
 
-// Derivation of the extrinsic burn-off + the leftover realized: the LEAP extrinsic
-// bought this cycle (the burn to repay), the realized short juice broken out per
-// close so it sums to collected, then paid-back %, remaining, and the leftover
-// (collected − target) — the realized extrinsic once the burn is covered.
-function ExtrinsicBurnoffMath({ pb }) {
-  const contribs = pb.contributions || [];
-  const target = pb.leap_extrinsic_at_entry;
-  const collected = pb.collected_to_date;
-  const realized = pb.realized_net_extrinsic != null ? pb.realized_net_extrinsic : (collected - target);
-  return (
-    <>
-      <MathRow label="LEAP extrinsic bought this cycle (the burn)" value={dollars(target)} strong />
-      <div className="pt-1 text-slate-500">Realized short juice collected this cycle (net per close):</div>
-      {contribs.length === 0 && <div className="text-slate-600">  (no closed shorts yet — collected $0)</div>}
-      {contribs.map((c, i) => (
-        <MathRow key={i}
-          label={`  ${c.date || "—"} · ${c.contracts || 0}×${c.strike != null ? `${fmt(c.strike, 0)}C` : "—"}`}
-          value={signedDollars(c.net_juice)} />
-      ))}
-      <MathRow label="  = collected (Σ closes)" value={dollars(collected)} strong />
-      <div className="border-t border-slate-800 pt-1" />
-      <MathRow label="Paid back = collected ÷ target"
-        value={`${dollars(collected)} ÷ ${dollars(target)} = ${fmt(pb.pct_complete, 1)}%`} />
-      <MathRow label="Remaining = target − collected"
-        value={`${dollars(target)} − ${dollars(collected)} = ${dollars(pb.remaining_to_payback)}`} />
-      <MathRow label="Leftover realized = collected − target"
-        value={`${dollars(collected)} − ${dollars(target)} = ${signedDollars(realized)}`}
-        strong tone={realized >= 0 ? "text-emerald-300" : "text-slate-400"} />
-      <div className="text-slate-600">{realized >= 0
-        ? "≥ 0 → the burn is repaid; the rest is booked extrinsic income."
-        : "< 0 → still recovering the LEAP's extrinsic before income is realized."}</div>
-    </>
-  );
-}
+// The card hero — the position's BASE: the owned shares the whole engine sits on.
+// Is the capital intact, and is every lot actually covered? The share block (cost
+// basis vs market value, unrealized) sits beside the covered-lot count, which is
+// the hard guardrail — short contracts may never exceed floor(shares/100). Renders
+// a prompt instead when the position holds no shares yet (a freshly opened row).
+function SharesBase({ p }) {
+  const sh = p.shares || {};
+  const cov = p.coverage || {};
+  const count = Number(sh.count || 0);
+  const cps = sh.cost_basis_per_share;
+  const spot = p.stock_price;
+  const cost = cps != null && count ? cps * count : null;
+  const value = spot != null && count ? spot * count : null;
+  const unreal = cost != null && value != null ? value - cost : null;
+  const lots = cov.coverable_lots ?? sh.coverable_lots;
+  const sold = cov.short_contracts != null
+    ? cov.short_contracts
+    : (p.short_calls || []).reduce((s, sc) => s + Number(sc.contracts || 0), 0);
+  const naked = cov.naked_short === true;
+  const free = lots != null ? lots - sold : null;
 
-// (1) Intrinsic balance — the LEAP orange beside whether the LEAP's intrinsic
-// (asset) still covers the shorts' intrinsic (liability), so a stock move washes out.
-function IntrinsicBalance({ p, onRepaired }) {
-  const pulp = pulpOf(p);
-  const bal = balanceOf(p, (p.short_calls || []).map((sc) => ({ sc })));
-  const hasBal = bal.longIntrinsic != null;
-  const covered = bal.covered;
-  // A LEAP whose cost basis was stored per-share reads ~100× too small, so the
-  // intrinsic-vs-cost ratio (the orange %) is absurd (e.g. 8,584%). Backend flags
-  // it; keep a client-side fallback (coverage > 1000% is impossible for a bought
-  // LEAP) so a stale payload without the flag still doesn't show the bad number.
-  const suspect = !!(p.leap_totals?.cost_basis_suspect) || (pulp.pct != null && pulp.pct > 1000);
-  const [busy, setBusy] = React.useState(false);
-  const [err, setErr] = React.useState(null);
-  const fix = async () => {
-    setBusy(true); setErr(null);
-    try {
-      await api.repairLeapCost(p.ticker);
-      onRepaired && onRepaired();
-    } catch (e) { setErr(String(e.message || e)); setBusy(false); }
-  };
+  if (!count) {
+    return <div className="text-xs text-slate-500">No shares held — buy the base lot to start the engine.</div>;
+  }
   return (
-    <div className="flex items-center gap-3">
-      <Orange uid={`bal-${p.ticker}`} pct={suspect ? null : pulp.pct} maintenance={p.leap_health?.maintenance_status || "unknown"}
-              maintained={!suspect && pulp.pct != null && pulp.pct >= 100} />
-      <div className="min-w-0">
-        <div className="mb-1 flex items-center gap-1.5">
-          <span className="text-[10px] uppercase tracking-wide text-slate-500">Intrinsic balance</span>
-          {hasBal && !suspect && (
-            <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
-              covered ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300" : "border-rose-500/40 bg-rose-500/15 text-rose-300"}`}>
-              {covered ? "balanced" : "unbalanced"}
-            </span>
-          )}
-          {suspect && (
-            <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-amber-300">
-              cost basis off
-            </span>
-          )}
+    <div className="min-w-0">
+      <div className="mb-1 flex flex-wrap items-center gap-1.5">
+        <span className="text-[10px] uppercase tracking-wide text-slate-500">Share base</span>
+        <span className={`rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase ${
+          naked ? "border-rose-500/40 bg-rose-500/15 text-rose-300"
+                : "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"}`}>
+          {naked ? "naked short" : "covered"}
+        </span>
+        {sh.locked && (
+          <span className="rounded-full border border-amber-500/40 bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase text-amber-300">
+            at share cap
+          </span>
+        )}
+      </div>
+      <div className="text-2xl font-semibold leading-none text-slate-100">
+        {count}<span className="ml-1 text-sm font-normal text-slate-500">shares</span>
+      </div>
+      <div className="mt-1.5 text-xs text-slate-500">
+        {money(cost)} cost{cps != null && <> ({fmt(cps, 2)}/sh)</>}
+        {value != null && <> · {money(value)} now</>}
+      </div>
+      {unreal != null && (
+        <div className={`text-xs font-semibold ${unreal >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
+          {signedDollars(unreal)} unrealized
         </div>
-        {suspect ? (
+      )}
+      <div className="mt-1 text-xs text-slate-500">
+        {lots == null ? "coverage pending" : (
           <>
-            {bal.longIntrinsic != null && (
-              <div className="text-sm text-slate-300">
-                LEAP intrinsic <span className="font-semibold text-slate-100">{money(bal.longIntrinsic)}</span>
-              </div>
-            )}
-            <div className="text-xs text-amber-300/90">
-              This LEAP's cost basis looks stored per-share (~100× too small), so the coverage % is unreliable.
-            </div>
-            <div className="mt-1.5 flex items-center gap-2">
-              <button onClick={fix} disabled={busy}
-                      className="rounded-lg border border-amber-600 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/20 disabled:opacity-50">
-                {busy ? "Fixing…" : "Fix cost basis (×100)"}
-              </button>
-              <span className="text-[10px] text-slate-500">or re-enter it under “Edit legs” in History</span>
-            </div>
-            {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+            {sold} of {lots} lot{lots === 1 ? "" : "s"} sold against
+            {free != null && free > 0 && <span className="text-emerald-300"> — {free} free to sell</span>}
+            {naked && <span className="text-rose-300"> — more calls sold than lots owned</span>}
           </>
-        ) : hasBal ? (
-          <>
-            <div className="text-sm text-slate-300">
-              LEAP <span className="font-semibold text-slate-100">{money(bal.longIntrinsic)}</span>
-              {" vs short "}<span className="font-semibold text-slate-100">{money(bal.shortIntrinsic)}</span>
-            </div>
-            <div className="text-xs text-slate-500">
-              {covered ? `${money(bal.net)} cushion — a stock move washes out`
-                       : `short intrinsic outruns the LEAP by ${money(-bal.net)}`}
-            </div>
-            <ShowMath><IntrinsicBalanceMath p={p} bal={bal} /></ShowMath>
-          </>
-        ) : <div className="text-xs text-slate-500">No mark yet — intrinsic balance pending.</div>}
+        )}
+        {sh.fragment_shares > 0 && (
+          <span className="text-amber-300"> · {sh.fragment_shares}sh fragment (never coverable)</span>
+        )}
       </div>
-    </div>
-  );
-}
-
-// (2) Extrinsic burn-off — the filling juice-battery + the recovery numbers.
-function ExtrinsicBurnoff({ ticker, payback }) {
-  const pb = payback || {};
-  const has = pb.leap_extrinsic_at_entry != null && pb.leap_extrinsic_at_entry > 0;
-  const done = has && pb.pct_complete >= 100;
-  // Leftover realized extrinsic = collected − target: negative while still
-  // recovering the burn, positive once the burn is repaid (booked income).
-  const realized = pb.realized_net_extrinsic != null
-    ? pb.realized_net_extrinsic
-    : (has ? pb.collected_to_date - pb.leap_extrinsic_at_entry : null);
-  return (
-    <div className="flex items-center gap-3">
-      {has && <PaybackTank uid={ticker} pct={pb.pct_complete} />}
-      <div className="min-w-0">
-        <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">Extrinsic burn — paid back</div>
-        {has ? (
-          <>
-            <div className={`text-2xl font-semibold leading-none ${done ? "text-emerald-300" : "text-slate-100"}`}>{fmt(pb.pct_complete, 0)}%</div>
-            <div className="mt-1.5 text-xs text-slate-500">{money(pb.collected_to_date)} of {money(pb.leap_extrinsic_at_entry)} recovered</div>
-            <div className="text-xs">
-              {realized >= 0
-                ? <span className="text-emerald-300">leftover realized {signedDollars(realized)} — burn repaid, the rest is booked income</span>
-                : <span className="text-slate-500">{money(pb.remaining_to_payback)} still to earn back before income is realized</span>}
-            </div>
-            <ShowMath><ExtrinsicBurnoffMath pb={pb} /></ShowMath>
-          </>
-        ) : <div className="text-xs text-slate-500">No entry extrinsic recorded — nothing to pay back.</div>}
-      </div>
+      {sh.accumulation_blocked && (
+        <div className="mt-1 text-[11px] text-amber-300/90">
+          Adding blocked — {sh.accumulation_block_reason || "relative strength deteriorating"}.
+        </div>
+      )}
+      <ShowMath><SharesBaseMath p={p} /></ShowMath>
     </div>
   );
 }
 
 // Plain-language "where do I stand" for the whole book, at the top of the page:
-// how the positions net out (balanced, paid-back, captured, needing attention)
+// how the positions net out (lots covered, premium captured, needing attention)
 // woven together with the book-level decision (market lean, engine, can-I-add)
 // from the portfolio-risk payload. A narrative, not a dashboard — the tiles below
 // carry the numbers.
-function BookSummary({ positions, diffsByTicker, payback, risk }) {
+function BookSummary({ positions, diffsByTicker, risk }) {
   const n = positions.length;
-  let balanced = 0;
-  const unbalanced = [];
-  let collected = 0, atEntry = 0, captured = 0, entry = 0, attention = 0;
+  let covered = 0;
+  const naked = [];
+  let lots = 0, sold = 0, captured = 0, entry = 0, attention = 0;
   for (const p of positions) {
-    const bal = balanceOf(p, (p.short_calls || []).map((sc) => ({ sc })));
-    if (bal.covered === true) balanced++;
-    else if (bal.covered === false) unbalanced.push(p.ticker);
-    const pb = payback?.[p.ticker];
-    if (pb?.leap_extrinsic_at_entry) { collected += pb.collected_to_date || 0; atEntry += pb.leap_extrinsic_at_entry; }
+    const cov = p.coverage || {};
+    const sh = p.shares || {};
+    if (cov.naked_short === true) naked.push(p.ticker);
+    else if (Number(sh.count || 0) > 0) covered++;
+    lots += Number(cov.coverable_lots ?? sh.coverable_lots ?? 0);
+    sold += Number(cov.short_contracts ?? 0);
     for (const sc of p.short_calls || []) {
       if (sc.entry_extrinsic_total != null) { entry += Number(sc.entry_extrinsic_total); captured += Number(sc.extrinsic_captured_total || 0); }
     }
     if (p.needs_review || p.defend || p.whipsaw?.tripped || (diffsByTicker[p.ticker]?.length)) attention++;
   }
-  const burnOff = atEntry > 0 ? (collected / atEntry) * 100 : null;
   const shortCap = entry > 0 ? (captured / entry) * 100 : null;
+  const lotsWorking = lots > 0 ? (sold / lots) * 100 : null;
 
   const t = risk?.totals || {};
   const cap = risk?.capital || {};
@@ -1109,13 +972,13 @@ function BookSummary({ positions, diffsByTicker, payback, risk }) {
   const sentences = [];
   sentences.push(
     `You hold ${n} position${n === 1 ? "" : "s"}` +
-    (unbalanced.length
-      ? ` — ${balanced} intrinsically balanced, ${unbalanced.join(", ")} unbalanced (the short's intrinsic has outrun the LEAP)`
-      : ", all intrinsically balanced (each LEAP still covers its shorts)") + ".");
-  if (burnOff != null || shortCap != null) {
-    const a = burnOff != null ? `earned back ${fmt(burnOff, 0)}% of your LEAP extrinsic` : "";
-    const b = shortCap != null ? `captured ${fmt(shortCap, 0)}% of this cycle's short premium` : "";
-    sentences.push(`Across the book you've ${[a, b].filter(Boolean).join(" and ")}.`);
+    (naked.length
+      ? ` — ${covered} fully covered, ${naked.join(", ")} NAKED (more calls sold than owned lots)`
+      : ", every short call backed by 100 owned shares") + ".");
+  if (lotsWorking != null || shortCap != null) {
+    const a = lotsWorking != null ? `${sold} of ${lots} owned lots working (${fmt(lotsWorking, 0)}%)` : "";
+    const b = shortCap != null ? `captured ${fmt(shortCap, 0)}% of this cycle's call premium` : "";
+    sentences.push(`Across the book you've got ${[a, b].filter(Boolean).join(", and you've ")}.`);
   }
   if (expoLabel || t.theta_per_day != null) {
     const parts = [];
@@ -1135,9 +998,9 @@ function BookSummary({ positions, diffsByTicker, payback, risk }) {
       <p className="text-sm leading-relaxed text-slate-300">{sentences.join(" ")}</p>
       <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2 border-t border-slate-800 pt-3 text-xs">
         <span><span className="text-slate-500">positions </span><span className="font-semibold text-slate-100">{n}</span></span>
-        <span><span className="text-slate-500">balanced </span><span className={`font-semibold ${unbalanced.length ? "text-amber-300" : "text-emerald-300"}`}>{balanced}/{n}</span></span>
-        {burnOff != null && <span><span className="text-slate-500">burn off </span><span className="font-semibold text-slate-100">{fmt(burnOff, 0)}%</span></span>}
-        {shortCap != null && <span><span className="text-slate-500">short capture </span><span className="font-semibold text-slate-100">{fmt(shortCap, 0)}%</span></span>}
+        <span><span className="text-slate-500">covered </span><span className={`font-semibold ${naked.length ? "text-rose-300" : "text-emerald-300"}`}>{covered}/{n}</span></span>
+        {lots > 0 && <span><span className="text-slate-500">lots working </span><span className="font-semibold text-slate-100">{sold}/{lots}</span></span>}
+        {shortCap != null && <span><span className="text-slate-500">call capture </span><span className="font-semibold text-slate-100">{fmt(shortCap, 0)}%</span></span>}
         <span className={attention > 0 ? "text-rose-300" : "text-slate-500"}>{attention > 0 && "⚠ "}{attn}</span>
         {canAdd != null && (
           <span className={`ml-auto rounded-full border px-2 py-0.5 font-semibold uppercase tracking-wide ${
@@ -1151,10 +1014,10 @@ function BookSummary({ positions, diffsByTicker, payback, risk }) {
 }
 
 // One ticker, collapsible. Collapsed: a summary of the three things that matter —
-// intrinsic balance, extrinsic burn-off, short-call capture. Expanded: those three
-// in full (orange, juice-battery, short list), plus any active safety alert
+// the share base, covered-lot capacity, short-call capture. Expanded: those in
+// full (share block, short list, accrual), plus any active safety alert
 // (reconciliation, defend, whipsaw) which also auto-opens the row.
-function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focused, setRolling, onOpenTicket, afterResolve }) {
+function PositionRow({ p, diffs, recs, onRecsChanged, focusCard, focused, setRolling, onOpenTicket, afterResolve }) {
   const shorts = p.short_calls || [];
   const hasAlert = !!(p.needs_review || p.defend || p.whipsaw?.tripped || (diffs && diffs.length));
   // Collapsed by default for a clean, scannable list; a tapped-alert deep link
@@ -1162,11 +1025,12 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
   const [open, setOpen] = React.useState(false);
   React.useEffect(() => { if (focused) setOpen(true); }, [focused]);
 
-  const pulp = pulpOf(p);
-  const bal = balanceOf(p, shorts.map((sc) => ({ sc })));
-  const covered = bal.covered;
-  const paid = payback?.pct_complete;
-  const hasPay = payback?.leap_extrinsic_at_entry != null && payback.leap_extrinsic_at_entry > 0;
+  const sh = p.shares || {};
+  const cov = p.coverage || {};
+  const count = Number(sh.count || 0);
+  const lots = cov.coverable_lots ?? sh.coverable_lots;
+  const sold = cov.short_contracts ?? shorts.reduce((s, sc) => s + Number(sc.contracts || 0), 0);
+  const naked = cov.naked_short === true;
   const shortPct = shortCapturePct(shorts);
 
   return (
@@ -1207,22 +1071,20 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
         </span>
         {/* collapsed summary — the three things, each with its tiny visual */}
         <span className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-xs">
-          <span className="flex items-center gap-1.5">
-            <Orange uid={`mini-${p.ticker}`} pct={pulp.pct} maintenance="unknown" mini />
-            <span className="text-slate-500">intrinsic</span>
-            {bal.longIntrinsic == null
-              ? <span className="text-slate-500">—</span>
-              : <span className={`font-semibold ${covered ? "text-emerald-300" : "text-rose-300"}`}>{covered ? "balanced" : "unbalanced"}</span>}
-          </span>
-          <span className="flex items-center gap-1.5">
-            {hasPay
-              ? <PaybackTank uid={`mini-${p.ticker}`} pct={paid} mini />
-              : <span className="inline-block w-5" />}
-            <span className="text-slate-500">burn off</span>
-            <span className={`font-semibold ${hasPay && paid >= 100 ? "text-emerald-300" : "text-slate-200"}`}>{hasPay ? `${fmt(paid, 0)}%` : "—"}</span>
+          <span className="flex items-center gap-1">
+            <span className="text-slate-500">shares</span>
+            <span className="font-semibold text-slate-200">{count || "—"}</span>
           </span>
           <span className="flex items-center gap-1">
-            <span className="text-slate-500">short</span>
+            <span className="text-slate-500">lots</span>
+            {lots == null
+              ? <span className="text-slate-500">—</span>
+              : <span className={`font-semibold ${naked ? "text-rose-300" : "text-slate-200"}`}>
+                  {sold}/{lots}{naked && " naked"}
+                </span>}
+          </span>
+          <span className="flex items-center gap-1">
+            <span className="text-slate-500">call</span>
             <span className="font-semibold text-slate-200">{shortPct == null ? "none" : `${fmt(shortPct, 0)}% cap`}</span>
           </span>
         </span>
@@ -1250,18 +1112,15 @@ function PositionRow({ p, diffs, payback, recs, onRecsChanged, focusCard, focuse
             </div>
           )}
 
-          {/* (1) intrinsic balance + (2) extrinsic burn-off */}
-          <div className="grid gap-4 rounded-xl border border-slate-800 bg-slate-900/40 p-4 sm:grid-cols-2">
-            <IntrinsicBalance p={p} onRepaired={afterResolve} />
-            <div className="sm:border-l sm:border-slate-800 sm:pl-4">
-              <ExtrinsicBurnoff ticker={p.ticker} payback={payback} />
-            </div>
+          {/* (1) the share base the engine sits on */}
+          <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
+            <SharesBase p={p} />
           </div>
 
-          {/* (3) short-call capture */}
+          {/* (2) weekly covered-call capture */}
           <ShortCalls p={p} shorts={shorts} setRolling={setRolling} onOpenTicket={onOpenTicket} />
 
-          {/* (4) accrual toward the next lot — shares positions only */}
+          {/* (3) accrual toward the next lot */}
           <AccrualProgress accrual={p.accrual} />
 
           {p.defend && (
@@ -1353,8 +1212,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
   return (
     <div className="grid gap-3">
       {positions.length > 0 && (
-        <BookSummary positions={positions} diffsByTicker={openDiffsByTicker}
-                     payback={data?.extrinsic_payback} risk={risk} />
+        <BookSummary positions={positions} diffsByTicker={openDiffsByTicker} risk={risk} />
       )}
       <PortfolioRisk data={risk} />
 
@@ -1364,7 +1222,6 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
           <PositionRow
             p={p}
             diffs={openDiffsByTicker[p.ticker]}
-            payback={data?.extrinsic_payback?.[p.ticker]}
             recs={recsByTicker[(p.ticker || "").toUpperCase()]}
             onRecsChanged={reloadRecs}
             focusCard={focusCard}

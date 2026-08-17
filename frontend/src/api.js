@@ -86,7 +86,6 @@ export const api = {
   },
   rollSuggestion: (ticker) => request(`/api/roll-suggestion?ticker=${ticker}`),
   defend: (ticker) => request(`/api/defend?ticker=${ticker}`),
-  leapRollEstimate: (ticker) => request(`/api/leap-roll-estimate?ticker=${ticker}`),
   universeHealth: (weeklies = false) => request(`/api/universe-health${weeklies ? "?weeklies=1" : ""}`),
   universe: () => request("/api/universe"),
   universeAdd: (ticker, sector) =>
@@ -139,9 +138,6 @@ export const api = {
   // Single-spot position editor: directly set a position's legs.
   setPositionLegs: (ticker, legs, reason) =>
     request("/api/positions/set-legs", { method: "POST", body: JSON.stringify({ ticker, legs, reason }) }),
-  // Fix a LEAP whose cost basis was stored per-share (~100× too small).
-  repairLeapCost: (ticker) =>
-    request("/api/positions/repair-leap-cost", { method: "POST", body: JSON.stringify({ ticker }) }),
   // Editable transaction table: apply per-transaction edits + derive position.
   saveTransactions: (edits, ticker) =>
     request("/api/transactions/save", { method: "POST", body: JSON.stringify({ edits, ticker }) }),

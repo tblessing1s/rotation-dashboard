@@ -25,6 +25,7 @@ import indicators
 import kill_switch
 import logging_handler as log
 import notifier
+import position_types
 import schwab_api
 
 ET = ZoneInfo("America/New_York")
@@ -34,7 +35,7 @@ ALERT_TYPES = {
     "KILL_SWITCH_SECTOR": ("CRITICAL", "HARD_CFM_RULE: RS3M vs Sector negative -> exit immediately"),
     "KILL_SWITCH_SPY": ("CRITICAL", "HARD_CFM_RULE: RS3M vs SPY negative on confirmed close -> exit within 1-2 days"),
     "CIRCUIT_BREAKER": ("CRITICAL", "HARD_CFM_RULE: line-in-the-sand exit price stored at entry"),
-    "DELTA_UNCOVERED": ("HIGH", "HARD_CFM_RULE: LEAP below 0.50 delta (or below the short's delta) no longer covers the short"),
+    "DELTA_UNCOVERED": ("HIGH", "HARD_CFM_RULE: more calls sold than owned 100-share lots (or, on a legacy diagonal, a LEAP that no longer covers the short)"),
     "DEFEND_POSITION": ("HIGH", "HARD_CFM_RULE: underlying closed below the short strike -> defensive roll-down"),
     "WHIPSAW_EXIT": ("CRITICAL", "HARD_CFM_RULE: defend whipsaw (too many roll-downs / too much cumulative drag) -> exit, not another defend"),
     "ASSIGNMENT_RISK": ("HIGH", "HARD_CFM_RULE: short extrinsic below the coming dividend invites early assignment"),
@@ -208,11 +209,20 @@ def check_delta_uncovered(state: dict) -> list[dict]:
                 "The LEAP no longer tracks the stock — roll it down/out or exit the position.",
                 {"leap_delta": cov["min_leg_delta"], "q": round(q, 4), "q_source": q_src}, key="floor"))
         if cov["inverted"]:
+            # SHARES base: "inverted" is a literal naked short — more calls written
+            # than owned 100-share lots. Say that, rather than the diagonal's
+            # delta-vs-delta phrasing, so the fix named is the one that applies.
+            if cov.get("position_type") == position_types.SHARES:
+                summary = (f"{t} has {cov['short_contracts']} call(s) sold against "
+                           f"{cov['coverable_lots']} owned lot(s) — NAKED.")
+                action = ("Buy back the uncovered call(s) or add shares — a call beyond "
+                          "your owned lots is unlimited upside risk.")
+            else:
+                summary = (f"{t} short delta {cov['short_delta']:.2f} exceeds long delta "
+                           f"{cov['long_delta']:.2f} (across {cov['long_contracts']} long contract(s)).")
+                action = "The diagonal is net-short deltas — roll the short up/out or deepen the LEAP."
             out.append(_alert(
-                "DELTA_UNCOVERED", t,
-                f"{t} short delta {cov['short_delta']:.2f} exceeds long delta {cov['long_delta']:.2f} "
-                f"(across {cov['long_contracts']} long contract(s)).",
-                "The diagonal is net-short deltas — roll the short up/out or deepen the LEAP.",
+                "DELTA_UNCOVERED", t, summary, action,
                 {"long_delta": cov["long_delta"], "short_delta": cov["short_delta"],
                  "q": round(q, 4), "q_source": q_src},
                 key="inverted"))

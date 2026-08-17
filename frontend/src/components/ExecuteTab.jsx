@@ -270,7 +270,7 @@ export default function ExecuteTab({ initialTicker, onExecuted, onBack }) {
       <Card title="Execute" right={<TradeModeBadge mode={tradeMode} />}>
         <p className="mb-3 text-sm text-slate-400">
           Send trades from the live option chain — it auto-detects the next action
-          (buy LEAP · sell / close / roll the short · sell the LEAP to exit) from
+          (buy 100 shares · sell the weekly covered call · close / roll it) from
           your current position and prices the order ticket for you.
         </p>
         {tradeMode === "paper" && (
