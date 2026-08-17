@@ -300,13 +300,24 @@ def test_queue_adapter_no_free_slot(monkeypatch):
 
 
 # --- Warm-scan interval gate (keeps the scorecard cache from ageing out) -------
-def test_warm_scan_due_gate():
-    from datetime import timedelta
+def test_warm_scan_due_is_once_per_scan_day():
+    """The full-universe sweep runs ONCE per trading day, outside trading hours —
+    not on an interval. Due-ness is purely "has this process handled this scan
+    day yet", so the sweep can no longer fire repeatedly through the session."""
     import alert_scheduler as sched
     noon = datetime(2026, 7, 8, 12, 0, tzinfo=ET)   # Wednesday, market open
-    assert sched.warm_scan_due(noon, None, interval_min=4) is True          # never warmed
-    assert sched.warm_scan_due(noon, noon - timedelta(minutes=2), 4) is False  # too soon
-    assert sched.warm_scan_due(noon, noon - timedelta(minutes=5), 4) is True   # due
-    # Outside market hours / weekend -> never due (no point warming when nobody scans).
-    assert sched.warm_scan_due(datetime(2026, 7, 8, 17, 0, tzinfo=ET), None, 4) is False
-    assert sched.warm_scan_due(datetime(2026, 7, 11, 12, 0, tzinfo=ET), None, 4) is False  # Sat
+    assert sched.warm_scan_due(noon, None, "2026-07-07") is True        # never swept
+    assert sched.warm_scan_due(noon, "2026-07-07", "2026-07-07") is False  # already done
+    # The roll past the close starts a new scan day, and that one IS due — which
+    # is what makes the sweep land outside trading hours.
+    assert sched.warm_scan_due(noon, "2026-07-07", "2026-07-08") is True
+
+
+def test_warm_scan_day_rolls_after_the_close_not_during_the_session():
+    """The scheduler's sweep is anchored to scan_cache's day key, so it fires just
+    after the close rather than at some point mid-session."""
+    import scan_cache
+    # Wednesday during the session -> still Tuesday's completed bars.
+    assert scan_cache.scan_day(datetime(2026, 7, 8, 12, 0, tzinfo=ET)) == "2026-07-07"
+    # ...and after the close, Wednesday's own.
+    assert scan_cache.scan_day(datetime(2026, 7, 8, 16, 30, tzinfo=ET)) == "2026-07-08"

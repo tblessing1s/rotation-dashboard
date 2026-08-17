@@ -146,7 +146,7 @@ def _day_cache_status() -> dict:
         return scan_cache.status(sector_data.all_tickers(),
                                  scorecard_metrics._current_regime_color())
     except Exception:  # noqa: BLE001 — a status read must never break the poll
-        return {"warm": False, "epoch": None, "scanned_at": None}
+        return {"warm": False, "scan_day": None, "scanned_at": None}
 
 
 def scan_status() -> dict:
@@ -162,7 +162,7 @@ def scan_status() -> dict:
     # returned a cached copy), so the UI can say so instead of implying the whole
     # universe is re-scanned on every visit.
     st["scanned_at"] = day["scanned_at"]
-    st["epoch"] = day["epoch"]
+    st["scan_day"] = day["scan_day"]
     return st
 
 

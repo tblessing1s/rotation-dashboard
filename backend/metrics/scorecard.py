@@ -842,7 +842,7 @@ def scorecard(tickers: list[str] | None = None, price_overrides: dict | None = N
                 return hit
         fresh = _compute_scorecard(names, regime_color=regime_color)
         scan_cache.store(names, regime_color, fresh)
-        return dict(fresh, cached=False, epoch=scan_cache.epoch())
+        return dict(fresh, cached=False, scan_day=scan_cache.scan_day())
 
     if force:
         out = _sweep()

@@ -12,17 +12,16 @@ Worse, an in-memory memo dies with the process. The Fly config auto-stops
 machines, so every restart/deploy dropped the cache and handed the next visitor a
 cold ~500-name sweep on the request path — the "stocks won't load" stall.
 
-WHAT THIS DOES. Persist one sweep per DATA EPOCH to the volume, so the universe
-is scanned about twice a day instead of dozens of times, and a restart re-reads
-the last sweep instead of recomputing it.
+WHAT THIS DOES. Persist ONE sweep per trading day to the volume, so the universe
+is scanned once a day instead of dozens of times, and a restart re-reads the last
+sweep instead of recomputing it.
 
-THE EPOCH. Keying purely on the calendar date would serve a pre-close sweep all
-evening, after the session's own bar has landed — stale for the part of the day
-the operator reviews. So the key is (ET date, session phase), where the phase
-flips once at ``EPOCH_ROLL_ET``, shortly after the close. That is exactly when
-the daily bars this sweep reads can change, and it matches data_handler's own
-12-hour freshness window: one sweep on the prior session's closed bars, one on
-today's. Anything finer would recompute identical numbers.
+THE SCAN DAY. One sweep per TRADING DAY, run OUTSIDE trading hours: the key rolls
+at ``SCAN_ROLL_ET`` (just after the close), so the sweep the scheduler runs at the
+post-close slot reads that session's final bars and then serves the evening, the
+next pre-market, and the whole next session. Weekends and holidays keep pointing
+at the last completed session, so a Saturday visit replays Friday's sweep instead
+of paying for an identical one.
 
 THE FINGERPRINT. Anything that would make yesterday's answer *wrong* rather than
 merely old is folded into the key, so a change re-scans instead of serving a
@@ -31,11 +30,18 @@ regime forces every verdict to BLOCKED, so the composed verdicts must track it),
 and the demo/live mode. A miss on any of these is a fresh sweep, which is the
 correct — and rare — cost.
 
+PER-STOCK REFRESHES. Rows are INDEPENDENT of one another: refreshing one stock
+(or one sector) intraday writes that row straight back here via ``patch_rows``, so
+it survives a reload and everyone else's rows are untouched. A refreshed row is
+therefore fresher than the sweep around it — deliberately: each name is judged on
+its own gates, and the row carries ``refreshed_at`` + ``price_source`` so the
+mixed vintage is visible rather than implied. The next daily sweep re-scans the
+WHOLE universe and overwrites every row, refreshed ones included.
+
 NOT CACHED HERE. The account overlay (affordability, Level 5) is applied per
-request in ``app`` against live state, so it is never frozen by this cache; and
-an explicit ticker subset (an entry snapshot at trade time) always computes
-fresh. The operator's Rescan button forces past this cache, and the per-ticker /
-per-sector Refresh buttons remain the intraday escape hatch for a single name.
+request in ``app`` against live state, so it is never frozen by this cache; and an
+explicit ticker subset (an entry snapshot at trade time) always computes fresh.
+The operator's Rescan button forces past this cache.
 """
 from __future__ import annotations
 
@@ -44,7 +50,7 @@ import json
 import logging
 import os
 import threading
-from datetime import datetime, time as _time
+from datetime import datetime, timedelta, time as _time
 from zoneinfo import ZoneInfo
 
 import config
@@ -53,20 +59,20 @@ logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 
-# The daily bars this sweep reads settle after the close; roll the epoch once,
-# shortly after, so the evening's scan reflects the session that just ended
-# rather than the pre-open snapshot taken that morning.
-EPOCH_ROLL_ET = _time(16, 15)
+# The daily bars this sweep reads settle after the close, so the scan day rolls
+# just after it — the sweep is always computed outside trading hours, on final
+# bars. Matches the scheduler's post-close slot (config.POST_CLOSE_SLOT_ET).
+SCAN_ROLL_ET = _time(16, 15)
 
 # Bump when the row SHAPE changes (a new column, a renamed field) so an upgraded
 # deploy never renders yesterday's payload through today's UI.
-SCHEMA = "v1"
+SCHEMA = "v2"
 
 _FILENAME = "scan_scorecard.json"
 _lock = threading.Lock()
 
 # Parsed-file memo, keyed by (path, mtime, size). /api/scan/status polls every
-# 2.5s and asks "is this epoch warm?", which would otherwise re-read and re-parse
+# 2.5s and asks "is this day warm?", which would otherwise re-read and re-parse
 # a ~500-row JSON document on every poll. Keyed on the file stat, so an external
 # write (another worker, a cleared cache) is picked up immediately.
 _parsed: tuple[tuple, dict] | None = None
@@ -78,11 +84,22 @@ def _path() -> str:
     return os.path.join(config.active_cache_dir(), _FILENAME)
 
 
-def epoch(now: datetime | None = None) -> str:
-    """The data epoch a sweep belongs to: ``YYYY-MM-DD/pre`` before the roll,
-    ``YYYY-MM-DD/post`` after it. PURE apart from the clock."""
+def scan_day(now: datetime | None = None) -> str:
+    """The trading day whose CLOSED bars the current sweep covers (``YYYY-MM-DD``).
+
+    Today once its close has passed; otherwise the most recent completed session —
+    so a pre-market visit, a weekend and a holiday all replay the last real
+    session's sweep rather than triggering an identical one. PURE apart from the
+    clock."""
+    import market_calendar
     now = now.astimezone(ET) if now else datetime.now(ET)
-    return f"{now.strftime('%Y-%m-%d')}/{'post' if now.time() >= EPOCH_ROLL_ET else 'pre'}"
+    d = now.date()
+    if market_calendar.is_trading_day(d) and now.time() >= SCAN_ROLL_ET:
+        return d.isoformat()
+    d -= timedelta(days=1)
+    while not market_calendar.is_trading_day(d):
+        d -= timedelta(days=1)
+    return d.isoformat()
 
 
 def fingerprint(names, regime_color: str | None) -> str:
@@ -123,13 +140,13 @@ def _read_blob() -> dict | None:
 
 
 def load(names, regime_color: str | None, now: datetime | None = None) -> dict | None:
-    """The stored sweep when it matches the current epoch AND fingerprint, else
+    """The stored sweep when it matches the current scan day AND fingerprint, else
     None. Never raises — an unreadable or corrupt cache is simply a miss."""
     blob = _read_blob()
     if blob is None:
         return None
-    want_epoch, want_fp = epoch(now), fingerprint(names, regime_color)
-    if blob.get("epoch") != want_epoch or blob.get("fingerprint") != want_fp:
+    want_day, want_fp = scan_day(now), fingerprint(names, regime_color)
+    if blob.get("scan_day") != want_day or blob.get("fingerprint") != want_fp:
         return None
     result = blob.get("result")
     if not isinstance(result, dict):
@@ -138,20 +155,22 @@ def load(names, regime_color: str | None, now: datetime | None = None) -> dict |
     result = dict(result)
     result["cached"] = True
     result["scanned_at"] = blob.get("scanned_at")
-    result["epoch"] = want_epoch
+    result["scan_day"] = want_day
     return result
 
 
 def store(names, regime_color: str | None, result: dict,
           now: datetime | None = None) -> None:
-    """Persist a fresh sweep for the current epoch. Best-effort: a full or
-    read-only volume degrades to no caching, never a failed scan. Written via a
-    temp file + atomic replace so a concurrent reader never sees a half-file."""
+    """Persist a fresh full-universe sweep for the current scan day, replacing
+    whatever was there — including any rows individually refreshed during the day.
+    Best-effort: a full or read-only volume degrades to no caching, never a failed
+    scan. Written via a temp file + atomic replace so a concurrent reader never
+    sees a half-file."""
     global _parsed
     if not isinstance(result, dict) or not result.get("results"):
-        return  # never pin an empty/failed sweep for a whole epoch
+        return  # never pin an empty/failed sweep for a whole day
     blob = {
-        "epoch": epoch(now),
+        "scan_day": scan_day(now),
         "fingerprint": fingerprint(names, regime_color),
         "scanned_at": (now or datetime.now(ET)).isoformat(timespec="seconds"),
         "result": result,
@@ -173,6 +192,66 @@ def store(names, regime_color: str | None, result: dict,
             pass
 
 
+def patch_rows(names, regime_color: str | None, rows,
+               now: datetime | None = None) -> int:
+    """Write individually-refreshed rows back into the current scan day's sweep,
+    replacing them by ticker. Returns how many rows were replaced.
+
+    Rows are independent, so a refreshed stock persists (surviving a reload) and
+    every other row is left exactly as the daily sweep computed it. Each patched
+    row is stamped ``refreshed_at`` so the UI can show it as fresher than the
+    sweep around it instead of silently mixing vintages.
+
+    Only replaces tickers ALREADY in the sweep — a refresh never grows the cached
+    universe (a sector refresh also pulls its ETF, which is not a scan row), so
+    the payload keeps matching the fingerprint it was stored under. A miss on the
+    scan day or fingerprint is a no-op: there is no sweep this belongs to.
+    """
+    global _parsed
+    by_ticker = {r.get("ticker"): r for r in (rows or []) if isinstance(r, dict) and r.get("ticker")}
+    if not by_ticker:
+        return 0
+    blob = _read_blob()
+    if blob is None:
+        return 0
+    if (blob.get("scan_day") != scan_day(now)
+            or blob.get("fingerprint") != fingerprint(names, regime_color)):
+        return 0
+    result = blob.get("result")
+    if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+        return 0
+    stamp = (now or datetime.now(ET)).isoformat(timespec="seconds")
+    patched, out = 0, []
+    for row in result["results"]:
+        fresh = by_ticker.get(row.get("ticker"))
+        if fresh is None:
+            out.append(row)
+            continue
+        out.append(dict(fresh, refreshed_at=stamp))
+        patched += 1
+    if not patched:
+        return 0
+    result = dict(result, results=out)
+    blob = dict(blob, result=result)
+    path = _path()
+    tmp = f"{path}.tmp"
+    try:
+        with _lock:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(blob, fh)
+            os.replace(tmp, path)
+            _parsed = None
+    except Exception as e:  # noqa: BLE001 — persistence is a nicety, never a dependency
+        logger.warning("could not persist refreshed rows (%s)", e)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        return 0
+    return patched
+
+
 def clear() -> None:
     """Drop the persisted sweep — called when the universe changes or the operator
     switches demo/live, so the next scan can't serve rows for the old world."""
@@ -187,9 +266,9 @@ def clear() -> None:
 
 
 def status(names, regime_color: str | None, now: datetime | None = None) -> dict:
-    """Whether this epoch's sweep is already on disk — lets the scheduler skip a
-    warm-up instead of recomputing, which is what makes the sweep once-an-epoch
-    rather than once-a-tick."""
+    """Whether this scan day's sweep is already on disk — lets the scheduler skip
+    a sweep instead of recomputing, which is what makes it once-a-day rather than
+    once-a-tick."""
     hit = load(names, regime_color, now=now)
-    return {"warm": hit is not None, "epoch": epoch(now),
+    return {"warm": hit is not None, "scan_day": scan_day(now),
             "scanned_at": hit.get("scanned_at") if hit else None}
