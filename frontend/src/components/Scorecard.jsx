@@ -491,6 +491,11 @@ function sortBench(rows) {
 }
 
 export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFocusHandled }) {
+  // MUST be declared before the useApi below: the fetch is keyed on it, and a
+  // `const` read from the deps array before its declaration is a temporal-dead-zone
+  // ReferenceError that throws on every render (the app has no error boundary, so
+  // that blanks the whole page rather than just this card).
+  const [showPricedOut, setShowPricedOut] = React.useState(false);
   const { data, error, loading, reload } = useApi(
     () => api.scorecard(null, { includeUnaffordable: showPricedOut }),
     [refreshKey, showPricedOut]);
@@ -498,7 +503,6 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
   const [sectorFilter, setSectorFilter] = React.useState("ALL");
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);
-  const [showPricedOut, setShowPricedOut] = React.useState(false);
   const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
   const rowRefs = React.useRef({});
