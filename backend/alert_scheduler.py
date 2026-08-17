@@ -48,8 +48,11 @@ _last_reconcile: date | None = None
 # it ran. Rate-limited to RECONCILE_INTERVAL_MINUTES during market hours so the
 # minutes-based staleness clock has a cadence to be measured against.
 _last_interval_reconcile: datetime | None = None
-# Last time the full-universe scan cache was re-warmed on the interval cadence, so
-# the operator's Scan always reads a warm cache (SCAN_WARM_INTERVAL_MINUTES).
+# Last time the warm-scan check ran. The check itself is cheap and rate-limited to
+# SCAN_WARM_INTERVAL_MINUTES; whether it actually SWEEPS is decided by the day
+# cache (scan_cache), which already holds this epoch's result — so the sweep runs
+# about twice a day while the check stays frequent enough to fill a new epoch (or a
+# restarted machine's empty cache) before the operator opens the Scan tab.
 _last_warm_scan: datetime | None = None
 
 
@@ -71,12 +74,24 @@ def recommendations_enabled() -> bool:
 
 
 def _warm_scan() -> None:
-    """Prime the full-universe scan cache so the first Scan of the day loads warm.
-    Best-effort: logged, never fatal to the tick or the process."""
+    """Prime the full-universe scan cache so the first Scan of the epoch loads warm.
+
+    Never forces: when this epoch's sweep is already on disk the call short-circuits
+    to a cache read, so the ~500-name sweep runs once per data epoch instead of once
+    per tick. Best-effort: logged, never fatal to the tick or the process."""
     if not warm_scan_enabled():
         return
     try:
+        import scan_cache
         import screening
+        import sector_data
+        from metrics import scorecard as scorecard_metrics
+        # Cheap pre-check purely so the log says which happened; the sweep itself
+        # is idempotent per epoch either way.
+        if scan_cache.status(sector_data.all_tickers(),
+                             scorecard_metrics._current_regime_color())["warm"]:
+            logger.debug("scan cache already warm for this epoch; skipping sweep")
+            return
         result = screening.warm_scan_cache()
         if result.get("ok"):
             logger.info("scan cache warmed")
@@ -88,9 +103,10 @@ def _warm_scan() -> None:
 
 def warm_scan_due(now: datetime, last: datetime | None,
                   interval_min: float | None = None) -> bool:
-    """PURE: is an interval warm-scan due? True on market days/hours when the last
-    warm ran ≥ interval minutes ago (or never). Kept below the scorecard cache TTL
-    so the cache never ages out mid-session. Unit-testable without threads/clock."""
+    """PURE: is an interval warm-scan CHECK due? True on market days/hours when the
+    last check ran ≥ interval minutes ago (or never). A due check does not imply a
+    sweep — ``_warm_scan`` skips when the day cache already holds this epoch — it
+    only means "look again". Unit-testable without threads/clock."""
     if not _market_hours(now):
         return False
     if interval_min is None:

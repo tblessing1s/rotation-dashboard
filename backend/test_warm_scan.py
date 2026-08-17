@@ -95,7 +95,7 @@ def test_background_scan_lifecycle_and_dedupe(monkeypatch):
     # the running state and prove a concurrent start is deduped (one job at a time).
     gate = threading.Event()
     monkeypatch.setattr(screening, "warm_scan_cache",
-                        lambda: (gate.wait(timeout=5), {"ok": True})[1])
+                        lambda force=False: (gate.wait(timeout=5), {"ok": True})[1])
 
     first = screening.start_background_scan()
     assert first["status"] == "running" and first["running"] is True
@@ -113,7 +113,7 @@ def test_background_scan_lifecycle_and_dedupe(monkeypatch):
 
 def test_background_scan_records_error(monkeypatch):
     monkeypatch.setattr(screening, "warm_scan_cache",
-                        lambda: {"ok": False, "error": "provider down"})
+                        lambda force=False: {"ok": False, "error": "provider down"})
     screening.start_background_scan()
     _await_scan_done()
     st = screening.scan_status()
@@ -135,6 +135,6 @@ def test_warm_scan_guard_skips_when_disabled(monkeypatch):
     monkeypatch.setenv("CFM_WARM_SCAN", "0")
     called = {"n": 0}
     monkeypatch.setattr(screening, "warm_scan_cache",
-                        lambda: called.__setitem__("n", called["n"] + 1) or {"ok": True})
+                        lambda force=False: called.__setitem__("n", called["n"] + 1) or {"ok": True})
     alert_scheduler._warm_scan()
     assert called["n"] == 0  # the guard short-circuits before touching screening

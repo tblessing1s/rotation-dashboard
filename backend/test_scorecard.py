@@ -10,6 +10,7 @@ import pytest
 
 os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="cfm-scorecard-test-"))
 
+import config  # noqa: E402
 from metrics import scorecard as sc  # noqa: E402
 from metrics import thresholds as T  # noqa: E402
 
@@ -443,8 +444,11 @@ def test_scorecard_endpoint_shape(monkeypatch):
 # ---- full-universe caching (avoids a redundant sweep when the Scan tab's
 # Scorecard panel and Ready-to-Enter panel both request it concurrently) ------
 @pytest.fixture()
-def _reset_scan_cache():
+def _reset_scan_cache(tmp_path, monkeypatch):
     import screening
+    # Isolate the persisted day cache (screening.clear_cache clears both layers)
+    # so these memo tests neither read nor leave a real sweep on the volume.
+    monkeypatch.setattr(config, "active_cache_dir", lambda: str(tmp_path / "cache"))
     screening.clear_cache()
     yield
     screening.clear_cache()  # never leak a cached full sweep into later tests
@@ -452,7 +456,7 @@ def _reset_scan_cache():
 
 def test_scorecard_full_universe_is_cached_ticker_subset_is_not(monkeypatch, _reset_scan_cache):
     calls = []
-    monkeypatch.setattr(sc, "_compute_scorecard", lambda names, price_overrides=None: calls.append(names) or {"as_of": "x", "results": []})
+    monkeypatch.setattr(sc, "_compute_scorecard", lambda names, price_overrides=None, regime_color=None: calls.append(names) or {"as_of": "x", "results": [{"ticker": "AAA"}]})
     monkeypatch.setattr(sc.sector_data, "all_tickers", lambda: ["AAA", "BBB"])
 
     sc.scorecard()          # full-universe (tickers=None) -> computes once
@@ -468,7 +472,7 @@ def test_scorecard_full_universe_is_cached_ticker_subset_is_not(monkeypatch, _re
 def test_scorecard_cache_cleared_on_demo_live_switch(monkeypatch, _reset_scan_cache):
     import screening
     calls = []
-    monkeypatch.setattr(sc, "_compute_scorecard", lambda names, price_overrides=None: calls.append(1) or {"as_of": "x", "results": []})
+    monkeypatch.setattr(sc, "_compute_scorecard", lambda names, price_overrides=None, regime_color=None: calls.append(1) or {"as_of": "x", "results": [{"ticker": "AAA"}]})
     monkeypatch.setattr(sc.sector_data, "all_tickers", lambda: ["AAA"])
 
     sc.scorecard()
