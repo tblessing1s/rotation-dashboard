@@ -1,5 +1,43 @@
 # Changelog
 
+## v2.9.0 — Scan cached per trading day; Scorecard crash fix; error boundaries
+
+Follow-up to v2.8.0's shares-primary migration (PR #255), which shipped the LEAP
+removal but left the Scan tab unopenable.
+
+- **Fix: "Show full universe scorecard" blanked the whole app.** `Scorecard` read
+  `showPricedOut` from its `useApi` dependency array one line above the `const`
+  that declares it. The deps array is evaluated during render, so the read hit the
+  temporal dead zone and threw `ReferenceError: Cannot access 'showPricedOut'
+  before initialization` on **every** render. With no error boundary anywhere,
+  React tore down the entire tree — a black page, no nav, no message. Introduced
+  by the affordability filter (`ed7a596`); the scorecard has been unopenable since.
+- **Error boundaries** (`ui.jsx`, `App.jsx`, `index.jsx`): a render throw now
+  degrades to a single error card with the message, a "Try again" that remounts the
+  subtree, and the component stack in the console. `App` wraps the tab content
+  (keyed on the view, so the nav survives and switching tabs clears the error);
+  `index.jsx` wraps the shell as a last resort.
+- **Scan: one full-universe sweep per trading day** (`scan_cache.py`, new). The
+  ~500-name sweep was memoized only in process memory on a 5-minute TTL and
+  re-warmed every 4 minutes, recomputing the universe dozens of times a day over
+  daily bars that `data_handler` refreshes every 12 hours — and an in-memory memo
+  dies with the process, so every Fly auto-stop handed the next visitor a cold
+  ~22s sweep on the request path. The sweep is now persisted to the volume once per
+  **trading day**, keyed on the day whose CLOSED bars it covers so it always runs
+  outside trading hours on final bars. Weekends and holidays replay the last
+  session. Measured: a restarted machine goes from 24,185 ms to **24 ms**.
+  The key also folds in the ticker universe, the market regime and demo/live mode,
+  so a change that would make a cached row *wrong* re-scans rather than serving it.
+- **Per-stock refreshes persist independently.** Refreshing one stock or sector
+  writes those rows back into the day's sweep, so a refreshed name survives a
+  reload while every other row stays exactly as the sweep computed it. Each patched
+  row carries `refreshed_at` + `price_source` so a row fresher than the sweep around
+  it says so. Held positions ride this automatically via the kill-switch RS3M pass
+  (3x per session). The nightly sweep re-scans everything and overwrites the lot.
+- **Rescan forces.** The operator's Rescan button bypasses both cache layers;
+  scheduled warm-ups never force. Scan freshness now counts the day cache, so
+  opening the tab after idle minutes no longer force-sweeps.
+
 ## v2.8.0 — Dividend income profile + position builder (state schema v21)
 
 **PROVENANCE — `TRAVIS_EXTENSION`, not a CFM rule.** The CFM source methodology
