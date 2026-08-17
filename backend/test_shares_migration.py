@@ -206,6 +206,26 @@ def test_delta_coverage_shares_flags_naked_short(store):
     assert ok["naked_short"] is False
 
 
+def test_positions_view_carries_the_coverage_verdict(store):
+    # The Positions UI reads the naked-short guardrail off the position payload,
+    # so the view must carry the SAME verdict delta_coverage returns — not leave
+    # the panel to re-derive it client-side.
+    _buy_shares("KO", 200, 60.0)
+    _sell_short("KO", 62.0, 2, 1.0, 60.0)
+    view = next(p for p in pm.positions_view(log.load_state()) if p["ticker"] == "KO")
+    cov = view["coverage"]
+    assert cov["position_type"] == position_types.SHARES
+    assert cov["coverable_lots"] == 2 and cov["short_contracts"] == 2
+    assert cov["naked_short"] is False
+
+    # Over-write the base: a third call against 2 owned lots is naked, and the
+    # view says so without any client-side arithmetic.
+    _sell_short("KO", 63.0, 1, 1.0, 60.0)
+    view = next(p for p in pm.positions_view(log.load_state()) if p["ticker"] == "KO")
+    assert view["coverage"]["short_contracts"] == 3
+    assert view["coverage"]["naked_short"] is True
+
+
 # ---- Round-lot SIZE-BLOCK ----------------------------------------------------
 def _est(spot):
     return {"ticker": "X", "stock_price": spot, "weekly_extrinsic_per_share": 1.0,

@@ -56,9 +56,10 @@ FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap",
 # LEAP-opening actions retired by the shares-primary migration (schema v20). With
 # shares as the active base leg the LEAP diagonal is read-only LEGACY: existing
 # history renders and prices from the immutable log, but no NEW LEAP may be opened,
-# added to, or rolled. These are rejected up-front when config.LEGACY_LEAP_READONLY
-# is on. Closing legacy LEAPs (close_leap / close_position_atomic) is NOT here —
-# winding a legacy position down must always stay possible. See position_types.py.
+# added to, or rolled. These are rejected up-front — config.LEGACY_LEAP_READONLY
+# is a hard True in production. Closing legacy LEAPs (close_leap /
+# close_position_atomic) is NOT here — winding a legacy position down must always
+# stay possible. See position_types.py.
 LEGACY_LEAP_OPEN_ACTIONS = {"buy_leap", "roll_leap", "open_position_atomic"}
 
 
@@ -76,8 +77,7 @@ class LegacyLeapBlocked(ValueError):
         super().__init__(
             f"'{action}' is disabled — the LEAP diagonal is read-only legacy under the "
             f"shares-primary migration; no new LEAP may be opened, added to, or rolled. "
-            f"Establish the base leg with buy_shares instead. (Set LEGACY_LEAP_READONLY=0 "
-            f"only to replay historical LEAP fills or build legacy fixtures.)")
+            f"Establish the base leg with buy_shares instead.")
 
 
 class PositionFrozenError(RuntimeError):

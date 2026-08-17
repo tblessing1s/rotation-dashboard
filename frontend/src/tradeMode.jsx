@@ -1,6 +1,5 @@
 import React from "react";
 import { api } from "./api.js";
-import { leapPerShare } from "./units.js";
 
 // Whether a submitted order will actually be transmitted to Schwab ("live") or
 // only captured to the local ledger ("paper"). Mirrors the backend routing in
@@ -59,11 +58,11 @@ export function TradeModeBadge({ mode, className = "" }) {
 export function describeOrder(payload = {}) {
   const money = (n) => (n == null || Number.isNaN(Number(n)) ? "—" : `$${Number(n).toFixed(2)}`);
   const verb = {
-    buy_leap: "Buy LEAP (buy to open)",
-    sell_short: "Sell weekly (sell to open)",
-    close_short: "Close short (buy to close)",
-    close_leap: "Close LEAP (sell to close)",
-    roll_short: "Roll short (buy-to-close + sell-to-open)",
+    buy_shares: "Buy shares (buy to open)",
+    sell_shares: "Sell shares (sell to close)",
+    sell_short: "Sell covered call (sell to open)",
+    close_short: "Close covered call (buy to close)",
+    roll_short: "Roll covered call (buy-to-close + sell-to-open)",
   }[payload.action] || payload.action;
 
   const rows = [["Order", verb], ["Ticker", payload.ticker || "—"],
@@ -77,9 +76,7 @@ export function describeOrder(payload = {}) {
   } else {
     rows.push(["Strike", payload.strike != null ? `${payload.strike}C` : "—"]);
     if (payload.expiration) rows.push(["Expiration", payload.expiration]);
-    const limit = payload.action === "buy_leap" ? leapPerShare(payload.execution_price || 0)
-      : payload.action === "close_leap" ? leapPerShare(payload.close_price || 0)
-      : payload.action === "sell_short" ? payload.premium_per_share
+    const limit = payload.action === "sell_short" ? payload.premium_per_share
       : payload.close_price_per_share;
     rows.push(["Limit / share", money(limit)]);
   }

@@ -10,12 +10,11 @@
 // "filled".)
 
 const ACTION_VERB = {
-  open_position_atomic: "Open position",
-  buy_leap: "Buy LEAP",
-  sell_short: "Sell short",
-  close_short: "Close short",
-  close_leap: "Close LEAP",
-  roll_short: "Roll short",
+  buy_shares: "Buy shares",
+  sell_shares: "Sell shares",
+  sell_short: "Sell covered call",
+  close_short: "Close covered call",
+  roll_short: "Roll covered call",
 };
 
 const FILL_TIMEOUT_MS = 3000;

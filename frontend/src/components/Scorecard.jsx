@@ -8,8 +8,8 @@ import { Card, Pill, Light, Spinner, ErrorState, StockLights, ChartLink, SleeveB
 //
 // SYM = the per-name Symbol Genius color; BASE / INST = the two structure-classifier
 // enums (both derived from the SINGLE classifier return the backend puts on the row);
-// RS = the two-speed relative-strength state vs the sector (SHADOW); JUICE/WK = net
-// weekly juice (% of LEAP cost, net of burn/slippage); SCORE = the composite 0–10
+// RS = the two-speed relative-strength state vs the sector (SHADOW); JUICE/WK = the
+// weekly covered-call juice (% of share cost); SCORE = the composite 0–10
 // quality rank (SHADOW — zero authority); VERDICT = the composed worst-signal-wins
 // scan verdict (invisible market regime + SYM + structure entrability). RS and SCORE
 // are displayed + logged but never feed the verdict, sizing, or Ready-to-Enter. Every
@@ -154,12 +154,6 @@ const COLUMNS = [
     },
   },
   {
-    key: "burn_weekly_pct", label: "Burn/wk", sortVal: (r) => r.burn_weekly_pct,
-    render: (r) => (r.burn_weekly_pct == null
-      ? <span className="text-slate-600">—</span>
-      : <span className="tabular-nums text-amber-300/80">−{fmt(r.burn_weekly_pct, 2)}%</span>),
-  },
-  {
     key: "net_juice_weekly_pct", label: "Net/wk", sortVal: (r) => r.net_juice_weekly_pct,
     render: (r) => (r.net_juice_weekly_pct == null
       ? <span className="text-slate-600">—</span>
@@ -210,18 +204,16 @@ const COLUMN_HELP = {
     "⊕ rising (leading, improving) · ⊕ fading (leading, rolling over) · ⊖ turning (lagging, recovering) · ⊖ falling (lagging, worsening). vs SPY is in the row drawer.",
   income_profile: "Income sleeve — which set of income expectations this name is judged against.\n" +
     "JUICE = the CFM juice engine (the default; every existing name). DIV = Travis's DIVIDEND_COMPOUNDER extension, for lower-volatility payers held for juice AND dividend.\n" +
-    "Provenance: the dividend sleeve is NOT a CFM rule — the source methodology prefers volatile names for their juice and warns against 'safe' low-vol stocks. It is an extension the shares-primary model makes viable (dividends are actually collected now; under a LEAP they never were).\n" +
+    "Provenance: the dividend sleeve is NOT a CFM rule — the source methodology prefers volatile names for their juice and warns against 'safe' low-vol stocks. It is an extension the shares-primary model makes viable: owning the shares, the dividend is actually collected.\n" +
     "The sleeve changes exactly two things: the RS peer benchmark for the sector leg (a dividend ETF instead of the growth-tilted sector ETF), and which SHADOW floor the row is measured against. Trend quality, the YELLOW watchlist lockout, the earnings-window exclusion and the RS-vs-SPY kill switch are IDENTICAL for both.",
   lot_cost: "What one 100-share lot costs — spot x 100. A shares-primary entry buys the WHOLE lot, so this, not the share price, is the capital a position actually needs.\n" +
     "Names whose lot costs more than your current dry powder are hidden by default (see the bar above the table); a shown row marked OVER is one you asked to see anyway.",
-  juice_weekly_pct: "Gross juice / week — the weekly short extrinsic as % of LEAP cost, BEFORE the LEAP's own decay. The strategy's stated income bar; the juice ADEQUACY floor gates on this (below the floor → BLOCKED).",
+  juice_weekly_pct: "Juice / week — the weekly covered-call extrinsic as % of SHARE cost (spot). The strategy's stated income bar; the juice ADEQUACY floor gates on this (below the floor → BLOCKED).",
   combined_weekly_yield_pct: "Combined weekly-equivalent yield — weekly juice + (trailing annual dividend ÷ 52). Hover a cell to split it back into its two components.\n" +
     "The juice half is EXTRINSIC ONLY — time value actually captured. Intrinsic passes through and nets to zero, and gross premium is never income.\n" +
     "A '*' means the dividend yield could not be resolved, so it is NOT counted (an unknown is never shown as a confident zero).\n" +
     "SHADOW: the floors this is compared against are logged and displayed for calibration and have ZERO blocking authority — no candidate is ever rejected on them, and there is no switch to enable that.",
-  burn_weekly_pct: "LEAP burn / week — theta decay of the LEAP's remaining EXTRINSIC, as % of LEAP cost (gross − net). Priced at ENTRY (a fresh ~0.90-delta LEAP) at flat spot, so it's the cost of WAITING and the MOST burn the position ever carries.\n" +
-    "In a good stock it shrinks toward zero: price rises → LEAP goes deep ITM → extrinsic → 0 → burn → 0, and Net climbs toward Gross. The structure/SYM/RS columns are your read on whether that will happen; the Positions view shows it as the real LEAP deepens.",
-  net_juice_weekly_pct: "Net juice / week — gross minus the LEAP burn and slippage. The income the setup actually pays (gross − burn); the Ready-to-Enter ranking key. Net ≤ 0 (burn exceeds income) is a hard BLOCK.",
+  net_juice_weekly_pct: "Net juice / week — the income the setup actually pays, as % of SHARE cost. Owning the shares outright, there is no long-leg decay to net out, so this tracks the gross weekly juice. The Ready-to-Enter ranking key; net ≤ 0 is a hard BLOCK.",
   score: "Composite SCORE 0–10 (SHADOW — zero authority).\n" +
     "A quality rank over the non-blocking inputs (sector strength, base maturity, InstFlow grade, ATR posture, MA21 distance, net juice/wk, RS state). All weights are PROPOSED_DEFAULT and logged for calibration. It does NOT feed the verdict, Ready-to-Enter, or sizing — it only ranks names within a tier.",
   verdict: "The composed verdict — worst-signal-wins of the (invisible) market regime, Symbol Genius, and the structure cell, folded with the FULL entry gate.\n" +
@@ -466,7 +458,6 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                 <Readout label="Vol×" value={fmt(row.volume_ratio, 2)} />
                 <Readout label="ATR mom" value={fmt(row.atr_momentum, 2)} />
                 <Readout label="OBV" value={row.obv_above_ema == null ? "—" : row.obv_above_ema ? "↑ accum" : "↓ distrib"} />
-                <Readout label="Burn $/sh/wk" value={row.burn_weekly_per_share == null ? "—" : `$${fmt(row.burn_weekly_per_share, 2)}`} />
                 <Readout label="Earnings" value={row.earnings_days != null ? `${row.earnings_days}d` : (row.earnings_date || "—")} />
                 <Readout label="Suitability" value={row.suitability || "—"} />
               </div>

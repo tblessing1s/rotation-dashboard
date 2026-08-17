@@ -1,7 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
 import { Card, Stat, Light, Pill, Meter, Modal, Loading, ErrorState, money, fmt, pct, useApi } from "./ui.jsx";
-import JuiceStandCard from "./JuiceStand.jsx";
 import ProcessRibbon from "./ProcessRibbon.jsx";
 import ReadyToEnter from "./ReadyToEnter.jsx";
 
@@ -72,10 +71,6 @@ function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
         push("medium", t, `${t} — short ${fmt(sc.strike, 0)}C ≥75% decayed; roll to capture juice`,
           () => nav.roll(t, "75%-rule"));
       }
-    }
-    if (p.leap_health?.roll_due) {
-      push("medium", t, `${t} — LEAP roll due${p.leap?.dte != null ? ` (${p.leap.dte} DTE)` : ""}`,
-        () => nav.focus(t));
     }
   }
 
@@ -226,12 +221,118 @@ function BookSummary({ capital }) {
   );
 }
 
+// The Grove detail — one row per open position behind the ribbon's oranges: the
+// owned share base, how much of it is working (calls written against coverable
+// lots), the call-side juice captured so far, and anything wanting attention.
+// Everything reads off the enriched positions payload — no new endpoints.
+function GroveDetail({ positions, killByTicker, onFocus }) {
+  const rows = (positions || []).map((p) => {
+    const sh = p.shares || {};
+    const cov = p.coverage || {};
+    const lots = cov.coverable_lots ?? sh.coverable_lots ?? null;
+    const sold = cov.short_contracts ?? (p.short_calls || [])
+      .reduce((s, sc) => s + Number(sc.contracts || 0), 0);
+    let captured = 0, entry = 0, any = false;
+    for (const sc of p.short_calls || []) {
+      if (sc.entry_extrinsic_total != null) {
+        entry += Number(sc.entry_extrinsic_total);
+        captured += Number(sc.extrinsic_captured_total || 0);
+        any = true;
+      }
+    }
+    const flags = [];
+    if (cov.naked_short === true) flags.push("naked");
+    if (p.needs_review) flags.push("review");
+    if (p.defend) flags.push("defend");
+    if (killByTicker?.[p.ticker]?.alert) flags.push("kill switch");
+    if (p.earnings?.warning) flags.push("earnings");
+    if ((p.short_calls || []).some((sc) => sc.roll_now)) flags.push("roll now");
+    if (sh.locked) flags.push("at cap");
+    return {
+      p, lots, sold, flags,
+      count: Number(sh.count || 0),
+      juicePct: any && entry > 0 ? (captured / entry) * 100 : null,
+      captured: any ? captured : null,
+    };
+  }).sort((a, b) => b.flags.length - a.flags.length || b.count - a.count);
+
+  if (!rows.length) {
+    return (
+      <Card title="The grove">
+        <p className="text-sm text-slate-500">
+          Bare grove — buy a 100-share lot to plant the first tree. 🍊
+        </p>
+      </Card>
+    );
+  }
+  const totalShares = rows.reduce((s, r) => s + r.count, 0);
+  const totalLots = rows.reduce((s, r) => s + (r.lots || 0), 0);
+  const totalSold = rows.reduce((s, r) => s + r.sold, 0);
+  return (
+    <Card
+      title={`The grove — ${rows.length} position${rows.length === 1 ? "" : "s"}`}
+      right={
+        <span className="text-xs text-slate-400">
+          {totalShares} shares · <span className="font-semibold text-emerald-300">{totalSold}</span>
+          {` of ${totalLots} lots working`}
+        </span>
+      }
+    >
+      <div className="space-y-1.5">
+        {rows.map(({ p, count, lots, sold, juicePct, captured, flags }) => (
+          <button
+            key={p.ticker}
+            onClick={() => onFocus?.(p.ticker)}
+            className="flex w-full flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-slate-800/60 bg-slate-900/40 px-3 py-2 text-left transition hover:bg-slate-800/50"
+          >
+            <span className="w-16 shrink-0 text-sm font-semibold text-slate-100">{p.ticker}</span>
+            <span className="text-xs text-slate-500">
+              <span className="font-semibold text-slate-200">{count}</span> sh
+              {p.stock_price != null && <span className="ml-1">@ {fmt(p.stock_price, 2)}</span>}
+            </span>
+            <span className="text-xs text-slate-500">
+              <span className={`font-semibold ${flags.includes("naked") ? "text-rose-300" : "text-slate-200"}`}>
+                {sold}/{lots ?? "—"}
+              </span> lots working
+            </span>
+            <span className="text-xs text-slate-500">
+              {juicePct == null ? "no call working" : (
+                <>
+                  <span className="font-semibold text-emerald-300">{fmt(juicePct, 0)}%</span> juice
+                  {captured != null && <span className="ml-1">({money(captured)})</span>}
+                </>
+              )}
+            </span>
+            {flags.length > 0 && (
+              <span className="ml-auto flex flex-wrap gap-1">
+                {flags.map((f) => (
+                  <span key={f}
+                        className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${
+                          f === "naked" || f === "review" || f === "defend" || f === "kill switch"
+                            ? "border-rose-500/40 bg-rose-500/15 text-rose-300"
+                            : "border-amber-500/40 bg-amber-500/15 text-amber-300"}`}>
+                    {f}
+                  </span>
+                ))}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+      <div className="mt-3 border-t border-slate-800 pt-2 text-[11px] text-slate-500">
+        Each tree is a name you own outright. "Lots working" is how many of its whole
+        100-share lots have a call written against them — the rest are idle shares.
+        "Juice" is the extrinsic captured on those calls since they were sold.
+      </div>
+    </Card>
+  );
+}
+
 // The Weekly Juice detail — income behind the glass illustration: the raw
 // week/month/YTD figures, the net-per-week projection, the weekly target band,
 // and the monthly milestones (all the numbers the ribbon deliberately hides).
-function IncomeDetail({ theta, capital, burnDiv }) {
+function IncomeDetail({ theta, capital }) {
   const t = theta?.totals || {};
-  const rollup = theta?.net_juice_rollup || {};
   const wt = theta?.weekly_target || {};
   const ms = (capital || {}).milestones || {};
   return (
@@ -241,21 +342,11 @@ function IncomeDetail({ theta, capital, burnDiv }) {
         <Stat label="This month" value={money(t.this_month)} />
         <Stat label="Juice · YTD" value={money(t.ytd)} />
       </div>
-      <div className="mt-4 grid grid-cols-2 gap-4">
-        <Stat label="Proj net / wk" value={money(rollup.net_juice_per_week)}
-              tone={rollup.net_juice_per_week == null ? "text-slate-500"
-                : rollup.net_juice_per_week >= 0 ? "text-emerald-300" : "text-rose-300"}
-              sub="juice minus LEAP burn" />
+      <div className="mt-4">
         <Stat label="Weekly target"
               value={wt.target_low != null ? `${money(wt.target_low)}–${money(wt.target_high)}` : "—"}
               sub="1–2% of deployed / wk" />
       </div>
-      {burnDiv?.warn && (
-        <div className="mt-3 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
-          LEAP burn is drifting {fmt(burnDiv.mean_abs_divergence_pct, 0)}% from the model (trailing) —
-          over the {burnDiv.threshold_pct}% warn threshold; the net figures may be off.
-        </div>
-      )}
       {(ms.half_nut || ms.quit_safe) && (
         <div className="mt-5 grid gap-4 sm:grid-cols-2">
           {["half_nut", "quit_safe"].map((k) => (
@@ -330,10 +421,8 @@ function PayoutGlance({ payouts, onOpen }) {
             {cash(cur.payout_amount)}
           </div>
           <div className="text-xs text-slate-500"
-               title="Juice collected minus the LEAP's weekly extrinsic burn">
-            {cur.burn_tracked
-              ? `${cash(cur.net_juice)} juice − ${cash(cur.leap_burn)} LEAP burn`
-              : payoutSub(cur, true)}
+               title="Net covered-call juice collected this month">
+            {payoutSub(cur, true)}
           </div>
         </div>
         {prev && (
@@ -417,8 +506,6 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
   }
 
   const cap = capital || {};
-  const payback = ov.data?.theta?.extrinsic_payback || {};
-  const burnDiv = ov.data?.burn_divergence || {};
 
   // Close the modal, then run an action (navigate / focus / enter) — so a link
   // inside a detail card takes you to the full tab without leaving it open.
@@ -433,12 +520,11 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
       node: <ReadyToEnter onSelectStock={closeThen(nav.enter)} />, tab: "Scan",
     },
     grove: {
-      node: <JuiceStandCard positions={openPositions} payback={payback}
-                            killByTicker={killByTicker}
-                            nav={{ ...nav, focus: closeThen(nav.focus) }} />,
+      node: <GroveDetail positions={openPositions} killByTicker={killByTicker}
+                         onFocus={closeThen(nav.focus)} />,
       tab: "Positions",
     },
-    juice: { node: <IncomeDetail theta={ov.data?.theta} capital={cap} burnDiv={burnDiv} />, tab: "History" },
+    juice: { node: <IncomeDetail theta={ov.data?.theta} capital={cap} />, tab: "History" },
   };
   const active = detail ? DETAIL[detail] : null;
 

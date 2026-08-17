@@ -461,6 +461,20 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
                      position_type=ptype)
         for sc in shorts]
     out["defend"] = any(sc["below_strike"] for sc in out["short_calls"])
+    # Coverage verdict on the position view (schema v21). For a SHARES base this is
+    # the hard guardrail the Positions UI reads: short contracts may never exceed
+    # floor(shares/100) coverable lots, and ``naked_short`` says when they do. The
+    # SAME pure core the alert sweep and the recommendation engine call, so the
+    # panel and the alert can never disagree. Best-effort — an unpriceable leg
+    # degrades to None, never blanks the position.
+    try:
+        import dividends as _div
+        # A SHARES base never reaches the Greeks (its coverage is a lot count), so
+        # q only matters for a legacy long leg — resolve it defensively, same as
+        # the alert sweep does, and fall back to 0 when there's no dividend data.
+        out["coverage"] = delta_coverage(position, price, q=_div.yield_for(ticker) or 0.0)
+    except Exception:  # noqa: BLE001 — a display readout never sinks the position
+        out["coverage"] = None
     out["roll_summary"] = roll_summary or {"count": 0, "net_total": 0.0, "drag_total": 0.0}
     # Whipsaw circuit breaker: too many defensive rolls / too much cumulative drag
     # -> exit, not another defend (the roll-down spiral no single check owns).

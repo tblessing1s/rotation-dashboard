@@ -506,13 +506,16 @@ MIN_WEEKLY_EXTRINSIC_AFTER_SLIPPAGE_PS = 0.05
 # a tick between the alert and the fill.
 LOT_ADD_BUFFER_PCT = 0.02
 
-# Shares-only enforcement (schema v20). With shares as the active base leg, the
+# Shares-only enforcement (schema v20). Shares are the active base leg and the
 # LEAP diagonal is read-only LEGACY: existing history stays queryable and priced,
-# but no NEW LEAP may be opened, added to, or rolled. When True, executor.execute
-# rejects the LEAP-opening actions (buy_leap / roll_leap / open_position_atomic)
-# with LegacyLeapBlocked. Set False (env LEGACY_LEAP_READONLY=0) only to replay
-# historical LEAP fills or construct legacy fixtures. See position_types.py.
-LEGACY_LEAP_READONLY = (os.environ.get("LEGACY_LEAP_READONLY", "1") != "0")
+# but no NEW LEAP may be opened, added to, or rolled — executor.execute rejects
+# the LEAP-opening actions (buy_leap / roll_leap / open_position_atomic) with
+# LegacyLeapBlocked. This is PERMANENT and deliberately not env-overridable: there
+# is no production path back to LEAP entry. The constant survives only as a
+# test/replay seam — the suite and seed_demo_data set the ATTRIBUTE directly
+# (config.LEGACY_LEAP_READONLY = False) to replay historical LEAP fills and build
+# legacy fixtures against the immutable log. See position_types.py.
+LEGACY_LEAP_READONLY = True
 
 # One-time book reset via the API (POST /api/admin/reset-book). OFF by default —
 # a destructive "start over" (clears positions + the execution log + derived

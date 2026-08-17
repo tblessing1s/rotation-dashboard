@@ -35,11 +35,20 @@ Match the surrounding style; don't introduce a linter unless asked.
 
 ## Conventions worth knowing
 
-- **Units:** LEAP prices and extrinsic are stored **per-contract** but displayed
-  **per-share** (÷100). Short premiums/extrinsic are per-share. The ×100 / ÷100
-  factor lives in one place per side — `backend/units.py` and `frontend/src/units.js`
-  (`leap_per_contract` / `leapPerShare` / `leapExtrinsicPerShare` / `totalDollars`);
-  route conversions through them rather than open-coding `* 100` at a new boundary.
+- **Shares-primary (permanent):** the base leg is **100 real shares** + weekly
+  covered calls. `config.LEGACY_LEAP_READONLY` is a hard `True` — not env-
+  overridable — so `executor.execute` refuses `buy_leap` / `roll_leap` /
+  `open_position_atomic` (`LegacyLeapBlocked` → HTTP 400). The constant survives
+  only as a **test/replay seam**: the suite (`conftest`) and `seed_demo_data` set
+  the attribute directly to replay historical LEAP fills. LEAP *derivation* stays
+  (recompute, migrations, `close_leap`, repair, `backend/units.py`) — the
+  execution log is append-only, so old fills must keep pricing forever. The UI is
+  shares-only; there is no LEAP surface left in `frontend/`.
+- **Units:** short premiums/extrinsic are per-share; one contract = 100 shares.
+  The ×100 factor lives in one place per side — `backend/units.py` (which still
+  carries the per-contract LEAP conversions for historical records) and
+  `frontend/src/units.js` (`SHARES_PER_CONTRACT` / `totalDollars`); route
+  conversions through them rather than open-coding `* 100` at a new boundary.
 - **Period bucketing:** bucket executions by date→expiration via
   `logging_handler.bucket_datetime()` — both the theta ledger and the Payouts view
   key off it so they can't disagree. Never re-derive week/month with a bespoke

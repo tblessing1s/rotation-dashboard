@@ -4,7 +4,7 @@ import { Card, money, fmt, useApi } from "./ui.jsx";
 
 // "The Cash Flow Machine — today": one illustrated ribbon across the top of the
 // Overview that tells the whole CFM cycle as a story, left→right, in the
-// juice-stand's hand-drawn SVG idiom. The pictures carry the numbers — a barrel
+// hand-drawn SVG idiom. The pictures carry the numbers — a barrel
 // three-quarters full IS the dry powder, a jar near its rim IS the month's nut
 // in reach — so the plain readouts fall away and only the two figures a picture
 // can't spell out remain (dollars to deploy, this week's pour). The substance
@@ -85,16 +85,16 @@ function Sprout({ tone = "#34d399", vigor = 1 }) {
   );
 }
 
-// One orange in the grove — fill is intrinsic vs cost basis (how stock-backed
-// the fruit is), the ring is the position's health verdict. Mirrors the juice
-// stand's per-orange read, no number needed.
+// One orange in the grove — fill is how much of the owned base is working (lots
+// with a call written on them), the ring is the position's health verdict. No
+// number needed; the tooltip carries the detail.
 function GroveOrange({ uid, pct, tone }) {
   const fill = pct == null ? 0 : Math.max(0, Math.min(100, pct));
   const top = 33, bottom = 82;
   const surfaceY = bottom - ((bottom - top) * fill) / 100;
   return (
     <svg viewBox="0 0 60 72" className="h-11 w-9 shrink-0" role="img"
-         aria-label={pct == null ? "coverage unknown" : `${fmt(fill, 0)} percent intrinsic-backed`}>
+         aria-label={pct == null ? "coverage unknown" : `${fmt(fill, 0)} percent of owned lots working`}>
       <defs>
         <linearGradient id={`gg-${uid}`} x1="0" y1="0" x2="0" y2="1">
           <stop offset="0" stopColor="#fb923c" />
@@ -121,11 +121,10 @@ function GroveOrange({ uid, pct, tone }) {
   );
 }
 
-// A position's juice cup for the grove — the short-call capture the JuiceStand
-// glasses show, shrunk to the ribbon so the per-short juice reads on the
-// dashboard without opening the stand. Fill = extrinsic captured across the
-// position's open shorts, with the percent drawn on the glass. Grey and empty
-// when no short is working (nothing being squeezed).
+// A position's juice cup for the grove — the covered-call capture, shrunk to the
+// ribbon so the per-call juice reads on the dashboard at a glance. Fill =
+// extrinsic captured across the position's open calls, with the percent drawn on
+// the glass. Grey and empty when no call is working (nothing being squeezed).
 function GroveCup({ uid, pct }) {
   const has = pct != null;
   const fill = has ? Math.max(0, Math.min(100, pct)) : 0;
@@ -400,8 +399,9 @@ function Slots({ used, total }) {
 }
 
 // ---------------------------------------------------------------------------
-// Per-position health verdict for the grove — reuses the JuiceStand signals
-// (kill switch / review / defend / roll / maintenance) folded to one tone.
+// Per-position health verdict for the grove — the safety signals (kill switch /
+// review / defend / earnings / naked short / a short about to expire or breached)
+// folded to one tone.
 const HEALTH = {
   critical: { ring: "#fb7185", leaf: "#fb7185", label: "needs you now" },
   warn: { ring: "#fbbf24", leaf: "#f59e0b", label: "wants tending" },
@@ -409,34 +409,36 @@ const HEALTH = {
   unknown: { ring: "#64748b", leaf: "#64748b", label: "no mark yet" },
 };
 function healthOf(p, ks) {
-  const lh = p.leap_health_agg || p.leap_health || {};
   if (p.needs_review || ks?.status === "red") return "critical";
   if (
     p.defend ||
     p.earnings?.warning ||
     ks?.alert ||
-    lh.maintenance_status === "burning" ||
+    p.coverage?.naked_short === true ||
     (p.short_calls || []).some((sc) => (sc.dte != null && sc.dte <= 2) || sc.below_strike)
   ) {
     return "warn";
   }
-  if (lh.maintenance_status === "self_funding" || lh.maintenance_status === "unknown") return "good";
-  return lh.maintenance_status ? "good" : "unknown";
-}
-function pulpPctOf(p) {
-  const t = p.leap_totals;
-  if (t && t.intrinsic != null && t.cost_basis) return (t.intrinsic / t.cost_basis) * 100;
-  const leap = p.leap || {};
-  const lh = p.leap_health || {};
-  const intrinsic = lh.leap_intrinsic ?? leap.intrinsic;
-  const basis = leap.cost_basis;
-  return intrinsic != null && basis ? (intrinsic / basis) * 100 : null;
+  return Number((p.shares || {}).count || 0) > 0 ? "good" : "unknown";
 }
 
-// The position's short-side juice capture, weighted across its open shorts:
+// How much of the position's owned base is actually working: short contracts sold
+// against coverable (whole-100) lots. A full tree is one whose every lot has a
+// call written on it; an empty one is shares sitting idle. Null when the lot
+// count isn't known yet.
+function lotsWorkingPctOf(p) {
+  const cov = p.coverage || {};
+  const sh = p.shares || {};
+  const lots = cov.coverable_lots ?? sh.coverable_lots;
+  if (!lots) return null;
+  const sold = cov.short_contracts ?? (p.short_calls || [])
+    .reduce((s, sc) => s + Number(sc.contracts || 0), 0);
+  return (sold / lots) * 100;
+}
+
+// The position's call-side juice capture, weighted across its open shorts:
 // extrinsic captured vs the extrinsic sold at entry, falling back to
-// whole-premium decay when entry extrinsic wasn't recorded (mirrors the
-// JuiceStand's juiceOf so the cup reads the same on the ribbon). Null when no
+// whole-premium decay when entry extrinsic wasn't recorded. Null when no
 // short is working or none reports enough to place a level.
 function juicePctOf(p) {
   let captured = 0, total = 0, any = false;
@@ -465,7 +467,6 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
 
   const capData = capital || {};
   const totals = theta?.totals || {};
-  const rollup = theta?.net_juice_rollup || {};
   const ms = capData.milestones || {};
 
   // ---- 1. Dry Powder — the rain barrel. Fill = deployable vs a full allocation.
@@ -520,7 +521,7 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
   const grove = React.useMemo(
     () => open.map((p) => ({
       p,
-      pulp: pulpPctOf(p),
+      pulp: lotsWorkingPctOf(p),
       juice: juicePctOf(p),
       health: healthOf(p, killByTicker?.[p.ticker]),
     })).sort((a, b) => {
@@ -549,7 +550,6 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
   // Fill is this week against the 2%/week stretch (a full glass); the dashed
   // pace line sits at the 1% "on-pace" target, so juice past it is a good week.
   const weekJuice = totals.this_week;
-  const netWk = rollup.net_juice_per_week;
   const wt = theta?.weekly_target || {};
   const targetLow = wt.target_low;
   const targetHigh = wt.target_high;
@@ -559,7 +559,6 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
   const paceFrac = targetHigh ? Math.min(0.9, Math.max(0.15, (targetLow || 0) / targetHigh)) : 0.5;
   const onPace = targetLow != null && weekJuice != null && weekJuice >= targetLow;
   const aboveTarget = targetHigh != null && weekJuice != null && weekJuice >= targetHigh;
-  const draining = netWk != null && netWk < 0;
   let harvestStory = !weekJuice || weekJuice <= 0
     ? "Nothing poured yet this week."
     : aboveTarget
@@ -567,10 +566,7 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
       : onPace
         ? "A solid pour — juice on pace this week."
         : "A slow trickle — under this week's pace.";
-  if (draining) harvestStory += " The burn's outrunning the juice.";
-  const harvestTone = draining
-    ? "border-rose-500/40 bg-rose-500/5"
-    : aboveTarget
+  const harvestTone = aboveTarget
       ? "border-emerald-400/50 bg-emerald-500/10"
       : "border-emerald-500/40 bg-emerald-500/5";
 
@@ -659,7 +655,7 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
                   key={p.ticker}
                   onClick={(e) => { e.stopPropagation(); nav?.focus?.(p.ticker); }}
                   className="flex flex-col items-center rounded-md px-0.5 hover:bg-slate-800/50"
-                  title={`${p.ticker} — ${HEALTH[health].label}${pulp != null ? ` · ${fmt(pulp, 0)}% intrinsic-backed` : ""}${juice != null ? ` · ${fmt(juice, 0)}% of juice captured` : " · no short working"}`}
+                  title={`${p.ticker} — ${HEALTH[health].label}${pulp != null ? ` · ${fmt(pulp, 0)}% of owned lots working` : ""}${juice != null ? ` · ${fmt(juice, 0)}% of juice captured` : " · no call working"}`}
                 >
                   <div className="flex items-end gap-0.5">
                     <GroveOrange uid={p.ticker} pct={pulp} tone={HEALTH[health]} />
@@ -680,8 +676,8 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
         {/* 4 — WEEKLY JUICE (this week's juice glass) */}
         <Stage
           emoji="🥤" title="Weekly Juice" tone={harvestTone}
-          hero={<span className={draining ? "text-rose-300" : "text-emerald-300"}>{money(weekJuice)}</span>}
-          story={<span className={draining ? "text-rose-300" : ""}>{harvestStory}</span>}
+          hero={<span className="text-emerald-300">{money(weekJuice)}</span>}
+          story={harvestStory}
           onClick={() => nav?.detail?.("juice")}
         >
           <WeeklyGlass pct={weekPct} paceFrac={paceFrac} glow={aboveTarget} />

@@ -2,7 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import { Pill, Loading, fmt } from "./ui.jsx";
 import { useTradeMode, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
-import { leapPerContract, totalDollars } from "../units.js";
+import { totalDollars } from "../units.js";
 
 // Dollar formatter that tolerates nulls (—) for thin/closed quotes.
 function dollars(n) {
@@ -14,29 +14,21 @@ function bigDollars(n) {
   return "$" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
 
+// Shares-primary: the base leg is 100 real shares and the weekly short is a
+// COVERED CALL written against them. LEAP entry is retired (see config.
+// LEGACY_LEAP_READONLY), so these are the only actions this ticket offers.
 const ACTION_LABELS = {
-  open_position_atomic: "Open position — buy LEAP + sell weekly",
-  buy_leap: "Buy LEAP only (deep ITM)",
-  sell_short: "Sell weekly short call",
-  close_short: "Close / roll short call",
-  close_leap: "Close LEAP (sell to close)",
-};
-
-// Shares-primary phrasing: the base leg is 100 real shares and the weekly short is
-// a COVERED CALL against them. These override the LEAP labels when chain.shares_mode.
-const SHARES_ACTION_LABELS = {
   buy_shares: "Open position — buy 100 shares",
   sell_short: "Sell covered call (weekly)",
   close_short: "Close / roll covered call",
-  close_leap: "Close LEAP (legacy) — sell to close",
 };
 
 /**
  * Option chain viewer + order ticket. Auto-detects the next action from the
- * user's current position, auto-picks the LEAP and an ATR-suggested weekly
- * strike, shows whether IV is rich vs realized vol, and estimates how long the
- * short juice takes to cover the LEAP's extrinsic. The user typically only sets
- * quantity, then executes straight from the chain (or just fills the form).
+ * user's current position, auto-picks an ATR-suggested weekly strike, shows
+ * whether IV is rich vs realized vol, and estimates the covered-call yield on
+ * the share cost. The user typically only sets quantity, then executes straight
+ * from the chain (or just fills the form).
  */
 export default function OptionChainModal({ ticker, accountGate, onExecute, onClose }) {
   const [chain, setChain] = React.useState(null);
@@ -46,7 +38,6 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   // The short's expiration is selectable now that the chain offers this week's
   // AND next week's weekly — a strike alone is ambiguous across the two weeks.
   const [weeklyExp, setWeeklyExp] = React.useState(null);
-  const [leapStrike, setLeapStrike] = React.useState(null);
   const [action, setAction] = React.useState(null);
   const [qty, setQty] = React.useState("");
   const [execErr, setExecErr] = React.useState(null);
@@ -83,23 +74,13 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
         const sug = cmp?.strikes?.find((s) => s.suggested) || cmp?.strikes?.[0];
         setWeeklyExp(cmp?.expiration ?? null);
         setWeeklyStrike(sug ? sug.strike : null);
-        const sugLeap = c.leap?.strikes?.find((s) => s.suggested) || c.leap?.strikes?.[0];
-        setLeapStrike(sugLeap ? sugLeap.strike : null);
-        // Shares-primary: the base is 100 real shares, entered on its own ticket
-        // (buy_shares), and the covered call is a separate step — there is no
-        // buy-both-legs atomic (an equity buy and an option sell can't share one
-        // broker order). Legacy: a fresh entry defaults to opening BOTH LEAP legs
-        // at once, with "Buy LEAP only" still selectable.
+        // The base is 100 real shares, entered on its own ticket (buy_shares),
+        // and the covered call is a separate step — there is no buy-both-legs
+        // atomic (an equity buy and an option sell can't share one broker order).
         const sa = c.suggested_action;
-        if (c.shares_mode) {
-          setAction(sa || "buy_shares");
-        } else {
-          const hasWeekly = (c.weekly?.strikes || []).length > 0;
-          setAction(sa === "buy_leap" && hasWeekly ? "open_position_atomic" : (sa || "buy_leap"));
-        }
+        setAction(ACTION_LABELS[sa] ? sa : "buy_shares");
         const defQty =
           sa === "close_short" && c.position?.open_short?.contracts ? c.position.open_short.contracts
-          : sa === "close_leap" && c.position?.existing_leap?.contracts ? c.position.existing_leap.contracts
           : c.quantity_default ?? 1;
         setQty(String(defQty));
         setLastUpdated(Date.now());
@@ -133,63 +114,40 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
     return () => clearInterval(id);
   }, []);
 
-  const leap = chain?.leap;
   const weekly = chain?.weekly;
   const iv = chain?.iv;
   const position = chain?.position;
   const openShort = position?.open_short;
-  const existingLeap = position?.existing_leap;
-  // Management-only (RED tape): entries are blocked, so the only moves are
-  // closing the open short and/or selling the LEAP to exit.
+  // Management-only (RED tape): entries are blocked, so the only move is closing
+  // or rolling the open covered call.
   const mgmt = !!chain?.management_only;
-  // Shares-primary: the base leg is 100 real shares, and the weekly short is a
-  // covered call against them. Drives the labels, the entry action, and the payoff.
-  const sharesMode = !!chain?.shares_mode;
   const sharesPerLot = chain?.shares_per_lot || 100;
-  const labels = sharesMode ? { ...ACTION_LABELS, ...SHARES_ACTION_LABELS } : ACTION_LABELS;
   const actionOptions = mgmt
     ? {
-        ...(position?.open_short_count ? { close_short: labels.close_short } : {}),
-        ...(position?.has_leap ? { close_leap: labels.close_leap } : {}),
+        ...(position?.open_short_count ? { close_short: ACTION_LABELS.close_short } : {}),
       }
-    : sharesMode
-      ? {
-          // buy_shares always available (establish OR scale the 100-share base);
-          // covered call once a base is held; roll/close when a short is open;
-          // close_leap only for a legacy LEAP being wound down.
-          buy_shares: labels.buy_shares,
-          ...(position?.has_shares || position?.has_leap ? { sell_short: labels.sell_short } : {}),
-          ...(position?.open_short_count ? { close_short: labels.close_short } : {}),
-          ...(position?.has_leap ? { close_leap: labels.close_leap } : {}),
-        }
-      : ACTION_LABELS;
-  const showPayoff = !mgmt && action !== "close_leap" && action !== "close_short";
+    : {
+        // buy_shares always available (establish OR scale the 100-share base);
+        // covered call once a base is held; roll/close when a short is open.
+        buy_shares: ACTION_LABELS.buy_shares,
+        ...(position?.has_shares ? { sell_short: ACTION_LABELS.sell_short } : {}),
+        ...(position?.open_short_count ? { close_short: ACTION_LABELS.close_short } : {}),
+      };
+  const showPayoff = !mgmt && action !== "close_short";
   // Weekly expiration groups: this week's boundary and next week's. Older chain
   // payloads (no `expirations`) collapse to a single group over weekly.strikes.
   const weeklyGroups = weekly?.expirations
     || (weekly ? [{ expiration: weekly.expiration, dte: weekly.dte, is_comparison: true, strikes: weekly.strikes || [] }] : []);
   const chosenGroup = weeklyGroups.find((g) => g.expiration === weeklyExp) || weeklyGroups[0] || null;
   const chosenWeekly = chosenGroup?.strikes?.find((s) => s.strike === weeklyStrike) || null;
-  const chosenLeap = leap?.strikes?.find((s) => s.strike === leapStrike)
-    || leap?.strikes?.find((s) => s.suggested) || null;
   const qtyNum = Number(qty) || 0;
-
-  // Live payoff: how much LEAP extrinsic must be covered, and ~weeks for the
-  // selected weekly's juice to cover it. A new-LEAP entry scales with the chosen
-  // LEAP's extrinsic and quantity — even when the position already holds a LEAP
-  // (an add-on), the cover total is the LEAP being bought, not the existing one.
-  // Selling a short against an already-owned LEAP covers its fixed remaining balance.
-  const buyingLeap = action === "open_position_atomic" || action === "buy_leap";
-  const coverTotal = position?.has_leap && !buyingLeap
-    ? chain?.payoff?.leap_extrinsic_to_cover
-    : chosenLeap?.extrinsic != null ? totalDollars(chosenLeap.extrinsic, qtyNum) : null;
   const weeklyJuice = chosenWeekly?.extrinsic != null ? totalDollars(chosenWeekly.extrinsic, qtyNum) : null;
-  const weeks = coverTotal && weeklyJuice && weeklyJuice > 0 ? Math.ceil(coverTotal / weeklyJuice) : null;
 
   // Shares-primary economics: a 100-share base costs spot × 100 × lots; the
   // covered-call yield is the weekly time premium (the chosen/suggested weekly's
-  // extrinsic) as a % of share cost. No LEAP extrinsic to cover, no burn.
-  const sharesEntry = sharesMode && action === "buy_shares";
+  // extrinsic) as a % of share cost. Owning shares outright, there is nothing to
+  // pay back — no extrinsic to cover, no burn.
+  const sharesEntry = action === "buy_shares";
   const spot = chain?.underlying_price ?? null;
   const sharesCost = spot != null ? spot * sharesPerLot * qtyNum : null;
   const ccPremiumPs = chosenWeekly?.extrinsic ?? null;
@@ -199,35 +157,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   function buildPayload() {
     const base = { action, ticker: chain.ticker, contracts: qtyNum };
     if (chain.underlying_price != null) base.stock_price = chain.underlying_price;
-    if (action === "open_position_atomic" && chosenLeap && chosenWeekly) {
-      // LEAP leg (buy to open) — same keys as buy_leap so the gate + booking reuse.
-      base.strike = chosenLeap.strike;
-      if (chosenLeap.expiration) base.expiration = chosenLeap.expiration;
-      if (chosenLeap.symbol) base.option_symbol = chosenLeap.symbol;
-      if (chosenLeap.dte != null) base.dte = chosenLeap.dte;
-      if (chosenLeap.mark != null) base.execution_price = Math.round(leapPerContract(chosenLeap.mark) * 100) / 100;
-      if (cbPrice !== "" && !Number.isNaN(Number(cbPrice))) base.circuit_breaker_price = Number(cbPrice);
-      if (chosenWeekly.extrinsic != null) base.weekly_extrinsic_per_share = chosenWeekly.extrinsic;
-      if (overrideReason.trim()) base.override_reason = overrideReason.trim();
-      // Weekly short leg (sell to open).
-      base.short_strike = chosenWeekly.strike;
-      const shortExp = chosenWeekly.expiration || chosenGroup?.expiration || weekly?.expiration;
-      if (shortExp) base.short_expiration = shortExp;
-      if (chosenWeekly.symbol) base.short_option_symbol = chosenWeekly.symbol;
-      if (chosenWeekly.mark != null) base.short_premium_per_share = chosenWeekly.mark;
-      if (chosenWeekly.dte != null) base.short_dte = chosenWeekly.dte;
-    } else if (action === "buy_leap" && chosenLeap) {
-      base.strike = chosenLeap.strike;
-      if (chosenLeap.expiration) base.expiration = chosenLeap.expiration;
-      if (chosenLeap.symbol) base.option_symbol = chosenLeap.symbol;
-      if (chosenLeap.dte != null) base.dte = chosenLeap.dte;
-      if (chosenLeap.mark != null) base.execution_price = Math.round(leapPerContract(chosenLeap.mark) * 100) / 100;
-      // Level 5 context: the stored line-in-the-sand, real weekly juice for the
-      // server-side gate, and the typed override reason when the gate is red.
-      if (cbPrice !== "" && !Number.isNaN(Number(cbPrice))) base.circuit_breaker_price = Number(cbPrice);
-      if (chosenWeekly?.extrinsic != null) base.weekly_extrinsic_per_share = chosenWeekly.extrinsic;
-      if (overrideReason.trim()) base.override_reason = overrideReason.trim();
-    } else if (action === "buy_shares") {
+    if (action === "buy_shares") {
       // The 100-share base leg (schema v20). The executor's buy_shares reads `qty`
       // (a share count); "Quantity" here is 100-share lots, so qty = lots × 100.
       // The covered call is a SEPARATE next step (sell_short) — not on this ticket.
@@ -246,29 +176,18 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       if (openShort.expiration) base.expiration = openShort.expiration;
       if (openShort.symbol) base.option_symbol = openShort.symbol;
       if (openShort.current_mark != null) base.close_price_per_share = openShort.current_mark;
-    } else if (action === "close_leap" && existingLeap) {
-      base.strike = existingLeap.strike;
-      base.contracts = qtyNum || existingLeap.contracts;
-      if (existingLeap.expiration) base.expiration = existingLeap.expiration;
-      if (existingLeap.symbol) base.option_symbol = existingLeap.symbol;
-      // close_price is per-contract total dollars (mirrors buy_leap).
-      if (existingLeap.current_mark != null) base.close_price = Math.round(leapPerContract(existingLeap.current_mark) * 100) / 100;
-      if (existingLeap.cost_basis != null) base.cost_basis = existingLeap.cost_basis;
     }
     return base;
   }
 
-  const isEntry = action === "buy_leap" || action === "open_position_atomic" || action === "buy_shares";
+  const isEntry = action === "buy_shares";
   const gateBlocked = isEntry && accountGate && !accountGate.pass;
   const canExecute =
     qtyNum > 0 &&
     (!gateBlocked || overrideReason.trim().length > 0) &&
-    ((action === "open_position_atomic" && chosenLeap && chosenWeekly) ||
-      (action === "buy_leap" && chosenLeap) ||
-      (action === "buy_shares") ||
+    ((action === "buy_shares") ||
       (action === "sell_short" && chosenWeekly) ||
-      (action === "close_short" && openShort) ||
-      (action === "close_leap" && existingLeap));
+      (action === "close_short" && openShort));
 
   function execute() {
     const payload = buildPayload();
@@ -381,7 +300,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                     {Object.entries(actionOptions).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                   </select>
                 </label>
-                <label className="text-slate-400">Quantity ({sharesMode ? "100-share lots" : "contracts"})
+                <label className="text-slate-400">Quantity ({action === "buy_shares" ? "100-share lots" : "contracts"})
                   <input
                     value={qty}
                     onChange={(e) => setQty(e.target.value.replace(/[^0-9]/g, ""))}
@@ -420,7 +339,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                       {accountGate.suggested_circuit_breaker.ma50 != null &&
                         ` ($${accountGate.suggested_circuit_breaker.ma50})`}
                       {accountGate.suggested_circuit_breaker.capped
-                        ? ". The MA50 stop would sit above spot, so the suggestion is capped just below price — a new LEAP here starts on a very tight leash. Consider whether to enter at all."
+                        ? ". The MA50 stop would sit above spot, so the suggestion is capped just below price — a new position here starts on a very tight leash. Consider whether to enter at all."
                         : "."}
                     </p>
                   )}
@@ -444,9 +363,9 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
               )}
 
               {/* Payoff estimate — entry context only; irrelevant when exiting.
-                  Shares-primary shows the covered-call economics (cost + yield);
-                  legacy shows LEAP extrinsic to cover + weeks-to-income-positive. */}
-              {showPayoff && (sharesMode ? (
+                  The covered-call economics: what the shares cost and what a week
+                  of premium on them is worth. */}
+              {showPayoff && (
                 <>
                   <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-slate-950 p-3 text-center">
                     <div>
@@ -467,27 +386,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                     {sharesEntry ? " You'll sell the covered call as the next step (Sell covered call)." : ""}
                   </p>
                 </>
-              ) : (
-                <>
-                  <div className="mt-3 grid grid-cols-3 gap-2 rounded-lg border border-slate-800 bg-slate-950 p-3 text-center">
-                    <div>
-                      <div className="text-[10px] uppercase tracking-wide text-slate-500">LEAP extrinsic to cover</div>
-                      <div className="text-base font-semibold text-amber-300">{bigDollars(coverTotal)}</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] uppercase tracking-wide text-slate-500">Est. weekly juice</div>
-                      <div className="text-base font-semibold text-emerald-300">{bigDollars(weeklyJuice)}</div>
-                    </div>
-                    <div>
-                      <div className="text-[10px] uppercase tracking-wide text-slate-500">≈ income-positive</div>
-                      <div className="text-base font-semibold text-slate-100">{weeks != null ? `~${weeks} wk` : "—"}</div>
-                    </div>
-                  </div>
-                  <p className="mt-1 text-[11px] text-slate-500">
-                    Rough estimate: weekly extrinsic ÷ LEAP extrinsic, {chain.payoff?.cover_basis}. Assumes the short is rolled at a similar credit each week.
-                  </p>
-                </>
-              ))}
+              )}
 
               <div className="mt-3 flex items-center justify-end gap-2">
                 <button onClick={onClose} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
@@ -502,7 +401,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                     ? "Executing…"
                     : `${action === "open_position_atomic" || action === "buy_shares"
                         ? "Open position"
-                        : `Execute ${labels[action]?.split(" ")[0] || ""}`} & log${tradeMode === "paper" ? " (paper)" : ""}`}
+                        : `Execute ${ACTION_LABELS[action]?.split(" ")[0] || ""}`} & log${tradeMode === "paper" ? " (paper)" : ""}`}
                 </button>
               </div>
               {execErr && <p className="mt-2 text-right text-xs text-rose-400">{execErr}</p>}
@@ -510,7 +409,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
 
             {/* Shares base — the 100-share long leg (shares-primary). No strike to
                 pick; you buy at market, so this is a plain cost summary. */}
-            {sharesMode && sharesEntry && (
+            {sharesEntry && (
               <div className="rounded-lg border border-sky-700 bg-slate-950 p-3">
                 <div className="mb-1 flex items-center justify-between">
                   <h3 className="text-sm font-semibold text-slate-200">Shares base (buy at market)</h3>
@@ -526,66 +425,6 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
               </div>
             )}
 
-            {/* LEAP — pick a strike in the preferred delta band (entry only).
-                Retired in shares-primary mode; only shown for legacy LEAP handling. */}
-            {!mgmt && !sharesMode && (
-            <div className={`rounded-lg border bg-slate-950 p-3 ${isEntry ? "border-sky-700" : "border-slate-800"}`}>
-              <div className="mb-2 flex items-center justify-between">
-                <h3 className="text-sm font-semibold text-slate-200">LEAP (pick a strike)</h3>
-                {leap?.delta_band && (
-                  <span className="text-xs text-slate-500">
-                    target delta {fmt(leap.delta_band[0], 2)}–{fmt(leap.delta_band[1], 2)}
-                    {leap.expiration ? ` · exp ${leap.expiration}` : ""}
-                    {leap.dte != null ? ` (${leap.dte} DTE)` : ""}
-                  </span>
-                )}
-              </div>
-              {leap?.strikes?.length ? (
-                <>
-                  <div className="grid grid-cols-[auto_repeat(5,1fr)] gap-2 text-xs uppercase tracking-wide text-slate-500">
-                    <span className="w-6" /><span>Strike</span><span>Delta</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
-                  </div>
-                  {leap.strikes.map((s) => {
-                    const inBand = leap.delta_band && s.delta != null
-                      && Math.abs(s.delta) >= leap.delta_band[0] && Math.abs(s.delta) <= leap.delta_band[1];
-                    return (
-                      <label
-                        key={s.strike}
-                        className={`grid grid-cols-[auto_repeat(5,1fr)] items-center gap-2 rounded-lg px-1 py-1 ${
-                          s.strike === leapStrike ? "bg-emerald-500/10" : "hover:bg-slate-800/50"
-                        }`}
-                      >
-                        <input
-                          type="radio" name="leap-strike"
-                          checked={s.strike === leapStrike}
-                          onChange={() => setLeapStrike(s.strike)}
-                          className="accent-emerald-400"
-                        />
-                        <span className="text-sm font-semibold tabular-nums text-slate-100">
-                          {fmt(s.strike, 2)}
-                          {s.suggested && <span className="ml-1 text-[10px] font-normal text-emerald-400">SUGGESTED</span>}
-                        </span>
-                        <span className={`text-sm tabular-nums ${inBand ? "text-emerald-300" : "text-slate-400"}`}>{fmt(s.delta, 2)}</span>
-                        <span className="text-sm tabular-nums text-slate-300">{dollars(s.bid)} / {dollars(s.ask)}</span>
-                        <span className="text-sm tabular-nums text-slate-400">{dollars(s.mark)}</span>
-                        <span className="text-sm tabular-nums text-emerald-300">{dollars(s.extrinsic)}</span>
-                      </label>
-                    );
-                  })}
-                  {chosenLeap && (
-                    <div className="pt-1 text-xs text-slate-500">
-                      Selected {fmt(chosenLeap.strike, 2)}
-                      {chosenLeap.expiration ? ` exp ${chosenLeap.expiration}` : ""} · delta {fmt(chosenLeap.delta, 2)} · IV{" "}
-                      {chosenLeap.volatility != null ? `${fmt(chosenLeap.volatility, 1)}%` : "—"}
-                      {chosenLeap.extrinsic != null && qtyNum > 0
-                        ? ` · total extrinsic ${bigDollars(totalDollars(chosenLeap.extrinsic, qtyNum))}` : ""}
-                    </div>
-                  )}
-                </>
-              ) : <p className="text-sm text-slate-400">No suitable LEAP strikes found.</p>}
-            </div>
-            )}
-
             {/* Open short buyback (only when rolling/closing) */}
             {openShort && (
               <div className={`rounded-lg border bg-slate-950 p-3 ${action === "close_short" ? "border-sky-700" : "border-slate-800"}`}>
@@ -597,27 +436,6 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
               </div>
             )}
 
-            {/* Existing LEAP sell-to-close (when exiting/rolling the long) */}
-            {action === "close_leap" && existingLeap && (
-              <div className="rounded-lg border border-sky-700 bg-slate-950 p-3">
-                <h3 className="mb-2 text-sm font-semibold text-slate-200">Existing LEAP (sell to close)</h3>
-                <div className="text-sm text-slate-300">
-                  {fmt(existingLeap.strike, 2)} · {existingLeap.contracts}c
-                  {existingLeap.current_dte != null ? ` · ${existingLeap.current_dte} DTE` : ""} · est. sell{" "}
-                  <span className="font-semibold text-slate-100">{dollars(existingLeap.current_mark)}/sh</span>
-                </div>
-                <div className="mt-1 text-xs text-slate-500">
-                  Cost basis {bigDollars(existingLeap.cost_basis)}
-                  {existingLeap.current_mark != null && existingLeap.contracts != null && (
-                    <> · est. proceeds {bigDollars(totalDollars(existingLeap.current_mark, existingLeap.contracts))}</>
-                  )}
-                  {existingLeap.extrinsic_remaining != null && (
-                    <> · {bigDollars(existingLeap.extrinsic_remaining)} extrinsic still unrecovered</>
-                  )}
-                </div>
-              </div>
-            )}
-
             {/* Weekly short — this week's boundary AND next week's. The comparison
                 week (full DTE) is the default so the Level-5 juice gate prices
                 against a real week's premium, not a 1–2 DTE stub. */}
@@ -625,7 +443,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
             <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" || action === "open_position_atomic" || action === "buy_shares" ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">
-                  {sharesMode ? "Weekly covered call" : "Weekly short call"} ({weekly?.posture || "…"}-suggested)
+                  Weekly covered call ({weekly?.posture || "…"}-suggested)
                   {sharesEntry && <span className="ml-1 text-xs font-normal text-slate-500">— sell after the shares fill</span>}
                 </h3>
                 {weekly && (
