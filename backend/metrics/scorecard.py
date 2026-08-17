@@ -728,7 +728,20 @@ def split_by_affordability(rows: list[dict], state: dict) -> tuple[list[dict], l
     return keep, priced_out, bar
 
 
-def _compute_scorecard(names: list[str], price_overrides: dict | None = None) -> dict:
+def _current_regime_color() -> str | None:
+    """The invisible market regime for a sweep. Read ONCE per sweep (and once
+    more to key the day cache — it is itself memoized, so that is not a second
+    compute). Best-effort: a regime failure degrades to None, and the composed
+    verdict then never emits READY."""
+    import screening
+    try:
+        return screening.regime().get("status")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _compute_scorecard(names: list[str], price_overrides: dict | None = None,
+                       regime_color: str | None = None) -> dict:
     import logging_handler as log
     import screening  # local imports avoid any import-time cycle
     import weeklies
@@ -744,13 +757,11 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_frames = {e: data_handler.get_daily(e) for e in etfs}
 
-    # The invisible market regime — ONE read for the whole sweep — feeds the composed
-    # scan verdict (a RED regime blocks every row). Best-effort: a regime failure
-    # degrades regime_color to None (composed verdict then never emits READY).
-    try:
-        regime_color = screening.regime().get("status")
-    except Exception:  # noqa: BLE001
-        regime_color = None
+    # The regime feeds the composed scan verdict (a RED regime blocks every row).
+    # Resolved by the caller on the cached path so it can key the day cache; read
+    # here for a direct/subset call.
+    if regime_color is None:
+        regime_color = _current_regime_color()
 
     # State is loaded ONCE for the whole sweep (schema v21) and threaded into the
     # profile resolution, which uses it for BOTH the assignment lookup and the
@@ -786,7 +797,8 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None) ->
     return {"as_of": log.utcnow(), "results": rows}
 
 
-def scorecard(tickers: list[str] | None = None, price_overrides: dict | None = None) -> dict:
+def scorecard(tickers: list[str] | None = None, price_overrides: dict | None = None,
+              force: bool = False) -> dict:
     """Build the scorecard for a list of tickers (default: every holding across
     every sector). Warms the cache for SPY + sector ETFs + the tickers in one
     parallel batch, then computes a row each — reusing the existing 4-level entry
@@ -795,16 +807,45 @@ def scorecard(tickers: list[str] | None = None, price_overrides: dict | None = N
     carries its sector) and sorted by sector then ticker.
 
     The full-universe sweep (tickers=None) is expensive (indicator math across
-    every holding) and purely market-driven — it doesn't depend on the
-    operator's own account state — so it's memoized with screening's short-TTL
-    cache. This matters because the Scan tab mounts both the Scorecard panel
-    and the Ready-to-Enter panel, which would otherwise each trigger their own
-    full sweep concurrently on every page load. An explicit ticker subset
-    (e.g. one ticker's entry snapshot at trade time) always computes fresh."""
+    every holding) and purely market-driven — it doesn't depend on the operator's
+    own account state — so it is cached at two levels:
+
+      * ``scan_cache`` (disk, one sweep per DATA EPOCH — see that module). This is
+        what makes the universe scan run ~twice a day instead of dozens of times,
+        and what lets a restarted machine serve the last sweep instead of
+        recomputing it on the request path.
+      * screening's short-TTL memo in front of it, so the Scan tab mounting both
+        the Scorecard and Ready-to-Enter panels doesn't even re-read/parse the
+        cache file twice on one page load.
+
+    ``force=True`` bypasses both — the operator's Rescan button, which must always
+    be able to get fresh numbers on demand.
+
+    An explicit ticker subset (e.g. one ticker's entry snapshot at trade time)
+    always computes fresh."""
     if tickers:
         names = [t.strip().upper() for t in tickers if t.strip()]
         return _compute_scorecard(names, price_overrides=price_overrides)
 
+    import scan_cache
     import screening  # local import avoids any import-time cycle
     names = sector_data.all_tickers()
-    return screening._cached("scorecard:full", lambda: _compute_scorecard(names))
+
+    def _sweep():
+        # Resolved before the cache read so the regime is part of the key: a
+        # regime flip must re-scan rather than serve verdicts composed against
+        # the old tape.
+        regime_color = _current_regime_color()
+        if not force:
+            hit = scan_cache.load(names, regime_color)
+            if hit is not None:
+                return hit
+        fresh = _compute_scorecard(names, regime_color=regime_color)
+        scan_cache.store(names, regime_color, fresh)
+        return dict(fresh, cached=False, scan_day=scan_cache.scan_day())
+
+    if force:
+        out = _sweep()
+        screening.prime_cache("scorecard:full", out)  # keep the memo consistent
+        return out
+    return screening._cached("scorecard:full", _sweep)

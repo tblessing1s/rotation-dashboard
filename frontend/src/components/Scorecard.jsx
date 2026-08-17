@@ -283,9 +283,19 @@ function sortRows(rows, sort) {
   });
 }
 
+// A row refreshed in an EARLIER session still carries its own stamp in the cached
+// sweep (the server writes refreshed rows back), so the indicator survives a
+// reload instead of silently reverting to looking like the rest of the sweep.
+function rowRefreshedAt(row) {
+  return row?.refreshed_at
+    ? { at: row.refreshed_at, source: row.price_source }
+    : undefined;
+}
+
 // A compact ↻ that force-pulls a live quote (one ticker, or a whole sector),
-// bypassing the daily cache. Spins while in flight; turns emerald once a name
-// has been refreshed this session, and red with a tooltip if the pull failed.
+// bypassing the daily sweep. Spins while in flight; turns emerald once a name has
+// been refreshed (this session or persisted from an earlier one), and red with a
+// tooltip if the pull failed.
 function RefreshButton({ onClick, busy, error, title, refreshedAt }) {
   const source = refreshedAt?.source;
   const stale = source === "cache";
@@ -491,6 +501,11 @@ function sortBench(rows) {
 }
 
 export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFocusHandled }) {
+  // MUST be declared before the useApi below: the fetch is keyed on it, and a
+  // `const` read from the deps array before its declaration is a temporal-dead-zone
+  // ReferenceError that throws on every render (the app has no error boundary, so
+  // that blanks the whole page rather than just this card).
+  const [showPricedOut, setShowPricedOut] = React.useState(false);
   const { data, error, loading, reload } = useApi(
     () => api.scorecard(null, { includeUnaffordable: showPricedOut }),
     [refreshKey, showPricedOut]);
@@ -498,7 +513,6 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
   const [sectorFilter, setSectorFilter] = React.useState("ALL");
   const [weekliesOnly, setWeekliesOnly] = React.useState(true);
-  const [showPricedOut, setShowPricedOut] = React.useState(false);
   const [sort, setSort] = React.useState({ key: "verdict", dir: "asc" });
   const [open, setOpen] = React.useState({});
   const rowRefs = React.useRef({});
@@ -735,7 +749,7 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
                 onToggle={() => setOpen((o) => ({ ...o, [row.ticker]: !o[row.ticker] }))}
                 onRefresh={() => refreshTicker(row.ticker)}
                 refreshing={!!busy[row.ticker]}
-                refreshedAt={refreshedAt[row.ticker]}
+                refreshedAt={refreshedAt[row.ticker] || rowRefreshedAt(row)}
                 refreshError={refreshErr[row.ticker]}
               />
             ))}

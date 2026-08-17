@@ -102,9 +102,13 @@ def api_scan_refresh():
     """Start a full-universe scan in a detached server-side job (deduped — one at
     a time) and return its status immediately. Because the sweep runs off-request,
     it keeps going even if the client tab is backgrounded, switched, or closed;
-    the client polls /api/scan/status and reads results warm when it returns."""
+    the client polls /api/scan/status and reads results warm when it returns.
+
+    FORCED: this is the operator's Rescan button, so it bypasses the day cache. The
+    scheduled warm-ups do not force — they only fill an epoch that has no sweep yet
+    (see scan_cache), which is what keeps the universe sweep to ~twice a day."""
     try:
-        return jsonify(screening.start_background_scan())
+        return jsonify(screening.start_background_scan(force=True))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

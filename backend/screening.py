@@ -27,12 +27,19 @@ _results_guard = threading.Lock()
 
 
 def clear_cache() -> None:
-    """Drop memoized scan results — called on a demo/live mode switch so the next
-    scan recomputes against the newly active data source."""
+    """Drop memoized scan results — called on a demo/live mode switch, and when the
+    universe changes, so the next scan recomputes against the newly active data
+    source. Clears the persisted day cache too: a sweep on the old universe (or the
+    other data source) must never be replayed for the new one."""
     _results.clear()
+    try:
+        import scan_cache
+        scan_cache.clear()
+    except Exception:  # noqa: BLE001 — clearing a cache must never break its caller
+        pass
 
 
-def warm_scan_cache() -> dict:
+def warm_scan_cache(force: bool = False) -> dict:
     """Pre-compute the full-universe scan so the operator's first Scan of the day
     is served warm instead of triggering a cold ~500-name provider fetch and
     indicator sweep on the request path.
@@ -61,7 +68,7 @@ def warm_scan_cache() -> dict:
         # The scorecard sweep is the heaviest Scan panel (Ready-to-Enter runs it);
         # memoize it here too so its first request is a cache hit.
         from metrics import scorecard as scorecard_metrics
-        scorecard_metrics.scorecard(None)
+        scorecard_metrics.scorecard(None, force=force)
         return {"ok": True}
     except Exception as e:  # noqa: BLE001 — a warm-up must never break its caller
         return {"ok": False, "error": str(e)}
@@ -87,8 +94,8 @@ def _now_iso() -> str:
     return datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
 
 
-def _run_background_scan() -> None:
-    result = warm_scan_cache()
+def _run_background_scan(force: bool = False) -> None:
+    result = warm_scan_cache(force=force)
     with _scan_guard:
         _scan_state.update(
             status="done" if result.get("ok") else "error",
@@ -97,7 +104,7 @@ def _run_background_scan() -> None:
         )
 
 
-def start_background_scan() -> dict:
+def start_background_scan(force: bool = False) -> dict:
     """Kick a full-universe scan in a detached daemon thread if one isn't already
     running, and return the status immediately. Idempotent: a concurrent call
     while a scan is in flight just returns the current status (one scan at a
@@ -110,15 +117,36 @@ def start_background_scan() -> dict:
         _scan_state.update(status="running", started_at=_now_iso(),
                            finished_at=None, error=None)
         _scan_thread = threading.Thread(target=_run_background_scan,
+                                        kwargs={"force": force},
                                         name="scan-runner", daemon=True)
         _scan_thread.start()
         return dict(_scan_state, running=True, fresh=_scan_fresh())
 
 
 def _scan_fresh() -> bool:
-    """True when the memoized full-universe sweeps are warm (results available
-    without a recompute) — i.e. a returning client can render immediately."""
-    return peek_cached("scorecard:full", max_age=_RESULT_TTL) is not None
+    """True when a full-universe sweep is available WITHOUT recomputing — i.e. a
+    returning client can render immediately.
+
+    Checks the day cache as well as the in-process memo. That matters twice over:
+    a restarted machine has an empty memo but a perfectly good sweep on disk, and
+    the Scan tab auto-kicks a (forced) rescan whenever this reads false — so
+    counting only the 5-minute memo would force a full sweep every time the tab
+    was opened after a few idle minutes, which is exactly what the day cache is
+    meant to stop."""
+    if peek_cached("scorecard:full", max_age=_RESULT_TTL) is not None:
+        return True
+    return _day_cache_status()["warm"]
+
+
+def _day_cache_status() -> dict:
+    """This epoch's disk-cache state, or a cold answer if anything goes wrong."""
+    try:
+        import scan_cache
+        from metrics import scorecard as scorecard_metrics
+        return scan_cache.status(sector_data.all_tickers(),
+                                 scorecard_metrics._current_regime_color())
+    except Exception:  # noqa: BLE001 — a status read must never break the poll
+        return {"warm": False, "scan_day": None, "scanned_at": None}
 
 
 def scan_status() -> dict:
@@ -128,7 +156,13 @@ def scan_status() -> dict:
         running = _scan_thread is not None and _scan_thread.is_alive()
         st = dict(_scan_state)
     st["running"] = running
-    st["fresh"] = _scan_fresh()
+    day = _day_cache_status()
+    st["fresh"] = running or _scan_fresh()
+    # When the universe was actually last swept (vs. when this process last
+    # returned a cached copy), so the UI can say so instead of implying the whole
+    # universe is re-scanned on every visit.
+    st["scanned_at"] = day["scanned_at"]
+    st["scan_day"] = day["scan_day"]
     return st
 
 
@@ -144,6 +178,13 @@ def peek_cached(key: str, max_age: float | None = None):
     if max_age is not None and time.time() - hit[0] > max_age:
         return None
     return hit[1]
+
+
+def prime_cache(key: str, value) -> None:
+    """Seed the memo with an already-computed result. Used after a FORCED sweep so
+    the short-TTL memo can't immediately serve back the stale value the force was
+    meant to replace."""
+    _results[key] = (time.time(), value)
 
 
 def _cached(key: str, fn, ttl: int = _RESULT_TTL, store_if=None):

@@ -142,6 +142,16 @@ def _merge_seed(sectors: list[dict], removed: set) -> bool:
 def _clear_caches() -> None:
     _load.cache_clear()
     stock_to_sector.cache_clear()
+    # A changed universe changes what a full sweep MEANS. The day cache keys on the
+    # ticker list so it would miss on its own, but the short-TTL memo in front of it
+    # would keep serving the old universe's rows for minutes — drop both now so an
+    # added/removed name shows up on the next Scan. Local import: screening imports
+    # this module, so a top-level import here would be a cycle.
+    try:
+        import screening
+        screening.clear_cache()
+    except Exception:  # noqa: BLE001 — cache invalidation must never break an edit
+        pass
 
 
 @lru_cache(maxsize=1)

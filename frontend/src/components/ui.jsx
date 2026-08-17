@@ -342,3 +342,68 @@ export function ErrorState({ error, onRetry, className = "" }) {
     </div>
   );
 }
+
+// Containment for a RENDER-time throw. React tears the whole tree down when a
+// component throws and nothing catches it — one bad card blanks the entire app,
+// nav and all, with no clue why (this is exactly how a temporal-dead-zone read in
+// Scorecard made the Scan tab a black screen). A boundary around each tab turns
+// that into a single broken card: the rest of the app keeps working and the
+// operator can read the error and move on.
+//
+// Must be a class — there is no hook equivalent of componentDidCatch. Note the
+// limits: this catches errors thrown while RENDERING its subtree, not ones thrown
+// in event handlers, timers, or async callbacks (those never break the tree, and
+// the fetch paths already surface through ErrorState).
+//
+// `label` names the area in the fallback. Give the element a `key` that changes
+// with the view (tab name, ticket id) so navigating away remounts it and clears a
+// stuck error; "Try again" also remounts the subtree in place.
+export class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null, nonce: 0 };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    // The fallback shows the message only; the stack belongs in the console so a
+    // bug like this is one glance to diagnose instead of a bisect.
+    console.error(`[${this.props.label || "UI"}] render error:`, error, info?.componentStack);
+  }
+
+  render() {
+    const { error, nonce } = this.state;
+    if (!error) {
+      // Keyed so "Try again" throws away the failed subtree's state rather than
+      // re-rendering straight back into the same broken condition.
+      return <React.Fragment key={nonce}>{this.props.children}</React.Fragment>;
+    }
+    const { label } = this.props;
+    return (
+      <Card title={label ? `${label} hit an error` : "Something went wrong"}>
+        <p className="text-sm text-rose-400">{String(error?.message || error)}</p>
+        <p className="mt-1 text-xs text-slate-500">
+          This section failed to render — the rest of the dashboard is unaffected, and
+          nothing was sent to your broker. The full stack is in the browser console.
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button
+            onClick={() => this.setState((s) => ({ error: null, nonce: s.nonce + 1 }))}
+            className="rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-200 hover:bg-slate-800"
+          >
+            Try again
+          </button>
+          <button
+            onClick={() => window.location.reload()}
+            className="rounded-md border border-slate-700 px-3 py-1 text-xs text-slate-400 hover:bg-slate-800"
+          >
+            Reload page
+          </button>
+        </div>
+      </Card>
+    );
+  }
+}

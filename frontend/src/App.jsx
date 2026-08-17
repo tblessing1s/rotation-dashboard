@@ -1,5 +1,6 @@
 import React from "react";
 import { api } from "./api.js";
+import { ErrorBoundary } from "./components/ui.jsx";
 import Navbar from "./components/Navbar.jsx";
 import Login from "./components/Login.jsx";
 import SchwabStatus from "./components/SchwabStatus.jsx";
@@ -192,6 +193,12 @@ export default function App() {
               onAlertsClick={() => goToTab("Settings")} />
       <main className="mx-auto max-w-7xl px-3 py-4 sm:px-4 sm:py-6">
         <SchwabStatus demo={demo} />
+        {/* One boundary around the tab content, keyed on the view: a render throw
+            inside a tab (or the order ticket) degrades to a single error card
+            instead of tearing down the whole app, and the nav above stays live so
+            switching tabs remounts the boundary and clears the error. */}
+        <ErrorBoundary key={execute ? `execute:${execute.id}` : `tab:${tab}`}
+                       label={execute ? "The order ticket" : tab}>
         {execute ? (
           <ExecuteTab
             key={execute.id}
@@ -249,6 +256,7 @@ export default function App() {
             )}
           </>
         )}
+        </ErrorBoundary>
       </main>
       <footer
         className="mx-auto max-w-7xl px-4 pb-8 pt-4 text-center text-xs text-slate-600"

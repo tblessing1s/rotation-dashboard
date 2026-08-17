@@ -74,11 +74,20 @@ export default function ScanProgress({ onComplete }) {
   // Idle/done: a slim confirmation line with a manual rescan.
   return (
     <div className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-1.5 text-xs text-slate-500">
-      <span>
+      <span
+        title={st.scanned_at
+          ? "The full universe is swept once per data epoch (once on the prior session's closing bars, once after today's close) and cached — opening this tab replays that sweep instead of re-running it. Rescan forces a fresh one."
+          : undefined}
+      >
         {st.fresh ? "Universe scan ready" : "No recent scan"}
-        {st.finished_at && ` · updated ${st.finished_at.slice(11, 16)}`}
+        {/* When the sweep actually ran — not when this process last served a
+            cached copy of it, which is what finished_at means. */}
+        {st.scanned_at
+          ? ` · swept ${st.scanned_at.slice(11, 16)}`
+          : st.finished_at ? ` · updated ${st.finished_at.slice(11, 16)}` : ""}
       </span>
-      <button onClick={rescan} className="rounded-md border border-slate-700 px-2 py-0.5 text-slate-300 hover:bg-slate-800">
+      <button onClick={rescan} title="Force a fresh full-universe sweep now"
+              className="rounded-md border border-slate-700 px-2 py-0.5 text-slate-300 hover:bg-slate-800">
         Rescan
       </button>
     </div>

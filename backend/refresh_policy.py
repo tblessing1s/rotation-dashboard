@@ -19,6 +19,7 @@ never dropped from it (live risk outranks a long candidate tail).
 """
 from __future__ import annotations
 
+import logging
 import os
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -28,6 +29,8 @@ import data_handler
 import logging_handler as log
 import maintenance
 import screening
+
+logger = logging.getLogger(__name__)
 
 ET = ZoneInfo("America/New_York")
 
@@ -159,8 +162,20 @@ def refresh_tickers(tickers: list[str]) -> dict:
         q = quotes.get(row.get("ticker"))
         if q:
             row["price_source"] = q.get("source")
+    # Rows are independent, so write these straight back into the day's cached
+    # sweep: the refreshed name stays refreshed across a reload, every other row
+    # is untouched, and tonight's full sweep overwrites the lot. Best-effort — a
+    # refresh must still return its rows if persisting them fails.
+    patched = 0
+    try:
+        import scan_cache
+        import sector_data as _sd
+        patched = scan_cache.patch_rows(_sd.all_tickers(),
+                                        scorecard_metrics._current_regime_color(), rows)
+    except Exception as e:  # noqa: BLE001 — persistence never breaks the refresh
+        logger.warning("could not persist refreshed rows (%s)", e)
     return {"tickers": names, "rows": rows, "count": len(names),
-            "as_of": sc.get("as_of"),
+            "as_of": sc.get("as_of"), "cached_rows_updated": patched,
             "quote_sources": sorted({q.get("source") for q in quotes.values() if q.get("source")})}
 
 

@@ -48,9 +48,11 @@ _last_reconcile: date | None = None
 # it ran. Rate-limited to RECONCILE_INTERVAL_MINUTES during market hours so the
 # minutes-based staleness clock has a cadence to be measured against.
 _last_interval_reconcile: datetime | None = None
-# Last time the full-universe scan cache was re-warmed on the interval cadence, so
-# the operator's Scan always reads a warm cache (SCAN_WARM_INTERVAL_MINUTES).
-_last_warm_scan: datetime | None = None
+# The scan day this process has already ensured a full-universe sweep for. The
+# sweep itself runs ONCE per trading day, outside trading hours: the scan day rolls
+# just after the close (scan_cache.SCAN_ROLL_ET), so the first tick past the roll
+# finds an empty cache and runs it on that session's final bars.
+_last_warm_scan_day: str | None = None
 
 
 def enabled() -> bool:
@@ -71,12 +73,24 @@ def recommendations_enabled() -> bool:
 
 
 def _warm_scan() -> None:
-    """Prime the full-universe scan cache so the first Scan of the day loads warm.
-    Best-effort: logged, never fatal to the tick or the process."""
+    """Run the day's full-universe sweep so the operator's Scan loads warm.
+
+    Never forces: when this scan day's sweep is already on disk the call
+    short-circuits to a cache read. Best-effort: logged, never fatal to the tick
+    or the process."""
     if not warm_scan_enabled():
         return
     try:
+        import scan_cache
         import screening
+        import sector_data
+        from metrics import scorecard as scorecard_metrics
+        # Cheap pre-check purely so the log says which happened; the sweep itself
+        # is idempotent per epoch either way.
+        if scan_cache.status(sector_data.all_tickers(),
+                             scorecard_metrics._current_regime_color())["warm"]:
+            logger.debug("this scan day's sweep is already cached; skipping")
+            return
         result = screening.warm_scan_cache()
         if result.get("ok"):
             logger.info("scan cache warmed")
@@ -86,29 +100,36 @@ def _warm_scan() -> None:
         logger.warning("scan cache warm-up failed: %s", e)
 
 
-def warm_scan_due(now: datetime, last: datetime | None,
-                  interval_min: float | None = None) -> bool:
-    """PURE: is an interval warm-scan due? True on market days/hours when the last
-    warm ran ≥ interval minutes ago (or never). Kept below the scorecard cache TTL
-    so the cache never ages out mid-session. Unit-testable without threads/clock."""
-    if not _market_hours(now):
-        return False
-    if interval_min is None:
-        interval_min = float(config.SCAN_WARM_INTERVAL_MINUTES)
-    if last is None:
-        return True
-    return (now - last).total_seconds() / 60.0 >= interval_min
+def warm_scan_due(now: datetime, last_day: str | None, current_day: str) -> bool:
+    """PURE: does this scan day still need its full-universe sweep? True when this
+    process hasn't already handled ``current_day``. The scan day rolls just after
+    the close, so the answer flips once a day, outside trading hours — never on an
+    interval. Unit-testable without threads/clock."""
+    return last_day != current_day
 
 
 def _maybe_warm_scan(now: datetime) -> None:
-    """Re-warm the full-universe scan cache on the SCAN_WARM_INTERVAL_MINUTES cadence
-    during market hours, so the cache never expires between the sparse alert slots
-    and the operator's Scan/Ready-to-Enter always reads warm (no ~10s recompute on
-    the request path). Best-effort — logged, never fatal to the tick."""
-    global _last_warm_scan
-    if not warm_scan_enabled() or not warm_scan_due(now, _last_warm_scan):
+    """Ensure the CURRENT scan day has a full-universe sweep — at most one per day.
+
+    Normally this fires on the first tick after the post-close roll and sweeps that
+    session's final bars, outside trading hours. It is also the recovery path: if
+    the machine was stopped at the roll (Fly auto-stops), the next tick notices the
+    day has no sweep and runs it, which is far better than handing the operator a
+    cold ~25s sweep on the request path. When the day's sweep is already on disk —
+    including one written by a previous process — this records the day and does
+    nothing. Best-effort: logged, never fatal to the tick."""
+    global _last_warm_scan_day
+    if not warm_scan_enabled():
         return
-    _last_warm_scan = now
+    try:
+        import scan_cache
+        day = scan_cache.scan_day(now)
+    except Exception as e:  # noqa: BLE001 — never break the tick on a clock/calendar read
+        logger.warning("could not resolve the scan day: %s", e)
+        return
+    if not warm_scan_due(now, _last_warm_scan_day, day):
+        return
+    _last_warm_scan_day = day
     _warm_scan()
 
 
