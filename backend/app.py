@@ -1864,6 +1864,15 @@ def auth_schwab_callback():
 def serve_frontend(path: str = ""):
     if path and os.path.exists(os.path.join(DIST_DIR, path)):
         return send_from_directory(DIST_DIR, path)
+    # A BUILD ASSET that isn't on disk means the caller is running a stale
+    # index.html: Vite content-hashes these filenames, so the only way to ask for
+    # one that doesn't exist is to be holding a document from an older deploy.
+    # Falling through to the SPA catch-all would hand back index.html with a 200
+    # and an HTML content-type, which the browser can neither execute nor
+    # diagnose. A real 404 lets it fail honestly (and lets the client's
+    # stale-build check below recover the session).
+    if path.startswith("assets/"):
+        return jsonify({"error": f"stale build asset '{path}' — reload the page"}), 404
     index = os.path.join(DIST_DIR, "index.html")
     if os.path.exists(index):
         return send_from_directory(DIST_DIR, "index.html")

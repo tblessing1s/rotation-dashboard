@@ -769,10 +769,13 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
 // it is filtered out of the scan by default. This states the bar and what it
 // excluded, because a name absent because it is too expensive today is a different
 // fact from a name that failed the gate, and neither should vanish silently.
+// Which ceiling produced the number, so the bar explains itself. With no
+// per-position cap set (the default) this figure IS the Overview's Dry Powder,
+// and the reason names whichever half of that calculation is smaller.
 const BINDING_LABEL = {
   cash_above_reserve: "cash above your defensive reserve",
   capital_cap: "the deployed-capital cap",
-  per_position_cap: "the per-position lot cap",
+  per_position_cap: "the per-position lot cap you set",
 };
 
 function AffordabilityBar({ affordability, showPricedOut, onToggle }) {

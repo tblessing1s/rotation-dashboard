@@ -614,8 +614,9 @@ def capital_summary(state: dict) -> dict:
     # the scan filters against (schema v21). The tighter of two ceilings:
     #   * `deployable`   — the dry powder above, itself min(capital cap headroom,
     #                      cash above the defensive reserve);
-    #   * PER_POSITION_CAP_USD — the per-position lot-cost SIZE-BLOCK Level 5
-    #                      enforces (round_lot_size).
+    #   * PER_POSITION_CAP_USD — an OPTIONAL tighter per-position ceiling, OFF by
+    #                      default, so normally the dry powder alone binds and this
+    #                      number equals the Overview's Dry Powder figure.
     # Derived from the SAME inputs account_gate's cash_reserve / capital_limit /
     # round_lot_size checks use, so a name the scan shows can't be one the Execute
     # gate would then reject on size, and vice versa.
@@ -630,7 +631,8 @@ def capital_summary(state: dict) -> dict:
     # is the position_limit gate's job, and it already surfaces as a near-miss with
     # a path ("a position slot frees") — a full book should still show the pipeline
     # it will draw from, not an empty screen.
-    max_lot_cost = (round(min(deployable, config.PER_POSITION_CAP_USD), 2)
+    _cap = config.PER_POSITION_CAP_USD
+    max_lot_cost = (round(min(deployable, _cap) if _cap else deployable, 2)
                     if operating > 0 else None)
     return {
         "capital_deployed": deployed,

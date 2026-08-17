@@ -397,20 +397,27 @@ def evaluate(ticker: str, contracts: int | None = None,
          "after": round(after, 2), "max": config.MAX_DEPLOYED_CAPITAL}))
 
     # 2b) Round-lot SIZE-BLOCK (SHARES base, schema v20). A shares entry is round
-    #     lots only; block any underlying whose single 100-share lot cost exceeds
-    #     the per-position cap. No coded per-position dollar cap existed before the
-    #     migration (only book-wide MAX_DEPLOYED_CAPITAL); PER_POSITION_CAP_USD is a
-    #     PROPOSED_DEFAULT. Only appended for a SHARES entry — legacy callers keep
-    #     the exact prior check set. Missing spot degrades to pass (never a false block).
+    #     lots only, so the whole lot has to fit what can actually be deployed.
+    #     The ceiling is read from position_manager.capital_summary — the SAME
+    #     max_lot_cost the scan's affordability bar filters on — so a name the scan
+    #     shows can never be one this gate then rejects on size, and vice versa.
+    #     By default that ceiling IS the dry powder (PER_POSITION_CAP_USD is off);
+    #     setting the cap tightens both surfaces together. Only appended for a
+    #     SHARES entry — legacy callers keep the exact prior check set. An
+    #     unknown ceiling or missing spot degrades to pass (never a false block).
     if position_type == position_types.SHARES:
         lot_cost = round(float(spot) * config.SHARES_PER_LOT, 2) if spot else None
+        import position_manager as _pm
+        ceiling = _pm.capital_summary(state).get("max_lot_cost")
+        label = (f"100-share lot ≤ ${ceiling:,.0f} (dry powder)" if ceiling is not None
+                 else "100-share lot ≤ dry powder (not yet known)")
         checks.append(_check(
-            "round_lot_size",
-            f"100-share lot ≤ ${config.PER_POSITION_CAP_USD:,.0f} (SIZE-BLOCKED)",
-            lot_cost is None or lot_cost <= config.PER_POSITION_CAP_USD, True,
+            "round_lot_size", label,
+            lot_cost is None or ceiling is None or lot_cost <= ceiling, True,
             {"spot": spot, "shares_per_lot": config.SHARES_PER_LOT, "lot_cost": lot_cost,
-             "per_position_cap": config.PER_POSITION_CAP_USD,
-             "size_blocked": bool(lot_cost is not None and lot_cost > config.PER_POSITION_CAP_USD)}))
+             "max_lot_cost": ceiling, "per_position_cap": config.PER_POSITION_CAP_USD,
+             "size_blocked": bool(lot_cost is not None and ceiling is not None
+                                  and lot_cost > ceiling)}))
 
     # 3) Sector concentration — the filters funnel into the hottest sector.
     import sector_data

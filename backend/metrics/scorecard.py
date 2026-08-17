@@ -686,7 +686,11 @@ def affordability(state: dict) -> dict:
         # filter is therefore INACTIVE — not that nothing is affordable.
         "binding": (
             "unknown" if cap.get("max_lot_cost") is None
-            else "per_position_cap" if cap.get("per_position_cap", 0) <= cap.get("deployable", 0)
+            # An optional per-position cap only binds when it is SET and tighter
+            # than the dry powder; off by default, so normally the real ceiling is
+            # whichever half of the dry powder calculation is smaller.
+            else "per_position_cap" if (cap.get("per_position_cap") is not None
+                                        and cap["per_position_cap"] <= cap.get("deployable", 0))
             else "capital_cap" if cap.get("capital_headroom", 0) <= cap.get("cash_above_reserve", 0)
             else "cash_above_reserve"),
         "active": cap.get("max_lot_cost") is not None,

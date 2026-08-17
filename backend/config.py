@@ -436,11 +436,19 @@ SHARE_CAP = 500              # accumulate to 500 shares per stock, then rotate
 # 100-share round lot. Fragments below one round lot can never be sold against
 # (HARD_CFM_RULE) — see position_manager.covered_lots.
 SHARES_PER_LOT = 100
-# PROPOSED_DEFAULT — per-position lot-cost ceiling (SIZE-BLOCKED). No coded
-# per-position dollar cap existed before the migration (only the book-wide
-# MAX_DEPLOYED_CAPITAL); this blocks a high-priced name whose single 100-share
-# lot would blow the position envelope. Override via the PER_POSITION_CAP_USD env.
-PER_POSITION_CAP_USD = float(os.environ.get("PER_POSITION_CAP_USD") or 15000)
+# OPTIONAL per-position lot-cost ceiling (SIZE-BLOCKED) — OFF by default
+# (operator decision). The binding limit on a single 100-share lot is the DRY
+# POWDER itself, so the scan's affordability bar equals the deployable figure the
+# Overview shows rather than a second, tighter number the operator never set.
+# No coded per-position dollar cap existed before the shares migration either
+# (only the book-wide MAX_DEPLOYED_CAPITAL), so this restores that behavior.
+# Set PER_POSITION_CAP_USD to re-impose a tighter per-name ceiling; None = none.
+# NOTE: a lot you cannot afford is still blocked — by dry powder, the deployed-
+# capital cap and the defensive-reserve check, which is where affordability
+# belongs. What is gone is the extra fixed ceiling below those.
+PER_POSITION_CAP_USD = (float(os.environ["PER_POSITION_CAP_USD"])
+                        if (os.environ.get("PER_POSITION_CAP_USD") or "").strip()
+                        else None)
 # PROPOSED_DEFAULT — weekly juice adequacy floor for a SHARES base, denominated
 # against DEPLOYED SHARE CAPITAL (spot x shares) rather than LEAP cost.
 #

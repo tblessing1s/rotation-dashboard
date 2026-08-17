@@ -244,6 +244,56 @@ def test_round_lot_size_block(store, monkeypatch):
     assert "round_lot_size" in g["blocking_failures"]
 
 
+def test_no_per_position_cap_by_default_so_the_bar_is_the_dry_powder(store, monkeypatch):
+    """Operator decision: no separate per-position ceiling. The scan's
+    affordability bar must therefore equal the Dry Powder figure the Overview
+    shows — two numbers for the same thing is what made the Scan tab read $15,000
+    while the tile read $19,888."""
+    from metrics import scorecard as sc
+    monkeypatch.setattr(config, "PER_POSITION_CAP_USD", None)
+    st = {"positions": [], "metadata": {"operating_cash": 32888, "reserve_required": 13000}}
+    cap, bar = pm.capital_summary(st), sc.affordability(st)
+    assert cap["deployable"] == 19888.0
+    assert bar["max_lot_cost"] == cap["deployable"]
+    assert bar["binding"] != "per_position_cap"   # nothing tighter is claiming it
+
+
+def test_an_explicit_cap_still_tightens_both_surfaces(store, monkeypatch):
+    # The knob still works when set — and then it IS the binding reason.
+    from metrics import scorecard as sc
+    monkeypatch.setattr(config, "PER_POSITION_CAP_USD", 15000.0)
+    st = {"positions": [], "metadata": {"operating_cash": 32888, "reserve_required": 13000}}
+    bar = sc.affordability(st)
+    assert bar["max_lot_cost"] == 15000.0 and bar["binding"] == "per_position_cap"
+
+
+def test_gate_size_block_uses_the_same_ceiling_as_the_scan(store, monkeypatch):
+    """The gate must not reject on size a name the scan just showed as affordable.
+    Both read max_lot_cost from capital_summary, so they move together."""
+    from metrics import scorecard as sc
+    monkeypatch.setattr(config, "PER_POSITION_CAP_USD", None)
+    monkeypatch.setattr(account_gate, "juice_estimate", lambda t, df=None: _est(60.0))
+    g = account_gate.evaluate("CHEAP", contracts=1, leap_cost_per_share=30.0,
+                              weekly_extrinsic_per_share=1.0,
+                              position_type=position_types.SHARES)
+    chk = next(c for c in g["checks"] if c["id"] == "round_lot_size")
+    bar = sc.affordability(log.load_state())
+    assert chk["detail"]["max_lot_cost"] == bar["max_lot_cost"]
+
+
+def test_a_lot_beyond_the_dry_powder_is_still_blocked(store, monkeypatch):
+    # Removing the fixed cap must NOT make an unaffordable lot enterable — dry
+    # powder is still a real ceiling, it is just the only one.
+    monkeypatch.setattr(config, "PER_POSITION_CAP_USD", None)
+    monkeypatch.setattr(account_gate, "juice_estimate", lambda t, df=None: _est(9_000.0))
+    g = account_gate.evaluate("PRICEY", contracts=1, leap_cost_per_share=100.0,
+                              weekly_extrinsic_per_share=3.0,
+                              position_type=position_types.SHARES)
+    chk = next(c for c in g["checks"] if c["id"] == "round_lot_size")
+    assert chk["pass"] is False and chk["detail"]["size_blocked"] is True
+    assert "round_lot_size" in g["blocking_failures"]
+
+
 def test_round_lot_size_block_passes_cheap_lot(store, monkeypatch):
     monkeypatch.setattr(config, "PER_POSITION_CAP_USD", 15000.0)
     monkeypatch.setattr(account_gate, "juice_estimate", lambda t, df=None: _est(60.0))
