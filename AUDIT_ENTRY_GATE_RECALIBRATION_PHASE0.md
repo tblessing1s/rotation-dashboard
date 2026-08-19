@@ -280,3 +280,75 @@ Other gate-related fixtures:
 
 **Phase 0 complete. HARD STOP — awaiting explicit approval before Phase 1.**
 No implementation code written. No constants changed. No files modified other than this audit document.
+
+---
+
+# APPENDIX — Phase 1 resolutions
+
+Added after Phase 1 was approved and implemented. The findings above are the
+Phase 0 record and are left as written; this appendix records how the open
+questions were resolved and which Phase 0 speculation the implementation
+disproved.
+
+## Questions resolved
+
+Phase 1 was approved without answers to Q1–Q9, so each was resolved the way the
+spec's own constraints imply, and every resolution is recorded in the CHANGELOG.
+
+| Q | Resolution |
+|---|---|
+| **Q1** — which engine | **Both.** The spec says "at the symbol level", in explicit contrast to the market level which it excludes. Both symbol engines carry SAR, so both carry the defect. `stock_lights.verdict` is edited once and serves both, as it already did. |
+| **Q2** — one constant or two | **One** — `config.SYM_MIN_GREEN_LIGHTS`. The rule is one rule; two constants would let the engines silently diverge on the thing the change is about. |
+| **Q3** — L3 ATR/IVR veto | **Out of scope.** Not named in the spec, and "DO NOT retune any constant not named in this spec" governs. Consequence recorded in the CHANGELOG: the Level-4 relaxation is partial for IVR ≥ 90 names. |
+| **Q4** — proposed `suitability` | **No.** `suitability` is a different lens (stock-momentum, regime-unaware) with its own thresholds; forking it was not asked for. The Scan/recommendation disagreement during shadow is accepted and noted. |
+| **Q5** — ruleset in the entry snapshot | **Not added.** `entry_context` freezes what the gate said; with `GATE_RULESET` defaulting to legacy and flipping being a deliberate human act, stamping it is a change to the immutable snapshot schema that this work item does not need. Worth doing *before* authority is flipped. |
+| **Q6** — log semantics | **Extended in place**, schema 2, append-per-run. `latest_before` filters strictly on `date <` and is unaffected; retention moved from record-count to distinct-date so multi-run days can't shorten the window. Test coverage added for both. |
+| **Q7** — L5 capture | Recorded as `{"pass": None, "note": "not_evaluated"}`. Evaluating Level 5 per swept name would mean a state load and a potential live cash resolution per name on a ~500-name sweep. Unevaluated is stated, never guessed. |
+| **Q8** — juice floor | **Not re-armed** (§5 forbids touching it). §2 therefore ships with no armed downstream income constraint. Recorded prominently in the CHANGELOG as a known consequence. |
+| **Q9** — `scan_id` | **Added.** The nightly sweep passes its memoized `as_of` as the run identity; an omitted `scan_id` defaults to a microsecond-precision timestamp so two runs can never collide into one record. |
+
+## Phase 0 speculation the implementation disproved
+
+**R5 (fixture flip risk) does not materialize.** §7 flagged that the `ivr=10.0`
+assertions in `test_stock_lights.py:103` and `test_dividend_profile.py:124` have
+no veto backstop and could flip under a 3-of-4 rule, and noted the fixture had not
+been run to determine the actual green count. It has been now:
+
+```
+xlk_july6_rollover last bar: greens=0, insufficient=False
+  close_vs_ma red · fast_vs_slow red · sar red · momentum red
+  core_green=False → RED under BOTH rulesets
+```
+
+All four lights are red, so the mandatory core fails and the proposed rule is
+strictly unable to admit the fixture — with the ATR/IVR veto armed or disarmed.
+Both existing assertions hold unchanged, and `test_gate_ruleset.py` pins this as a
+measured fact rather than an assumption.
+
+## Spec inconsistencies found while implementing
+
+The prompt's SYM vote matrix (Tests §2) contradicts the prompt's own normative
+formulas (Phase 1 §1) in two cells. The formulas were implemented as written,
+since the legacy rule is pinned by regression and cannot be changed:
+
+| Spec test | Spec says | Actual, per the formulas |
+|---|---|---|
+| (a) 4/4 green | GREEN both | ✅ GREEN both |
+| (b) 3/4, core passing, SAR red | legacy YELLOW / proposed GREEN | ✅ as specified |
+| (c) 3/4, core **failing** | RED both | legacy **YELLOW** / proposed RED — legacy has no core concept, so a core-failing 3/4 is still exactly 3 green. The proposed rule is *stricter* here, not looser. |
+| (d) 2/4 | RED both | Depends on the core: core failing → RED both (as specified); core green → legacy RED / proposed **YELLOW**, because the formula makes `SYM_MIN_GREEN_LIGHTS - 1` the YELLOW band. YELLOW is never enterable under either ruleset, so this moves the displayed tier, never entry eligibility. |
+
+Both readings of (d) are asserted in `test_gate_ruleset.py`.
+
+## Verification
+
+- Full backend suite: **1168 passed**, 12 failed — the same 12 that fail on the
+  unmodified tree in this container (`cryptography`/`_cffi_backend` is broken here,
+  producing a `pyo3_runtime.PanicException`). Baseline confirmed by stashing the
+  change and re-running. No regressions.
+- Under `CFM_GATE_RULESET=proposed` the **only** additional failure across the
+  whole suite is `test_5a_default_ruleset_is_legacy`, which asserts the shipped
+  default and is now skipped when the environment overrides it. Everything else
+  passes under both rulesets — evidence that flipping authority is side-effect-free
+  as the spec requires.
+- Frontend: `npm run build` clean.

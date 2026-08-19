@@ -1,4 +1,4 @@
-"""Scan rejection-reason log — binding-constraint extraction, append-only per-day
+"""Scan rejection-reason log — binding-constraint extraction, append-per-scan-run
 records, and the calibration summary. Pure storage under a temp DATA_DIR."""
 from __future__ import annotations
 
@@ -35,7 +35,7 @@ def test_binding_constraint_skips_rs_annotation():
 
 
 # ---------------------------------------------------------------------------
-# record_scan — append-only, idempotent per day
+# record_scan — append-only per scan RUN, idempotent within one run
 # ---------------------------------------------------------------------------
 def test_record_scan_persists_calibration_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
@@ -51,15 +51,65 @@ def test_record_scan_persists_calibration_fields(tmp_path, monkeypatch):
     assert rec["base_stage"] == "EARLY_ADVANCE" and rec["sector_rs1m"] == 1.2
 
 
-def test_record_scan_idempotent_per_day(tmp_path, monkeypatch):
+def test_record_scan_idempotent_within_one_run(tmp_path, monkeypatch):
+    """Re-writing the SAME scan_id replaces that run's point — a retry of one
+    partially-failed sweep must not double-count."""
     monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
-    srl.record_scan([_row("AAA", "BLOCKED", ["structure:BLOCKED"], score=1.0)], day="2026-07-16")
-    srl.record_scan([_row("AAA", "READY", [], score=8.0)], day="2026-07-16")   # same day, rewrites
-    srl.record_scan([_row("AAA", "WATCH", ["symbol:WATCH"], score=5.0)], day="2026-07-17")
+    srl.record_scan([_row("AAA", "BLOCKED", ["structure:BLOCKED"], score=1.0)],
+                    day="2026-07-16", scan_id="run-1")
+    srl.record_scan([_row("AAA", "READY", [], score=8.0)],
+                    day="2026-07-16", scan_id="run-1")   # same RUN — replaces
     recs = srl.series("AAA")
-    assert len(recs) == 2                              # two distinct days, not three
-    assert recs[0]["verdict"] == "READY"              # last write of 07-16 won
-    assert recs[1]["date"] == "2026-07-17"
+    assert len(recs) == 1
+    assert recs[0]["verdict"] == "READY" and recs[0]["scan_id"] == "run-1"
+
+
+def test_record_scan_appends_per_run_and_never_rewrites(tmp_path, monkeypatch):
+    """Schema 2: every scan RUN appends its own record and the log grows
+    monotonically — a re-run on the same day never rewrites the earlier one."""
+    monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
+    srl.record_scan([_row("AAA", "BLOCKED", ["structure:BLOCKED"], score=1.0)],
+                    day="2026-07-16", scan_id="run-1")
+    srl.record_scan([_row("AAA", "READY", [], score=8.0)],
+                    day="2026-07-16", scan_id="run-2")   # same day, DIFFERENT run
+    srl.record_scan([_row("AAA", "WATCH", ["symbol:WATCH"], score=5.0)],
+                    day="2026-07-17", scan_id="run-3")
+    recs = srl.series("AAA")
+    assert len(recs) == 3                                     # nothing was rewritten
+    assert [r["verdict"] for r in recs] == ["BLOCKED", "READY", "WATCH"]
+    assert [r["scan_id"] for r in recs] == ["run-1", "run-2", "run-3"]
+    assert all(r["schema"] == srl.SCHEMA_VERSION for r in recs)
+    # An omitted scan_id is still its own run (microsecond identity), never a
+    # silent overwrite of the last one.
+    srl.record_scan([_row("AAA", "READY", [])], day="2026-07-17")
+    assert len(srl.series("AAA")) == 4
+
+
+def test_retention_trims_by_date_not_record_count(tmp_path, monkeypatch):
+    """A day may now carry several runs, so retention counts DISTINCT DATES —
+    a count-based trim would silently shorten the retained window."""
+    monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
+    for day in ("2026-07-14", "2026-07-15", "2026-07-16"):
+        for run in ("a", "b"):
+            srl.record_scan([_row("AAA", "READY", [])], day=day, scan_id=f"{day}-{run}")
+    srl.record_scan([_row("AAA", "READY", [])], day="2026-07-17",
+                    scan_id="2026-07-17-a", max_days=2)
+    recs = srl.series("AAA")
+    assert sorted({r["date"] for r in recs}) == ["2026-07-16", "2026-07-17"]
+    assert len(recs) == 3                                # 2 runs on the 16th + 1 on the 17th
+
+
+def test_latest_before_still_returns_the_newest_prior_day(tmp_path, monkeypatch):
+    """The transition diff reads yesterday's state; multiple same-day runs must
+    not change which record that is."""
+    monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
+    srl.record_scan([_row("AAA", "BLOCKED", ["structure:BLOCKED"])],
+                    day="2026-07-16", scan_id="run-1")
+    srl.record_scan([_row("AAA", "WATCH", ["symbol:WATCH"])],
+                    day="2026-07-16", scan_id="run-2")
+    srl.record_scan([_row("AAA", "READY", [])], day="2026-07-17", scan_id="run-3")
+    prior = srl.latest_before("2026-07-17")
+    assert prior["AAA"]["verdict"] == "WATCH"          # last run OF the prior day
 
 
 def test_record_scan_skips_rows_without_ticker(tmp_path, monkeypatch):

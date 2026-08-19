@@ -233,7 +233,8 @@ def _level(gate: dict | None, level) -> dict | None:
 
 
 def gate_blocks(gate: dict | None, account_gate: dict | None = None,
-                *, ext_context: dict | None = None) -> list[dict]:
+                *, ext_context: dict | None = None,
+                ruleset: str | None = None) -> list[dict]:
     """Every FAILING gate check the three signal inputs don't already own, as
     structured blocks {level, id, label, observed}. Extracted from the gate levels
     (L2 sector veto, L3 tripped vetoes, L4 right-spot) and the optional L5 account
@@ -242,6 +243,13 @@ def gate_blocks(gate: dict | None, account_gate: dict | None = None,
 
     ``ext_context`` supplies the extra observed values the two Level-4 ESTIMATED
     triggers need for a days estimate (ma21 rise/day, atr, contraction rate).
+
+    ``ruleset`` selects WHICH Level-4 right spot to read, for the shadow-first
+    dual compute: None (the default) reads the level's own — i.e. the
+    authoritative one, byte-identical to the pre-recalibration behavior — while a
+    named ruleset reads that ruleset's replay out of
+    ``detail.right_spot_by_ruleset``. It never changes L2/L3/L5, which are
+    ruleset-invariant, and it is still a READ, never a re-evaluation.
     """
     blocks: list[dict] = []
     ext = ext_context or {}
@@ -266,9 +274,17 @@ def gate_blocks(gate: dict | None, account_gate: dict | None = None,
 
     # Level 4 — right spot (blocking; the check ids carry the observed values).
     l4 = _level(gate, 4)
-    if l4 is not None and not l4.get("pass", True):
-        rs = (l4.get("detail") or {}).get("right_spot") or {}
-        for c in rs.get("checks") or []:
+    if l4 is not None:
+        det4 = l4.get("detail") or {}
+        # A named ruleset reads its own replay; None keeps the level's own verdict
+        # so the authoritative path is unchanged.
+        alt = ((det4.get("right_spot_by_ruleset") or {}).get(ruleset)
+               if ruleset is not None else None)
+        if alt is not None:
+            rs, failed = alt, not alt.get("pass", True)
+        else:
+            rs, failed = det4.get("right_spot") or {}, not l4.get("pass", True)
+        for c in (rs.get("checks") or []) if failed else []:
             if not c.get("pass"):
                 observed = {"value": c.get("value")}
                 if c.get("id") == "extension":

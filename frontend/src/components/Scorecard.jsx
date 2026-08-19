@@ -592,6 +592,28 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
     return { ready: counts.READY, le14, beyond: bench.length - le14 };
   }, [results, counts.READY]);
 
+  // Gate-ruleset divergence (shadow-first recalibration): how many rows the
+  // PROPOSED rules would verdict differently from the SHIPPED ones. Display only —
+  // the table's verdicts are always the authoritative ruleset's (row.gate_ruleset).
+  const divergence = React.useMemo(() => {
+    const rows = results.filter((r) => r.legacy_verdict != null || r.proposed_verdict != null);
+    if (!rows.length) return null;
+    const diverged = rows.filter((r) => r.ruleset_divergence);
+    return {
+      count: diverged.length,
+      scored: rows.length,
+      ruleset: rows[0].gate_ruleset,
+      // The two most common transitions, so the badge says WHICH way it moves.
+      pairs: Object.entries(
+        diverged.reduce((acc, r) => {
+          const k = `${r.legacy_verdict}→${r.proposed_verdict}`;
+          acc[k] = (acc[k] || 0) + 1;
+          return acc;
+        }, {}),
+      ).sort((a, b) => b[1] - a[1]).slice(0, 2),
+    };
+  }, [results]);
+
   const sectorOptions = React.useMemo(
     () => Array.from(new Set(results.map((r) => r.sector).filter(Boolean))).sort(),
     [results],
@@ -677,6 +699,24 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
         <span className="text-emerald-300">{pipeline.ready} READY now</span>
         <span className="text-sky-300">{pipeline.le14} eligible ≤14d</span>
         <span className="text-slate-500">{pipeline.beyond} beyond</span>
+        {/* Shadow-ruleset divergence — non-blocking. The table above is unchanged;
+            this only says how often the proposed gate would have disagreed. */}
+        {divergence && (
+          <span
+            className={`rounded-full border px-2 py-0.5 ${divergence.count
+              ? "border-violet-500/40 bg-violet-500/10 text-violet-200"
+              : "border-slate-700 text-slate-500"}`}
+            title={`Gate ruleset in force: ${divergence.ruleset}. `
+              + `${divergence.count} of ${divergence.scored} rows would verdict differently `
+              + `under the proposed rules (mandatory-core 3-of-4 + ATR not-expanding). `
+              + `SHADOW — the verdicts shown are the ${divergence.ruleset} ruleset's.`
+              + (divergence.pairs.length
+                ? ` Most common: ${divergence.pairs.map(([k, n]) => `${k} ×${n}`).join(", ")}.`
+                : "")}
+          >
+            shadow ruleset: {divergence.count}/{divergence.scored} diverge
+          </span>
+        )}
       </div>
       <div className="mb-4 flex flex-wrap items-center gap-2">
         {FILTERS.map(filterBtn)}

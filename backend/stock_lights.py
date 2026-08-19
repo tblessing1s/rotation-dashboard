@@ -107,12 +107,28 @@ def tripped_vetoes(vetoes: list[dict]) -> list[str]:
 
 # ---------------------------------------------------------------------------
 # Verdict (stock-level mapping — differs from the market vote + dwell)
+#
+# TWO rulesets live here, selected by ``config.GATE_RULESET`` (default "legacy").
+# Both are computed on every evaluation so their divergence can be logged; only
+# the configured one carries blocking authority. ``verdict`` below is the LEGACY
+# rule and is deliberately left byte-identical — it is the regression anchor.
 # ---------------------------------------------------------------------------
+CORE_LIGHT = "close_vs_ma"   # the MANDATORY core light under the proposed ruleset
+
+
+def core_is_green(lights: dict | None) -> bool:
+    """Whether the mandatory core light (close > SMA50) is green. A missing or
+    uncomputable core light is NOT green — an unmeasurable core never clears."""
+    return ((lights or {}).get(CORE_LIGHT) or {}).get("signal") == GREEN
+
+
 def verdict(greens: int, insufficient: bool, any_veto: bool) -> str:
-    """GREEN = 4/4 green AND no veto; YELLOW = exactly 3 green AND no veto (a
-    watchlist state, never enterable); RED otherwise (<=2 green, any veto, or
-    insufficient history — a name whose lights can't all be computed is never
-    GREEN or YELLOW)."""
+    """LEGACY vote rule. GREEN = 4/4 green AND no veto; YELLOW = exactly 3 green
+    AND no veto (a watchlist state, never enterable); RED otherwise (<=2 green,
+    any veto, or insufficient history — a name whose lights can't all be computed
+    is never GREEN or YELLOW).
+
+    UNCHANGED — every existing caller and fixture pins this exact mapping."""
     if any_veto or insufficient:
         return RED
     if greens >= 4:
@@ -122,6 +138,51 @@ def verdict(greens: int, insufficient: bool, any_veto: bool) -> str:
     return RED
 
 
+def verdict_proposed(greens: int, insufficient: bool, any_veto: bool,
+                     core_green: bool) -> str:
+    """PROPOSED mandatory-core N-of-4 rule (TRAVIS_EXTENSION, PROPOSED_DEFAULT).
+
+        GREEN  = core light green AND greens >= config.SYM_MIN_GREEN_LIGHTS
+        YELLOW = core light green AND greens == SYM_MIN_GREEN_LIGHTS - 1
+        RED    = otherwise, OR core light not green, regardless of the others
+
+    Vetoes and insufficient history still dominate, exactly as in the legacy rule.
+
+    The point of the core: close > SMA50 is the light that maps to the
+    Consider-Going-To-Cash exit level, so it stays mandatory — the entry veto set
+    tracks the exit trigger set. Every OTHER light loses unilateral veto power,
+    Parabolic SAR most importantly: it is binary, whippy, and its seed is
+    path-dependent on the frame's first bar (indicators.parabolic_sar), so an
+    entry must not hinge on it alone. SAR is still computed, still voted, still
+    displayed — it simply cannot block by itself any more."""
+    if any_veto or insufficient:
+        return RED
+    if not core_green:
+        return RED
+    if greens >= config.SYM_MIN_GREEN_LIGHTS:
+        return GREEN
+    if greens == config.SYM_MIN_GREEN_LIGHTS - 1:
+        return YELLOW
+    return RED
+
+
+def verdict_for(greens: int, insufficient: bool, any_veto: bool, *,
+                core_green: bool = False, ruleset: str | None = None) -> str:
+    """The verdict under ``ruleset`` (default ``config.GATE_RULESET``). The single
+    dispatch point — callers pick a ruleset, never a rule."""
+    if (ruleset or config.GATE_RULESET) == config.RULESET_PROPOSED:
+        return verdict_proposed(greens, insufficient, any_veto, core_green)
+    return verdict(greens, insufficient, any_veto)
+
+
+def verdicts_by_ruleset(greens: int, insufficient: bool, any_veto: bool,
+                        core_green: bool) -> dict:
+    """Every ruleset's verdict from one light vote — the shadow-compute input."""
+    return {rs: verdict_for(greens, insufficient, any_veto,
+                            core_green=core_green, ruleset=rs)
+            for rs in config.GATE_RULESETS}
+
+
 # ---------------------------------------------------------------------------
 # Right-spot gate (SEPARATE, after the lights; blocking; stocks == ETFs)
 # ---------------------------------------------------------------------------
@@ -129,26 +190,57 @@ def _spot_check(cid: str, value, ok) -> dict:
     return {"id": cid, "value": value, "pass": bool(ok)}
 
 
-def right_spot(df) -> dict:
-    """The consolidation "right spot" gate — evaluated AFTER a GREEN light verdict,
-    and blocking. NOT a light. Identical for stocks and ETFs. A check with no data
-    (None) fails conservatively (you can't confirm a right spot you can't measure).
-    ``blocked_by`` lists ``spot:<check>`` reasons; empty == in the right spot."""
-    atrp = indicators.atr_pct(df) if df is not None else None
-    momentum = indicators.atr_momentum(df) if df is not None else None
-    extension = indicators.atr_extension(df) if df is not None else None
+def atr_momentum_max(ruleset: str | None = None) -> float:
+    """The Level-4 ATR/ATR_5EMA ceiling for ``ruleset``.
 
+      legacy   — SPOT_ATR_MOMENTUM_MAX (1.0): ATR actively contracting or flat.
+      proposed — L4_ATR_EXPANSION_MAX (1.05): ATR merely not EXPANDING.
+
+    Deliberately NOT the shadow SCORE's ATR band (scan_score.ATR_CONTRACTING /
+    ATR_EXPANDING), which still rewards contraction for RANKING. Only the veto
+    relaxes; the rank is untouched, and the two stay independently tunable."""
+    return (config.L4_ATR_EXPANSION_MAX
+            if (ruleset or config.GATE_RULESET) == config.RULESET_PROPOSED
+            else config.SPOT_ATR_MOMENTUM_MAX)
+
+
+def _right_spot_from(atrp, momentum, extension, ruleset: str | None = None) -> dict:
+    """The right-spot verdict over already-computed indicator values, so both
+    rulesets can be evaluated from ONE pass over the bars."""
     checks = [
         _spot_check("atr_pct", atrp,
                     atrp is not None and atrp <= config.CONSOLIDATION_ATR_PCT_MAX),
-        # ATR / ATR_5EMA <= 1 (or the configured max) = contracting or flat.
+        # ATR / ATR_5EMA <= the ruleset's ceiling (see atr_momentum_max).
         _spot_check("atr_5d_ema", momentum,
-                    momentum is not None and momentum <= config.SPOT_ATR_MOMENTUM_MAX),
+                    momentum is not None and momentum <= atr_momentum_max(ruleset)),
         _spot_check("extension", extension,
                     extension is not None and extension <= config.SPOT_ATR_EXTENSION_MAX),
     ]
     blocked_by = [f"spot:{c['id']}" for c in checks if not c["pass"]]
     return {"pass": not blocked_by, "checks": checks, "blocked_by": blocked_by}
+
+
+def _spot_inputs(df) -> tuple:
+    return (indicators.atr_pct(df) if df is not None else None,
+            indicators.atr_momentum(df) if df is not None else None,
+            indicators.atr_extension(df) if df is not None else None)
+
+
+def right_spot(df, ruleset: str | None = None) -> dict:
+    """The consolidation "right spot" gate — evaluated AFTER a GREEN light verdict,
+    and blocking. NOT a light. Identical for stocks and ETFs. A check with no data
+    (None) fails conservatively (you can't confirm a right spot you can't measure).
+    ``blocked_by`` lists ``spot:<check>`` reasons; empty == in the right spot.
+
+    ``ruleset`` selects the ATR ceiling only (see ``atr_momentum_max``); the
+    ATR% and extension checks are identical under both."""
+    return _right_spot_from(*_spot_inputs(df), ruleset)
+
+
+def right_spots_by_ruleset(df) -> dict:
+    """Every ruleset's right-spot verdict from ONE pass over the bars."""
+    inputs = _spot_inputs(df)
+    return {rs: _right_spot_from(*inputs, rs) for rs in config.GATE_RULESETS}
 
 
 # ---------------------------------------------------------------------------
@@ -170,19 +262,38 @@ def compute(df, sector_df=None, ivr_percentile: float | None = None,
     engine = genius_lights.compute(df, params=params)
     vetoes = evaluate_vetoes(df, sector_df, ivr_percentile, is_etf, benchmark=benchmark)
     trip = tripped_vetoes(vetoes)
-    v = verdict(engine["greens"], engine["insufficient"], bool(trip))
-    spot = right_spot(df)
+    core = core_is_green(engine["lights"])
+
+    # SHADOW-FIRST dual compute: every ruleset's verdict + right spot, from ONE
+    # light vote and ONE indicator pass. Only `config.GATE_RULESET` is
+    # authoritative below; the rest exist so the divergence can be recorded.
+    verdicts = verdicts_by_ruleset(engine["greens"], engine["insufficient"],
+                                   bool(trip), core)
+    spots = right_spots_by_ruleset(df)
+    by_ruleset = {
+        rs: {"verdict": verdicts[rs], "right_spot": spots[rs],
+             # YELLOW is never enterable, under either ruleset.
+             "enterable": verdicts[rs] == GREEN and spots[rs]["pass"]}
+        for rs in config.GATE_RULESETS
+    }
+    active = config.GATE_RULESET
+    v, spot = verdicts[active], spots[active]
     return {
         "lights": engine["lights"],
         "greens": engine["greens"],
         "reds": engine["reds"],
         "insufficient": engine["insufficient"],
+        "core_green": core,
         "verdict": v,
         "enterable": v == GREEN and spot["pass"],   # YELLOW is never enterable
         "vetoes": vetoes,
         "vetoed": bool(trip),
         "veto_reasons": [f"veto:{vid}" for vid in trip],
         "right_spot": spot,
+        # The shadow record: which ruleset decided the fields above, and what
+        # every ruleset would have said. Never read by the blocking path.
+        "ruleset": active,
+        "by_ruleset": by_ruleset,
         "is_etf": bool(is_etf),
         "benchmark": benchmark,
     }

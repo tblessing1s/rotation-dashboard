@@ -428,6 +428,12 @@ def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
         "veto_reasons": sl["veto_reasons"],
         "right_spot": spot,
         "enterable": sl["enterable"],
+        # SHADOW record (gate recalibration): the mandatory-core light state, the
+        # ruleset that decided `verdict`/`right_spot`/`enterable` above, and what
+        # every ruleset would have said. Carried, never read by the gate.
+        "core_green": sl["core_green"],
+        "ruleset": sl["ruleset"],
+        "by_ruleset": sl["by_ruleset"],
         "stock_green": stock_green,
         # Back-compat: `consolidating` now means "in the right spot" (the gate that
         # replaced the old single consolidating flag).
@@ -496,6 +502,17 @@ def _check(label: str, value, passed) -> dict:
 
 def _all(checks: list[dict]) -> bool:
     return all(c["pass"] for c in checks)
+
+
+def _cleared_level(passes: list[tuple]) -> float:
+    """The highest CONTIGUOUS passing level from the first — stop on first fail.
+    ``passes`` is [(level, passed), ...] in gate order."""
+    cleared = 0
+    for level, ok in passes:
+        if not ok:
+            break
+        cleared = level
+    return cleared
 
 
 def resolve_profile_detail(ticker: str, state: dict | None = None,
@@ -658,18 +675,71 @@ def entry_gate(ticker: str, profile: str | None = None) -> dict:
                (spot_by_id.get("extension") or {}).get("pass")),
     ]
     levels.append({"level": 4, "name": "Right spot (not extended)", "pass": bool(spot.get("pass")),
-                   "checks": l4_checks, "detail": {"atr_pct": row["atr_pct"],
-                                                   "right_spot": spot, "consolidating": row["consolidating"]}})
+                   "checks": l4_checks,
+                   "detail": {"atr_pct": row["atr_pct"], "right_spot": spot,
+                              "consolidating": row["consolidating"],
+                              # Both rulesets' right spots, so the shadow fold can
+                              # read the non-authoritative one without recomputing.
+                              "right_spot_by_ruleset": {
+                                  rs: (alt or {}).get("right_spot")
+                                  for rs, alt in (row.get("by_ruleset") or {}).items()}}})
 
     # Stop-on-fail: the cleared level is the highest contiguous pass from 1.
-    cleared = 0
-    for lv in levels:
-        if lv["pass"]:
-            cleared = lv["level"]
-        else:
-            break
+    cleared = _cleared_level([(lv["level"], bool(lv["pass"])) for lv in levels])
     verdict = "READY TO ENTER" if cleared == 4 else "WAIT"
+
+    # ---- Calibration telemetry (records only — changes no verdict) ------------
+    # EVERY level's result, recorded past the first failure. Stop-on-first-fail
+    # still governs `cleared_level` above; the log needs the full conditional
+    # picture so redundant levels can be identified later. This is free: `levels`
+    # is built unconditionally and only the cleared-level derivation stops early.
+    # Level 5 is NOT here — it is a separate account overlay (account_gate.
+    # evaluate) applied per request in /api/scan/ready, and evaluating it for
+    # every swept name would mean a state load + live cash resolution per name.
+    # It is recorded as "not_evaluated" rather than guessed.
+    all_level_results = {
+        f"L{lv['level']:g}": {
+            "pass": bool(lv["pass"]),
+            "name": lv["name"],
+            "failing_checks": [c["label"] for c in (lv.get("checks") or [])
+                               if not c.get("pass")],
+        } for lv in levels
+    }
+    all_level_results["L5"] = {"pass": None, "name": "Account & juice overlay",
+                               "failing_checks": [], "note": "not_evaluated"}
+    first_failing = next((lv["level"] for lv in levels if not lv["pass"]), None)
+
+    # Per-ruleset replay. Only L3 (the symbol vote) and L4 (the right spot) differ
+    # between rulesets, and both were already computed for EVERY ruleset upstream
+    # in stock_lights.compute — this is a READ of that shadow record, never a
+    # re-evaluation, and it costs no extra indicator work.
+    by_rs = row.get("by_ruleset") or {}
+    rulesets = {}
+    for rs in config.GATE_RULESETS:
+        alt = by_rs.get(rs)
+        passes = []
+        for lv in levels:
+            if alt and lv["level"] == 3:
+                passes.append((3, alt.get("verdict") == stock_lights.GREEN))
+            elif alt and lv["level"] == 4:
+                passes.append((4, bool((alt.get("right_spot") or {}).get("pass"))))
+            else:
+                passes.append((lv["level"], bool(lv["pass"])))
+        rs_cleared = _cleared_level(passes)
+        rulesets[rs] = {
+            "cleared_level": rs_cleared,
+            "verdict": "READY TO ENTER" if rs_cleared == 4 else "WAIT",
+            "levels": {f"L{lvl:g}": ok for lvl, ok in passes},
+        }
+
     return {"ticker": ticker, "sector": sector_etf, "levels": levels,
             "cleared_level": cleared, "verdict": verdict,
             "income_profile": row.get("income_profile"),
-            "peer_benchmark": row.get("peer_benchmark")}
+            "peer_benchmark": row.get("peer_benchmark"),
+            # Shadow-first record. `ruleset` is the one that produced `levels` /
+            # `cleared_level` / `verdict` above; `rulesets` is every ruleset's
+            # replay of the same evaluation.
+            "ruleset": config.GATE_RULESET,
+            "rulesets": rulesets,
+            "all_level_results": all_level_results,
+            "first_failing_level": first_failing}
