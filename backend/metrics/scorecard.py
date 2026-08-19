@@ -569,6 +569,11 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                                             cls["base_stage"], cls["inst_flow"])
     row["sym"] = sym["color"]
     row["sym_greens"] = sym["greens"]
+    # The individual SYM lights + the mandatory-core state, so the recalibration
+    # record can re-derive the vote offline instead of trusting the composite.
+    row["sym_lights"] = {k: (v or {}).get("signal")
+                         for k, v in (sym.get("lights") or {}).items()}
+    row["sym_core_green"] = sym.get("core_green")
     row["base_stage"] = cls["base_stage"]
     row["inst_flow"] = cls["inst_flow"]
     row["structure_entrability"] = composed["structure_entrability"]
@@ -582,16 +587,28 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # are the forward-looking "path to READY" annotations over the SAME evaluation.
     import scan_triggers
     ext_context = _ext_trigger_context(df)
-    blocks = scan_triggers.gate_blocks(gate, ext_context=ext_context)
     # NET juice-floor SAFETY block — the viability gate, folded into the canonical
     # verdict here (pure over the row's net juice, no account state, so the memoized
     # market sweep can carry it). A sub-floor name is BLOCKED, off the bench, with an
     # L5-juice binding constraint — closing the "bench led by names that can't pay".
     juice_block = scan_triggers.juice_floor_block(row.get("net_juice_weekly_pct"),
                                                   row.get("juice_weekly_pct"))
-    if juice_block is not None:
-        blocks.append(juice_block)
-    rv = scan_triggers.compose_row_verdict(composed, blocks)
+
+    def _fold(sym_color, ruleset):
+        """One ruleset's row verdict: signal composition + the gate fold. A READ of
+        already-computed state — the gate and the lights were evaluated once."""
+        c = scan_verdict.compose_verdict(regime_color, sym_color,
+                                         cls["base_stage"], cls["inst_flow"])
+        blocks = scan_triggers.gate_blocks(gate, ext_context=ext_context,
+                                           ruleset=ruleset)
+        if juice_block is not None:
+            blocks.append(juice_block)
+        return scan_triggers.compose_row_verdict(c, blocks)
+
+    # AUTHORITATIVE. ruleset=None reads the gate levels' own verdicts, so with
+    # GATE_RULESET="legacy" every line below is byte-identical to the pre-
+    # recalibration path.
+    rv = _fold(sym["color"], None)
     row["verdict"] = rv["verdict"]                       # the canonical scan verdict
     row["verdict_reasons"] = list(rv["reasons"])
     row["binding"] = rv["binding"]                       # structured first-fail (Q9)
@@ -599,6 +616,33 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["path_to_ready"] = scan_triggers.path_to_ready(rv["triggers"])
     row["eligible_days"] = scan_triggers.earliest_eligible_days(rv["triggers"])
     row["bench"] = scan_triggers.is_bench(rv["verdict"], rv["triggers"])
+
+    # ---- SHADOW-FIRST dual compute (gate recalibration) ----------------------
+    # Every ruleset's row verdict, so the divergence between the shipped rules and
+    # the proposed ones is measurable per name per scan. ZERO authority: nothing
+    # below is read by /api/scan/ready, the executor, sizing, alerts or the
+    # recommendation pipeline — they all key off `row["verdict"]` above, which
+    # follows config.GATE_RULESET. Flipping that flag is a HUMAN decision.
+    sym_by_rs = sym.get("by_ruleset") or {}
+    verdict_by_ruleset = {}
+    for rs_name in config.GATE_RULESETS:
+        if rs_name == sym.get("ruleset"):
+            verdict_by_ruleset[rs_name] = rv["verdict"]   # already the authoritative fold
+        else:
+            verdict_by_ruleset[rs_name] = _fold(
+                sym_by_rs.get(rs_name) or sym["color"], rs_name)["verdict"]
+    row["gate_ruleset"] = config.GATE_RULESET
+    row["verdict_by_ruleset"] = verdict_by_ruleset
+    row["legacy_verdict"] = verdict_by_ruleset.get(config.RULESET_LEGACY)
+    row["proposed_verdict"] = verdict_by_ruleset.get(config.RULESET_PROPOSED)
+    row["ruleset_divergence"] = bool(row["legacy_verdict"] != row["proposed_verdict"])
+    # Full conditional gate picture (every level, recorded past the first fail) +
+    # the lowest failing level. Distinct from `binding`, which is the most
+    # DECISIVE block (worst severity first), not the first one in gate order.
+    if gate is not None:
+        row["all_level_results"] = gate.get("all_level_results")
+        row["first_failing_level"] = gate.get("first_failing_level")
+        row["gate_rulesets"] = gate.get("rulesets")
 
     # Two-speed RS SHADOW — vs Sector (the table's primary) + vs SPY (drawer). Level
     # reuses the displayed RS3M; slope is the RS-line-EMA direction. A sector ETF has

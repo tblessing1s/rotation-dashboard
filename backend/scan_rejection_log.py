@@ -35,6 +35,15 @@ import config
 LOG_PATH = os.path.join(config.DATA_DIR, "scan_rejection_log.json")
 _lock = threading.RLock()
 
+# Record schema version. Bumped when the persisted per-symbol record gains or
+# changes fields, so a calibration pass can tell which records carry which
+# columns rather than inferring from absence.
+#   1 — verdict + binding + score/RS/juice + shadow floor (schema v21)
+#   2 — gate-recalibration shadow record: scan_id, both rulesets' verdicts and
+#       their divergence, the full per-level results, the SYM light breakdown and
+#       the raw ATR ratio. Writes become append-per-SCAN-RUN (see record_scan).
+SCHEMA_VERSION = 2
+
 
 def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -131,6 +140,27 @@ def _record_from_row(row: dict) -> dict:
         "shadow_floor_measured_pct": floor.get("measured_pct"),
         "shadow_floor_basis": floor.get("basis"),
         "shadow_floor_reasons": floor.get("reasons"),
+        # --- Gate recalibration shadow record (schema 2) ----------------------
+        # BOTH rulesets' verdicts and whether they diverged. The authoritative one
+        # is named by `gate_ruleset`; `verdict` above always follows it. This is
+        # the dataset a human reads before deciding whether to flip authority —
+        # recording it grants none.
+        "gate_ruleset": row.get("gate_ruleset"),
+        "legacy_verdict": row.get("legacy_verdict"),
+        "proposed_verdict": row.get("proposed_verdict"),
+        "ruleset_divergence": bool(row.get("ruleset_divergence")),
+        # The FULL conditional gate picture — every level's result, recorded even
+        # past the first failure, so a later pass can ask which levels were
+        # redundant. `first_failing_level` is the lowest failing level in gate
+        # order; it is NOT `binding_level` above (the most DECISIVE block).
+        "first_failing_level": row.get("first_failing_level"),
+        "all_level_results": row.get("all_level_results"),
+        # Inputs needed to re-derive the symbol vote offline, so a rule change can
+        # be replayed against history without refetching bars.
+        "sym_lights": row.get("sym_lights"),
+        "sym_core_green": row.get("sym_core_green"),
+        "sym_greens": row.get("sym_greens"),
+        "atr_momentum": row.get("atr_momentum"),
     }
 
 
@@ -182,6 +212,19 @@ def summary(window: int | None = None) -> dict:
             for reason in rec.get("shadow_floor_reasons") or []:
                 floor_reasons[reason] = floor_reasons.get(reason, 0) + 1
     ready = verdict_counts.get("READY", 0)
+    # Ruleset-divergence tally (schema 2): how often the proposed rules would have
+    # reached a different verdict than the shipped ones, and in which direction.
+    # The empirical basis for a human decision to flip GATE_RULESET — no more.
+    diverged = 0
+    divergence_pairs: dict[str, int] = {}
+    for recs in data.values():
+        for rec in (recs[-window:] if window else recs):
+            if rec.get("legacy_verdict") is None and rec.get("proposed_verdict") is None:
+                continue                       # schema 1 record — nothing to compare
+            if rec.get("ruleset_divergence"):
+                diverged += 1
+                pair = f"{rec.get('legacy_verdict')}->{rec.get('proposed_verdict')}"
+                divergence_pairs[pair] = divergence_pairs.get(pair, 0) + 1
     for agg in floor.values():
         seen = agg["pass"] + agg["fail"]
         agg["evaluated"] = seen
@@ -199,20 +242,53 @@ def summary(window: int | None = None) -> dict:
         "shadow_floor": floor,
         "shadow_floor_reasons": dict(sorted(floor_reasons.items(),
                                             key=lambda kv: kv[1], reverse=True)),
+        # Gate-recalibration divergence read (schema 2).
+        "ruleset": config.GATE_RULESET,
+        "ruleset_divergences": diverged,
+        "ruleset_divergence_rate": (round(diverged / total * 100, 1) if total else None),
+        "ruleset_divergence_pairs": dict(sorted(divergence_pairs.items(),
+                                                key=lambda kv: kv[1], reverse=True)),
     }
 
 
 # ---------------------------------------------------------------------------
 # Writes
 # ---------------------------------------------------------------------------
+def _trim_to_days(recs: list[dict], max_days: int) -> list[dict]:
+    """Keep only the records whose date falls in the newest ``max_days`` DISTINCT
+    dates. Retention is by date, not by record count — a day may now carry more
+    than one record (one per scan run), so a count-based trim would silently
+    shorten the retained window whenever a day was scanned twice."""
+    days = sorted({r.get("date", "") for r in recs})
+    if len(days) <= max_days:
+        return recs
+    keep = set(days[-max_days:])
+    return [r for r in recs if r.get("date", "") in keep]
+
+
 def record_scan(rows: list[dict], day: str | None = None,
-                max_days: int | None = None) -> dict:
-    """Append today's scan record for every row in one load/save. Idempotent per
-    day (the last write of a day replaces that day's point per symbol). Best-effort:
-    a malformed row is skipped, never raised, so a telemetry append can't sink the
-    sweep that called it. Returns {ok, recorded}."""
+                max_days: int | None = None, scan_id: str | None = None) -> dict:
+    """Append this scan RUN's record for every row in one load/save.
+
+    APPEND-ONLY per scan run (schema 2): each run carries a distinct ``scan_id``
+    and appends its own record, so re-running a scan never rewrites a prior one —
+    the log grows monotonically within the retention window. Re-writing the SAME
+    ``scan_id`` (a genuine retry of one run) is still idempotent and replaces that
+    run's point, which is what keeps a partially-failed sweep from double-counting.
+
+    This supersedes schema 1's per-DAY last-write-wins rule. Reads are unaffected:
+    ``latest_before`` filters strictly on ``date <`` and still returns the newest
+    prior-day record per symbol, and ``summary`` counts records either way.
+
+    Best-effort: a malformed row is skipped, never raised, so a telemetry append
+    can't sink the sweep that called it. Returns {ok, recorded, scan_id}."""
     max_days = max_days or config.SCAN_REJECTION_LOG_DAYS
     day = day or _today()
+    # Omitting scan_id means "this call IS its own run" — microsecond precision so
+    # two runs in the same second can never collide into one another's record.
+    # The nightly sweep passes its memoized as_of instead, which is the real run
+    # identity and makes a retry of that sweep genuinely idempotent.
+    scan_id = scan_id or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     try:
         with _lock:
             data = _load()
@@ -221,16 +297,19 @@ def record_scan(rows: list[dict], day: str | None = None,
                 ticker = (row.get("ticker") or "").upper()
                 if not ticker:
                     continue
-                point = {"date": day, **_record_from_row(row)}
+                point = {"date": day, "scan_id": scan_id, "schema": SCHEMA_VERSION,
+                         **_record_from_row(row)}
                 recs = data["symbols"].setdefault(ticker, [])
-                if recs and recs[-1].get("date") == day:
-                    recs[-1] = point
+                same_run = next((i for i, r in enumerate(recs)
+                                 if r.get("scan_id") == scan_id), None)
+                if same_run is not None:
+                    recs[same_run] = point        # retry of THIS run — idempotent
                 else:
                     recs.append(point)
-                    recs.sort(key=lambda r: r.get("date", ""))
-                del recs[:-max_days]
+                    recs.sort(key=lambda r: (r.get("date", ""), r.get("scan_id") or ""))
+                data["symbols"][ticker] = _trim_to_days(recs, max_days)
                 n += 1
             _save(data)
-        return {"ok": True, "recorded": n}
+        return {"ok": True, "recorded": n, "scan_id": scan_id}
     except Exception as e:  # noqa: BLE001 — telemetry must never sink its caller
         return {"ok": False, "error": str(e)}

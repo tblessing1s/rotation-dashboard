@@ -1,5 +1,59 @@
 # Changelog
 
+## v2.10.0 — Entry-gate recalibration, shadow-first
+
+Three defects in the entry gate, addressed behind a `GATE_RULESET` flag that
+**defaults to `legacy`** — nothing below carries blocking authority until a human
+flips it. Both rulesets are computed on every scan and their divergence is
+recorded per name per run.
+
+- **SYM vote: mandatory-core 3-of-4** (`stock_lights.verdict_proposed`). The
+  4-of-4 requirement gave every one of four correlated lights unilateral veto
+  power over an entry — Parabolic SAR most consequentially, since its seed is
+  path-dependent on the frame's first bar, so an entry could hinge on how much
+  history a frame happened to carry. Under the proposed rule `close > SMA50` stays
+  **mandatory** (it is the light that maps to the Consider-Going-To-Cash exit
+  level, keeping the entry veto set aligned with the exit trigger set) and any
+  `SYM_MIN_GREEN_LIGHTS` of four clears. SAR is still computed, voted and
+  displayed; it simply can no longer block alone. The market (SPY) regime vote and
+  its yellow dwell are **untouched** — they have their own `>=3` rule already.
+- **Level 4: contracting → not expanding** (`stock_lights.atr_momentum_max`).
+  Requiring ATR/ATR_5EMA ≤ 1.0 systematically selected premium-poor charts, since
+  contracting ATR compresses the very extrinsic the strategy sells — the gate
+  disagreeing with itself. The proposed ceiling is `L4_ATR_EXPANSION_MAX` (1.05).
+  ATR% and extension are unchanged, and the shadow SCORE's own ATR band is a
+  separate constant, so the rank still rewards contraction while only the veto
+  relaxes.
+- **Rejection log extended to schema 2** (`scan_rejection_log.py`). Now records
+  both rulesets' verdicts and their divergence, the **full per-level gate result**
+  (every level, recorded past the first failure — stop-on-first-fail still governs
+  the verdict), the lowest `first_failing_level` (distinct from `binding`, which is
+  the most *decisive* block), the SYM light breakdown, the core-light state and the
+  raw ATR ratio — enough to replay a rule change against history without refetching
+  bars. Writes became **append-per-scan-run**: each run carries a `scan_id` and
+  appends, so a same-day re-run no longer overwrites the earlier record; retention
+  is now by distinct date rather than record count. Re-writing the same `scan_id`
+  is still idempotent.
+- **Divergence surfaced in the UI** (`Scorecard.jsx`): a non-blocking pill in the
+  Scan tab's pipeline row reads `shadow ruleset: N/M diverge`, with the ruleset in
+  force and the most common verdict transitions in its tooltip. `/api/scan/rejection-stats`
+  gains `ruleset_divergences`, `ruleset_divergence_rate` and `ruleset_divergence_pairs`.
+
+Known consequences, recorded deliberately rather than fixed here:
+
+- The Level-3 veto `atr_expanding_high_ivr` is **not** in this change's scope, so
+  an expanding-ATR name at IVR ≥ 90 is still blocked at Level 3 regardless of the
+  Level-4 relaxation — exactly the high-IV names the relaxation targets.
+- The blocking juice floor is disabled under shares-primary
+  (`scan_triggers.juice_floor_block` returns `None`), and the share-denominated
+  `shadow_floor` never blocks. So relaxing Level 4 removes a constraint with **no
+  armed downstream income constraint** to take its place. Re-arming a
+  share-denominated floor is separate tracked work.
+- The XLK July 6th fixture cannot flip: its last bar measures 0/4 green with the
+  core light red, so the mandatory-core rule is strictly unable to admit it.
+
+Full Phase 0 findings, with citations: `AUDIT_ENTRY_GATE_RECALIBRATION_PHASE0.md`.
+
 ## v2.9.0 — Scan cached per trading day; Scorecard crash fix; error boundaries
 
 Follow-up to v2.8.0's shares-primary migration (PR #255), which shipped the LEAP

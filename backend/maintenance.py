@@ -216,7 +216,11 @@ def nightly_refresh() -> dict:
         from metrics import scorecard as scorecard_metrics
         sweep = scorecard_metrics.scorecard(None)
         sweep_results = sweep.get("results", [])
-        report["scan_rejection_log"] = scan_rejection_log.record_scan(sweep_results)
+        # The sweep's as_of IS the scan-run identity — one memoized sweep, one
+        # scan_id, so a same-day re-run appends its own record rather than
+        # overwriting the earlier one (schema 2, append-per-run).
+        report["scan_rejection_log"] = scan_rejection_log.record_scan(
+            sweep_results, scan_id=sweep.get("as_of"))
     except Exception as e:  # noqa: BLE001 — a scan-log failure must not sink the sweep
         report["errors"].append(f"scan_rejection_log: {e}")
 

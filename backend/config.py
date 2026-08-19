@@ -294,6 +294,45 @@ SYMBOL_GENIUS_HISTORY_DAYS = 90  # PROPOSED_DEFAULT — ~1 quarter of trading da
 # calibration dataset. Derived telemetry, append-only, never in state.json.
 SCAN_REJECTION_LOG_DAYS = 180    # PROPOSED_DEFAULT — ~2 quarters of trading days
 
+# ---- Entry-gate ruleset (shadow-first recalibration) -----------------------
+# The gate recalibration ships SHADOW-FIRST: both rulesets are computed on every
+# scan and their divergence is logged, but only ONE carries blocking authority.
+#
+#   "legacy"   — the shipped rules: symbol verdict 4/4 green = GREEN / exactly 3
+#                = YELLOW, and the Level-4 right spot requires ATR/ATR_5EMA <=
+#                SPOT_ATR_MOMENTUM_MAX (contracting or flat).
+#   "proposed" — mandatory-core 3-of-4 (see SYM_MIN_GREEN_LIGHTS) and a Level-4
+#                right spot that only requires ATR not EXPANDING (see
+#                L4_ATR_EXPANSION_MAX).
+#
+# Default "legacy". Flipping authority is a HUMAN decision made once the
+# divergence record justifies it — there is deliberately no date-based auto-flip.
+RULESET_LEGACY = "legacy"
+RULESET_PROPOSED = "proposed"
+GATE_RULESETS = (RULESET_LEGACY, RULESET_PROPOSED)
+GATE_RULESET = os.environ.get("CFM_GATE_RULESET", RULESET_LEGACY).strip().lower()
+if GATE_RULESET not in GATE_RULESETS:      # an unknown value is never authority
+    GATE_RULESET = RULESET_LEGACY
+
+# Mandatory-core 3-of-4 (TRAVIS_EXTENSION). The symbol verdict under the proposed
+# ruleset is GREEN when the MANDATORY CORE light (close > SMA50 — the light that
+# maps to the Consider-Going-To-Cash exit level) is green AND at least this many
+# of the four lights are green. Core failure alone is RED regardless of the rest.
+# The point is that no single non-core light — Parabolic SAR above all, whose seed
+# is path-dependent on the frame's first bar — can unilaterally veto an entry.
+# The MARKET (SPY) vote is NOT affected: it has its own >=3 rule + yellow dwell
+# (GENIUS_VOTE_GREEN_MIN / GENIUS_YELLOW_DWELL_DAYS above).
+SYM_MIN_GREEN_LIGHTS = 3       # PROPOSED_DEFAULT — green lights needed alongside the core
+
+# Level-4 right spot under the proposed ruleset: ATR/ATR_5EMA must not be
+# EXPANDING, rather than actively contracting. Rationale: contracting ATR
+# compresses extrinsic, so the legacy bar systematically selects premium-poor
+# charts that the income checks then fail — the gate disagreeing with itself.
+# Deliberately SEPARATE from SPOT_ATR_MOMENTUM_MAX (the legacy veto) and from the
+# shadow SCORE's own ATR posture band (scan_score.ATR_CONTRACTING/ATR_EXPANDING),
+# so the veto and the rank stay independently tunable.
+L4_ATR_EXPANSION_MAX = 1.05    # PROPOSED_DEFAULT — ATR/ATR_5EMA <= this = not expanding
+
 # Scan transition-events log (DATA_DIR/scan_diff_log.json) — the append-only
 # audit trail of daily BENCH→READY / degrade / entrant / slot-open transitions,
 # also the retrospective-capture store (Phase-0 Q9). Derived, single nightly

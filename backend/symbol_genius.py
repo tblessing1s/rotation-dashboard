@@ -121,11 +121,22 @@ def compute(df, params: dict | None = None) -> dict:
     insufficient = _insufficient(lights) or bars < p["warmup_bars"]
     greens = _green_count(lights)
     # Symbol Genius has no vetoes of its own (those live in stock_lights / the gate).
-    verdict = stock_lights.verdict(greens, insufficient, any_veto=False)
+    # SHADOW-FIRST: every ruleset's verdict from the one vote; only
+    # config.GATE_RULESET is authoritative. The mandatory core light is the SAME
+    # key here as in stock_lights (close_vs_ma), so the rule reads identically on
+    # both engines even though their fourth lights differ.
+    core = stock_lights.core_is_green(lights)
+    by_ruleset = stock_lights.verdicts_by_ruleset(greens, insufficient, False, core)
+    verdict = by_ruleset[config.GATE_RULESET]
     return {
         "lights": lights,
         "greens": greens,
         "insufficient": insufficient,
+        "core_green": core,
         "verdict": verdict,
         "color": verdict,        # the per-row SYM color
+        # Shadow record — which ruleset decided `verdict`/`color`, and what each
+        # ruleset would have said. Never read by the blocking path.
+        "ruleset": config.GATE_RULESET,
+        "by_ruleset": dict(by_ruleset),
     }
