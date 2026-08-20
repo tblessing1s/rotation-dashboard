@@ -142,14 +142,17 @@ def _merge_seed(sectors: list[dict], removed: set) -> bool:
 def _clear_caches() -> None:
     _load.cache_clear()
     stock_to_sector.cache_clear()
-    # A changed universe changes what a full sweep MEANS. The day cache keys on the
-    # ticker list so it would miss on its own, but the short-TTL memo in front of it
-    # would keep serving the old universe's rows for minutes — drop both now so an
-    # added/removed name shows up on the next Scan. Local import: screening imports
-    # this module, so a top-level import here would be a cycle.
+    # A changed universe changes what a full sweep COVERS, but not what any
+    # surviving row MEANS — the rows are independent and the day cache is no longer
+    # keyed on the ticker list. So drop the short-TTL memo (which would otherwise
+    # keep serving the old universe for minutes) and KEEP the disk sweep: the next
+    # Scan reuses every unchanged row and computes only the added names. Dropping
+    # the disk sweep here is what made a one-ticker edit cost a full cold ~500-name
+    # sweep on the request path. Local import: screening imports this module, so a
+    # top-level import here would be a cycle.
     try:
         import screening
-        screening.clear_cache()
+        screening.clear_memo()
     except Exception:  # noqa: BLE001 — cache invalidation must never break an edit
         pass
 

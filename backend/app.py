@@ -1642,10 +1642,17 @@ def api_universe():
 
 @app.route("/api/universe/add", methods=["POST"])
 def api_universe_add():
-    """Add a constituent to a sector: {ticker, sector}."""
+    """Add a constituent to a sector: {ticker, sector}.
+
+    The new name's daily bars and weeklies status are warmed in a detached thread
+    so the next scan doesn't pay for them on the request path — a brand-new
+    ticker is cold in both caches, and the weeklies probe is a live option-chain
+    call. The response doesn't wait for it."""
     payload = request.get_json(silent=True) or {}
     try:
-        return jsonify(sector_data.add_ticker(payload.get("ticker", ""), payload.get("sector", "")))
+        out = sector_data.add_ticker(payload.get("ticker", ""), payload.get("sector", ""))
+        out.update(screening.start_background_warm([out["added"]]))
+        return jsonify(out)
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001
@@ -1673,7 +1680,11 @@ def api_universe_sync():
     (e.g. after ETFs / S&P additions were added to the seed). Respects the
     operator's removals (tombstoned); never removes or moves anything."""
     try:
-        return jsonify(sector_data.sync_from_seed())
+        out = sector_data.sync_from_seed()
+        # Same reasoning as /add: names pulled in from the seed are cold in both
+        # caches, so warm them off-request rather than on the next scan.
+        out.update(screening.start_background_warm(out.get("added") or []))
+        return jsonify(out)
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

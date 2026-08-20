@@ -12,7 +12,13 @@ the near-term expirations from Schwab and returns:
           drops a tradeable name.
 
 Results are cached for a long TTL (weeklies status is near-static — a name gains
-weeklies and keeps them), and can be overridden by hand via
+weeklies and keeps them). An UNDETERMINABLE result (None) is cached too, on a
+much shorter TTL: a name whose chain can't be read is re-probed within the hour
+rather than on every sweep. That distinction matters more than it looks — a
+None used not to be cached at all, so every unresolvable name (a typo, a dead
+listing, an optionless symbol) cost a live chain call plus its retry/backoff on
+EVERY full-universe sweep, permanently. A batch of such names is enough to push
+the sweep past the client's request timeout. Results can be overridden by hand via
 `metadata.weeklies_overrides` (e.g. {"JBHT": false, "AAPL": true}). The whole
 check can be disabled with SCORECARD_CHECK_WEEKLIES=0.
 
@@ -36,6 +42,10 @@ import schwab_api
 
 # Weeklies status barely changes, so cache it for a week by default.
 _TTL = int(os.environ.get("WEEKLIES_TTL", str(config.WEEKLIES_CACHE_TTL)))
+# An undeterminable (None) probe is pinned for much less — see the module
+# docstring: long enough to stop a sweep re-probing dead names, short enough that
+# a transient outage clears on its own.
+_UNKNOWN_TTL = config.WEEKLIES_UNKNOWN_TTL
 # 40 days guarantees the window always contains at least one monthly (3rd-Friday)
 # expiration — consecutive monthlies are ≤35 days apart — so a monthly-only name
 # resolves to False (not an undeterminable None), while weeklies still show up.
@@ -111,7 +121,14 @@ def _detect(ticker: str) -> bool | None:
 
 def has_weeklies(ticker: str, refresh: bool = False) -> bool | None:
     """True/False/None (see module docstring). Override wins; else cached; else
-    detected. None results aren't pinned for the full TTL so they retry sooner."""
+    detected.
+
+    EVERY result is pinned, including None — an undeterminable one just gets the
+    much shorter ``_UNKNOWN_TTL`` so it re-probes within the hour instead of on
+    every sweep. Caching the negative is the point: an unresolvable name is
+    exactly the one whose probe is slowest (a chain call that errors or times out,
+    with retry/backoff behind it), so leaving it uncached made the worst names the
+    most expensive, on every single sweep."""
     t = ticker.upper()
     ov = _overrides().get(t)
     if ov is not None:
@@ -120,12 +137,13 @@ def has_weeklies(ticker: str, refresh: bool = False) -> bool | None:
         return None
     if not refresh:
         hit = _cache.get(t)
-        if hit and time.time() - hit[0] < _TTL:
-            return hit[1]
+        if hit is not None:
+            ttl = _TTL if hit[1] is not None else _UNKNOWN_TTL
+            if time.time() - hit[0] < ttl:
+                return hit[1]
     val = _detect(t)
-    if val is not None:
-        with _cache_guard:
-            _cache[t] = (time.time(), val)
+    with _cache_guard:
+        _cache[t] = (time.time(), val)
     return val
 
 

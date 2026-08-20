@@ -871,6 +871,7 @@ def scorecard(tickers: list[str] | None = None, price_overrides: dict | None = N
         names = [t.strip().upper() for t in tickers if t.strip()]
         return _compute_scorecard(names, price_overrides=price_overrides)
 
+    import logging_handler as log
     import scan_cache
     import screening  # local import avoids any import-time cycle
     names = sector_data.all_tickers()
@@ -880,12 +881,35 @@ def scorecard(tickers: list[str] | None = None, price_overrides: dict | None = N
         # regime flip must re-scan rather than serve verdicts composed against
         # the old tape.
         regime_color = _current_regime_color()
-        if not force:
-            hit = scan_cache.load(names, regime_color)
-            if hit is not None:
-                return hit
+        reuse = None if force else scan_cache.reusable(names, regime_color)
+        if reuse is not None and reuse["complete"]:
+            return reuse["result"]
+
+        # INCREMENTAL. The day's sweep is still valid for every name it already
+        # covers, so a universe edit re-scans only what actually changed: added
+        # names are computed and merged in, removed names' rows were already
+        # dropped by `reusable`. Before this, adding ONE ticker invalidated all
+        # ~500 rows and forced a full cold sweep onto the request path — where the
+        # client's 60s abort was waiting — because the universe was in the cache
+        # key. The cost was proportional to the universe instead of to the edit.
+        if reuse is not None and reuse["result"].get("results"):
+            missing = reuse["missing"]
+            merged = dict(reuse["result"])
+            if missing:
+                added = _compute_scorecard(missing, regime_color=regime_color)
+                # New rows are stamped like a per-stock refresh, so the mixed
+                # vintage stays visible rather than implied (same discipline as
+                # scan_cache.patch_rows).
+                stamp = log.utcnow()
+                rows = list(merged["results"]) + [dict(r, refreshed_at=stamp)
+                                                  for r in added["results"]]
+                merged["results"] = sorted(rows, key=lambda r: (r["sector"], r["ticker"]))
+                merged["partial_rescan"] = len(added["results"])
+                scan_cache.store(regime_color, merged)
+            return merged
+
         fresh = _compute_scorecard(names, regime_color=regime_color)
-        scan_cache.store(names, regime_color, fresh)
+        scan_cache.store(regime_color, fresh)
         return dict(fresh, cached=False, scan_day=scan_cache.scan_day())
 
     if force:

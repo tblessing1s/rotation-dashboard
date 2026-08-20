@@ -40,7 +40,7 @@ def _result(n=2):
             "results": [{"ticker": f"T{i}", "verdict": "WATCH"} for i in range(n)]}
 
 
-NAMES = ["AAPL", "MSFT"]
+NAMES = ["T0", "T1"]
 
 
 # ---- The scan-day key -------------------------------------------------------
@@ -83,7 +83,7 @@ def test_scan_day_is_evaluated_in_market_time_not_utc():
 # ---- Store / load round trip -------------------------------------------------
 def test_load_replays_the_stored_sweep_for_the_whole_scan_day(cache_dir):
     swept = datetime(2026, 8, 17, 16, 30, tzinfo=scan_cache.ET)   # the post-close sweep
-    scan_cache.store(NAMES, "green", _result(), now=swept)
+    scan_cache.store("green", _result(), now=swept)
     # ...still served through the evening AND the whole of the next session.
     for when in (datetime(2026, 8, 17, 21, 0, tzinfo=scan_cache.ET),
                  datetime(2026, 8, 18, 9, 45, tzinfo=scan_cache.ET),
@@ -96,27 +96,56 @@ def test_load_replays_the_stored_sweep_for_the_whole_scan_day(cache_dir):
 
 
 def test_load_misses_once_the_next_session_closes(cache_dir):
-    scan_cache.store(NAMES, "green", _result(),
+    scan_cache.store("green", _result(),
                      now=datetime(2026, 8, 17, 16, 30, tzinfo=scan_cache.ET))
     # Past the NEXT close there are newer final bars — a fresh sweep is due.
     assert scan_cache.load(NAMES, "green",
                            now=datetime(2026, 8, 18, 16, 30, tzinfo=scan_cache.ET)) is None
 
 
-@pytest.mark.parametrize("names,regime", [
-    (["AAPL", "MSFT", "NVDA"], "green"),   # universe changed
-    (["AAPL", "MSFT"], "red"),             # regime flipped
-    (["AAPL"], "green"),                   # a name was removed
-])
-def test_load_misses_when_an_input_would_make_the_answer_wrong(cache_dir, names, regime):
+def test_load_misses_when_a_global_input_would_make_every_row_wrong(cache_dir):
+    """A regime flip re-composes every verdict, so the whole sweep is wrong —
+    not merely incomplete. Same for a demo/live switch."""
     now = datetime(2026, 8, 17, 16, 30, tzinfo=scan_cache.ET)
-    scan_cache.store(NAMES, "green", _result(), now=now)
-    assert scan_cache.load(names, regime, now=now) is None
+    scan_cache.store("green", _result(), now=now)
+    assert scan_cache.load(NAMES, "red", now=now) is None
+    assert scan_cache.reusable(NAMES, "red", now=now) is None
+
+
+# ---- A universe edit costs only what it changed -----------------------------
+def test_adding_a_name_keeps_every_other_row(cache_dir):
+    """The regression this whole design exists for: adding ONE ticker used to
+    change the fingerprint and discard all ~500 rows, forcing a full cold sweep
+    onto the request path. Now the stored rows survive and only the new name is
+    reported missing."""
+    now = datetime(2026, 8, 17, 16, 30, tzinfo=scan_cache.ET)
+    scan_cache.store("green", _result(), now=now)
+
+    reuse = scan_cache.reusable(NAMES + ["NVDA"], "green", now=now)
+    assert reuse is not None
+    assert reuse["complete"] is False
+    assert reuse["missing"] == ["NVDA"]
+    assert [r["ticker"] for r in reuse["result"]["results"]] == ["T0", "T1"]
+    # The strict all-or-nothing read still says "not servable from cache alone".
+    assert scan_cache.load(NAMES + ["NVDA"], "green", now=now) is None
+
+
+def test_removing_a_name_drops_its_row_and_costs_nothing(cache_dir):
+    now = datetime(2026, 8, 17, 16, 30, tzinfo=scan_cache.ET)
+    scan_cache.store("green", _result(), now=now)
+
+    reuse = scan_cache.reusable(["T0"], "green", now=now)
+    assert reuse is not None and reuse["complete"] is True
+    assert reuse["missing"] == []
+    assert [r["ticker"] for r in reuse["result"]["results"]] == ["T0"]
+    # A removal alone is a full hit — nothing to recompute.
+    hit = scan_cache.load(["T0"], "green", now=now)
+    assert hit is not None and [r["ticker"] for r in hit["results"]] == ["T0"]
 
 
 def test_clear_drops_the_persisted_sweep(cache_dir):
     now = datetime(2026, 8, 17, 16, 30, tzinfo=scan_cache.ET)
-    scan_cache.store(NAMES, "green", _result(), now=now)
+    scan_cache.store("green", _result(), now=now)
     assert scan_cache.load(NAMES, "green", now=now) is not None
     scan_cache.clear()
     assert scan_cache.load(NAMES, "green", now=now) is None
@@ -126,7 +155,7 @@ def test_an_empty_sweep_is_never_pinned_for_the_day(cache_dir):
     # A failed/empty sweep must not be cached, or one bad run blanks the Scan for
     # the rest of the day.
     now = datetime(2026, 8, 17, 16, 30, tzinfo=scan_cache.ET)
-    scan_cache.store(NAMES, "green", {"as_of": "x", "results": []}, now=now)
+    scan_cache.store("green", {"as_of": "x", "results": []}, now=now)
     assert scan_cache.load(NAMES, "green", now=now) is None
 
 
@@ -140,7 +169,7 @@ def test_corrupt_cache_is_a_miss_not_a_crash(cache_dir):
 def test_store_survives_an_unwritable_cache_dir(cache_dir, monkeypatch):
     # A full/read-only volume degrades to "no caching", never a failed scan.
     monkeypatch.setattr(config, "active_cache_dir", lambda: "/proc/nonexistent/nope")
-    scan_cache.store(NAMES, "green", _result())  # must not raise
+    scan_cache.store("green", _result())  # must not raise
     assert scan_cache.load(NAMES, "green") is None
 
 
@@ -164,6 +193,65 @@ def test_full_sweep_computes_once_per_day_then_replays(cache_dir, monkeypatch):
     assert len(calls) == 1, "the sweep recomputed instead of replaying from disk"
     assert second["cached"] is True
     assert [r["ticker"] for r in second["results"]] == ["T0", "T1"]
+
+
+def test_adding_a_ticker_rescans_only_that_ticker(cache_dir, monkeypatch):
+    """The end-to-end shape of the fix: after a universe edit the sweep computes
+    the ADDED names only, merges them into the day's rows, and re-stores the lot.
+    Before this, one addition re-scanned the entire universe on the request path."""
+    calls = []
+    universe = list(NAMES)
+    monkeypatch.setattr(scorecard_metrics, "_current_regime_color", lambda: "green")
+    monkeypatch.setattr(scorecard_metrics.sector_data, "all_tickers", lambda: list(universe))
+    monkeypatch.setattr(scorecard_metrics, "_compute_scorecard",
+                        lambda names, price_overrides=None, regime_color=None: (
+                            calls.append(list(names)),
+                            {"as_of": "2026-08-17T12:00:00Z",
+                             "results": [{"ticker": t, "sector": "XLK",
+                                          "verdict": "WATCH"} for t in names]})[1])
+
+    scorecard_metrics.scorecard(None)
+    assert calls == [["T0", "T1"]]                    # the cold sweep
+
+    universe.append("NVDA")                            # the operator adds a name
+    screening._results.clear()                         # drop the in-process memo only
+    out = scorecard_metrics.scorecard(None)
+
+    assert calls[-1] == ["NVDA"], "the whole universe re-scanned instead of the addition"
+    assert len(calls) == 2
+    assert [r["ticker"] for r in out["results"]] == ["NVDA", "T0", "T1"]
+    assert out["partial_rescan"] == 1
+    # The added row is stamped like a refresh, so the mixed vintage is visible.
+    added = next(r for r in out["results"] if r["ticker"] == "NVDA")
+    assert added["refreshed_at"]
+    assert "refreshed_at" not in next(r for r in out["results"] if r["ticker"] == "T0")
+
+    # And it persisted: the next read is a complete hit with nothing recomputed.
+    screening._results.clear()
+    again = scorecard_metrics.scorecard(None)
+    assert len(calls) == 2, "the merged sweep did not persist"
+    assert [r["ticker"] for r in again["results"]] == ["NVDA", "T0", "T1"]
+
+
+def test_removing_a_ticker_needs_no_rescan_at_all(cache_dir, monkeypatch):
+    calls = []
+    universe = list(NAMES)
+    monkeypatch.setattr(scorecard_metrics, "_current_regime_color", lambda: "green")
+    monkeypatch.setattr(scorecard_metrics.sector_data, "all_tickers", lambda: list(universe))
+    monkeypatch.setattr(scorecard_metrics, "_compute_scorecard",
+                        lambda names, price_overrides=None, regime_color=None: (
+                            calls.append(list(names)),
+                            {"as_of": "2026-08-17T12:00:00Z",
+                             "results": [{"ticker": t, "sector": "XLK",
+                                          "verdict": "WATCH"} for t in names]})[1])
+
+    scorecard_metrics.scorecard(None)
+    universe.remove("T1")
+    screening._results.clear()
+    out = scorecard_metrics.scorecard(None)
+
+    assert len(calls) == 1, "a removal must not trigger any recompute"
+    assert [r["ticker"] for r in out["results"]] == ["T0"]
 
 
 def test_force_bypasses_the_day_cache(cache_dir, monkeypatch):
@@ -210,7 +298,7 @@ def test_scan_status_reports_when_the_universe_was_swept(cache_dir, monkeypatch)
 
 # ---- Per-stock refreshes are independent and persist -------------------------
 def _stored(cache_dir, now):
-    scan_cache.store(NAMES, "green",
+    scan_cache.store("green",
                      {"as_of": "2026-08-17T20:30:00Z",
                       "results": [{"ticker": "T0", "verdict": "WATCH", "price": 10},
                                   {"ticker": "T1", "verdict": "WATCH", "price": 20}]},
@@ -291,3 +379,75 @@ def test_refresh_tickers_persists_into_the_days_sweep(cache_dir, monkeypatch):
     assert rows["T1"]["verdict"] == "READY"          # persisted, survives a reload
     assert rows["T1"]["price_source"] == "schwab"
     assert rows["T0"]["verdict"] == "WATCH"          # untouched
+
+
+# ---------------------------------------------------------------------------
+# Universe edits invalidate the MEMO, not the day's sweep
+# ---------------------------------------------------------------------------
+def test_a_universe_edit_keeps_the_days_sweep_on_disk(cache_dir, monkeypatch):
+    """sector_data._clear_caches() runs on every add/remove. It must drop the
+    short-TTL memo (or the Scan tab serves the old ticker list for minutes) and
+    KEEP the disk sweep — wiping the disk here is what turned a one-ticker edit
+    into a full cold sweep on the request path."""
+    import sector_data
+    now = datetime(2026, 8, 17, 16, 30, tzinfo=scan_cache.ET)
+    scan_cache.store("green", _result(), now=now)
+    screening.prime_cache("scorecard:full", {"as_of": "x", "results": []})
+
+    sector_data._clear_caches()
+
+    assert screening.peek_cached("scorecard:full", max_age=3600) is None, "memo survived"
+    assert scan_cache.load(NAMES, "green", now=now) is not None, "disk sweep was wiped"
+
+
+def test_a_mode_switch_still_drops_everything(cache_dir):
+    """A demo/live switch IS a global invalidation — a sweep computed against the
+    other data source must never be replayed."""
+    now = datetime(2026, 8, 17, 16, 30, tzinfo=scan_cache.ET)
+    scan_cache.store("green", _result(), now=now)
+    screening.clear_cache()
+    assert scan_cache.load(NAMES, "green", now=now) is None
+
+
+# ---------------------------------------------------------------------------
+# New names are warmed off-request
+# ---------------------------------------------------------------------------
+def test_adding_a_ticker_warms_its_bars_and_weeklies(monkeypatch):
+    """Both caches, because a new name is cold in both and the weeklies probe is
+    the expensive half (a live option-chain call)."""
+    import weeklies
+    warmed = {}
+    monkeypatch.setattr(screening.data_handler, "prefetch",
+                        lambda syms, force=False: warmed.setdefault("bars", list(syms)))
+    monkeypatch.setattr(weeklies, "prefetch",
+                        lambda syms: warmed.setdefault("weeklies", list(syms)))
+
+    out = screening.warm_symbols(["nvda", " ", "amd"])
+    assert out["ok"] and out["warmed"] == ["NVDA", "AMD"]
+    assert warmed["bars"] == ["NVDA", "AMD"]
+    assert warmed["weeklies"] == ["NVDA", "AMD"]
+
+
+def test_warming_never_raises_into_its_caller(monkeypatch):
+    def _boom(syms, force=False):
+        raise RuntimeError("provider down")
+    monkeypatch.setattr(screening.data_handler, "prefetch", _boom)
+    out = screening.warm_symbols(["NVDA"])
+    assert out["ok"] is False and out["warmed"] == []
+
+
+def test_background_warm_returns_immediately_and_does_the_work(monkeypatch):
+    import threading as _t
+    done = _t.Event()
+    seen = []
+    monkeypatch.setattr(screening, "warm_symbols",
+                        lambda names: (seen.append(list(names)), done.set())[0])
+    out = screening.start_background_warm(["NVDA"])
+    assert out["warming"] == ["NVDA"]
+    assert done.wait(timeout=5), "the detached warm never ran"
+    assert seen == [["NVDA"]]
+
+
+def test_background_warm_is_a_no_op_for_nothing():
+    assert screening.start_background_warm([])["warming"] == []
+    assert screening.start_background_warm(None)["warming"] == []

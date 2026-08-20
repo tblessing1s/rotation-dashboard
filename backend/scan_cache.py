@@ -25,10 +25,18 @@ of paying for an identical one.
 
 THE FINGERPRINT. Anything that would make yesterday's answer *wrong* rather than
 merely old is folded into the key, so a change re-scans instead of serving a
-stale row: the ticker universe (names added/removed), the market regime (a RED
-regime forces every verdict to BLOCKED, so the composed verdicts must track it),
-and the demo/live mode. A miss on any of these is a fresh sweep, which is the
-correct — and rare — cost.
+stale row: the market regime (a RED regime forces every verdict to BLOCKED, so
+the composed verdicts must track it) and the demo/live mode. A miss on either is
+a fresh sweep, which is the correct — and rare — cost.
+
+The ticker universe is deliberately NOT in the fingerprint. It used to be, and
+that made every universe edit an all-or-nothing invalidation: adding ONE name
+discarded all ~500 cached rows and forced a full cold sweep on the request path,
+where the browser's 60s abort was waiting. The cost was proportional to the
+universe, not to the edit. Since rows are independent (see below), a universe
+change is handled by ROW SET instead — ``reusable`` serves the rows that are
+still in the universe, names with no row are computed and merged in, and rows for
+removed names are dropped. Only a genuinely global input re-scans everything.
 
 PER-STOCK REFRESHES. Rows are INDEPENDENT of one another: refreshing one stock
 (or one sector) intraday writes that row straight back here via ``patch_rows``, so
@@ -102,11 +110,15 @@ def scan_day(now: datetime | None = None) -> str:
     return d.isoformat()
 
 
-def fingerprint(names, regime_color: str | None) -> str:
-    """Identity of the inputs that would make a cached sweep WRONG, not just old."""
+def fingerprint(regime_color: str | None) -> str:
+    """Identity of the GLOBAL inputs that would make every cached row WRONG, not
+    just old — the market regime and the demo/live mode, plus the row schema.
+
+    The ticker universe is NOT here on purpose (see the module docstring): a
+    universe edit invalidates the rows it actually touches, never the whole sweep.
+    """
     payload = json.dumps({
         "schema": SCHEMA,
-        "names": sorted({str(n).upper() for n in (names or [])}),
         "regime": regime_color,
         "demo": bool(config.demo_enabled()),
     }, sort_keys=True)
@@ -139,27 +151,64 @@ def _read_blob() -> dict | None:
     return blob
 
 
-def load(names, regime_color: str | None, now: datetime | None = None) -> dict | None:
-    """The stored sweep when it matches the current scan day AND fingerprint, else
-    None. Never raises — an unreadable or corrupt cache is simply a miss."""
+def reusable(names, regime_color: str | None,
+             now: datetime | None = None) -> dict | None:
+    """What of the stored sweep can be reused for ``names`` right now.
+
+    None on a scan-day or fingerprint miss — nothing is reusable and the caller
+    must sweep from cold. Otherwise:
+
+        {"result":    the stored result dict, rows filtered to `names`,
+         "missing":   names with no stored row, in `names` order,
+         "complete":  True when nothing is missing,
+         "scanned_at": when the stored sweep ran}
+
+    Rows for names no longer in the universe are dropped here, so a REMOVAL costs
+    nothing and an ADDITION costs only the added names. Never raises — an
+    unreadable or corrupt cache is simply a miss.
+    """
     blob = _read_blob()
     if blob is None:
         return None
-    want_day, want_fp = scan_day(now), fingerprint(names, regime_color)
+    want_day, want_fp = scan_day(now), fingerprint(regime_color)
     if blob.get("scan_day") != want_day or blob.get("fingerprint") != want_fp:
         return None
     result = blob.get("result")
-    if not isinstance(result, dict):
+    if not isinstance(result, dict) or not isinstance(result.get("results"), list):
         return None
+
+    wanted = [str(n).upper() for n in (names or [])]
+    want_set = set(wanted)
+    kept, have = [], set()
+    for row in result["results"]:
+        ticker = str(row.get("ticker") or "").upper()
+        if ticker in want_set and ticker not in have:
+            kept.append(row)
+            have.add(ticker)
+    missing = [n for n in dict.fromkeys(wanted) if n not in have]
+
     # Provenance for the UI: this sweep is a replay, and this is when it ran.
-    result = dict(result)
-    result["cached"] = True
-    result["scanned_at"] = blob.get("scanned_at")
-    result["scan_day"] = want_day
-    return result
+    out = dict(result)
+    out["results"] = kept
+    out["cached"] = True
+    out["scanned_at"] = blob.get("scanned_at")
+    out["scan_day"] = want_day
+    return {"result": out, "missing": missing, "complete": not missing,
+            "scanned_at": blob.get("scanned_at")}
 
 
-def store(names, regime_color: str | None, result: dict,
+def load(names, regime_color: str | None, now: datetime | None = None) -> dict | None:
+    """The stored sweep when it matches the current scan day AND fingerprint AND
+    covers every name, else None.
+
+    This is the strict all-or-nothing read: "can I serve this request purely from
+    cache". A sweep that covers only SOME of `names` is not a hit here — callers
+    that can compute the remainder use ``reusable`` instead."""
+    hit = reusable(names, regime_color, now=now)
+    return hit["result"] if hit is not None and hit["complete"] else None
+
+
+def store(regime_color: str | None, result: dict,
           now: datetime | None = None) -> None:
     """Persist a fresh full-universe sweep for the current scan day, replacing
     whatever was there — including any rows individually refreshed during the day.
@@ -171,7 +220,7 @@ def store(names, regime_color: str | None, result: dict,
         return  # never pin an empty/failed sweep for a whole day
     blob = {
         "scan_day": scan_day(now),
-        "fingerprint": fingerprint(names, regime_color),
+        "fingerprint": fingerprint(regime_color),
         "scanned_at": (now or datetime.now(ET)).isoformat(timespec="seconds"),
         "result": result,
     }
@@ -202,20 +251,24 @@ def patch_rows(names, regime_color: str | None, rows,
     row is stamped ``refreshed_at`` so the UI can show it as fresher than the
     sweep around it instead of silently mixing vintages.
 
-    Only replaces tickers ALREADY in the sweep — a refresh never grows the cached
-    universe (a sector refresh also pulls its ETF, which is not a scan row), so
-    the payload keeps matching the fingerprint it was stored under. A miss on the
-    scan day or fingerprint is a no-op: there is no sweep this belongs to.
+    Only replaces tickers ALREADY in the sweep AND still in ``names`` — a refresh
+    never grows the cached universe (a sector refresh also pulls its ETF, which is
+    not a scan row) and never resurrects a row for a name that has since been
+    removed. A miss on the scan day or fingerprint is a no-op: there is no sweep
+    this belongs to.
     """
     global _parsed
-    by_ticker = {r.get("ticker"): r for r in (rows or []) if isinstance(r, dict) and r.get("ticker")}
+    universe = {str(n).upper() for n in (names or [])}
+    by_ticker = {r.get("ticker"): r for r in (rows or [])
+                 if isinstance(r, dict) and r.get("ticker")
+                 and str(r["ticker"]).upper() in universe}
     if not by_ticker:
         return 0
     blob = _read_blob()
     if blob is None:
         return 0
     if (blob.get("scan_day") != scan_day(now)
-            or blob.get("fingerprint") != fingerprint(names, regime_color)):
+            or blob.get("fingerprint") != fingerprint(regime_color)):
         return 0
     result = blob.get("result")
     if not isinstance(result, dict) or not isinstance(result.get("results"), list):

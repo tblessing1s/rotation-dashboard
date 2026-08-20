@@ -116,3 +116,50 @@ def test_has_weeklies_disabled_returns_none(monkeypatch):
     monkeypatch.setattr(weeklies.log, "load_state", lambda: {"metadata": {}})
     monkeypatch.setenv("SCORECARD_CHECK_WEEKLIES", "0")
     assert weeklies.has_weeklies("ABC") is None
+
+
+# ---------------------------------------------------------------------------
+# An undeterminable probe is pinned too — the sweep-cost regression.
+# ---------------------------------------------------------------------------
+def test_undeterminable_probe_is_cached_so_a_sweep_probes_once(monkeypatch):
+    """A name whose chain can't be read used to be re-probed on EVERY sweep,
+    because only non-None results were cached. That made the slowest names (a
+    chain call that errors, with retry/backoff behind it) the most expensive ones,
+    permanently — enough of them and the sweep outruns the request timeout."""
+    _reset()
+    probes = []
+    monkeypatch.setattr(weeklies, "_enabled", lambda: True)
+    monkeypatch.setattr(weeklies, "_detect", lambda t: (probes.append(t), None)[1])
+
+    assert weeklies.has_weeklies("DEAD") is None
+    assert weeklies.has_weeklies("DEAD") is None
+    assert weeklies.has_weeklies("DEAD") is None
+    assert probes == ["DEAD"], "an unresolvable name was re-probed"
+
+
+def test_the_unknown_pin_expires_far_sooner_than_a_real_answer(monkeypatch):
+    """A transient outage must clear on its own, so None gets the short TTL while
+    a real True/False keeps the long one."""
+    _reset()
+    monkeypatch.setattr(weeklies, "_enabled", lambda: True)
+    monkeypatch.setattr(weeklies, "_detect", lambda t: None)
+    weeklies.has_weeklies("DEAD")
+
+    # Age the entry past the unknown TTL but nowhere near the real one.
+    ts, val = weeklies._cache["DEAD"]
+    weeklies._cache["DEAD"] = (ts - weeklies._UNKNOWN_TTL - 1, val)
+    monkeypatch.setattr(weeklies, "_detect", lambda t: True)
+    assert weeklies.has_weeklies("DEAD") is True, "the unknown pin never expired"
+    assert weeklies._UNKNOWN_TTL < weeklies._TTL
+
+
+def test_a_resolved_answer_still_holds_for_the_long_ttl(monkeypatch):
+    _reset()
+    probes = []
+    monkeypatch.setattr(weeklies, "_enabled", lambda: True)
+    monkeypatch.setattr(weeklies, "_detect", lambda t: (probes.append(t), True)[1])
+    assert weeklies.has_weeklies("AAPL") is True
+    ts, val = weeklies._cache["AAPL"]
+    weeklies._cache["AAPL"] = (ts - weeklies._UNKNOWN_TTL - 1, val)
+    assert weeklies.has_weeklies("AAPL") is True
+    assert probes == ["AAPL"], "a resolved answer expired on the unknown TTL"
