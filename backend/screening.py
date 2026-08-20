@@ -4,6 +4,7 @@ indicators — no provider calls beyond what data_handler caches.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from datetime import datetime, timezone
@@ -16,6 +17,8 @@ import regime_history
 import sector_data
 import stock_lights
 
+logger = logging.getLogger(__name__)
+
 # Short-TTL memoization so the expensive full-universe scans run once and are
 # reused by repeated polls and by the entry gate, instead of recomputing on
 # every concurrent request. Per-key locks collapse a thundering herd (many
@@ -26,12 +29,26 @@ _result_locks: dict[str, threading.Lock] = {}
 _results_guard = threading.Lock()
 
 
-def clear_cache() -> None:
-    """Drop memoized scan results — called on a demo/live mode switch, and when the
-    universe changes, so the next scan recomputes against the newly active data
-    source. Clears the persisted day cache too: a sweep on the old universe (or the
-    other data source) must never be replayed for the new one."""
+def clear_memo() -> None:
+    """Drop ONLY the in-process memo, keeping the persisted day sweep.
+
+    This is the UNIVERSE-CHANGE invalidation. The memo has to go, or the Scan tab
+    would keep serving the old ticker list for minutes; the disk sweep must NOT,
+    because its rows are still correct for every name that didn't change and
+    ``scan_cache.reusable`` will serve them while only the added names are
+    computed. Clearing the disk here is what used to turn a one-ticker edit into a
+    full cold ~500-name sweep on the request path."""
     _results.clear()
+
+
+def clear_cache() -> None:
+    """Drop memoized scan results AND the persisted day sweep — the GLOBAL
+    invalidation, for a demo/live mode switch: a sweep computed against the other
+    data source must never be replayed for this one.
+
+    For a universe change use ``clear_memo`` instead; there the stored rows are
+    still valid for every unchanged name."""
+    clear_memo()
     try:
         import scan_cache
         scan_cache.clear()
@@ -121,6 +138,39 @@ def start_background_scan(force: bool = False) -> dict:
                                         name="scan-runner", daemon=True)
         _scan_thread.start()
         return dict(_scan_state, running=True, fresh=_scan_fresh())
+
+
+def warm_symbols(tickers) -> dict:
+    """Fetch daily bars + probe weeklies for these names, so they are warm before
+    any sweep reaches them. Best-effort and never raises.
+
+    Called when a ticker is ADDED to the universe. A brand-new name is cold in two
+    independent caches, and the second one is the expensive half: the weeklies
+    probe is a live option-chain call, and a name whose chain can't be read pays
+    its retry/backoff too. Paying that here — off-request, right after the edit —
+    is what keeps it off the operator's next Scan."""
+    names = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
+    if not names:
+        return {"warmed": [], "ok": True}
+    try:
+        import weeklies
+        data_handler.prefetch(names)
+        weeklies.prefetch(names)
+        return {"warmed": names, "ok": True}
+    except Exception as e:  # noqa: BLE001 — warming is an optimization, never a dependency
+        logger.warning("could not warm %s (%s)", ", ".join(names), e)
+        return {"warmed": [], "ok": False, "error": str(e)}
+
+
+def start_background_warm(tickers) -> dict:
+    """Warm new names in a detached daemon thread and return immediately, so the
+    add request answers at once and the fetching happens off the request path."""
+    names = [str(t).strip().upper() for t in (tickers or []) if str(t).strip()]
+    if not names:
+        return {"warming": []}
+    threading.Thread(target=warm_symbols, args=(names,),
+                     name="universe-warm", daemon=True).start()
+    return {"warming": names}
 
 
 def _scan_fresh() -> bool:

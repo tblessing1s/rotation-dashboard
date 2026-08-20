@@ -615,6 +615,13 @@ WEEKLY_MIN_COMPARISON_DTE = 5
 # scorecard flags names without weeklies; the status is near-static so it's cached
 # for a week (override the TTL via WEEKLIES_TTL; disable via SCORECARD_CHECK_WEEKLIES=0).
 WEEKLIES_CACHE_TTL = 7 * 24 * 3600
+# An UNDETERMINABLE probe (None — Schwab error, empty chain, no expirations in
+# the window) is pinned too, but only briefly: long enough that one full-universe
+# sweep doesn't re-probe the same dead names name-by-name, short enough that a
+# transient outage or a newly-listed chain resolves within the hour. Before this
+# a None was not cached at all, so every unresolvable name cost a live option-
+# chain call — with retry/backoff — on EVERY sweep, forever.
+WEEKLIES_UNKNOWN_TTL = int(os.environ.get("WEEKLIES_UNKNOWN_TTL", "3600"))
 
 # ---- Earnings --------------------------------------------------------------
 # Around earnings we either roll the short deep-ITM for protection or exit the

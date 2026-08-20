@@ -1,5 +1,50 @@
 # Changelog
 
+## v2.10.1 — Universe edits no longer re-scan the whole universe
+
+Adding tickers made the Scan tab time out. Root cause was three compounding
+issues, all fixed here.
+
+- **A universe edit invalidated every cached row.** `scan_cache.fingerprint()`
+  hashed the full ticker list, so adding ONE name changed the key and discarded
+  all ~500 rows — the cost was proportional to the universe, not to the edit. The
+  next Scan then recomputed everything synchronously inside
+  `GET /api/scan/scorecard`, where the client's 60s abort (`api.js`) was waiting.
+  Gunicorn's timeout is 600s, so the server kept going and usually finished; the
+  browser just gave up first.
+  The universe is now **out of the fingerprint**, which keeps only the genuinely
+  global inputs (regime, demo/live, row schema). A universe change is handled by
+  row set instead: `scan_cache.reusable()` serves the rows still in the universe,
+  reports which names have none, and the sweep computes **only those** and merges
+  them in. Removals cost nothing. Measured on a 522-name universe: adding 26
+  tickers now computes 26 rows instead of 548.
+- **`sector_data._clear_caches()` deleted the day's sweep on every edit**, which
+  would have defeated the above on its own. Split into `screening.clear_memo()`
+  (universe change — drop the short-TTL memo, keep the disk sweep) and
+  `screening.clear_cache()` (demo/live switch — drop both, since a sweep computed
+  against the other data source must never be replayed).
+- **Undeterminable weeklies probes were never cached.** `has_weeklies` pinned
+  only `True`/`False`, so a name whose option chain can't be read — a typo, a dead
+  listing, an optionless symbol — was re-probed on *every* sweep, forever. Those
+  are the slowest probes there are (a live chain call plus its retry/backoff), so
+  the worst names were also the most expensive ones, permanently. `None` is now
+  pinned on a short `WEEKLIES_UNKNOWN_TTL` (1h, env-tunable): one probe per sweep
+  at most, while a transient outage still clears on its own.
+
+Also:
+
+- **New names are warmed off-request.** `POST /api/universe/add` and
+  `/api/universe/sync` now kick a detached `screening.start_background_warm()`
+  that fetches daily bars and probes weeklies for the added names, so a fresh
+  ticker is never cold when a sweep reaches it. The response doesn't wait.
+- **`patch_rows` gained a universe-membership guard** — a refreshed row is written
+  back only if its ticker is still in the universe, so a refresh in flight during a
+  removal can't resurrect a dropped row.
+
+Upgrade note: the fingerprint change means the first scan after deploy is a
+one-time full sweep (the stored blob's old key can't match). It re-caches
+immediately.
+
 ## v2.10.0 — Entry-gate recalibration, shadow-first
 
 Three defects in the entry gate, addressed behind a `GATE_RULESET` flag that
