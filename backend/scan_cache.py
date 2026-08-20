@@ -75,7 +75,8 @@ SCAN_ROLL_ET = _time(16, 15)
 # Bump when the row SHAPE changes (a new column, a renamed field) so an upgraded
 # deploy never renders yesterday's payload through today's UI.
 #   v3 — Level-4 chart-structure shadow keys (structure / structure_score /
-#        structure_score_of / consolidation_phase / suitability_notes). The bump
+#        structure_score_of / consolidation_phase / suitability_notes), including
+#        the per-basis tightness ceiling (structure.tightness_max). The bump
 #        is load-bearing beyond the new columns: `suitability` on a v2 row was
 #        computed under the phase-BLIND volume rule, so serving one after this
 #        deploy would keep emitting the thin-participation CAUTION the change

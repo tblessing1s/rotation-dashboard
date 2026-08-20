@@ -194,7 +194,8 @@ const COLUMNS = [
         "",
         line("dist below 126d high", st.dist_from_high_pct == null ? null : `${fmt(st.dist_from_high_pct, 2)}%`, c.dist_from_high_pct),
         line("MA21 slope", st.ma21_slope == null ? null : `${fmt(st.ma21_slope, 3)} ATR/bar (${st.ma21_slope_state})`, c.ma21_slope),
-        line("tightness", st.tightness == null ? null : `${fmt(st.tightness, 3)} vs ${st.tightness_basis}`, c.tightness),
+        line("tightness", st.tightness == null ? null
+          : `${fmt(st.tightness, 3)} vs ${st.tightness_basis} (bar ${fmt(st.tightness_max, 3)})`, c.tightness),
         line("higher lows", st.higher_lows, c.higher_lows),
         st.dist_from_high_252_pct != null ? `  (252d high: ${fmt(st.dist_from_high_252_pct, 2)}% below)` : null,
         of < 4 ? `\nPARTIAL READ — unmeasurable: ${(st.insufficient || []).join(", ")}. Not a low score.` : null,
@@ -408,7 +409,9 @@ function StructureShadow({ row }) {
         {cell("tightness",
               st.tightness == null ? null : fmt(st.tightness, 3),
               c.tightness,
-              `Range of the last 15 closes over the prior 60-bar ${st.tightness_basis === "atr_sum" ? "ATR sum (no advance detected)" : "advance"}. Lower = tighter coil; constructive below 0.35. NOTE: the two bases are not on one scale — see chart_structure.tightness.`)}
+              `Range of the last 15 closes over the prior 60-bar ${
+                st.tightness_basis === "atr_sum" ? "ATR SUM (no advance detected)" : "ADVANCE range"
+              }. Lower = tighter coil; constructive below ${fmt(st.tightness_max, 3)}. The two bases are not on one scale — summed true range is path length, always ≥ the range it spans — so each carries its OWN ceiling (advance 0.35, atr_sum 0.05). Never compare a tightness value across bases.`)}
         {cell("higher lows", st.higher_lows, c.higher_lows,
               "Successive higher swing lows over the trailing 30 bars (3-bar pivots). Constructive at 2 or more.")}
       </div>

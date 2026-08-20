@@ -63,7 +63,22 @@ MA21_SLOPE_FLAT = 0.05         # PROPOSED_DEFAULT — |slope| below this (ATR/ba
 
 TIGHTNESS_RECENT = 15          # PROPOSED_DEFAULT — the coil window (daily closes)
 TIGHTNESS_PRIOR = 60           # PROPOSED_DEFAULT — the prior-advance window it is measured against
-TIGHTNESS_MAX = 0.35           # PROPOSED_DEFAULT — coil range / advance range below this = constructive
+# The two bases are NOT on one scale, so they carry SEPARATE thresholds — see
+# ``tightness_max_for``. A single threshold is what makes the atr_sum reading
+# uninformative: measured over a synthetic population spanning drift, amplitude,
+# period and noise, 0.35 admits 100.0% of atr_sum-basis charts against 60.2% of
+# advance-basis ones. A bar everything clears is not a bar.
+TIGHTNESS_MAX_ADVANCE = 0.35   # PROPOSED_DEFAULT — coil range / prior ADVANCE range
+# PROPOSED_DEFAULT — coil range / prior 60-bar ATR SUM. Two independent estimates
+# put it at the same place:
+#   * random-walk scale. Summed true range is PATH LENGTH; over n bars a random
+#     walk spans a range of order path/sqrt(n). So the scale-equivalent bar is
+#     TIGHTNESS_MAX_ADVANCE / sqrt(60) = 0.045. Measured range/atr_sum on
+#     non-advancing windows: median 0.131 vs the theoretical 1/sqrt(60) = 0.129.
+#   * pass-rate matching. The threshold admitting the same FRACTION of atr_sum
+#     charts that 0.35 admits of advance charts is 0.049 (60.3% vs 60.2%).
+# 0.05 sits between them, is legible, and matches the pass rate to ~1 point.
+TIGHTNESS_MAX_ATR_SUM = 0.05
 
 HIGHER_LOWS_WINDOW = 30        # PROPOSED_DEFAULT — trailing bars scanned for swing lows
 HIGHER_LOWS_MIN = 2            # PROPOSED_DEFAULT — this many successive higher lows = constructive
@@ -173,26 +188,40 @@ def ma21_slope_state(slope: float | None) -> str | None:
 # ---------------------------------------------------------------------------
 # 3. Tightness of the coil
 # ---------------------------------------------------------------------------
+def tightness_max_for(basis: str | None) -> float | None:
+    """The constructive ceiling for one tightness ``basis``.
+
+    Split deliberately. The denominators measure different things — a RANGE for
+    an advancing prior window, summed true range (PATH LENGTH) when it did not
+    advance — and path length is always >= the range it spans, so one number
+    cannot bar both. Calibrated so each basis discriminates at a comparable rate
+    rather than to the same nominal value; see the constants above."""
+    if basis == "advance":
+        return TIGHTNESS_MAX_ADVANCE
+    if basis == "atr_sum":
+        return TIGHTNESS_MAX_ATR_SUM
+    return None
+
+
 def tightness(df: pd.DataFrame | None, recent: int = TIGHTNESS_RECENT,
               prior: int = TIGHTNESS_PRIOR) -> tuple[float | None, str | None]:
-    """``(ratio, basis)`` — the range of the last ``recent`` closes over the range
+    """``(ratio, basis)`` — the range of the last ``recent`` closes over the size
     of the ``prior`` bars that preceded them. Lower = tighter coil; constructive
-    below ``TIGHTNESS_MAX``.
+    below the ceiling for its OWN basis (``tightness_max_for``).
 
     ``basis`` is ``"advance"`` when the prior window genuinely advanced (its last
     close above its first) and the spread of that advance is the denominator, or
     ``"atr_sum"`` when it did not and the summed true range over the same window
     stands in as the volatility scale.
 
-    CALIBRATION CAVEAT — the two bases are NOT on one scale. Summed true range is
-    path length, which is >= the range it spans, so an ``atr_sum`` denominator is
-    systematically LARGER and its ratios systematically smaller (more
-    "constructive") than an ``advance`` one. That biases exactly the non-advancing
-    drift charts this metric is meant to punish. ``basis`` is returned, carried on
-    the row and persisted per scan precisely so the calibration pass can separate
-    the two populations rather than pool them — and it is a live argument for
-    splitting the threshold in two once there is data. Recorded as specified,
-    flagged rather than silently rewritten."""
+    THE RATIO IS ONLY COMPARABLE WITHIN A BASIS. Summed true range is path
+    length, always >= the range it spans, so an ``atr_sum`` denominator is
+    systematically larger and its ratios systematically smaller. That is why the
+    thresholds are split rather than shared: under one shared 0.35 the atr_sum
+    reading admitted 100% of its population and carried no information at all.
+    Never compare two tightness values across bases, and never pool them in a
+    calibration — which is exactly why ``basis`` is returned, carried on the row,
+    and persisted per scan alongside the value."""
     c = _closes(df)
     if c is None or len(c) < recent + prior:
         return None, None
@@ -268,7 +297,8 @@ def structure_metrics(df: pd.DataFrame | None) -> dict:
         "dist_from_high_pct": None if dist is None else bool(dist <= DIST_FROM_HIGH_MAX),
         # Rising, not merely non-negative: the FLAT band is the drifting chart.
         "ma21_slope": None if slope is None else bool(slope > 0 and abs(slope) >= MA21_SLOPE_FLAT),
-        "tightness": None if tight is None else bool(tight < TIGHTNESS_MAX),
+        # Judged against its OWN basis's ceiling — the two are not interchangeable.
+        "tightness": None if tight is None else bool(tight < tightness_max_for(tight_basis)),
         "higher_lows": None if hl is None else bool(hl >= HIGHER_LOWS_MIN),
     }
     insufficient = [k for k in METRICS if values[k] is None]
@@ -278,6 +308,10 @@ def structure_metrics(df: pd.DataFrame | None) -> dict:
         "dist_from_high_252_pct": dist_long,
         "ma21_slope_state": ma21_slope_state(slope),
         "tightness_basis": tight_basis,
+        # The ceiling this reading was actually judged against, carried so the
+        # display and the calibration log never have to re-derive which basis
+        # applied — and so a ratio is never read against the wrong bar.
+        "tightness_max": tightness_max_for(tight_basis),
         "constructive": constructive,
         "structure_score": sum(1 for k in measurable if constructive[k]),
         "structure_score_of": len(measurable),

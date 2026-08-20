@@ -76,6 +76,17 @@ def post_run_drift():
     return _frame(run + roll + drift)
 
 
+def post_run_loose_drift():
+    """Same rolled-over shape as `post_run_drift`, but the drift is WIDE rather
+    than a tight coil. Under the old shared 0.35 ceiling this cleared tightness —
+    like every other atr_sum-basis chart. It is the fixture that proves the split
+    threshold actually discriminates."""
+    run = _zig(80, 100.0, 0.007, 0.010)
+    roll = _zig(40, run[-1] * 0.99, -0.005, 0.010, phase0=80 % 6)
+    drift = _zig(20, roll[-1], 0.0, 0.045, phase0=(80 + 40) % 6)
+    return _frame(run + roll + drift)
+
+
 def fresh_breakout():
     """Advance, brief base, then a sharp thrust out of it in the last 8 bars —
     a real setup, but not a COIL. Tightness is the leg that must catch it."""
@@ -100,7 +111,7 @@ def test_ideal_coil_scores_four_of_four():
     # Each leg for the stated reason, not by accident.
     assert m["dist_from_high_pct"] <= cs.DIST_FROM_HIGH_MAX
     assert m["ma21_slope"] > 0 and m["ma21_slope_state"] == "rising"
-    assert m["tightness"] < cs.TIGHTNESS_MAX and m["tightness_basis"] == "advance"
+    assert m["tightness"] < cs.TIGHTNESS_MAX_ADVANCE and m["tightness_basis"] == "advance"
     assert m["higher_lows"] >= cs.HIGHER_LOWS_MIN
 
 
@@ -114,29 +125,66 @@ def test_post_run_drift_scores_at_most_one_of_four():
     assert m["constructive"]["higher_lows"] is False           # no rising swing lows
 
 
-def test_post_run_drift_tightness_passes_only_via_the_atr_sum_basis():
-    """Executable documentation of the calibration caveat in
-    ``chart_structure.tightness``: a non-advancing prior window falls back to
-    SUMMED true range, which is path length and therefore systematically larger
-    than a range — so the ratio is systematically smaller and reads
-    "constructive" on exactly the drift charts the metric is meant to punish.
+def test_tightness_thresholds_are_split_per_basis():
+    """The two denominators measure different things — a RANGE for an advancing
+    prior window, summed true range (PATH LENGTH) when it did not advance — and
+    path length is always >= the range it spans. One shared ceiling therefore
+    cannot bar both: under 0.35 the atr_sum reading admitted 100% of its
+    population and carried no information.
 
-    This is the one leg post-run drift passes. It is recorded as specified rather
-    than silently rewritten, and `tightness_basis` is persisted per scan so the
-    calibration pass can separate the two populations instead of pooling them.
-    If a future change splits the threshold per basis, this test is the one to
-    revisit."""
+    The split value is corroborated two independent ways, both landing at ~0.045-0.049:
+    random-walk scale (0.35 / sqrt(60)) and pass-rate matching against the
+    advance basis. 0.05 sits between them."""
+    assert cs.TIGHTNESS_MAX_ADVANCE == 0.35            # unchanged
+    assert cs.TIGHTNESS_MAX_ATR_SUM == 0.05            # new, separately calibrated
+    assert cs.TIGHTNESS_MAX_ATR_SUM < cs.TIGHTNESS_MAX_ADVANCE
+    # Within a hair of the random-walk scale-equivalent bar.
+    assert cs.TIGHTNESS_MAX_ATR_SUM == pytest.approx(
+        cs.TIGHTNESS_MAX_ADVANCE / math.sqrt(cs.TIGHTNESS_PRIOR), abs=0.01)
+
+    assert cs.tightness_max_for("advance") == cs.TIGHTNESS_MAX_ADVANCE
+    assert cs.tightness_max_for("atr_sum") == cs.TIGHTNESS_MAX_ATR_SUM
+    assert cs.tightness_max_for(None) is None          # nothing measured, nothing to judge
+
+
+def test_the_split_threshold_has_teeth_on_the_atr_sum_basis():
+    """The point of splitting: a WIDE drift on a non-advancing base must now fail
+    tightness. Under the old shared 0.35 it cleared — which is what made the
+    atr_sum reading useless."""
+    m = cs.structure_metrics(post_run_loose_drift())
+    assert m["tightness_basis"] == "atr_sum"
+    assert m["tightness"] < 0.35                       # would have PASSED the old bar
+    assert m["tightness"] > cs.TIGHTNESS_MAX_ATR_SUM   # ...and FAILS its own
+    assert m["constructive"]["tightness"] is False
+    assert m["structure_score"] == 0                   # 1/4 -> 0/4
+
+
+def test_a_tight_coil_on_a_non_advancing_base_still_passes():
+    """The split must discriminate, not blanket-reject. `post_run_drift`'s coil is
+    genuinely tight (~6th percentile of the atr_sum population), so tightness —
+    which measures tightness and nothing else — correctly still passes it. The
+    chart is rejected by the OTHER three legs, which is the design: one metric per
+    concern, and the score does the composing."""
     m = cs.structure_metrics(post_run_drift())
     assert m["tightness_basis"] == "atr_sum"
     assert m["constructive"]["tightness"] is True
-    # ...and it is the ONLY leg it passes, so the score still separates.
     assert [k for k in cs.METRICS if m["constructive"][k]] == ["tightness"]
+    assert m["structure_score"] == 1
+
+
+def test_the_applied_ceiling_is_carried_on_the_record():
+    """A ratio must never be read against the wrong bar, so the ceiling it was
+    judged against travels with it."""
+    for fn in (ideal_coil, post_run_drift, fresh_breakout):
+        m = cs.structure_metrics(fn())
+        assert m["tightness_max"] == cs.tightness_max_for(m["tightness_basis"])
+    assert cs.structure_metrics(short_history(40))["tightness_max"] is None
 
 
 def test_fresh_breakout_fails_tightness():
     m = cs.structure_metrics(fresh_breakout())
     assert m["constructive"]["tightness"] is False
-    assert m["tightness"] >= cs.TIGHTNESS_MAX
+    assert m["tightness"] >= cs.TIGHTNESS_MAX_ADVANCE
     assert m["tightness_basis"] == "advance"
     # It is not a bad chart — just not a coil. The other legs still read well,
     # which is what makes tightness the discriminating leg here.
@@ -236,7 +284,7 @@ def test_higher_lows_counts_the_trailing_run_and_zero_is_a_real_answer():
 
 def test_tightness_reports_which_denominator_it_used():
     tight, basis = cs.tightness(ideal_coil())
-    assert basis == "advance" and 0 < tight < cs.TIGHTNESS_MAX
+    assert basis == "advance" and 0 < tight < cs.TIGHTNESS_MAX_ADVANCE
     tight2, basis2 = cs.tightness(post_run_drift())
     assert basis2 == "atr_sum"
     assert cs.tightness(short_history(40)) == (None, None)
@@ -555,6 +603,9 @@ def test_rejection_log_persists_the_structure_record():
     assert rec["structure_score"] == m["structure_score"]
     assert rec["structure_score_of"] == m["structure_score_of"]
     assert rec["tightness_basis"] == m["tightness_basis"]
+    # The per-basis ceiling travels with the ratio, so a calibration pass can
+    # never read a value against the wrong bar or pool the two populations.
+    assert rec["tightness_max"] == m["tightness_max"]
     assert rec["structure_insufficient"] == m["insufficient"]
     assert rec["consolidation_phase"] is True
     assert rec["volume_ratio"] == _VR_BELOW

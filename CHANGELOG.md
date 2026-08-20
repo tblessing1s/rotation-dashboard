@@ -12,7 +12,8 @@ READY/WATCH kept landing on spots a human would not call compelling.
 - **Four new structure metrics, SHADOW ONLY** (`backend/chart_structure.py`):
   `dist_from_high_pct` (126-bar, 252-bar for display), `ma21_slope` (ATR/bar, so
   names are comparable), `tightness` (15-bar coil range over the prior 60-bar
-  advance), and `higher_lows` (3-bar pivots over 30 bars). Plus
+  advance, with a separately calibrated ceiling per denominator), and
+  `higher_lows` (3-bar pivots over 30 bars). Plus
   `structure_score`, the count in their constructive bands.
   **Zero authority**: nothing is appended to the `blocks` list that carries
   verdict authority, nothing is a check in `stock_lights._right_spot_from`,
@@ -30,7 +31,7 @@ READY/WATCH kept landing on spots a human would not call compelling.
   recommendation pool (`recommendation_runner`), the internal queue
   (`queue_state`) and the intraday hot set (`refresh_policy`).
 - **Calibration logging.** `scan_rejection_log` schema 3 persists the metrics, the
-  score and its denominator, the tightness basis and the phase flag per candidate
+  score and its denominator, the tightness basis and applied ceiling, and the phase flag per candidate
   per scan; `summary()` crosstabs `structure_score` against the verdict reached
   *without* it. New `structure_labels` store + `GET|POST /api/scan/structure-label`
   records Travis's manual compelling / not-compelling calls (append-only, curl-able,
@@ -52,12 +53,19 @@ Three things worth knowing:
   is dividend-adjusted. A ratio test can't work — an unadjusted 2:1 split and a
   real 50% drawdown give the identical ratio — so a window straddling a
   split-sized *single-bar* drop is reported unmeasurable instead.
-- **`tightness`'s two denominators are not on one scale.** When the prior window
-  didn't advance it falls back to summed true range, which is path length and so
-  systematically larger — biasing toward "constructive" on exactly the drift
-  charts the metric should punish. Implemented as specified, and `tightness_basis`
-  is persisted per scan so calibration can split the populations rather than pool
-  them. `test_post_run_drift_tightness_passes_only_via_the_atr_sum_basis` pins it.
+- **`tightness` carries a SEPARATE threshold per basis.** When the prior window
+  didn't advance the denominator falls back to summed true range, which is path
+  length and always >= the range it spans — so the two bases are not on one scale
+  and one ceiling cannot bar both. Measured over a synthetic population spanning
+  drift, amplitude, period and noise, the shared 0.35 admitted **100%** of
+  atr_sum-basis charts against 60.2% of advance-basis ones: a bar everything
+  clears is not a bar. The atr_sum ceiling is now **0.05**, corroborated two
+  independent ways that agree to within a few thousandths — random-walk scale
+  (`0.35 / sqrt(60)` = 0.045; measured median range/atr_sum on non-advancing
+  windows 0.131 vs the theoretical 0.129) and pass-rate matching against the
+  advance basis (0.049 -> 60.3% vs 60.2%). The applied ceiling travels with the
+  ratio on the row and in the log, so a calibration pass can never read a value
+  against the wrong bar or pool the two populations.
 
 Unchanged and asserted: `VOLUME_RATIO_MIN`, the MFI 40–60 band, `ATR_MOMENTUM_MAX`,
 every Level-4 threshold, and WATCH/BENCH semantics. `AUDIT_LEVEL4_STRUCTURE_PHASE0.md`

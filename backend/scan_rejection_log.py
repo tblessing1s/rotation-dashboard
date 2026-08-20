@@ -44,8 +44,8 @@ _lock = threading.RLock()
 #       the raw ATR ratio. Writes become append-per-SCAN-RUN (see record_scan).
 #   3 — Level-4 CHART-STRUCTURE shadow metrics (chart_structure): the four raw
 #       values, their constructive verdicts, structure_score / _of, the
-#       insufficient list, the tightness basis, and the consolidation-phase flag
-#       the volume check reads. This is the calibration dataset that a future
+#       insufficient list, the tightness basis AND the per-basis ceiling it was
+#       judged against, and the consolidation-phase flag the volume check reads. This is the calibration dataset that a future
 #       "should structure block?" decision would rest on — which is exactly why
 #       it is persisted per candidate per scan rather than only rendered.
 SCHEMA_VERSION = 3
@@ -175,9 +175,11 @@ def _record_from_row(row: dict) -> dict:
         # (structure_labels), so the raw values are persisted alongside the
         # verdict they did NOT influence. `structure_score_of` and
         # `structure_insufficient` are recorded so a partial read is never
-        # mistaken for a low score. `tightness_basis` separates the "advance" and
-        # "atr_sum" denominators, which are NOT on one scale (see
-        # chart_structure.tightness).
+        # mistaken for a low score. `tightness_basis` names which denominator was
+        # used and `tightness_max` the ceiling it was judged against: the
+        # "advance" and "atr_sum" bases are NOT on one scale and carry SEPARATE
+        # thresholds, so a calibration pass must never pool or cross-compare
+        # their ratios (see chart_structure.tightness).
         "structure_score": struct.get("structure_score"),
         "structure_score_of": struct.get("structure_score_of"),
         "structure_insufficient": struct.get("insufficient"),
@@ -187,6 +189,7 @@ def _record_from_row(row: dict) -> dict:
         "ma21_slope_state": struct.get("ma21_slope_state"),
         "tightness": struct.get("tightness"),
         "tightness_basis": struct.get("tightness_basis"),
+        "tightness_max": struct.get("tightness_max"),
         "higher_lows": struct.get("higher_lows"),
         "structure_constructive": struct.get("constructive"),
         # The phase flag that decided whether the thin-volume CAUTION applied —
