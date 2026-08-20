@@ -947,6 +947,48 @@ def api_scan_transitions():
         return _err(e)
 
 
+@app.route("/api/scan/structure-label", methods=["GET", "POST"])
+def api_scan_structure_label():
+    """Operator STRUCTURE_LABEL annotations — the manual half of the Level-4
+    chart-structure calibration set (see structure_labels).
+
+    POST {ticker, label, scan_id?, verdict?, structure_score?,
+          structure_score_of?, note?} appends one label. ``label`` is
+    COMPELLING / NOT_COMPELLING / UNSURE (yes/no/unsure shorthands accepted).
+    Append-only: relabelling appends a second row rather than rewriting the
+    first, and NOTHING here edits or re-derives the historical verdict it
+    annotates.
+
+    GET returns the calibration rollup (labels crossed against structure_score),
+    or one ticker's labels with ?ticker=X, or the newest across all tickers with
+    ?recent=N. Curl-able by design — no UI is required for the shadow period.
+
+    Sits behind the normal session auth like every other /api/scan/* route."""
+    try:
+        import structure_labels
+        if request.method == "GET":
+            ticker = (request.args.get("ticker") or "").strip()
+            if ticker:
+                return jsonify({"ticker": ticker.upper(),
+                                "labels": structure_labels.series(ticker)})
+            limit = request.args.get("recent")
+            if limit is not None:
+                return jsonify({"labels": structure_labels.recent(limit=int(limit or 100))})
+            return jsonify(structure_labels.summary())
+        body = request.get_json(silent=True) or {}
+        result = structure_labels.record_label(
+            body.get("ticker") or "",
+            body.get("label") or "",
+            scan_id=body.get("scan_id"),
+            verdict=body.get("verdict"),
+            structure_score=body.get("structure_score"),
+            structure_score_of=body.get("structure_score_of"),
+            note=body.get("note"))
+        return jsonify(result), (200 if result.get("ok") else 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/scan/candidate-universe")
 def api_scan_candidate_universe():
     """The weekly universe-intake screen result — the momentum/quality-filtered

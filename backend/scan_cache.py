@@ -74,7 +74,14 @@ SCAN_ROLL_ET = _time(16, 15)
 
 # Bump when the row SHAPE changes (a new column, a renamed field) so an upgraded
 # deploy never renders yesterday's payload through today's UI.
-SCHEMA = "v2"
+#   v3 — Level-4 chart-structure shadow keys (structure / structure_score /
+#        structure_score_of / consolidation_phase / suitability_notes). The bump
+#        is load-bearing beyond the new columns: `suitability` on a v2 row was
+#        computed under the phase-BLIND volume rule, so serving one after this
+#        deploy would keep emitting the thin-participation CAUTION the change
+#        removes — and `suitability` gates the recommendation pool, the queue and
+#        the hot-refresh set.
+SCHEMA = "v3"
 
 _FILENAME = "scan_scorecard.json"
 _lock = threading.Lock()

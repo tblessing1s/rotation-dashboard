@@ -256,6 +256,10 @@ def compute_verdict(metrics: dict) -> dict:
     ETF is still caught."""
     avoid: list[str] = []
     caution: list[str] = []
+    # Non-blocking observations. A note NEVER changes the verdict — it is how a
+    # suppressed rule still says what it saw, so "no CAUTION" is distinguishable
+    # from "nothing looked at".
+    notes: list[str] = []
     is_etf = bool(metrics.get("is_etf"))
 
     # --- AVOID rules ---
@@ -270,7 +274,7 @@ def compute_verdict(metrics: dict) -> dict:
     if ext is not None and ext > T.ATR_EXTENSION_MAX:
         avoid.append(f"ATR extension {ext:.1f} > {T.ATR_EXTENSION_MAX:g} (overextended)")
     if avoid:
-        return {"verdict": "AVOID", "reasons": avoid}
+        return {"verdict": "AVOID", "reasons": avoid, "notes": notes}
 
     # --- CAUTION rules (only when not already AVOID) ---
     # The MFI band, thin-participation volume floor, and ATR-expansion check are
@@ -279,9 +283,28 @@ def compute_verdict(metrics: dict) -> dict:
     m = metrics.get("mfi")
     if not is_etf and m is not None and (m < T.MFI_MIN or m > T.MFI_MAX):
         caution.append(f"MFI {m:.0f} outside {T.MFI_MIN:g}–{T.MFI_MAX:g} band")
+    # PHASE-AWARE thin-volume floor (TRAVIS_EXTENSION). The THRESHOLD IS UNCHANGED
+    # (T.VOLUME_RATIO_MIN, still 0.8) — what changes is where it APPLIES.
+    #
+    # The flat floor is phase-blind, and that made it fire on exactly the setups
+    # Level 4 exists to find: inside a consolidation, LOW volume is CONSTRUCTIVE
+    # (supply drying up), not thin participation. Note that the rule two lines
+    # below already penalizes ATR EXPANSION — i.e. this lens already assumes a
+    # coiling name — so firing on the quiet volume that same coil produces had the
+    # two CAUTIONs pulling opposite directions on one chart.
+    #
+    # Outside a consolidation (a breakout / entry-day confirmation context) the
+    # behavior is byte-identical to before: same threshold, same message. The phase
+    # flag is a pure READ of the already-computed Level-4 check results
+    # (chart_structure.consolidation_phase) and fails CLOSED — absent a gate it is
+    # False, which is the pre-change path.
     vr = metrics.get("volume_ratio")
     if not is_etf and vr is not None and vr < T.VOLUME_RATIO_MIN:
-        caution.append(f"volume ratio {vr:.2f} < {T.VOLUME_RATIO_MIN:g} (thin participation)")
+        if metrics.get("consolidation_phase"):
+            notes.append(f"volume: drying up (constructive) — {vr:.2f} < "
+                         f"{T.VOLUME_RATIO_MIN:g} inside a consolidation")
+        else:
+            caution.append(f"volume ratio {vr:.2f} < {T.VOLUME_RATIO_MIN:g} (thin participation)")
     atrm = metrics.get("atr_momentum")
     if not is_etf and atrm is not None and atrm > T.ATR_MOMENTUM_MAX:
         caution.append(f"ATR expanding ({atrm:.2f} > {T.ATR_MOMENTUM_MAX:g}) — wants APP, not CFM")
@@ -291,9 +314,9 @@ def compute_verdict(metrics: dict) -> dict:
     if slope is not None and slope < 0:
         caution.append(f"MA50 rolling over (slope {slope:+.2f})")
     if caution:
-        return {"verdict": "CAUTION", "reasons": caution}
+        return {"verdict": "CAUTION", "reasons": caution, "notes": notes}
 
-    return {"verdict": "GO", "reasons": []}
+    return {"verdict": "GO", "reasons": [], "notes": notes}
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +710,37 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["score_parts"] = scored["parts"]
     row["sector_rs1m"] = None if sector_rs1m is None else round(sector_rs1m, 2)
 
+    # ---- Level-4 CHART STRUCTURE (SHADOW) + the volume phase flag -------------
+    # TRAVIS_EXTENSION. Purely ADDITIVE row keys. Level 4 measures quietness but
+    # not structure, so these four metrics measure the structure it misses:
+    # distance below the trailing high, MA21 slope in ATR/bar, coil tightness, and
+    # successive higher lows — plus `structure_score`, the count in their
+    # constructive bands.
+    #
+    # ZERO AUTHORITY (chart_structure's module docstring states the full contract):
+    # nothing here is appended to `blocks`, so `row["verdict"]` — already finalized
+    # ~100 lines above — is bit-for-bit what it was before this block existed, and
+    # `bench` / `triggers` / `path_to_ready` with it. Graduating a metric to
+    # blocking authority is a deliberate future code change contingent on the
+    # calibration these logged values exist to feed.
+    #
+    # Attached BEFORE the Level-4 short-circuit below, deliberately: "gate failed,
+    # structure N/4" is half the comparison the calibration is FOR, and computing
+    # it only for gate-passing rows would throw that half away. The metrics are
+    # pure reads over the frame already in hand — no extra fetch.
+    import chart_structure
+    struct = chart_structure.structure_metrics(df)
+    row["structure"] = struct
+    row["structure_score"] = struct["structure_score"]
+    row["structure_score_of"] = struct["structure_score_of"]
+
+    # The consolidation phase flag the volume check reads — a pure READ of the
+    # Level-4 right-spot checks already computed for this row's gate, never a
+    # re-derivation. `gate is None` (the many score_ticker callers that pass no
+    # gate) yields False, i.e. exactly today's volume behavior.
+    row["consolidation_phase"] = chart_structure.consolidation_phase(
+        (_gate_level_detail(gate, 4) or {}).get("right_spot"))
+
     # `suitability` = the CFM-suitability lens (stock-level gate short-circuit, else
     # the GO/CAUTION/AVOID metric rules). Not the headline verdict — a demoted signal.
     failed = _failed_stock_gate_level(gate)
@@ -695,6 +749,7 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
         row["suitability"] = "AVOID"
         row["suitability_reasons"] = [f"fails entry gate level {failed}"
                                       + (f" ({name})" if name else "")]
+        row["suitability_notes"] = []
         return row
 
     # Judge the rounded values the UI actually shows, so the suitability can never
@@ -702,6 +757,9 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     suitability = compute_verdict(row)
     row["suitability"] = suitability["verdict"]
     row["suitability_reasons"] = suitability["reasons"]
+    # Non-blocking observations (today: the phase-suppressed volume note), so a
+    # suppressed rule is still visible rather than silently absent.
+    row["suitability_notes"] = suitability.get("notes") or []
     return row
 
 

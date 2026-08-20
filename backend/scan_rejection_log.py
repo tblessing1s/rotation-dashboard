@@ -42,7 +42,13 @@ _lock = threading.RLock()
 #   2 — gate-recalibration shadow record: scan_id, both rulesets' verdicts and
 #       their divergence, the full per-level results, the SYM light breakdown and
 #       the raw ATR ratio. Writes become append-per-SCAN-RUN (see record_scan).
-SCHEMA_VERSION = 2
+#   3 — Level-4 CHART-STRUCTURE shadow metrics (chart_structure): the four raw
+#       values, their constructive verdicts, structure_score / _of, the
+#       insufficient list, the tightness basis, and the consolidation-phase flag
+#       the volume check reads. This is the calibration dataset that a future
+#       "should structure block?" decision would rest on — which is exactly why
+#       it is persisted per candidate per scan rather than only rendered.
+SCHEMA_VERSION = 3
 
 
 def _today() -> str:
@@ -97,6 +103,7 @@ def _record_from_row(row: dict) -> dict:
     """The persisted fields for one scan row (compact but calibration-sufficient)."""
     binding = row.get("binding") or {}
     floor = row.get("shadow_floor") or {}
+    struct = row.get("structure") or {}
     return {
         "verdict": row.get("verdict"),
         "bench": bool(row.get("bench")),
@@ -161,6 +168,31 @@ def _record_from_row(row: dict) -> dict:
         "sym_core_green": row.get("sym_core_green"),
         "sym_greens": row.get("sym_greens"),
         "atr_momentum": row.get("atr_momentum"),
+        # --- Level-4 chart structure, SHADOW (schema 3) ------------------------
+        # ZERO blocking authority today (chart_structure). Graduating any of these
+        # to a gate check is a future work item CONTINGENT on joining these rows
+        # against Travis's manual compelling / not-compelling labels
+        # (structure_labels), so the raw values are persisted alongside the
+        # verdict they did NOT influence. `structure_score_of` and
+        # `structure_insufficient` are recorded so a partial read is never
+        # mistaken for a low score. `tightness_basis` separates the "advance" and
+        # "atr_sum" denominators, which are NOT on one scale (see
+        # chart_structure.tightness).
+        "structure_score": struct.get("structure_score"),
+        "structure_score_of": struct.get("structure_score_of"),
+        "structure_insufficient": struct.get("insufficient"),
+        "dist_from_high_pct": struct.get("dist_from_high_pct"),
+        "dist_from_high_252_pct": struct.get("dist_from_high_252_pct"),
+        "ma21_slope": struct.get("ma21_slope"),
+        "ma21_slope_state": struct.get("ma21_slope_state"),
+        "tightness": struct.get("tightness"),
+        "tightness_basis": struct.get("tightness_basis"),
+        "higher_lows": struct.get("higher_lows"),
+        "structure_constructive": struct.get("constructive"),
+        # The phase flag that decided whether the thin-volume CAUTION applied —
+        # persisted with the ratio so the suppression is auditable after the fact.
+        "consolidation_phase": bool(row.get("consolidation_phase")),
+        "volume_ratio": row.get("volume_ratio"),
     }
 
 
@@ -189,12 +221,23 @@ def summary(window: int | None = None) -> dict:
     """A calibration-oriented rollup over the retained records: how often each
     binding constraint bound, and the READY rate — the empirical read on whether
     the gate is too strict. ``window`` bounds each symbol to its newest N records."""
+    from metrics import thresholds as _T
+    vol_floor = _T.VOLUME_RATIO_MIN            # read, never written — see chart_structure
     data = _load()["symbols"]
     binding_counts: dict[str, int] = {}
     verdict_counts: dict[str, int] = {}
     # Shadow-floor calibration tallies, per profile (schema v21).
     floor: dict[str, dict] = {}
     floor_reasons: dict[str, int] = {}
+    # Level-4 structure calibration tallies (schema 3). The headline question the
+    # shadow period exists to answer is "does structure_score separate the charts
+    # Travis calls compelling from the ones he doesn't", so the rollup is a
+    # CROSSTAB of score against the verdict the gate reached WITHOUT it — not a
+    # bare histogram. Partial reads are counted separately; a 2-of-3 is not a 2/4.
+    struct_by_score: dict[str, dict] = {}
+    struct_partial = 0
+    struct_measured = 0
+    phase_suppressed = 0
     total = 0
     for recs in data.values():
         for rec in (recs[-window:] if window else recs):
@@ -211,6 +254,20 @@ def summary(window: int | None = None) -> dict:
                 agg["pass" if passed else "fail"] += 1
             for reason in rec.get("shadow_floor_reasons") or []:
                 floor_reasons[reason] = floor_reasons.get(reason, 0) + 1
+            # Structure crosstab. Keyed "n/k" so a partial read stays visibly
+            # partial instead of being pooled with a full one at the same n.
+            score, of = rec.get("structure_score"), rec.get("structure_score_of")
+            if score is not None and of:
+                struct_measured += 1
+                if of < 4:
+                    struct_partial += 1
+                agg = struct_by_score.setdefault(f"{score}/{of}", {})
+                agg[v] = agg.get(v, 0) + 1
+            # How often the phase flag actually suppressed a thin-volume CAUTION —
+            # the empirical size of the volume change, per scan.
+            if (rec.get("consolidation_phase") and rec.get("volume_ratio") is not None
+                    and rec["volume_ratio"] < vol_floor):
+                phase_suppressed += 1
     ready = verdict_counts.get("READY", 0)
     # Ruleset-divergence tally (schema 2): how often the proposed rules would have
     # reached a different verdict than the shipped ones, and in which direction.
@@ -232,6 +289,16 @@ def summary(window: int | None = None) -> dict:
     return {
         "records": total,
         "symbols": len(data),
+        # SHADOW structure calibration read (schema 3): structure_score crossed
+        # against the verdict reached WITHOUT it, plus how many thin-volume
+        # CAUTIONs the consolidation-phase flag suppressed. Evidence for a future
+        # decision; it grants nothing.
+        "structure": {
+            "measured": struct_measured,
+            "partial_reads": struct_partial,
+            "by_score": dict(sorted(struct_by_score.items())),
+            "phase_suppressed_volume_cautions": phase_suppressed,
+        },
         "verdict_counts": verdict_counts,
         "binding_counts": dict(sorted(binding_counts.items(),
                                       key=lambda kv: kv[1], reverse=True)),
