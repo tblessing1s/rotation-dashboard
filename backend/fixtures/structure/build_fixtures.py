@@ -25,6 +25,7 @@ The parquet outputs are committed so tests never rebuild.
 """
 from __future__ import annotations
 
+import math
 import os
 
 import numpy as np
@@ -208,7 +209,65 @@ def early_advance_low_juice() -> pd.DataFrame:
     return _ohlcv(closes, highs, lows, vols, start="2023-01-02")
 
 
+def recovery_v_shape() -> pd.DataFrame:
+    """A V-shaped recovery still under its 200-day — the shape that read BASING
+    before 2026-08-21 (BaseStage.RECOVERING; AUDIT_BASING_RECOVERY_PHASE0.md).
+
+    SYNTHETIC. This is a hand-built reproduction of the GDDY 2026-08-21
+    observation, NOT captured market data — no provider is configured in the test
+    environment and none is ever called, so real bars for that date cannot be
+    obtained here. It is named for the SHAPE rather than the ticker so nobody
+    mistakes it for a real quote series. The GDDY measurements it reproduces:
+
+        close 97.08, ~0.7% BELOW SMA200 (97.77), ~29% above the June low,
+        above a rising SMA50, downtrend line broken, an early-August
+        earnings gap carrying a range + volume expansion.
+
+    The geometry is what makes the case: the plateau sits OUTSIDE the 150-bar
+    slope window but INSIDE the 200-bar SMA, so the long fit reads flat (the
+    decline and the rally net out) while the SMA200 still sits above price. That
+    is exactly the configuration one 150-bar fit cannot resolve."""
+    plateau, top, low, end = 132.0, 118.0, 75.0, 97.08
+    pre = [plateau * (1 + 0.012 * math.cos(2 * math.pi * i / 23)) for i in range(95)]
+    ramp = np.linspace(plateau, top, 15).tolist()
+    down = [(top + (low - top) * (i / 59)) * (1 + 0.012 * math.cos(2 * math.pi * i / 13))
+            for i in range(60)]
+    up = [(low + (end - low) * (i / 99)) * (1 + 0.010 * math.cos(2 * math.pi * i / 11))
+          for i in range(100)]
+    closes = np.array(pre + ramp + down + up, dtype=float)
+    closes[-1] = end
+    highs = closes * 1.008
+    lows = closes * 0.992
+    vols = _updown_volume(closes, up_vol=1_600_000.0, down_vol=1_100_000.0)
+    # The early-August earnings gap: one wide-range bar on ~4x volume.
+    highs[-12] = closes[-12] * 1.06
+    lows[-12] = closes[-12] * 0.985
+    vols[-13:-9] *= 4.0
+    return _ohlcv(closes, highs, lows, vols, start="2025-08-01")
+
+
+def flat_base_below_200() -> pd.DataFrame:
+    """A genuine base under the 200-day: flat over BOTH horizons. Proves
+    RECOVERING did not swallow legitimate bases — same below-200 position as
+    recovery_v_shape, but with no rally in the short window."""
+    # The decline sits OUTSIDE the 150-bar slope window (the flat stretch is
+    # longer than the window) but INSIDE the 200-bar SMA — the same geometry as
+    # recovery_v_shape, so the two differ ONLY in what the short window sees.
+    plateau = 132.0
+    pre = [plateau * (1 + 0.012 * math.cos(2 * math.pi * i / 23)) for i in range(58)]
+    decline = np.linspace(plateau, 97.0, 60).tolist()
+    flat = [97.0 * (1 + 0.011 * math.cos(2 * math.pi * i / 17)) for i in range(152)]
+    closes = np.array(pre + decline + flat, dtype=float)
+    closes[-1] = 97.0
+    highs = closes * 1.007
+    lows = closes * 0.993
+    vols = _updown_volume(closes, up_vol=1_300_000.0, down_vol=1_150_000.0)
+    return _ohlcv(closes, highs, lows, vols, start="2025-08-01")
+
+
 FIXTURES = {
+    "recovery_v_shape": recovery_v_shape,
+    "flat_base_below_200": flat_base_below_200,
     "topping_distribution": topping_distribution,
     "topping_distribution_sector": topping_distribution_sector,
     "early_advance_accum": early_advance_accum,

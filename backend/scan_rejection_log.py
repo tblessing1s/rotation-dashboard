@@ -221,6 +221,59 @@ def latest_before(day: str | None = None) -> dict:
     return out
 
 
+def structure_durations() -> dict[str, dict]:
+    """How long each symbol has carried its CURRENT structure label, derived from
+    the records already in this store — ``{ticker: {stage, days, since}}``.
+
+    DERIVED, not counted. A per-run counter was the obvious implementation and is
+    the wrong one: ``structure_classifier.classify`` is documented PURE and
+    prefix-causal (the same frame must always produce the same answer, which is
+    what makes the committed fixtures replayable), and a counter incremented on
+    each call breaks exactly that. This store already writes ``base_stage`` per
+    symbol per scan run with a ``date``, so the duration is a read over data we
+    keep anyway — no new state, no purity violation, and it works retroactively
+    over history the counter would have had to start from zero on.
+    AUDIT_BASING_RECOVERY_PHASE0.md §7 Q4.
+
+    ``days`` counts DISTINCT DATES the current label has held, walking back from
+    the newest record and stopping at the first date whose label differs — so a
+    same-day re-scan (several scan_ids, one date) counts once, and a gap in the
+    record (a weekend, a missed sweep) does not reset it. Pure data: nothing is
+    thresholded on this, and no behavior keys off it.
+
+    ONE load for the whole universe — the per-ticker helper below reuses it, so a
+    sweep never pays N reads."""
+    out: dict[str, dict] = {}
+    for ticker, recs in _load()["symbols"].items():
+        if not recs:
+            continue
+        # Newest first, one entry per DATE (the last write of a date wins).
+        by_date: dict[str, str | None] = {}
+        for rec in recs:
+            by_date[rec.get("date") or ""] = rec.get("base_stage")
+        dates = sorted((d for d in by_date if d), reverse=True)
+        if not dates:
+            continue
+        stage = by_date[dates[0]]
+        if stage is None:
+            continue
+        days, since = 0, dates[0]
+        for day in dates:
+            if by_date[day] != stage:
+                break
+            days += 1
+            since = day
+        out[ticker] = {"stage": stage, "days": days, "since": since}
+    return out
+
+
+def days_in_current_structure(ticker: str) -> int | None:
+    """Consecutive recorded days ``ticker`` has held its current structure label,
+    or None when it has no records. See ``structure_durations``."""
+    entry = structure_durations().get((ticker or "").upper())
+    return None if entry is None else entry["days"]
+
+
 def summary(window: int | None = None) -> dict:
     """A calibration-oriented rollup over the retained records: how often each
     binding constraint bound, and the READY rate — the empirical read on whether
@@ -290,9 +343,24 @@ def summary(window: int | None = None) -> dict:
         seen = agg["pass"] + agg["fail"]
         agg["evaluated"] = seen
         agg["pass_rate"] = round(agg["pass"] / seen * 100, 1) if seen else None
+    # Structure-duration rollup (derived; see structure_durations). Pure data for
+    # future bench-alert calibration — nothing is thresholded on it.
+    durations = structure_durations()
+    by_stage: dict[str, dict] = {}
+    for entry in durations.values():
+        agg = by_stage.setdefault(entry["stage"], {"symbols": 0, "total_days": 0})
+        agg["symbols"] += 1
+        agg["total_days"] += entry["days"]
+    for agg in by_stage.values():
+        agg["mean_days"] = round(agg["total_days"] / agg["symbols"], 1)
     return {
         "records": total,
         "symbols": len(data),
+        "structure_duration": {
+            "by_stage": dict(sorted(by_stage.items())),
+            "longest": dict(sorted(durations.items(),
+                                   key=lambda kv: -kv[1]["days"])[:10]),
+        },
         # SHADOW structure calibration read (schema 3): structure_score crossed
         # against the verdict reached WITHOUT it, plus how many thin-volume
         # CAUTIONs the consolidation-phase flag suppressed. Evidence for a future

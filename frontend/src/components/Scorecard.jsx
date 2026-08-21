@@ -23,12 +23,18 @@ import { Card, Pill, Light, Spinner, ErrorState, StockLights, ChartLink, SleeveB
 // mapping from the enum values, never truncated strings scattered through the JSX.
 // ---------------------------------------------------------------------------
 const BASE_LABELS = {
-  BASING: "BASING", EARLY_ADVANCE: "EARLY ADV", LATE_ADVANCE: "LATE ADV",
-  TOPPING: "TOPPING", DECLINING: "DECLINING", INSUFFICIENT_DATA: "NO DATA",
+  BASING: "BASING", RECOVERING: "RECOVERY", EARLY_ADVANCE: "EARLY ADV",
+  LATE_ADVANCE: "LATE ADV", TOPPING: "TOPPING", DECLINING: "DECLINING",
+  INSUFFICIENT_DATA: "NO DATA",
 };
 const BASE_TONE = {
   EARLY_ADVANCE: "text-emerald-300", LATE_ADVANCE: "text-amber-300",
-  BASING: "text-sky-300", TOPPING: "text-rose-300", DECLINING: "text-rose-400",
+  BASING: "text-sky-300",
+  // RECOVERY sits between BASING and the advances: same WATCH-only consequence
+  // as a base, but the short-window slope is rising. Teal keeps it adjacent to
+  // BASING's sky without reading as an advance's emerald.
+  RECOVERING: "text-teal-300",
+  TOPPING: "text-rose-300", DECLINING: "text-rose-400",
   INSUFFICIENT_DATA: "text-slate-500",
 };
 const INST_LABELS = {
@@ -42,7 +48,7 @@ const INST_TONE = {
 };
 const VERDICT_STATUS = { READY: "ready", CAUTION: "caution", WATCH: "watch", BLOCKED: "blocked" };
 const VERDICT_ORDER = { READY: 0, CAUTION: 1, WATCH: 2, BLOCKED: 3 };
-const BASE_ORDER = { EARLY_ADVANCE: 0, LATE_ADVANCE: 1, BASING: 2, TOPPING: 3, DECLINING: 4, INSUFFICIENT_DATA: 5 };
+const BASE_ORDER = { EARLY_ADVANCE: 0, LATE_ADVANCE: 1, RECOVERING: 2, BASING: 3, TOPPING: 4, DECLINING: 5, INSUFFICIENT_DATA: 6 };
 const INST_ORDER = { ACCUMULATING: 0, EARLY_INTEREST: 1, NO_INTEREST: 2, DISTRIBUTING: 3, INSUFFICIENT_DATA: 4 };
 const SYM_ORDER = { green: 0, yellow: 1, red: 2 };
 // Two-speed RS (shadow): glyph = level sign (⊕ leading / ⊖ lagging), word = the
@@ -228,7 +234,8 @@ const COLUMN_HELP = {
   sym: "Symbol Genius — the per-name four-light instance (Close > SMA50 · SMA50 > SMA200 · SAR below price · ROC10 > 0).\n" +
     "4 green = GREEN · exactly 3 = YELLOW (watchlist) · ≤2 or insufficient history = RED. The fourth light (SMA50 > SMA200) diverges from the market regime's EMA21 > SMA50 on purpose — a longer structural clock.",
   base_stage: "Structure — where the name sits in its base→advance→decline cycle.\n" +
-    "EARLY ADV / LATE ADV / BASING / TOPPING / DECLINING (from the 150-day slope, price position, base count, ATR posture). Only EARLY ADV is READY-eligible; TOPPING / DECLINING block.",
+    "EARLY ADV / LATE ADV / RECOVERY / BASING / TOPPING / DECLINING (from the 150-day slope, price position, base count, ATR posture). Only EARLY ADV is READY-eligible; TOPPING / DECLINING block.\n" +
+    "RECOVERY = a V-shaped rebound still under its 200-day: flat over 150 bars because the decline and the rally net out, but rising over the last 40. Same WATCH-only consequence as BASING — it is a clearer label, not a better verdict.",
   inst_flow: "Institutional flow — accumulation vs distribution.\n" +
     "ACCUM / EARLY INT / NO INT / DISTRIB (from 50-day up/down volume, OBV vs its 20-EMA with a price-divergence check, and accumulation/distribution day counts). DISTRIB blocks.",
   income_profile: "Income sleeve — which set of income expectations this name is judged against.\n" +

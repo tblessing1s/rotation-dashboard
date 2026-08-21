@@ -1,5 +1,76 @@
 # Changelog
 
+## v2.13.0 — RECOVERING: a V-shaped rebound is not a base
+
+The structure classifier labeled a recovery advance as BASING. Root cause is the
+slope's memory: `trend_slope_pct` is ONE least-squares fit over 150 daily bars,
+so a decline and a rally of similar magnitude inside that window net to ~zero. A
+chart that fell 30% and then rallied 30% read exactly as flat as one that did
+nothing, and fell through to BASING.
+
+BASING is WATCH-only, so **no gate decision was ever wrong** — this is a labeling
+and triage fix. But the label was wrong on the dashboard and would have poisoned
+bench/WATCH ranking and the transition alerts.
+
+- **Dual-window slope.** `SLOPE_WINDOW_SHORT = 40` alongside the existing 150,
+  same least-squares + mean-normalization helper (it already took `window` as a
+  parameter — no duplicated math). The short window is consulted **only** inside
+  the flat band: it disambiguates what kind of flat this is. The advance,
+  topping and declining claims keep keying off the long window alone, bound to a
+  separate local so they cannot drift.
+- **New `BaseStage.RECOVERING`** — below the 200-day, long slope flat, short
+  slope rising. Registered explicitly everywhere the audit found a consumer:
+  `structure_entrability`, the shadow SCORE, the scan table's BASE column
+  (label / tone / sort), the column help, and the pipeline-entrant alert.
+- **Deleted a dead branch.** Path B's `if falling: return DECLINING` was
+  unreachable: reaching it required being below the 200-day, which the earlier
+  guard already reduced to "not falling". It is gone, with a comment, rather than
+  left implying a declining path that never existed.
+- **`days_in_current_structure`, derived not counted.** `scan_rejection_log`
+  already writes `base_stage` per symbol per scan with a date, so the duration is
+  a read over data we keep anyway — exposed as `structure_durations()` (one load
+  for the whole universe) and rolled up on `/api/scan/rejection-stats`.
+
+Three things worth knowing:
+
+- **RECOVERING is WATCH-only, and structurally cannot be otherwise.** The
+  entrability grid gates READY and CAUTION on exact equality with the advance
+  stages, so it fails *open to WATCH* for any stage it does not name. The new
+  label is safe by construction, not by remembering to register it — and there is
+  now a test pinning that property directly, so a future edit to the grid cannot
+  quietly break it.
+- **Registration was load-bearing in three places, each failing silently.**
+  Unregistered, the shadow SCORE maps an unknown stage to 0.0 — *below* TOPPING's
+  0.1, so a recovery would have ranked beneath a topping name; the BASE column
+  renders an em-dash indistinguishable from NO DATA; and it sorts last. The SCORE
+  value is set equal to BASING deliberately: this change re-labels, it does not
+  re-rank.
+- **`scan_diff` keyed the pipeline-entrant alert off the literal string
+  "BASING"**, so the label split alone would have stopped `SCAN_PIPELINE_ENTRANT`
+  firing for exactly these charts. RECOVERING now joins BASING as an intake
+  stage — it is the same pipeline signal.
+
+A note on the counter: §1.4 of the request asked for a per-run counter.
+`structure_classifier.classify` is documented PURE and prefix-causal — the same
+frame must always return the same answer, which is what makes the committed
+fixtures replayable — and a counter incremented per call breaks precisely that.
+Deriving it from the append-only scan log needs no new state, no purity
+violation, and works retroactively over history a counter would have had to start
+from zero on. `test_the_classifier_stayed_pure` pins the contract.
+
+Deferred deliberately: the Path-B ATR-expansion filter. It had no valid
+fall-through target — the only reachable outcomes below the 200-day are BASING
+and RECOVERING, and every candidate target was either semantically wrong or would
+have fired a false "base rolled over" degrade alert. Flagged in
+`AUDIT_BASING_RECOVERY_PHASE0.md` §0.A as a separately-motivated change.
+
+Fixtures `recovery_v_shape` and `flat_base_below_200` are **synthetic** — no
+provider is configured in the test environment, so real bars for the observed
+date cannot be captured. `recovery_v_shape` reproduces the reported measurements
+(close 0.7% under SMA200, ~29% above the low, above a rising SMA50, an early-
+August gap) and is named for the shape rather than a ticker so it is never
+mistaken for a real quote series.
+
 ## v2.12.0 — RS3M-vs-Sector removed completely
 
 A stock's relative strength against its cap-weighted sector ETF is not a peer

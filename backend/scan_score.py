@@ -60,6 +60,14 @@ _INST_FLOW_SUB = {          # PROPOSED_DEFAULT — ACCUM > EARLY_INT (spec order
 _BASE_STAGE_SUB = {         # PROPOSED_DEFAULT — only EARLY_ADVANCE is READY-eligible
     sclf.BaseStage.EARLY_ADVANCE: 1.0,
     sclf.BaseStage.BASING: 0.5,
+    # Same as BASING on purpose. RECOVERING (2026-08-21) splits a subset of the
+    # old BASING population out under its own label; scoring it differently would
+    # silently RE-RANK those names, and this change is a labeling fix, not a
+    # ranking one. Left equal so SCORE is unchanged for every affected row —
+    # a deliberate calibration question for later, not a side effect now.
+    # (Registering it at all is the point: `.get(..., 0.0)` below would otherwise
+    # score it BELOW TOPPING's 0.1.)
+    sclf.BaseStage.RECOVERING: 0.5,
     sclf.BaseStage.LATE_ADVANCE: 0.5,
     sclf.BaseStage.TOPPING: 0.1,
     sclf.BaseStage.DECLINING: 0.0,

@@ -33,6 +33,8 @@ PIPELINE_ENTRANT = "SCAN_PIPELINE_ENTRANT"
 SECTOR_SLOT_OPEN = "SCAN_SECTOR_SLOT_OPEN"
 
 _DEGRADE_BASE = {"TOPPING", "DECLINING"}
+# The not-yet-entrable intake stages, for the pipeline-entrant event.
+_INTAKE_BASE = {"BASING", "RECOVERING"}
 _DEGRADE_RS = {"FADING", "FALLING"}
 
 
@@ -93,14 +95,20 @@ def diff_symbol(prev: dict | None, today: dict | None) -> list[dict]:
                                      f"{disp} relative strength {pr} → {tr}",
                                      {"axis": "rs", "from": pr, "to": tr}))
 
-    # Pipeline entrant — a fresh BASING + EARLY_INTEREST that wasn't that yesterday.
-    entrant_now = (today.get("base_stage") == "BASING"
-                   and today.get("inst_flow") == "EARLY_INTEREST")
-    entrant_prev = bool(prev) and (prev.get("base_stage") == "BASING"
-                                   and prev.get("inst_flow") == "EARLY_INTEREST")
+    # Pipeline entrant — a fresh intake stage + EARLY_INTEREST that wasn't that
+    # yesterday. RECOVERING joined BASING here on 2026-08-21: it is the same
+    # pipeline signal (a not-yet-entrable setup drawing early interest), and the
+    # label split alone must not silently stop the alert for charts that would
+    # have fired it as BASING — AUDIT_BASING_RECOVERY_PHASE0.md §0.D.
+    def _entrant(row):
+        return bool(row) and (row.get("base_stage") in _INTAKE_BASE
+                              and row.get("inst_flow") == "EARLY_INTEREST")
+
+    entrant_now, entrant_prev = _entrant(today), _entrant(prev)
     if entrant_now and not entrant_prev:
         events.append(_event(PIPELINE_ENTRANT, tkr,
-                             f"{disp} entered the pipeline (BASING + early interest)",
+                             f"{disp} entered the pipeline "
+                             f"({today.get('base_stage')} + early interest)",
                              {"sector": today.get("sector")}))
     return events
 

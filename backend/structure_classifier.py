@@ -46,6 +46,13 @@ import indicators
 # ---------------------------------------------------------------------------
 class BaseStage:
     BASING = "BASING"
+    # A V-shaped recovery under the 200-day: the LONG slope is flat because a
+    # decline and a rally of similar size net out across 150 bars, while the
+    # SHORT window is strongly rising. Added 2026-08-21 (TRAVIS_EXTENSION) —
+    # these charts read BASING before, which is a labeling defect, not a gate
+    # one: RECOVERING is WATCH-only exactly like BASING (see
+    # ``structure_entrability``). AUDIT_BASING_RECOVERY_PHASE0.md.
+    RECOVERING = "RECOVERING"
     EARLY_ADVANCE = "EARLY_ADVANCE"
     LATE_ADVANCE = "LATE_ADVANCE"
     TOPPING = "TOPPING"
@@ -89,6 +96,19 @@ MIN_BARS_FLOW = 50             # PROPOSED_DEFAULT — below this, InstFlow = INS
 SLOPE_WINDOW = 150             # PROPOSED_DEFAULT — the "150-day slope" window
 SLOPE_RISING_PCT = 8.0         # PROPOSED_DEFAULT — fit rises > this % across the window = rising
 SLOPE_FALLING_PCT = -8.0       # PROPOSED_DEFAULT — fit falls below this = falling
+
+# SHORT-window slope (TRAVIS_EXTENSION, 2026-08-21). Same least-squares +
+# mean-normalization method, a shorter memory. It exists because ONE 150-bar fit
+# cannot tell a quiet base from a violent V: a decline and a rally of similar
+# magnitude inside the window net to ~zero, so a chart that fell 30% and then
+# rallied 30% reads exactly as flat as one that did nothing. The short window is
+# consulted ONLY inside the flat band, to disambiguate what kind of flat it is;
+# the advance and topping claims keep keying off the long window alone.
+SLOPE_WINDOW_SHORT = 40        # PROPOSED_DEFAULT — ~two months
+SHORT_SLOPE_RISING_PCT = 8.0   # PROPOSED_DEFAULT — short fit rises > this % = rising
+# There is deliberately NO SHORT_SLOPE_FALLING_PCT yet: no rule consults one, and
+# a threshold nothing reads is indistinguishable from a live rule to the next
+# reader. Add it with the rule that needs it.
 
 # Maturity / posture for the advance sub-classification.
 EXT_LATE_PCT = 15.0            # PROPOSED_DEFAULT — close > this % above SMA50 = extended (late)
@@ -273,6 +293,10 @@ def _signals(df: pd.DataFrame | None) -> dict:
         "above_sma50": None if (price is None or sma50 is None) else price > sma50,
         "above_sma200": None if (price is None or sma200 is None) else price > sma200,
         "slope_pct": trend_slope_pct(df),
+        # Same helper, shorter memory — see SLOPE_WINDOW_SHORT. Never enters the
+        # INSUFFICIENT_DATA guard in _base_stage: it is not a binding input, and
+        # MIN_BARS_BASE (210) already guarantees it is computable.
+        "slope_pct_short": trend_slope_pct(df, SLOPE_WINDOW_SHORT),
         "ext_atr": ext_atr,
         "pct_above_sma50": pct_above_sma50,
         "pct_above_sma200": pct_above_sma200,
@@ -311,6 +335,12 @@ def _base_stage(sig: dict) -> str:
 
     rising = slope > SLOPE_RISING_PCT
     falling = slope < SLOPE_FALLING_PCT
+    # SHORT-window read. Bound to a SEPARATE local on purpose: `rising` / `falling`
+    # above stay tied to the long window and keep feeding the DECLINING, advance
+    # and TOPPING claims byte-for-byte. This one is consulted in exactly one place
+    # (the below-200 flat region below) and never widens a claim.
+    short = sig.get("slope_pct_short")
+    rising_short = short is not None and short > SHORT_SLOPE_RISING_PCT
     extended = sig["pct_above_sma50"] is not None and sig["pct_above_sma50"] > EXT_LATE_PCT
     expanding = sig["atr_posture"] is not None and sig["atr_posture"] > ATR_EXPANDING_MAX
     mature = (sig["base_count"] or 0) >= LATE_ADVANCE_MIN_BASES
@@ -332,9 +362,25 @@ def _base_stage(sig: dict) -> str:
         if falling or expanding or not above50 or stalled_after_advance:
             return BaseStage.TOPPING
         return BaseStage.BASING          # quiet consolidation near the LT trend (re-base)
-    # Below the long-term average: falling = declining, flat = building a base.
-    if falling:
-        return BaseStage.DECLINING
+    # Below the long-term average. The long slope is necessarily FLAT here: a
+    # falling name below its 200-day already returned DECLINING at the top of this
+    # tree, so `falling` is provably False by this point. (There WAS a
+    # `if falling: return DECLINING` here; it was unreachable for that reason and
+    # was removed 2026-08-21 rather than left to imply a declining path that never
+    # existed — AUDIT_BASING_RECOVERY_PHASE0.md §0.A.)
+    #
+    # So the only question is what KIND of flat this is, and the 150-bar window
+    # cannot answer it — a decline plus a rally of similar size nets to ~zero. The
+    # short window separates a genuine base (flat over both horizons) from a
+    # V-shaped recovery still under its 200-day (flat long, rising short).
+    #
+    # NOTE: no ATR-expansion or SMA50 filter here, unlike Path A above. That
+    # asymmetry is known and deliberate for now: the only reachable outcomes below
+    # the 200-day are these two, so a vol-expansion test would need a third label
+    # to route to, and no observed chart motivates one yet. Flagged in the audit
+    # (§0.A / §7 Q1) as a candidate for a later, separately-motivated change.
+    if rising_short:
+        return BaseStage.RECOVERING
     return BaseStage.BASING
 
 
@@ -392,7 +438,16 @@ def structure_entrability(base_stage: str, inst_flow: str) -> str:
       * TOPPING / DECLINING (any flow)                  -> BLOCKED
       * any DISTRIBUTING                                -> BLOCKED
       * INSUFFICIENT_DATA (either axis)                 -> BLOCKED (never guess entrable)
-      * everything else (e.g. BASING × EARLY_INTEREST)  -> WATCH (valid, not entrable)
+      * BASING / RECOVERING × a non-blocking flow       -> WATCH (valid, not entrable)
+      * everything else                                 -> WATCH
+
+    The READY and CAUTION rows are EXACT-EQUALITY gated on EARLY_ADVANCE /
+    LATE_ADVANCE, so the final ``return WATCH`` is a fail-open-to-WATCH for any
+    stage this grid does not name — a new label can never reach READY or CAUTION
+    by being forgotten here. RECOVERING (2026-08-21) relies on that property and
+    is also named explicitly below, because a reader should not have to derive
+    it. ``test_structure_fixtures`` asserts the fall-through directly so it
+    survives future edits to this grid.
     """
     if base_stage in (BaseStage.INSUFFICIENT_DATA, BaseStage.TOPPING, BaseStage.DECLINING):
         return Entrability.BLOCKED
@@ -403,4 +458,7 @@ def structure_entrability(base_stage: str, inst_flow: str) -> str:
         return Entrability.READY
     if base_stage == BaseStage.LATE_ADVANCE and inst_flow == InstFlow.ACCUMULATING:
         return Entrability.CAUTION
+    # BASING and RECOVERING both land here: a valid setup that is not yet
+    # entrable. Named for the reader; the fall-through would produce the same
+    # answer (see the docstring).
     return Entrability.WATCH
