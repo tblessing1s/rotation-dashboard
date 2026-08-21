@@ -21,7 +21,13 @@ class ExitReason:
     """Namespace of the coded exit-reason string constants."""
 
     # Kill switch (kill_switch.py) — relative-strength exits.
-    KILL_SWITCH_SECTOR = "KILL_SWITCH_SECTOR"   # RS3M vs Sector negative -> exit now
+    # RETIRED 2026-08-21: no new close can be stamped KILL_SWITCH_SECTOR (the
+    # RS3M-vs-Sector trigger was removed — docs/decision-2026-08-21-remove-sector-rs.md).
+    # The member is KEPT because historical closes carry the string and the
+    # History tab and the CSV export read it back; it is simply absent from
+    # CLOSE_TIME below, so it can be READ forever and never written again. Same
+    # pattern as LEGACY_UNRECORDED.
+    KILL_SWITCH_SECTOR = "KILL_SWITCH_SECTOR"   # RETIRED — historical reads only
     KILL_SWITCH_SPY = "KILL_SWITCH_SPY"         # RS3M vs SPY negative -> exit 1-2 days
 
     # Position circuit breaker (circuit_breaker.py) — one member per condition.
@@ -51,10 +57,11 @@ class ExitReason:
     LEGACY_UNRECORDED = "LEGACY_UNRECORDED"
 
 
-# Every reason a close can legitimately set at trade time (excludes the
-# migration-only LEGACY_UNRECORDED).
+# Every reason a close can legitimately set at trade time. Excludes the
+# migration-only LEGACY_UNRECORDED and the RETIRED KILL_SWITCH_SECTOR — both
+# stay valid to READ off historical closes, neither can be written again.
 CLOSE_TIME = frozenset({
-    ExitReason.KILL_SWITCH_SECTOR, ExitReason.KILL_SWITCH_SPY,
+    ExitReason.KILL_SWITCH_SPY,
     ExitReason.CB_DRAWDOWN_15, ExitReason.CB_MA50_3CLOSE,
     ExitReason.CB_MA200_CLOSE, ExitReason.CB_MANUAL_LINE,
     ExitReason.WHIPSAW_BREAKER, ExitReason.DELTA_COVERAGE,
@@ -69,7 +76,13 @@ CLOSE_TIME = frozenset({
 OPERATOR_SELECTABLE = frozenset(CLOSE_TIME - {ExitReason.LEAP_ROLL})
 
 # Every value the field may hold on a stored record (CLOSE_TIME + legacy).
-ALL = frozenset(CLOSE_TIME | {ExitReason.LEGACY_UNRECORDED})
+# Every code that may appear on a STORED record. RETIRED codes belong here even
+# though no new close can set them — `is_valid` is the read-side check, and a
+# historical close stamped KILL_SWITCH_SECTOR (or the migration-only
+# LEGACY_UNRECORDED) must stay valid forever
+# (docs/decision-2026-08-21-remove-sector-rs.md).
+RETIRED = frozenset({ExitReason.KILL_SWITCH_SECTOR})
+ALL = frozenset(CLOSE_TIME | RETIRED | {ExitReason.LEGACY_UNRECORDED})
 
 # The automated-trigger codes (everything a rule can raise on its own); the
 # operator's discretionary close is the only human-authored member.

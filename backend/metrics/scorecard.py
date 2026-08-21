@@ -203,24 +203,24 @@ def compute_inputs(df: pd.DataFrame | None) -> dict:
     }
 
 
-def metrics_for(df: pd.DataFrame | None, spy_df: pd.DataFrame | None,
-                sector_df: pd.DataFrame | None) -> dict:
+def metrics_for(df: pd.DataFrame | None, spy_df: pd.DataFrame | None) -> dict:
     """All scorecard metric values for one ticker (the row's numeric fields).
-    Pure over the three frames; relative strength reuses indicators.rs3m. RS3M vs
-    Sector is the DIRECT rs3m(stock, sector_etf) ratio over the same 63-day
-    lookback (the same figure the kill switch and entry gate now use), NOT the
-    vs-SPY difference approximation."""
+    Pure over the two frames; relative strength reuses indicators.rs3m — the
+    DIRECT ratio over a 63-day lookback, the same figure the kill switch uses.
+
+    The peer/sector frame this used to take went with RS3M-vs-Sector on
+    2026-08-21 (docs/decision-2026-08-21-remove-sector-rs.md). Dropping the
+    PARAMETER matters as much as dropping the metric: every caller was fetching
+    a frame for it, and a warm-cache read per dividend-sleeve row per sweep is
+    not free."""
     inp = compute_inputs(df)
 
     rs_vs_spy = indicators.rs3m(df, spy_df) if (df is not None and spy_df is not None) else None
-    rs_vs_sector = (indicators.rs3m(df, sector_df)
-                    if (df is not None and sector_df is not None) else None)
 
     obv_above, obv_dist = obv_vs_ema(inp["obv"], inp["obv_20ema"])
     return {
         "price": inp["price"],
         "rs3m_vs_spy": rs_vs_spy,
-        "rs3m_vs_sector": rs_vs_sector,
         "pct_above_ma21": pct_above_ma21(inp["price"], inp["ma21"]),
         "pct_above_ma200": pct_above_ma200(inp["price"], inp["ma200"]),
         "atr_extension": atr_extension(inp["price"], inp["ma21"], inp["atr"]),
@@ -248,9 +248,8 @@ def compute_verdict(metrics: dict) -> dict:
     layer it on top of the existing 4-level entry gate (see `scorecard`).
 
     ETFs run as a lower-vol income sleeve, not growth leaders, so — matching the
-    lower juice / beats-SPY bars and the entry gate's beats-sector waiver — the
-    growth-momentum filters are waived when `metrics["is_etf"]` is set: the
-    beats-assigned-sector AVOID and the MFI-band / thin-volume / ATR-expansion
+    lower juice / beats-SPY bars — the growth-momentum filters are waived when
+    `metrics["is_etf"]` is set: the MFI-band / thin-volume / ATR-expansion
     CAUTIONs. The genuine risk rails still apply to ETFs — below MA200,
     over-extension, and the MA50 trend filters — so a broken-trend or overextended
     ETF is still caught."""
@@ -263,11 +262,12 @@ def compute_verdict(metrics: dict) -> dict:
     is_etf = bool(metrics.get("is_etf"))
 
     # --- AVOID rules ---
-    rs_sec = metrics.get("rs3m_vs_sector")
-    # An ETF isn't required to outrun its (assigned or own) broad sector — the
-    # income sleeve waives this leg, same as the entry gate does.
-    if not is_etf and rs_sec is not None and rs_sec < T.RS3M_VS_SECTOR_MIN:
-        avoid.append(f"rs3m_vs_sector negative ({rs_sec:+.1f}%)")
+    # The rs3m_vs_sector AVOID led this list until 2026-08-21, when
+    # RS3M-vs-Sector was removed system-wide
+    # (docs/decision-2026-08-21-remove-sector-rs.md). Note what that widened:
+    # `suitability` gates the recommendation pool, the internal queue and the
+    # intraday hot-refresh set, so names that used to be excluded here now reach
+    # all three. Deliberate, not an oversight.
     if metrics.get("below_ma200") is True:
         avoid.append("price below MA200")
     ext = metrics.get("atr_extension")
@@ -323,7 +323,7 @@ def compute_verdict(metrics: dict) -> dict:
 # Orchestration — holdings list -> rows. Layers the verdict on the entry gate.
 # ---------------------------------------------------------------------------
 _ROUND = {  # display rounding per field (verdict is computed from full precision)
-    "price": 2, "rs3m_vs_spy": 2, "rs3m_vs_sector": 2, "pct_above_ma21": 1,
+    "price": 2, "rs3m_vs_spy": 2, "pct_above_ma21": 1,
     "pct_above_ma200": 1, "atr_extension": 2, "ma50_slope": 3, "volume_ratio": 2,
     "volume_acceleration": 2, "obv_pct_distance": 1, "mfi": 1, "atr_momentum": 2,
 }
@@ -472,14 +472,10 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
         annual_div_pct = annual_dividend_yield_pct
     peer = income_profile.resolve(ticker, profile, sector_etf)
     profile = peer["profile"]
-    peer_df = sector_df if peer["use_sector_df"] else data_handler.get_daily(peer["benchmark"])
-
-    metrics = metrics_for(df, spy_df, peer_df)
-    # A name scored against ITSELF has no distinct peer to beat — rs3m_vs_sector
-    # would otherwise compute to a tautological ~0 every time (same frame vs
-    # itself), which reads as a real number, not "N/A".
-    if peer["is_sector_etf"] or peer["is_own_benchmark"]:
-        metrics["rs3m_vs_sector"] = None
+    metrics = metrics_for(df, spy_df)
+    # The self-comparison guard that lived here (a name scored against ITSELF
+    # computes a tautological ~0) went with the vs-sector metric it protected —
+    # docs/decision-2026-08-21-remove-sector-rs.md.
     row = _round_row(metrics)
     row["ticker"] = ticker.upper()
     row["sector"] = sector_etf
@@ -667,32 +663,20 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
         row["first_failing_level"] = gate.get("first_failing_level")
         row["gate_rulesets"] = gate.get("rulesets")
 
-    # Two-speed RS SHADOW — vs Sector (the table's primary) + vs SPY (drawer). Level
-    # reuses the displayed RS3M; slope is the RS-line-EMA direction. A sector ETF has
-    # no distinct peer sector, so its vs-Sector RS is N/A (same rule as rs3m_vs_sector).
-    # SHADOW ONLY: never feeds the composed verdict above, never blocks, never sizes.
-    # NOTE: this shadow read still keys off the SECTOR frame, not the profile's peer
-    # frame — so for a DIVIDEND_COMPOUNDER the drawer's RS column and the row's
-    # rs3m_vs_sector are measured against different benchmarks. Left as-is
-    # deliberately: it is the pre-v21 behavior and this is a shadow readout with no
-    # authority. Worth reconciling in its own change, not silently here.
-    rs_sec = (rss.rs_state(df, sector_df)
-              if (not peer["is_sector_etf"] and sector_df is not None)
-              else {"state": None, "level": None, "slope": None})
+    # Two-speed RS SHADOW — vs SPY only. Level reuses the displayed RS3M; slope is
+    # the RS-line-EMA direction. SHADOW ONLY: never feeds the composed verdict,
+    # never blocks, never sizes.
+    #
+    # The vs-SECTOR variant was removed 2026-08-21 along with everything else
+    # keyed off a cap-weighted sector benchmark
+    # (docs/decision-2026-08-21-remove-sector-rs.md). It took three things with
+    # it: the scan table's `RS` column, its contribution to the shadow SCORE, and
+    # the TURNING WATCH annotation that could append a reason string to a
+    # non-READY row. The vs-SPY read below is what remains.
     rs_spy = rss.rs_state(df, spy_df) if spy_df is not None else {"state": None, "level": None, "slope": None}
-    row["rs_state"] = rs_sec["state"]            # vs Sector — the table column
-    row["rs_level"] = rs_sec["level"]
-    row["rs_slope"] = rs_sec["slope"]
-    row["rs_state_spy"] = rs_spy["state"]        # vs SPY — the drawer readout
+    row["rs_state_spy"] = rs_spy["state"]
     row["rs_spy_level"] = rs_spy["level"]
     row["rs_spy_slope"] = rs_spy["slope"]
-
-    # Gated Phase-0 exception: a TURNING vs-Sector RS on an already-non-READY row is
-    # an informational WATCH annotation (relative strength recovering) appended to the
-    # CANONICAL verdict's reasons — never a second verdict, never a verdict change.
-    annotation = rss.turning_watch_reason(row["verdict"], row["rs_state"])
-    if annotation:
-        row["verdict_reasons"].append(annotation)
 
     # Composite SCORE (0–10) SHADOW — a pure rank over the already-computed row
     # inputs. ZERO authority: not read by the verdict, gate, /api/scan/ready, sizing,
@@ -702,7 +686,7 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
                    if (sector_df is not None and spy_df is not None) else None)
     scored = scan_score.compute_score(
         inst_flow=cls["inst_flow"], base_stage=cls["base_stage"],
-        base_count=cls["signals"].get("base_count"), rs_state_value=row["rs_state"],
+        base_count=cls["signals"].get("base_count"),
         sector_rs1m=sector_rs1m, atr_momentum=row.get("atr_momentum"),
         pct_above_ma21=row.get("pct_above_ma21"),
         net_juice_weekly_pct=row.get("net_juice_weekly_pct"))

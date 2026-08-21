@@ -71,7 +71,7 @@ _CYCLE_COLS = ["id", "ticker", "entry_date", "exit_date", "days_held",
                "capital_deployed", "gross_juice", "roll_count", "roll_net",
                "roll_drag", "leap_pnl", "net_result", "net_return_pct",
                "target_met", "exit_reason", "exit_note",
-               "verdict", "regime", "iv_rank", "rs3m_vs_spy", "rs3m_vs_sector"]
+               "verdict", "regime", "iv_rank", "rs3m_vs_spy"]
 _ROLL_COLS = ["roll_id", "ticker", "date", "reason", "from_strike", "to_strike",
               "buyback_cost", "new_premium", "net"]
 

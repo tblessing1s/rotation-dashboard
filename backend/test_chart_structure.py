@@ -363,7 +363,10 @@ def test_no_hard_cfm_rule_or_level_4_threshold_moved():
     assert T.MFI_MIN == 40.0 and T.MFI_MAX == 60.0          # [HARD RULE]
     assert T.ATR_MOMENTUM_MAX == 1.0                        # [HARD RULE]
     assert T.ATR_EXTENSION_MAX == 3.0
-    assert T.RS3M_VS_SECTOR_MIN == 0.0
+    # RS3M_VS_SECTOR_MIN was asserted here until 2026-08-21, when it was removed
+    # with the rest of the sector-relative logic
+    # (docs/decision-2026-08-21-remove-sector-rs.md).
+    assert not hasattr(T, "RS3M_VS_SECTOR_MIN")
     assert config.CONSOLIDATION_ATR_PCT_MAX == 5.0
     assert config.SPOT_ATR_MOMENTUM_MAX == 1.0
     assert config.SPOT_ATR_EXTENSION_MAX == 1.5
@@ -434,7 +437,7 @@ def test_xlk_july6_right_spot_is_byte_identical():
     plain dict of scalars, so `==` is a genuine structural comparison — if a
     structure metric had leaked into `_right_spot_from`'s checks list, this fails."""
     df = _xlk()
-    res = stock_lights.compute(df, sector_df=None, ivr_percentile=95.0, is_etf=True)
+    res = stock_lights.compute(df, ivr_percentile=95.0, is_etf=True)
     assert res["right_spot"] == stock_lights.right_spot(df, config.RULESET_LEGACY)
     assert res["verdict"] == stock_lights.RED
     assert "veto:atr_expanding_high_ivr" in res["veto_reasons"]
@@ -594,7 +597,7 @@ def test_no_gate_means_no_phase_and_todays_volume_behaviour(monkeypatch):
 # ===========================================================================
 def test_rejection_log_persists_the_structure_record():
     import scan_rejection_log as srl
-    assert srl.SCHEMA_VERSION == 3
+    assert srl.SCHEMA_VERSION == 4
     m = cs.structure_metrics(ideal_coil())
     rec = srl._record_from_row({
         "ticker": "TEST", "verdict": "READY", "structure": m,

@@ -40,15 +40,20 @@ def test_binding_constraint_skips_rs_annotation():
 def test_record_scan_persists_calibration_fields(tmp_path, monkeypatch):
     monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
     rows = [_row("NVDA", "WATCH", ["symbol:WATCH"], score=6.1,
-                 score_parts={"inst_flow": 0.6}, rs_state="TURNING", rs_level=-5.0,
-                 rs_slope=0.9, net_juice_weekly_pct=2.1, base_stage="EARLY_ADVANCE",
+                 score_parts={"inst_flow": 0.6},
+                 net_juice_weekly_pct=2.1, base_stage="EARLY_ADVANCE",
                  inst_flow="EARLY_INTEREST", sym="yellow", sector_rs1m=1.2, iv_rank=40.0)]
     out = srl.record_scan(rows, day="2026-07-16")
     assert out["ok"] and out["recorded"] == 1
     rec = srl.series("NVDA")[-1]
     assert rec["binding_constraint"] == "symbol:WATCH"
-    assert rec["score"] == 6.1 and rec["rs_state"] == "TURNING" and rec["rs_level"] == -5.0
     assert rec["base_stage"] == "EARLY_ADVANCE" and rec["sector_rs1m"] == 1.2
+    # Schema 4 dropped the vs-SECTOR two-speed RS shadow
+    # (docs/decision-2026-08-21-remove-sector-rs.md). `sector_rs1m` above is a
+    # DIFFERENT figure — the sector ETF's own strength vs SPY — and stays.
+    assert rec["schema"] == 4
+    for gone in ("rs_state", "rs_level", "rs_slope"):
+        assert gone not in rec
 
 
 def test_record_scan_idempotent_within_one_run(tmp_path, monkeypatch):

@@ -74,10 +74,16 @@ def test_operator_discretion_carries_note_onto_cycle(store):
 # point the rule fires — the close then stamps that code).
 # ---------------------------------------------------------------------------
 def test_kill_switch_code_mapping():
-    sector = {"status": "red", "rs3m_vs_spy": 1.0, "rs3m_vs_sector": -0.5}
-    spy = {"status": "red", "rs3m_vs_spy": -0.5, "rs3m_vs_sector": 2.0}
-    green = {"status": "green", "rs3m_vs_spy": 3.0, "rs3m_vs_sector": 2.0}
-    assert kill_switch.exit_reason_code(sector) == ExitReason.KILL_SWITCH_SECTOR
+    # A red evaluation still carrying a legacy rs3m_vs_sector value must map to
+    # the SPY reason: KILL_SWITCH_SECTOR is RETIRED and can never be stamped on a
+    # new close (docs/decision-2026-08-21-remove-sector-rs.md).
+    legacy_sector = {"status": "red", "rs3m_vs_spy": -1.0, "rs3m_vs_sector": -0.5}
+    spy = {"status": "red", "rs3m_vs_spy": -0.5}
+    green = {"status": "green", "rs3m_vs_spy": 3.0}
+    assert kill_switch.exit_reason_code(legacy_sector) == ExitReason.KILL_SWITCH_SPY
+    # ...and a red with no negative SPY leg yields no code at all.
+    assert kill_switch.exit_reason_code(
+        {"status": "red", "rs3m_vs_spy": 1.0, "rs3m_vs_sector": -0.5}) is None
     assert kill_switch.exit_reason_code(spy) == ExitReason.KILL_SWITCH_SPY
     assert kill_switch.exit_reason_code(green) is None
 

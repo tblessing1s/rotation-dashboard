@@ -79,12 +79,12 @@ def test_cycle_record_hand_computed(isolated_state):
 
 
 def test_cycle_includes_roll_drag(isolated_state):
-    _run_cycle(with_roll=True, close_price=2400, exit_reason="KILL_SWITCH_SECTOR")
+    _run_cycle(with_roll=True, close_price=2400, exit_reason="KILL_SWITCH_SPY")
     c = log.load_state()["cycles"][0]
     # Roll: buyback 2.00*500=1000, new premium 1.50*500=750 -> net -250 (drag).
     assert c["roll_count"] == 1
     assert c["roll_net"] == -250.0 and c["roll_drag"] == -250.0
-    assert c["exit_reason"] == "KILL_SWITCH_SECTOR"
+    assert c["exit_reason"] == "KILL_SWITCH_SPY"
     # Juice: 2 weekly closes at +250 each, the roll's buyback close nets
     # (0.50-2.00)= -1.50/sh -> -750, the final close nets 0. Total = -250.
     assert c["gross_juice"] == -250.0
@@ -137,7 +137,7 @@ def test_wash_sale_window_open_without_reentry(isolated_state):
 
 def test_history_aggregates_and_export(isolated_state):
     _run_cycle(ticker="NVDA", close_price=2600)                    # +12.5% win
-    _run_cycle(ticker="AMD", close_price=2000, exit_reason="KILL_SWITCH_SECTOR")  # loss
+    _run_cycle(ticker="AMD", close_price=2000, exit_reason="KILL_SWITCH_SPY")  # loss
     state = log.load_state()
     view = history.view(state)
     agg = view["aggregates"]
@@ -149,7 +149,7 @@ def test_history_aggregates_and_export(isolated_state):
     assert view["cycles"][0]["ticker"] == "AMD"  # newest first
 
     csv_text = history.juice_journal_csv(state)
-    assert "# closed cycles" in csv_text and "NVDA" in csv_text and "KILL_SWITCH_SECTOR" in csv_text
+    assert "# closed cycles" in csv_text and "NVDA" in csv_text and "KILL_SWITCH_SPY" in csv_text
     # Compact entry-context summary columns are present (values may be null offline).
     assert "verdict" in csv_text and "iv_rank" in csv_text and "exit_note" in csv_text
     md_text = history.juice_journal_markdown(state)

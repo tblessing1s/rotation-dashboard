@@ -1558,7 +1558,6 @@ def api_config():
             "vix_calm": config.VIX_CALM,
             "sector_rs3m_min": config.SECTOR_RS3M_MIN,
             "stock_rs_vs_spy_min": config.STOCK_RS_VS_SPY_MIN,
-            "stock_rs_vs_sector_min": config.STOCK_RS_VS_SECTOR_MIN,
         },
         "cfm": {
             "leap_contracts": config.LEAP_CONTRACTS,

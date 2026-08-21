@@ -60,34 +60,42 @@ def test_score_ticker_carries_rs_score_and_ivr_fields(monkeypatch):
     monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: stock)
     row = sc.score_ticker("NVDA", stock, "XLK", sector, regime_color="green")
 
-    # RS shadow: vs-Sector state on the row, vs-SPY in the drawer fields, raw
-    # level/slope for the calibration log.
-    assert row["rs_state"] == "TURNING"
-    assert row["rs_level"] is not None and row["rs_slope"] is not None
-    assert "rs_state_spy" in row and "rs_spy_level" in row
-    # SCORE shadow: a 0–10 number with its component parts.
+    # RS shadow: vs-SPY only. The vs-SECTOR state (and its level/slope) were
+    # removed 2026-08-21 (docs/decision-2026-08-21-remove-sector-rs.md).
+    assert "rs_state_spy" in row and "rs_spy_level" in row and "rs_spy_slope" in row
+    assert "rs_state" not in row and "rs_level" not in row and "rs_slope" not in row
+    # SCORE shadow: a 0–10 number with its component parts, no RS component.
     assert 0.0 <= row["score"] <= 10.0
-    assert set(row["score_parts"]) >= {"inst_flow", "base", "rs_state", "net_juice"}
+    assert set(row["score_parts"]) >= {"inst_flow", "base", "net_juice"}
+    assert "rs_state" not in row["score_parts"]
     # IVR drawer field present (None here — no accrued history in the test store).
     assert "iv_rank" in row and "iv_percentile" in row
     # Net juice/wk (the promoted column) is present.
     assert "net_juice_weekly_pct" in row
 
 
-def test_turning_annotation_appended_to_non_ready_reasons(monkeypatch):
+def test_no_rs_annotation_can_reach_verdict_reasons(monkeypatch):
+    """Was test_turning_annotation_appended_to_non_ready_reasons. The TURNING
+    vs-sector WATCH annotation was the ONE path by which the shadow RS module
+    could write into a verdict field; it went with the sector RS itself
+    (docs/decision-2026-08-21-remove-sector-rs.md). Re-pinned as a positive
+    absence assertion rather than deleted, because the guarantee it protects —
+    the shadow layer never touches verdict_reasons — is now stronger."""
     import data_handler
+    import rs_state
     import scan_triggers
     stock = _load_fixture("turning_recovery")
     sector = _load_fixture("turning_recovery_sector")
     monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: stock)
-    # Isolate the SIGNAL binding from the (separately-tested) net-juice safety gate,
-    # which this low-vol recovery fixture would otherwise trip.
     monkeypatch.setattr(scan_triggers, "juice_floor_block", lambda _n, _g=None: None)
     row = sc.score_ticker("NVDA", stock, "XLK", sector, regime_color="green")
-    # SYM yellow -> verdict WATCH (non-READY); the TURNING vs-sector RS annotates it.
     assert row["verdict"] != "READY"
     assert row["verdict_reasons"][0] == "symbol:WATCH"          # binding constraint leads
-    assert any("TURNING" in r for r in row["verdict_reasons"])  # annotation appended
+    assert not any("TURNING" in r for r in row["verdict_reasons"])
+    assert not any(r.startswith("rs:") for r in row["verdict_reasons"])
+    # The helper that produced it is gone, not merely unused.
+    assert not hasattr(rs_state, "turning_watch_reason")
+    assert not hasattr(rs_state, "WATCH_ANNOTATION")
 
 
 def test_score_does_not_leak_into_the_verdict(monkeypatch):
@@ -219,7 +227,7 @@ def test_compute_inputs_matches_indicators_and_handles_empty():
 def _clean_metrics(**over):
     """A metrics dict that is GO by default; override fields to fire rules."""
     base = {
-        "rs3m_vs_spy": 8.0, "rs3m_vs_sector": 3.0, "pct_above_ma21": 2.0,
+        "rs3m_vs_spy": 8.0, "pct_above_ma21": 2.0,
         "pct_above_ma200": 12.0, "atr_extension": 1.0, "below_ma50": False,
         "below_ma200": False, "ma50_slope": 0.2, "volume_ratio": 1.1,
         "volume_acceleration": 1.0, "obv_above_ema": True, "obv_pct_distance": 3.0,
@@ -234,7 +242,8 @@ def test_verdict_go_when_all_clean():
 
 
 def test_verdict_avoid_rules_fire_individually():
-    assert sc.compute_verdict(_clean_metrics(rs3m_vs_sector=-1.1))["verdict"] == "AVOID"
+    # The rs3m_vs_sector AVOID was removed 2026-08-21 — a negative value is now
+    # simply not a field the verdict reads.
     assert sc.compute_verdict(_clean_metrics(below_ma200=True))["verdict"] == "AVOID"
     assert sc.compute_verdict(_clean_metrics(atr_extension=3.5))["verdict"] == "AVOID"
     # boundary: exactly 3.0 is NOT > 3.0 -> not AVOID on that rule
@@ -254,11 +263,12 @@ def test_verdict_caution_rules_fire_individually():
 
 
 def test_verdict_avoid_dominates_and_collects_all_reasons():
-    v = sc.compute_verdict(_clean_metrics(rs3m_vs_sector=-2.0, below_ma200=True,
+    v = sc.compute_verdict(_clean_metrics(below_ma200=True,
                                           atr_extension=4.0, mfi=80.0))
     assert v["verdict"] == "AVOID"
-    assert len(v["reasons"]) == 3  # all three AVOID reasons, no CAUTION ones
-    assert any("sector" in r for r in v["reasons"])
+    assert len(v["reasons"]) == 2  # both remaining AVOID reasons, no CAUTION ones
+    # The third was the sector-RS reason, removed 2026-08-21.
+    assert not any("sector" in r.lower() for r in v["reasons"])
     assert any("MA200" in r for r in v["reasons"])
     assert any("extension" in r for r in v["reasons"])
 
@@ -286,10 +296,12 @@ def test_verdict_etf_waives_growth_momentum_cautions():
     assert sc.compute_verdict(_clean_metrics(is_etf=True, **momentum))["verdict"] == "GO"
 
 
-def test_verdict_etf_waives_beats_sector_avoid():
-    # An ETF lagging its (assigned or own) broad sector isn't AVOID'd for it —
-    # the income sleeve waives the beats-sector leg, same as the entry gate.
-    assert sc.compute_verdict(_clean_metrics(rs3m_vs_sector=-5.0))["verdict"] == "AVOID"
+def test_a_negative_sector_rs_can_no_longer_avoid_anything():
+    """Was test_verdict_etf_waives_beats_sector_avoid — the ETF waiver is moot
+    now the leg is gone for every name. Re-pinned to assert that a deeply
+    negative sector RS on an otherwise-clean row is GO, for stock AND ETF
+    (docs/decision-2026-08-21-remove-sector-rs.md)."""
+    assert sc.compute_verdict(_clean_metrics(rs3m_vs_sector=-5.0))["verdict"] == "GO"
     assert sc.compute_verdict(_clean_metrics(is_etf=True, rs3m_vs_sector=-5.0))["verdict"] == "GO"
 
 
@@ -373,19 +385,20 @@ def test_score_ticker_verdict_matches_displayed_values(monkeypatch):
     assert sc.compute_verdict(row)["verdict"] == row["suitability"]
 
 
-def test_score_ticker_nulls_sector_leg_for_a_sector_etf_candidate(monkeypatch):
-    # XLK scored as its own candidate (ticker == sector_etf) has no distinct
-    # peer sector to beat — rs3m_vs_sector would otherwise compute to a
-    # tautological ~0 every time (identical frame vs itself), which reads as
-    # a real, borderline number rather than "not applicable".
+def test_score_ticker_carries_no_sector_rs_for_a_sector_etf_candidate(monkeypatch):
+    # XLK scored as its own candidate used to need a guard here: rs3m_vs_sector
+    # computed a tautological ~0 (identical frame vs itself) that read as a real,
+    # borderline number. Both the metric and the guard were removed 2026-08-21
+    # (docs/decision-2026-08-21-remove-sector-rs.md); the field simply is not
+    # there, for a sector ETF or anything else.
     import data_handler
     df = _frame(100 + np.cumsum(np.random.RandomState(21).normal(0, 1, 260)))
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
     gate = {"verdict": "READY TO ENTER", "cleared_level": 4}
     row = sc.score_ticker("XLK", df, "XLK", df, gate=gate)
     assert row["is_sector_etf"] is True
-    assert row["rs3m_vs_sector"] is None
-    # The (now-null) sector leg must not spuriously trigger the AVOID rule.
+    assert "rs3m_vs_sector" not in row
+    # ...and nothing sector-shaped can trigger the AVOID rule.
     assert sc.compute_verdict(row)["verdict"] == row["suitability"]
 
     # A regular constituent (ticker != sector_etf) is unaffected.
@@ -426,7 +439,7 @@ def test_scorecard_endpoint_shape(monkeypatch):
     assert {r["ticker"] for r in body["results"]} == {"AAPL", "MSFT"}
     row = body["results"][0]
     # Every verdict-driving field is present in the row (no hidden state).
-    for field in ("ticker", "sector", "price", "rs3m_vs_spy", "rs3m_vs_sector",
+    for field in ("ticker", "sector", "price", "rs3m_vs_spy",
                   "pct_above_ma21", "pct_above_ma200", "atr_extension", "below_ma50",
                   "below_ma200", "ma50_slope", "volume_ratio", "volume_acceleration",
                   "obv_above_ema", "obv_pct_distance", "mfi", "atr_momentum",

@@ -1,7 +1,7 @@
 """Two-speed relative-strength state — SHADOW ONLY.
 
-Collapses an RS pairing (a name vs a benchmark — vs SPY or vs its sector ETF) into
-one of four states from two speeds:
+Collapses an RS pairing (a name vs a benchmark — vs SPY; the vs-sector pairing
+was removed 2026-08-21) into one of four states from two speeds:
 
     * LEVEL — the 3-month relative strength (``indicators.rs3m``): is the name
       OUT-performing (>= 0) or UNDER-performing (< 0) the benchmark. The slow read.
@@ -17,15 +17,14 @@ one of four states from two speeds:
     | FALLING   | < 0   | down  | lagging and getting worse                 |
 
 LEVEL deliberately reuses ``indicators.rs3m`` — the SAME figure the drawer already
-shows as "RS3M Sec" / "RS3M SPY" — so the state's level axis can never disagree
+shows as "RS3M SPY" — so the state's level axis can never disagree
 with the displayed RS3M number. SLOPE is the new RS-line-EMA direction (the ToS
 RS-momentum read), so chart and app agree on "is it turning".
 
 **SHADOW ONLY.** This never feeds ``scan_verdict.compose_verdict``, never blocks,
-never sizes, never touches the kill switch. It is displayed and logged. The ONE
-gated exception (Phase 0 audit): a ``TURNING`` vs-Sector state may append a WATCH
-*reason string* to an already-non-READY row's ``verdict_reasons`` — an
-informational annotation, never a verdict change.
+never sizes, never touches the kill switch. It is displayed and logged, and that
+is all — the one former exception (a TURNING vs-Sector WATCH annotation) went
+with the sector pairing itself.
 
 Pure: no I/O, no clock. All thresholds ``PROPOSED_DEFAULT``.
 """
@@ -60,22 +59,12 @@ def collapse(level: float | None, slope: float | None) -> str | None:
     return TURNING if up else FALLING
 
 
-# The gated Phase-0 exception, as a pure helper so the scan sweep and the tests
-# agree on it. It NEVER changes a verdict — it only annotates.
-WATCH_ANNOTATION = "rs:TURNING (vs sector recovering — watch)"
-
-
-def turning_watch_reason(verdict: str | None, rs_state_vs_sector: str | None) -> str | None:
-    """The informational WATCH annotation for an already-non-READY row whose
-    vs-Sector RS is ``TURNING`` (relative strength recovering), else None. Pure.
-
-    This is the ONE gated exception from the Phase 0 audit: a ``TURNING`` state may
-    add a WATCH *reason string* to ``verdict_reasons`` on a row that is already NOT
-    READY — never for a READY row, never as a verdict change, never a second
-    verdict. ``verdict`` is the canonical ``scan_verdict`` value ("READY" clears)."""
-    if verdict != "READY" and rs_state_vs_sector == TURNING:
-        return WATCH_ANNOTATION
-    return None
+# REMOVED 2026-08-21: ``WATCH_ANNOTATION`` / ``turning_watch_reason``. That was
+# the one gated exception where this shadow module could append a reason string
+# to a non-READY row's ``verdict_reasons`` — and it keyed off the vs-SECTOR
+# state, which went with the rest of the sector-relative logic
+# (docs/decision-2026-08-21-remove-sector-rs.md). This module now has NO path to
+# any verdict field at all, which is a stronger shadow guarantee than before.
 
 
 def rs_state(df, bench) -> dict:

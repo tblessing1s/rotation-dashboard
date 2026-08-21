@@ -35,7 +35,7 @@ _TRACKED_FIELDS = (
     "scorecard.verdict",
     "regime.status", "regime.vix", "regime.breadth",
     "sector.rs3m_vs_spy", "sector.breadth",
-    "stock.rs3m_vs_spy", "stock.rs3m_vs_sector", "stock.atr_pct",
+    "stock.rs3m_vs_spy", "stock.atr_pct",
     "stock.atr_value", "stock.rsi", "stock.pct_above_ma21", "stock.price",
     "iv.iv_rank", "iv.iv_percentile",
 )
@@ -182,7 +182,7 @@ def _scorecard_section(row: dict | None, track, reason: str) -> dict:
     verdict = track("scorecard.verdict", row.get("verdict"), reason)
     # Every scalar metric the scorecard exposes, verbatim (None-safe copy).
     metric_keys = (
-        "price", "rs3m_vs_spy", "rs3m_vs_sector", "pct_above_ma21",
+        "price", "rs3m_vs_spy", "pct_above_ma21",
         "pct_above_ma200", "atr_extension", "below_ma50", "below_ma200",
         "ma50_slope", "volume_ratio", "volume_acceleration", "obv_above_ema",
         "obv_pct_distance", "mfi", "atr_momentum", "juice_weekly_pct",
@@ -265,24 +265,15 @@ def _stock_section(ticker: str, gate: dict | None, row: dict | None,
         atr_value, rsi = _atr_rsi(ticker)
     return {
         "rs3m_vs_spy": track("stock.rs3m_vs_spy", d.get("rs3m_vs_spy"), reason),
-        "rs3m_vs_sector": track("stock.rs3m_vs_sector", d.get("rs3m_vs_sector"), reason),
-        # RS1M ranking inputs frozen alongside (the ranking key within GREENs).
+        # RS1M ranking input frozen alongside (the ranking key within GREENs,
+        # now vs SPY for every name).
         "rs1m_vs_spy": d.get("rs1m_vs_spy"),
-        "rs1m_vs_sector": d.get("rs1m_vs_sector"),
-        # Provenance: which RS-vs-sector variant gated this entry. The gate now
-        # uses the DIRECT rs3m(stock, sector_etf) ratio everywhere (no vs-SPY
-        # difference approximation), so this is constant "direct" — recorded
-        # explicitly so a future change of variant can never be silent, and old
-        # v1/v2 snapshots (which predate the switch) stay distinguishable. RS3M is
-        # now display/kill-switch only; RS1M is the ranking key.
-        "rs3m_vs_sector_method": "direct",
-        # WHICH peer group the vs-sector leg was measured against (schema v21). The
-        # method above says HOW the ratio was computed; this says against WHAT. A
-        # DIVIDEND_COMPOUNDER substitutes a dividend-peer benchmark for the
-        # growth-tilted sector ETF, so "direct" alone would be ambiguous — direct
-        # against which benchmark? Recorded additively, so v1/v2/v3 snapshots (which
-        # predate the sleeve) stay readable and simply carry None here.
-        "rs3m_vs_sector_benchmark": d.get("peer_benchmark"),
+        # SNAPSHOT_SCHEMA_VERSION 4 (2026-08-21) dropped four vs-sector fields
+        # from this section — rs3m_vs_sector, rs1m_vs_sector,
+        # rs3m_vs_sector_method and rs3m_vs_sector_benchmark — with the removal
+        # of RS3M-vs-Sector (docs/decision-2026-08-21-remove-sector-rs.md).
+        # v1/v2/v3 snapshots still carry them and stay readable by their own
+        # version tag; `summary()` is a pure .get() read and ignores them.
         "income_profile": d.get("income_profile"),
         "atr_pct": track("stock.atr_pct", d.get("atr_pct"), reason),
         "atr_value": track("stock.atr_value", atr_value, reason),
@@ -396,7 +387,6 @@ def summary(entry_context: dict | None) -> dict:
         "regime": (ec.get("regime") or {}).get("status"),
         "iv_rank": (ec.get("iv") or {}).get("iv_rank"),
         "rs3m_vs_spy": stock.get("rs3m_vs_spy"),
-        "rs3m_vs_sector": stock.get("rs3m_vs_sector"),
     }
 
 
@@ -410,22 +400,18 @@ def exit_metrics(ticker: str, *, now: datetime | None = None) -> dict:
     never fetches beyond the cache."""
     ticker = (ticker or "").upper()
     out = {"captured_at": _utc(now).strftime("%Y-%m-%dT%H:%M:%SZ"),
-           "rs3m_vs_spy": None, "rs3m_vs_sector": None, "atr_pct": None,
+           "rs3m_vs_spy": None, "atr_pct": None,
            "atr_value": None, "rsi": None, "pct_above_ma21": None, "price": None}
     try:
         import data_handler
         import indicators
-        import sector_data
         from metrics import scorecard as sc
         spy = data_handler.get_daily(config.BENCHMARK)
         df = data_handler.get_daily(ticker)
-        etf = sector_data.sector_for(ticker) or ""
-        sector_df = data_handler.get_daily(etf) if etf else None
-        m = sc.metrics_for(df, spy, sector_df)
+        m = sc.metrics_for(df, spy)
         atr, rsi = _atr_rsi(ticker)
         out.update({
             "rs3m_vs_spy": m.get("rs3m_vs_spy"),
-            "rs3m_vs_sector": m.get("rs3m_vs_sector"),
             "atr_pct": indicators.atr_pct(df) if df is not None else None,
             "atr_value": atr, "rsi": rsi,
             "pct_above_ma21": m.get("pct_above_ma21"),

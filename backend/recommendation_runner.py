@@ -65,10 +65,10 @@ def _ticker_snapshot(ticker: str, position: dict | None, q_pair, price, bars,
         pass
     tk["price"] = price
     try:
-        rs_spy, rs_sector = q_pair if q_pair is not None else kill_switch._rs_pair(ticker)
-        tk["rs3m_vs_spy"], tk["rs3m_vs_sector"] = rs_spy, rs_sector
+        rs_spy = q_pair if q_pair is not None else kill_switch._rs_spy(ticker)
+        tk["rs3m_vs_spy"] = rs_spy
     except Exception:  # noqa: BLE001
-        tk["rs3m_vs_spy"] = tk["rs3m_vs_sector"] = None
+        tk["rs3m_vs_spy"] = None
     try:
         etf = sector_data.sector_for(ticker)
         if etf and etf.upper() != ticker.upper():

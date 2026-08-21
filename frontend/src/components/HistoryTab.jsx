@@ -208,7 +208,7 @@ function CycleRow({ c }) {
                   At entry: verdict <span className="font-semibold text-slate-200">{summary.verdict ?? "—"}</span>
                   {" · "}regime <span className="font-semibold text-slate-200">{summary.regime ?? "—"}</span>
                   {" · "}IV rank {summary.iv_rank != null ? `${fmt(summary.iv_rank, 0)}` : "—"}
-                  {" · "}RS vs SPY {pct(summary.rs3m_vs_spy)} · RS vs Sec {pct(summary.rs3m_vs_sector)}
+                  {" · "}RS vs SPY {pct(summary.rs3m_vs_spy)}
                 </span>
               ) : (
                 <span className="text-xs text-slate-500">

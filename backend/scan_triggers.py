@@ -76,7 +76,6 @@ _KIND = {
     "breadth_collapsing": CONDITIONAL,
     "under_distribution": SAFETY,
     # Level 3 — stock-lights vetoes (stock_lights.evaluate_vetoes ids).
-    "veto:rs3m_vs_sector": CONDITIONAL,
     "veto:atr_expanding_high_ivr": CONDITIONAL,
     "veto:close_below_ma200": SAFETY,
     # Level 4 — right spot (stock_lights.right_spot check ids).
@@ -105,7 +104,6 @@ _CLEARS = {
     "rs1m_negative": "sector RS1M vs SPY > 0",
     "breadth_collapsing": "sector breadth recovers",
     "under_distribution": "sector no longer under distribution",
-    "veto:rs3m_vs_sector": "RS3M vs sector > 0",
     "veto:atr_expanding_high_ivr": "ATR contracting or IVR cools",
     "veto:close_below_ma200": "reclaim MA200",
     "atr_pct": "ATR% contracts into range",

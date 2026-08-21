@@ -40,7 +40,11 @@ ACTIONABLE = frozenset(ACTION_TYPES - {ActionType.NO_ACTION})
 class TriggerRule:
     """WHY the recommendation fired — same style as exit_reasons.ExitReason."""
 
-    KILL_RS_SECTOR = "KILL_RS_SECTOR"                  # RS3M vs Sector negative -> EXIT now
+    # RETIRED 2026-08-21 — the RS3M-vs-Sector trigger was removed
+    # (docs/decision-2026-08-21-remove-sector-rs.md). KEPT because persisted
+    # recommendation records carry the string and are immutable; no new
+    # recommendation is ever emitted with it.
+    KILL_RS_SECTOR = "KILL_RS_SECTOR"                  # RETIRED — historical reads only
     KILL_RS_SPY_CONFIRMED = "KILL_RS_SPY_CONFIRMED"    # RS3M vs SPY negative on close -> EXIT 1-2d
     CIRCUIT_BREAKER = "CIRCUIT_BREAKER"                # line-in-the-sand condition tripped -> EXIT
     WHIPSAW_GUARD = "WHIPSAW_GUARD"                    # defend whipsaw -> EXIT, not another defend
@@ -56,6 +60,10 @@ class TriggerRule:
     ALL_CLEAR = "ALL_CLEAR"                            # explicit no-action claim for the pass
 
 
+# The VALIDITY set for reading persisted records — it deliberately still holds
+# the RETIRED KILL_RS_SECTOR so historical recommendations keep validating
+# (`is_trigger`). Retirement stops EMISSION (see recommendation_engine's
+# _EXIT_PRIORITY), never reads.
 TRIGGER_RULES = frozenset({
     TriggerRule.KILL_RS_SECTOR, TriggerRule.KILL_RS_SPY_CONFIRMED,
     TriggerRule.CIRCUIT_BREAKER, TriggerRule.WHIPSAW_GUARD,

@@ -32,7 +32,6 @@ ET = ZoneInfo("America/New_York")
 
 # type -> (severity, rule provenance)
 ALERT_TYPES = {
-    "KILL_SWITCH_SECTOR": ("CRITICAL", "HARD_CFM_RULE: RS3M vs Sector negative -> exit immediately"),
     "KILL_SWITCH_SPY": ("CRITICAL", "HARD_CFM_RULE: RS3M vs SPY negative on confirmed close -> exit within 1-2 days"),
     "CIRCUIT_BREAKER": ("CRITICAL", "HARD_CFM_RULE: line-in-the-sand exit price stored at entry"),
     "DELTA_UNCOVERED": ("HIGH", "HARD_CFM_RULE: more calls sold than owned 100-share lots (or, on a legacy diagonal, a LEAP that no longer covers the short)"),
@@ -97,7 +96,7 @@ _ROLL_ACTIONS = {
     "EARNINGS_WINDOW": "earnings",
 }
 _FOCUS_ACTIONS = {
-    "KILL_SWITCH_SECTOR", "KILL_SWITCH_SPY", "CIRCUIT_BREAKER", "SHORT_STOCK_DETECTED",
+    "KILL_SWITCH_SPY", "CIRCUIT_BREAKER", "SHORT_STOCK_DETECTED",
     "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
     "WHIPSAW_EXIT", "JUICE_INADEQUATE", "EARNINGS_DATE_STALE", "ROLL_LEG_IMBALANCE",
     "EXTRINSIC_ABOVE_ENTRY", "RECOMMENDATION", "TRUST_COVERAGE_MISS",
@@ -171,12 +170,10 @@ def check_kill_switch(state: dict) -> list[dict]:
     out = []
     for ev in kill_switch.evaluate_all(state):
         t = ev["ticker"]
-        if ev.get("rs3m_vs_sector") is not None and ev["rs3m_vs_sector"] < 0:
-            out.append(_alert(
-                "KILL_SWITCH_SECTOR", t,
-                f"{t} RS3M vs Sector turned negative ({ev['rs3m_vs_sector']}%).",
-                f"EXIT {t} immediately.", {"kill_switch": ev}))
-        elif ev.get("rs3m_vs_spy") is not None and ev["rs3m_vs_spy"] < 0:
+        # The RS3M-vs-Sector exit-now alert was removed 2026-08-21
+        # (docs/decision-2026-08-21-remove-sector-rs.md). SPY is the only
+        # relative-strength exit alert now.
+        if ev.get("rs3m_vs_spy") is not None and ev["rs3m_vs_spy"] < 0:
             out.append(_alert(
                 "KILL_SWITCH_SPY", t,
                 f"{t} RS3M vs SPY negative on close ({ev['rs3m_vs_spy']}%).",

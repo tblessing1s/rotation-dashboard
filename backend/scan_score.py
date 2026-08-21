@@ -2,7 +2,7 @@
 
 A single quality number over the NON-BLOCKING inputs already computed for a scan
 row: sector strength, base maturity (stage + count), institutional-flow grade, ATR
-posture, distance from MA21, net juice/week, and the two-speed RS state. It answers
+posture, distance from MA21, and net juice/week. It answers
 "of the names that are *entrable*, which are the strongest setups" — a RANK, not a
 gate.
 
@@ -23,7 +23,6 @@ Pure: no I/O, no clock.
 """
 from __future__ import annotations
 
-import rs_state
 import structure_classifier as sclf
 
 # ---------------------------------------------------------------------------
@@ -31,15 +30,22 @@ import structure_classifier as sclf
 # ---------------------------------------------------------------------------
 W_INST_FLOW = 2.0          # PROPOSED_DEFAULT — accumulation is the strongest tell
 W_BASE = 2.0               # PROPOSED_DEFAULT — where the name sits in its cycle
-W_RS_STATE = 1.5           # PROPOSED_DEFAULT — leading + improving vs its sector
+# W_RS_STATE (1.5) was here — the two-speed RS state vs the name's SECTOR.
+# Removed 2026-08-21 with the rest of the sector-relative logic
+# (docs/decision-2026-08-21-remove-sector-rs.md). The quality weights therefore
+# drop 8.5 -> 7.0 and are renormalized below, so SCORE stays 0-10 while the
+# remaining five components each carry more of it. SCORE has ZERO authority so
+# this decides nothing — but a score is NOT comparable across that change.
+# If an RS component is wanted back, re-point it at the vs-SPY state the row
+# already carries (`rs_state_spy`); do not reinstate a sector benchmark.
 W_SECTOR = 1.0             # PROPOSED_DEFAULT — tailwind from a strong sector
 W_ATR = 1.0                # PROPOSED_DEFAULT — contracting vol is a CFM positive
 W_DIST_MA21 = 1.0          # PROPOSED_DEFAULT — near the MA (not extended) is best
 # Net juice is NO LONGER an additive weight — it is a MULTIPLICATIVE viability
 # factor (see compute_score): a chart-quality rank, then scaled by whether the
 # setup actually pays. The quality weights sum to 8.5, renormalized to 0–10.
-_QUALITY_WEIGHT = (W_INST_FLOW + W_BASE + W_RS_STATE
-                   + W_SECTOR + W_ATR + W_DIST_MA21)   # 8.5
+_QUALITY_WEIGHT = (W_INST_FLOW + W_BASE
+                   + W_SECTOR + W_ATR + W_DIST_MA21)   # 7.0
 
 # ---------------------------------------------------------------------------
 # Sub-score maps (each returns a 0..1 quality) — PROPOSED_DEFAULT.
@@ -59,13 +65,6 @@ _BASE_STAGE_SUB = {         # PROPOSED_DEFAULT — only EARLY_ADVANCE is READY-e
     sclf.BaseStage.DECLINING: 0.0,
     sclf.BaseStage.INSUFFICIENT_DATA: 0.0,
 }
-_RS_STATE_SUB = {           # PROPOSED_DEFAULT — RISING best, FALLING worst
-    rs_state.RISING: 1.0,
-    rs_state.TURNING: 0.6,
-    rs_state.FADING: 0.3,
-    rs_state.FALLING: 0.0,
-}
-
 # Distance-from-MA21 posture (percent). PROPOSED_DEFAULT.
 DIST_IDEAL_MAX = 5.0        # PROPOSED_DEFAULT — up to +5% above MA21 is the sweet spot
 DIST_EXTENDED = 15.0        # PROPOSED_DEFAULT — >= +15% above MA21 scores 0 (extended)
@@ -136,7 +135,7 @@ def _juice_sub(net_juice_weekly_pct: float | None) -> float:
 
 
 def compute_score(*, inst_flow: str | None, base_stage: str | None, base_count=None,
-                  rs_state_value: str | None = None, sector_rs1m: float | None = None,
+                  sector_rs1m: float | None = None,
                   atr_momentum: float | None = None, pct_above_ma21: float | None = None,
                   net_juice_weekly_pct: float | None = None) -> dict:
     """The composite SCORE (0–10) + its component parts, from already-computed row
@@ -145,7 +144,6 @@ def compute_score(*, inst_flow: str | None, base_stage: str | None, base_count=N
     parts = {
         "inst_flow": _INST_FLOW_SUB.get(inst_flow, 0.0),
         "base": _base_sub(base_stage, base_count),
-        "rs_state": _RS_STATE_SUB.get(rs_state_value, 0.0) if rs_state_value is not None else 0.0,
         "sector": _sector_sub(sector_rs1m),
         "atr": _atr_sub(atr_momentum),
         "dist_ma21": _dist_ma21_sub(pct_above_ma21),
@@ -156,7 +154,6 @@ def compute_score(*, inst_flow: str | None, base_stage: str | None, base_count=N
     # ``parts["net_juice"]`` for calibration continuity but drives only the factor).
     weighted = (parts["inst_flow"] * W_INST_FLOW
                 + parts["base"] * W_BASE
-                + parts["rs_state"] * W_RS_STATE
                 + parts["sector"] * W_SECTOR
                 + parts["atr"] * W_ATR
                 + parts["dist_ma21"] * W_DIST_MA21)

@@ -162,18 +162,23 @@ def test_fixture_c_verdict_non_ready_binding_is_symbol_level3():
     assert composed["reasons"] == ["symbol:WATCH"]            # SYM is the binding input
 
 
-def test_fixture_c_turning_annotation_present_on_non_ready():
-    # The gated Phase-0 exception: a TURNING vs-Sector RS annotates an already-
-    # non-READY row's reasons — informational only, never a verdict change.
+def test_fixture_c_has_no_annotation_path_left():
+    """Was test_fixture_c_turning_annotation_present_on_non_ready. Fixture C is
+    still the TURNING vs-sector shape, but the annotation it drove was removed
+    2026-08-21 with the sector RS pairing
+    (docs/decision-2026-08-21-remove-sector-rs.md). Re-pinned to assert the
+    write path is gone — a stricter guarantee than the one it replaced."""
     stock = _load("turning_recovery")
     sector = _load("turning_recovery_sector")
     base, inst = sc.classify_symbol(stock)
     sym = symbol_genius.compute(stock)["color"]
     verdict = sv.compose_verdict("green", sym, base, inst)["verdict"]
-    state = rss.rs_state(stock, sector)["state"]
-    assert rss.turning_watch_reason(verdict, state) == rss.WATCH_ANNOTATION
-    # ...but a READY row is never annotated, even if TURNING.
-    assert rss.turning_watch_reason(sv.READY, rss.TURNING) is None
+    assert verdict != sv.READY                       # the fixture is still non-READY
+    # The vs-sector state is still COMPUTABLE as a pure pairing...
+    assert rss.rs_state(stock, sector)["state"] == rss.TURNING
+    # ...but nothing can turn it into a verdict_reasons entry any more.
+    assert not hasattr(rss, "turning_watch_reason")
+    assert not hasattr(rss, "WATCH_ANNOTATION")
 
 
 # ---------------------------------------------------------------------------

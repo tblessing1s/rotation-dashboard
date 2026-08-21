@@ -118,16 +118,15 @@ def test_1_xlk_july6_regression_unchanged():
 
     # Layer 2 — the ATR/IVR veto still fires independently, through the ETF path.
     assert indicators.atr_expanding(df) is True
-    res = stock_lights.compute(df, sector_df=None, ivr_percentile=95.0, is_etf=True)
+    res = stock_lights.compute(df, ivr_percentile=95.0, is_etf=True)
     assert res["verdict"] == stock_lights.RED
     assert "veto:atr_expanding_high_ivr" in res["veto_reasons"]
-    assert stock_lights.compute(df, sector_df=None, ivr_percentile=10.0,
+    assert stock_lights.compute(df, ivr_percentile=10.0,
                                 is_etf=True)["verdict"] != stock_lights.GREEN
 
     # And the profile parameter cannot change any of it: a name evaluated as a
     # DIVIDEND_COMPOUNDER gets the identical lights, verdict and right-spot.
-    as_div = stock_lights.compute(df, sector_df=None, ivr_percentile=95.0, is_etf=True,
-                                  benchmark=config.DIVIDEND_PEER_BENCHMARK)
+    as_div = stock_lights.compute(df, ivr_percentile=95.0, is_etf=True)
     assert as_div["lights"] == res["lights"]
     assert as_div["verdict"] == res["verdict"]
     assert as_div["greens"] == res["greens"]
@@ -143,9 +142,8 @@ def test_2_juice_engine_verdict_is_byte_identical_to_no_profile():
     not perturb the default path."""
     df = _ko_like()
     sector = _strong_bench()
-    legacy = stock_lights.compute(df, sector_df=sector, ivr_percentile=30.0, is_etf=False)
-    tagged = stock_lights.compute(df, sector_df=sector, ivr_percentile=30.0, is_etf=False,
-                                  benchmark="XLP")
+    legacy = stock_lights.compute(df, ivr_percentile=30.0, is_etf=False)
+    tagged = stock_lights.compute(df, ivr_percentile=30.0, is_etf=False)
     # Provenance is additive; every DECISION field is identical.
     for key in ("lights", "greens", "reds", "insufficient", "verdict", "enterable",
                 "vetoed", "veto_reasons", "right_spot"):
@@ -220,9 +218,8 @@ def test_3_dividend_fixture_fails_juice_floor_but_clears_combined(store, monkeyp
     # The trend gates are untouched by the profile: identical inputs, identical
     # lights/right-spot for both sleeves.
     df, bench = _ko_like(), _strong_bench()
-    a = stock_lights.compute(df, sector_df=bench, ivr_percentile=20.0, is_etf=False)
-    b = stock_lights.compute(df, sector_df=bench, ivr_percentile=20.0, is_etf=False,
-                             benchmark=config.DIVIDEND_PEER_BENCHMARK)
+    a = stock_lights.compute(df, ivr_percentile=20.0, is_etf=False)
+    b = stock_lights.compute(df, ivr_percentile=20.0, is_etf=False)
     assert a["verdict"] == b["verdict"] and a["right_spot"] == b["right_spot"]
 
 
@@ -253,28 +250,27 @@ def test_3c_unknown_dividend_never_reads_as_a_confident_zero():
 # ===========================================================================
 # 4. Dividend laggard — rejected at Level 3 against the dividend benchmark.
 # ===========================================================================
-def test_4_dividend_laggard_vetoed_against_the_dividend_benchmark():
-    """The AAPL lesson, for the new branch: substituting the peer benchmark must
-    NOT make the filter toothless. A payer lagging its DIVIDEND peers is still
-    vetoed at Level 3."""
-    laggard, bench = _laggard(), _strong_bench()
-    vetoes = stock_lights.evaluate_vetoes(laggard, bench, ivr_percentile=20.0,
-                                          is_etf=False,
-                                          benchmark=config.DIVIDEND_PEER_BENCHMARK)
-    rs = next(v for v in vetoes if v["id"] == "rs3m_vs_sector")
-    assert rs["applicable"] is True
-    assert rs["value"] < 0 and rs["tripped"] is True
-    assert rs["benchmark"] == config.DIVIDEND_PEER_BENCHMARK   # provenance recorded
-
-    # A tripped veto forces RED, so Level 3 fails — the same rule as JUICE_ENGINE.
-    res = stock_lights.compute(laggard, sector_df=bench, ivr_percentile=20.0,
-                               is_etf=False, benchmark=config.DIVIDEND_PEER_BENCHMARK)
-    assert res["verdict"] == stock_lights.RED
-    assert "veto:rs3m_vs_sector" in res["veto_reasons"]
-    assert res["enterable"] is False
+def test_4_dividend_laggard_is_no_longer_vetoed_on_the_peer_leg():
+    """Was test_4_dividend_laggard_vetoed_against_the_dividend_benchmark, which
+    pinned that substituting the dividend peer benchmark did not make the filter
+    toothless. The peer leg itself was removed 2026-08-21
+    (docs/decision-2026-08-21-remove-sector-rs.md), so there is no vs-peer veto
+    left to be toothless OR toothed. Re-pinned to assert the absence — a payer
+    lagging its dividend peers is now clear of THIS veto, and only the ATR/IVR
+    and MA200 vetoes remain."""
+    laggard = _laggard()
+    vetoes = stock_lights.evaluate_vetoes(laggard, ivr_percentile=20.0,
+                                          is_etf=False)
+    assert not any(v["id"] == "rs3m_vs_sector" for v in vetoes)
+    assert {v["id"] for v in vetoes} == {"atr_expanding_high_ivr", "close_below_ma200"}
+    res = stock_lights.compute(laggard, ivr_percentile=20.0, is_etf=False)
+    assert "veto:rs3m_vs_sector" not in res["veto_reasons"]
 
 
-def test_4b_benchmark_substitution_is_sector_leg_only():
+def test_4b_benchmark_resolution_still_works_for_the_income_floors():
+    """The peer BENCHMARK NAME still resolves — it selects which shadow income
+    floor a sleeve is measured against. Only the RS legs it used to feed are
+    gone (docs/decision-2026-08-21-remove-sector-rs.md)."""
     assert ip.benchmark_for(ip.JUICE_ENGINE, "XLP") == "XLP"
     assert ip.benchmark_for(ip.DIVIDEND_COMPOUNDER, "XLP") == config.DIVIDEND_PEER_BENCHMARK
     assert config.DIVIDEND_PEER_BENCHMARK in config.DIVIDEND_PEER_BENCHMARKS
@@ -290,7 +286,7 @@ def test_4c_kill_switch_spy_leg_is_untouched():
     a negative vs-SPY reading exits under either sleeve, identically."""
     import kill_switch
     for _profile in (ip.JUICE_ENGINE, ip.DIVIDEND_COMPOUNDER):
-        v = kill_switch.classify("KO", rs_vs_spy=-3.0, rs_vs_sector=5.0)
+        v = kill_switch.classify("KO", rs_vs_spy=-3.0)
         assert v["status"] == "red" and v["alert"] is True
         assert "RS3M vs SPY" in v["suggested_action"]
         assert kill_switch.exit_reason_code(v) == "KILL_SWITCH_SPY"
@@ -549,10 +545,10 @@ def test_9_etf_waiver_behavior_unchanged():
     """The existing ETF branch is the structural model for the dividend branch;
     it must be untouched by it."""
     df, sector = _ko_like(), _strong_bench()
-    # The vs-sector veto stays waived for an ETF (not applicable, never tripped).
-    vetoes = stock_lights.evaluate_vetoes(df, sector, ivr_percentile=20.0, is_etf=True)
-    rs = next(v for v in vetoes if v["id"] == "rs3m_vs_sector")
-    assert rs["applicable"] is False and rs["tripped"] is False and rs["value"] is None
+    # The vs-sector veto is gone for every name, ETF or not — the ETF WAIVER it
+    # used to need went with it (docs/decision-2026-08-21-remove-sector-rs.md).
+    vetoes = stock_lights.evaluate_vetoes(df, ivr_percentile=20.0, is_etf=True)
+    assert not any(v["id"] == "rs3m_vs_sector" for v in vetoes)
 
     # And the ETF juice bar is unchanged, and still below the growth bar.
     import sector_data

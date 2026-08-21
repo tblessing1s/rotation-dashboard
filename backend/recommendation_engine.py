@@ -45,7 +45,10 @@ ENGINE_VERSION = 1
 
 # Trigger priority (first fired wins the dominant slot), per action family.
 _EXIT_PRIORITY = (
-    TriggerRule.KILL_RS_SECTOR,
+    # KILL_RS_SECTOR was here, first: the RS3M-vs-Sector exit-now trigger
+    # dominated every other exit. Removed 2026-08-21 — no recommendation is
+    # emitted with it any more (docs/decision-2026-08-21-remove-sector-rs.md).
+    # The enum member survives for historical reads; this is the EMISSION list.
     TriggerRule.CIRCUIT_BREAKER,
     TriggerRule.WHIPSAW_GUARD,
     TriggerRule.KILL_RS_SPY_CONFIRMED,
@@ -299,16 +302,14 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
     last_close = tk.get("last_close")
     triggers: dict[str, dict] = {}
 
-    # Kill switch — the shared pure core over the snapshot's RS pair.
-    ks = kill_switch.classify(t, tk.get("rs3m_vs_spy"), tk.get("rs3m_vs_sector"))
+    # Kill switch — the shared pure core over the snapshot's RS3M-vs-SPY value.
+    # Sector-relative exits were removed 2026-08-21, so RED here is always the
+    # confirm-on-close SPY rule.
+    ks = kill_switch.classify(t, tk.get("rs3m_vs_spy"))
     if ks["status"] == "red":
-        rule = (TriggerRule.KILL_RS_SECTOR
-                if ks.get("rs3m_vs_sector") is not None and ks["rs3m_vs_sector"] < 0
-                else TriggerRule.KILL_RS_SPY_CONFIRMED)
-        first = _first_rs_negative(
-            tk.get("bars"),
-            tk.get("sector_bars") if rule == TriggerRule.KILL_RS_SECTOR else tk.get("spy_bars"),
-            config.RS3M_LOOKBACK)
+        rule = TriggerRule.KILL_RS_SPY_CONFIRMED
+        first = _first_rs_negative(tk.get("bars"), tk.get("spy_bars"),
+                                   config.RS3M_LOOKBACK)
         triggers[rule] = {"kill_switch": ks, "condition_first_true_at": first}
 
     # Circuit breaker — the shared evaluator with the snapshot's bars injected.
@@ -373,7 +374,7 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
 
     features = {
         "price": price, "last_close": last_close,
-        "rs3m_vs_spy": tk.get("rs3m_vs_spy"), "rs3m_vs_sector": tk.get("rs3m_vs_sector"),
+        "rs3m_vs_spy": tk.get("rs3m_vs_spy"),
         "atr": tk.get("atr"), "atr_direction": tk.get("atr_direction"),
         "hist_vol": tk.get("hist_vol"), "iv_rank": tk.get("iv_rank"),
         "pct_above_ma21": tk.get("pct_above_ma21"),
@@ -405,7 +406,6 @@ def _dominant(triggers: dict) -> tuple[str, str] | None:
 
 
 _KILL_EXIT_CODE = {
-    TriggerRule.KILL_RS_SECTOR: "KILL_SWITCH_SECTOR",
     TriggerRule.KILL_RS_SPY_CONFIRMED: "KILL_SWITCH_SPY",
     TriggerRule.WHIPSAW_GUARD: "WHIPSAW_BREAKER",
     TriggerRule.DELTA_COVERAGE_FLOOR: "DELTA_COVERAGE",

@@ -42,42 +42,30 @@ MA200_WINDOW = 200
 # ---------------------------------------------------------------------------
 # Vetoes (any one -> RED, evaluated before the vote)
 # ---------------------------------------------------------------------------
-def evaluate_vetoes(df, sector_df, ivr_percentile: float | None,
-                    is_etf: bool, benchmark: str | None = None) -> list[dict]:
-    """The three entry vetoes, each recorded as {id, value, applicable, tripped}
+def evaluate_vetoes(df, ivr_percentile: float | None,
+                    is_etf: bool) -> list[dict]:
+    """The two entry vetoes, each recorded as {id, value, applicable, tripped}
     whether or not it fires (so ``entry_context`` can freeze every evaluation).
     Any ``tripped`` -> the verdict is RED.
 
-      1. rs3m_vs_sector < 0   (stocks only — an ETF has no growth-leader peer
-         sector to beat; same waiver as the kill switch)
-      2. atr_expanding AND ivr_percentile >= VETO_IVR_PERCENTILE_MIN  (a volatile
+      1. atr_expanding AND ivr_percentile >= VETO_IVR_PERCENTILE_MIN  (a volatile
          name into rich IV — the wrong tape for a new CFM entry)
-      3. close < ma200        (the trend-is-broken line)
+      2. close < ma200        (the trend-is-broken line)
 
-    ``sector_df`` is the COMPARISON frame for veto 1, whatever the caller decided
-    that should be — the name's sector ETF for a JUICE_ENGINE candidate, or the
-    dividend-peer benchmark for a DIVIDEND_COMPOUNDER (schema v21). This function
-    does not resolve it; ``benchmark`` is carried purely as PROVENANCE so a frozen
-    entry snapshot records which benchmark actually gated the entry and a variant
-    change can never be silent. The RULE is unchanged for both profiles — the
-    comparison must still be beaten, only the peer group differs.
+    REMOVED 2026-08-21 (TRAVIS_EXTENSION): the ``rs3m_vs_sector < 0`` veto that
+    led this list, along with the ``sector_df`` comparison frame and the
+    ``benchmark`` provenance argument that existed ONLY to serve it. A stock's
+    strength against its cap-weighted sector ETF is not a peer comparison, so
+    the signal was removed system-wide —
+    docs/decision-2026-08-21-remove-sector-rs.md.
+
+    Note this leaves NO relative-strength veto at entry: RS3M-vs-SPY was never
+    one (the "beats SPY" gate leg had been removed earlier), so the sector veto
+    was the only RS check the entry gate had. That is deliberate and recorded.
     """
     out: list[dict] = []
 
-    # 1. rs3m_vs_sector < 0 (stocks only)
-    rs_sec = None
-    applicable = bool(not is_etf and df is not None and sector_df is not None)
-    if applicable:
-        rs_sec = indicators.rs3m(df, sector_df)
-    out.append({
-        "id": "rs3m_vs_sector",
-        "value": rs_sec,
-        "applicable": applicable,
-        "tripped": bool(applicable and rs_sec is not None and rs_sec < 0),
-        "benchmark": benchmark,
-    })
-
-    # 2. atr_expanding AND ivr_percentile >= threshold
+    # 1. atr_expanding AND ivr_percentile >= threshold
     expanding = indicators.atr_expanding(df) if df is not None else None
     out.append({
         "id": "atr_expanding_high_ivr",
@@ -88,7 +76,7 @@ def evaluate_vetoes(df, sector_df, ivr_percentile: float | None,
                         and ivr_percentile >= config.VETO_IVR_PERCENTILE_MIN),
     })
 
-    # 3. close < ma200
+    # 2. close < ma200
     close = indicators.last(df) if df is not None else None
     ma200 = indicators.sma(df, MA200_WINDOW) if df is not None else None
     out.append({
@@ -246,21 +234,23 @@ def right_spots_by_ruleset(df) -> dict:
 # ---------------------------------------------------------------------------
 # Pure core — lights + verdict + vetoes + right-spot over frames/scalars
 # ---------------------------------------------------------------------------
-def compute(df, sector_df=None, ivr_percentile: float | None = None,
-            is_etf: bool = False, params: dict | None = None,
-            benchmark: str | None = None) -> dict:
-    """The full per-name evaluation over already-fetched frames + IVR scalar.
+def compute(df, ivr_percentile: float | None = None,
+            is_etf: bool = False, params: dict | None = None) -> dict:
+    """The full per-name evaluation over the already-fetched frame + IVR scalar.
     PURE (no I/O). Returns the four lights, the green count, the stock verdict, the
     veto evaluations, and the right-spot gate — everything a caller needs to gate
     and everything ``entry_context`` freezes.
 
-    ``benchmark`` is the symbol whose frame the caller passed as ``sector_df``,
-    recorded as provenance only (schema v21). The four lights, the verdict mapping,
-    the YELLOW lockout and the right-spot gate are IDENTICAL for every profile —
-    trend quality is never waived or relaxed by the dividend sleeve [HARD_CFM_RULE].
+    The four lights, the verdict mapping, the YELLOW lockout and the right-spot
+    gate are IDENTICAL for every profile — trend quality is never waived or
+    relaxed by the dividend sleeve [HARD_CFM_RULE].
+
+    ``sector_df`` / ``benchmark`` were removed 2026-08-21 with the vs-sector veto
+    they existed to serve (docs/decision-2026-08-21-remove-sector-rs.md). Nothing
+    in this function reads a peer frame any more.
     """
     engine = genius_lights.compute(df, params=params)
-    vetoes = evaluate_vetoes(df, sector_df, ivr_percentile, is_etf, benchmark=benchmark)
+    vetoes = evaluate_vetoes(df, ivr_percentile, is_etf)
     trip = tripped_vetoes(vetoes)
     core = core_is_green(engine["lights"])
 
@@ -295,22 +285,22 @@ def compute(df, sector_df=None, ivr_percentile: float | None = None,
         "ruleset": active,
         "by_ruleset": by_ruleset,
         "is_etf": bool(is_etf),
-        "benchmark": benchmark,
     }
 
 
 # ---------------------------------------------------------------------------
 # Input-gathering wrapper — reads caches only, never a fresh provider call
 # ---------------------------------------------------------------------------
-def evaluate(ticker: str, *, df=None, spy_df=None, sector_df=None,
+def evaluate(ticker: str, *, df=None, spy_df=None,
              profile: str | None = None) -> dict:
     """Gather this name's cached inputs and run ``compute``. Frames may be passed
     in (the scan already has them warm) or are read from ``data_handler``'s cache.
     IVR percentile comes from the local IV history file (never a provider call).
 
-    ``profile`` (schema v21) selects the vs-peer BENCHMARK for the rs3m veto: the
-    name's sector ETF for JUICE_ENGINE, the dividend-peer benchmark for a
-    DIVIDEND_COMPOUNDER. Nothing else about the evaluation changes."""
+    ``profile`` (schema v21) no longer selects anything here — it used to pick the
+    vs-peer benchmark for the rs3m veto, which was removed 2026-08-21
+    (docs/decision-2026-08-21-remove-sector-rs.md). It is still resolved for the
+    ``income_profile`` / ``is_sector_etf`` provenance on the returned dict."""
     import data_handler
     import income_profile
     import iv_history
@@ -322,27 +312,14 @@ def evaluate(ticker: str, *, df=None, spy_df=None, sector_df=None,
 
     sector_etf = sector_data.sector_for(ticker)
     is_etf = sector_data.is_etf(ticker)
-    # For JUICE_ENGINE the benchmark IS the sector ETF, so this reproduces the
-    # pre-v21 behavior exactly. is_own_benchmark is the anti-tautology guard — a
-    # self-comparison computes to 0.0, which reads as a real number and silently
-    # breaks the veto — asked against the ACTIVE benchmark, so a compounder whose
-    # ticker is the dividend benchmark is caught too, not just a sector ETF.
     peer = income_profile.resolve(ticker, profile, sector_etf)
-    benchmark, is_own_benchmark = peer["benchmark"], peer["is_own_benchmark"]
-    if sector_df is None and benchmark and not is_own_benchmark:
-        sector_df = data_handler.get_daily(benchmark)
-    # A sector ETF (or any ETF's) vs-sector veto is waived, so its sector frame is
-    # irrelevant to the veto; leave it None for those.
-    if is_etf or is_own_benchmark:
-        sector_df = None
 
     try:
         ivr_percentile = (iv_history.iv_rank(ticker) or {}).get("iv_percentile")
     except Exception:  # noqa: BLE001 — IVR is advisory; a missing file just skips the veto
         ivr_percentile = None
 
-    out = compute(df, sector_df=sector_df, ivr_percentile=ivr_percentile, is_etf=is_etf,
-                  benchmark=None if sector_df is None else benchmark)
+    out = compute(df, ivr_percentile=ivr_percentile, is_etf=is_etf)
     out["ticker"] = ticker
     out["sector"] = sector_etf
     out["is_sector_etf"] = peer["is_sector_etf"]

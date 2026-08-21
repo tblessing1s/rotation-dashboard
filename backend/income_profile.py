@@ -133,24 +133,26 @@ def benchmark_for(profile: str | None, sector_etf: str | None) -> str | None:
 
 
 def resolve(ticker: str, profile: str | None, sector_etf: str | None) -> dict:
-    """The whole vs-peer comparison decision for one name, as data.
+    """The sleeve/benchmark resolution for one name, as data.
 
-    Four call sites (the scan row, the scorecard row, the stock-lights wrapper and
-    the kill switch) each need the same three answers — which benchmark, is this
-    name its own benchmark, and can the caller reuse the sector frame it already
-    holds. Deriving them independently at each site is four chances to drift on the
-    load-bearing anti-tautology guard, so they are derived once here.
+    Several call sites (the scan row, the scorecard row, the stock-lights
+    wrapper) need the same answers — which sleeve, which benchmark, is this name
+    its own benchmark. Deriving them independently at each site is a chance to
+    drift, so they are derived once here. The kill switch no longer calls this
+    at all: its peer leg was removed 2026-08-21.
 
     Returns:
       ``profile``          — normalized
-      ``benchmark``        — the RS3M comparison symbol for the SECTOR leg
+      ``benchmark``        — the peer symbol this sleeve is judged against. It no
+                             longer selects an RS comparison: the vs-peer RS legs
+                             were removed 2026-08-21
+                             (docs/decision-2026-08-21-remove-sector-rs.md). It
+                             survives as the sleeve's identity for the shadow
+                             income floors and as snapshot provenance.
       ``is_sector_etf``    — the name IS its own sector ETF (display/back-compat)
-      ``is_own_benchmark`` — the name IS its active benchmark, so the peer leg is
-                             not applicable (a self-comparison computes to exactly
-                             0.0, which reads as a real number and silently breaks
-                             both the veto and the kill switch's thinning leg)
-      ``use_sector_df``    — the benchmark IS the sector ETF, so a caller holding a
-                             warm sector frame can use it as-is rather than fetching
+      ``is_own_benchmark`` — the name IS its active benchmark
+    ``use_sector_df`` was dropped with the peer-frame fetch it existed to
+    optimize — no caller loads a peer frame any more.
     PURE.
     """
     t = (ticker or "").strip().upper()
@@ -163,7 +165,6 @@ def resolve(ticker: str, profile: str | None, sector_etf: str | None) -> dict:
         "benchmark": bench,
         "is_sector_etf": bool(sector) and t == sector,
         "is_own_benchmark": bool(t) and bool(bench_u) and t == bench_u,
-        "use_sector_df": bool(bench_u) and bench_u == sector,
     }
 
 
@@ -171,13 +172,12 @@ def is_own_benchmark(ticker: str, profile: str | None, sector_etf: str | None) -
     """True when a name IS its own comparison benchmark, so the sector leg is not
     applicable.
 
-    The pre-existing guard only asked "is this ticker its own sector ETF" — a
-    self-comparison computes to exactly 0.0, which reads as a real number and
-    silently breaks both the veto and the kill switch's thinning leg (see
-    kill_switch._rs_pair). Substituting a dividend benchmark reopens that trap for
-    a compounder whose ticker IS the benchmark (SCHD held as a position, compared
-    against SCHD), so the guard is asked against whatever benchmark is actually in
-    force rather than against the sector ETF specifically."""
+    A self-comparison computes to exactly 0.0, which reads as a real number
+    rather than "N/A". The vs-peer RS legs this guard protected (the entry veto
+    and the kill switch's sector leg) were removed 2026-08-21
+    (docs/decision-2026-08-21-remove-sector-rs.md), so it no longer guards a
+    live comparison — it remains as the profile-resolution predicate for
+    "this name IS its own benchmark", which the sleeve still needs."""
     t = (ticker or "").strip().upper()
     bench = benchmark_for(profile, sector_etf)
     return bool(t) and bool(bench) and t == str(bench).strip().upper()
