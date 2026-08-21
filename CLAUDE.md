@@ -53,6 +53,16 @@ Match the surrounding style; don't introduce a linter unless asked.
   `logging_handler.bucket_datetime()` — both the theta ledger and the Payouts view
   key off it so they can't disagree. Never re-derive week/month with a bespoke
   parser.
+- **Shadow mode:** several features are computed, displayed and logged with ZERO
+  authority pending real-data calibration — the weekly-juice floor
+  (`scan_triggers.shadow_floor`), the composite SCORE (`scan_score`), the gate
+  ruleset replay, and the Level-4 structure metrics (`chart_structure`). The
+  load-bearing invariant is that none of them is ever appended to the `blocks`
+  list feeding `scan_triggers.compose_row_verdict` — that list is what carries
+  verdict authority. There is deliberately no config switch that grants a shadow
+  metric authority; graduating one is a reviewed code change. Reuse the existing
+  pattern (additive row keys → `scan_rejection_log` → violet "NO AUTHORITY"
+  display) rather than inventing a parallel one.
 - **Optional deps:** `pywebpush` (web-push) and `boto3` (S3 backup) are lazily
   imported and not required for the test suite. `pywebpush`'s `http-ece` sub-dep
   may fail to build in some containers; that's expected and non-fatal.

@@ -173,6 +173,46 @@ const COLUMNS = [
         </span>),
   },
   {
+    // SHADOW — Level-4 chart structure. Styled to match the shadow SCORE and the
+    // shadow-ruleset chip (violet = observation), deliberately NOT the emerald /
+    // amber / rose palette the blocking gate outputs use, so it can never be read
+    // as a gate result. Zero authority: it moves no verdict, ranking or filter.
+    key: "structure_score", label: "Struct",
+    sortVal: (r) => r.structure_score,
+    render: (r) => {
+      const st = r.structure || {};
+      const of = r.structure_score_of;
+      if (r.structure_score == null || !of) {
+        return <span className="text-slate-600" title="Not enough history to read chart structure.">—</span>;
+      }
+      const c = st.constructive || {};
+      const line = (label, val, ok) =>
+        `${ok == null ? "·" : ok ? "✓" : "✗"} ${label}: ${val ?? "insufficient data"}`;
+      const title = [
+        `SHADOW — chart structure ${r.structure_score}/${of} constructive. `
+          + `Zero blocking authority: it does not affect the verdict, ranking, bench or Ready-to-Enter.`,
+        "",
+        line("dist below 126d high", st.dist_from_high_pct == null ? null : `${fmt(st.dist_from_high_pct, 2)}%`, c.dist_from_high_pct),
+        line("MA21 slope", st.ma21_slope == null ? null : `${fmt(st.ma21_slope, 3)} ATR/bar (${st.ma21_slope_state})`, c.ma21_slope),
+        line("tightness", st.tightness == null ? null
+          : `${fmt(st.tightness, 3)} vs ${st.tightness_basis} (bar ${fmt(st.tightness_max, 3)})`, c.tightness),
+        line("higher lows", st.higher_lows, c.higher_lows),
+        st.dist_from_high_252_pct != null ? `  (252d high: ${fmt(st.dist_from_high_252_pct, 2)}% below)` : null,
+        of < 4 ? `\nPARTIAL READ — unmeasurable: ${(st.insufficient || []).join(", ")}. Not a low score.` : null,
+      ].filter((x) => x !== null).join("\n");
+      return (
+        <span
+          className={`tabular-nums rounded-full border px-1.5 py-0.5 text-[11px] ${
+            of < 4 ? "border-slate-700 text-slate-500"
+              : "border-violet-500/40 bg-violet-500/10 text-violet-200"}`}
+          title={title}
+        >
+          {r.structure_score}/{of}
+        </span>
+      );
+    },
+  },
+  {
     key: "verdict", label: "Verdict", sortVal: (r) => VERDICT_ORDER[r.verdict] ?? 9,
     render: (r) => (
       <span className="inline-flex items-center gap-1.5">
@@ -326,6 +366,65 @@ function RefreshButton({ onClick, busy, error, title, refreshedAt }) {
 }
 
 // One demoted readout in the expand drawer (label over value).
+// SHADOW — the four Level-4 chart-structure metrics on the expanded row, styled
+// as an observation (violet, explicit NO AUTHORITY badge) rather than as gate
+// output, matching ShadowFloorLog below. Level 4 measures quietness; these
+// measure the structure it misses. None of them can move a verdict.
+function StructureShadow({ row }) {
+  const st = row.structure;
+  if (!st) return null;
+  const c = st.constructive || {};
+  const of = row.structure_score_of;
+  const mark = (ok) => (ok == null ? <span className="text-slate-600">·</span>
+    : ok ? <span className="text-violet-300">✓</span> : <span className="text-slate-500">✗</span>);
+  const cell = (label, val, ok, hint) => (
+    <div className="flex items-baseline gap-1.5" title={hint}>
+      {mark(ok)}
+      <span className="text-slate-500">{label}</span>
+      <span className="tabular-nums text-slate-300">{val ?? "insufficient data"}</span>
+    </div>
+  );
+  return (
+    <div className="mt-2 border-t border-slate-800 pt-2">
+      <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wide text-slate-500">
+        Chart structure
+        <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-violet-300">
+          STRUCT {row.structure_score ?? "—"}/{of ?? "—"}
+        </span>
+        <span className="rounded bg-slate-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-slate-400">
+          NO AUTHORITY
+        </span>
+      </div>
+      <div className="grid grid-cols-2 gap-x-6 gap-y-1 text-xs sm:grid-cols-4">
+        {cell("below 126d high",
+              st.dist_from_high_pct == null ? null : `${fmt(st.dist_from_high_pct, 2)}%`,
+              c.dist_from_high_pct,
+              `Percent under the trailing 126-bar closing high. Constructive within 8%.${
+                st.dist_from_high_252_pct != null
+                  ? ` 252-bar: ${fmt(st.dist_from_high_252_pct, 2)}% below (display only).` : ""}`)}
+        {cell("MA21 slope",
+              st.ma21_slope == null ? null : `${fmt(st.ma21_slope, 3)} (${st.ma21_slope_state})`,
+              c.ma21_slope,
+              "MA21 slope over the trailing 10 bars, in ATR per bar so names are comparable. Constructive when RISING — |slope| < 0.05 is the flat/drifting band.")}
+        {cell("tightness",
+              st.tightness == null ? null : fmt(st.tightness, 3),
+              c.tightness,
+              `Range of the last 15 closes over the prior 60-bar ${
+                st.tightness_basis === "atr_sum" ? "ATR SUM (no advance detected)" : "ADVANCE range"
+              }. Lower = tighter coil; constructive below ${fmt(st.tightness_max, 3)}. The two bases are not on one scale — summed true range is path length, always ≥ the range it spans — so each carries its OWN ceiling (advance 0.35, atr_sum 0.05). Never compare a tightness value across bases.`)}
+        {cell("higher lows", st.higher_lows, c.higher_lows,
+              "Successive higher swing lows over the trailing 30 bars (3-bar pivots). Constructive at 2 or more.")}
+      </div>
+      {of != null && of < 4 && (
+        <p className="mt-1 text-[11px] text-slate-500">
+          Partial read — not enough history for {(st.insufficient || []).join(", ")}.
+          Scored {row.structure_score}/{of}, not {row.structure_score}/4.
+        </p>
+      )}
+    </div>
+  );
+}
+
 function Readout({ label, value }) {
   return (
     <div className="min-w-0">
@@ -477,6 +576,15 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                   {row.suitability_reasons.map((reason, i) => <li key={i}>{reason}</li>)}
                 </ul>
               ) : null}
+              {/* Non-blocking observations — today, the thin-volume CAUTION that a
+                  consolidation suppressed. Shown so "no CAUTION" is legibly
+                  different from "nothing looked at". */}
+              {row.suitability_notes?.length ? (
+                <ul className="list-disc space-y-0.5 pl-5 text-xs text-emerald-300/70">
+                  {row.suitability_notes.map((note, i) => <li key={i}>{note}</li>)}
+                </ul>
+              ) : null}
+              <StructureShadow row={row} />
             </div>
           </td>
         </tr>
