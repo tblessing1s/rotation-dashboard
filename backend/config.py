@@ -238,7 +238,9 @@ STOCK_RS_VS_SPY_MIN = 5.0      # stock RS3M vs SPY > +5% (growth-leader bar)
 # SPY by 5% to be entry-ready. (Sector ETFs already waive the beats-sector leg;
 # non-sector ETFs still beat their assigned sector.)
 STOCK_RS_VS_SPY_MIN_ETF = 0.0
-STOCK_RS_VS_SECTOR_MIN = 0.0  # stock RS3M vs Sector > 0
+# STOCK_RS_VS_SECTOR_MIN was here — removed 2026-08-21 with the RS3M-vs-Sector
+# veto and kill-switch trigger it floored
+# (docs/decision-2026-08-21-remove-sector-rs.md).
 
 
 def rs_vs_spy_min(is_etf: bool = False) -> float:
@@ -267,8 +269,10 @@ SPOT_ATR_EXTENSION_MAX = 1.5   # PROPOSED_DEFAULT — extension above MA21 must 
 SPOT_ATR_MOMENTUM_MAX = 1.0    # PROPOSED_DEFAULT — ATR/ATR_5EMA <= this = contracting or flat
 
 # ---- Stock-lights vetoes (any one -> RED, evaluated before the vote) -------
-# rs3m_vs_sector < 0 (stocks only) reuses indicators.rs3m; close < ma200 reuses
-# the MA200 trend line. The volatility veto pairs an expanding ATR with a rich IV.
+# close < ma200 reuses the MA200 trend line; the volatility veto pairs an
+# expanding ATR with a rich IV. (The rs3m_vs_sector veto that led this list was
+# removed 2026-08-21 — docs/decision-2026-08-21-remove-sector-rs.md. There is no
+# relative-strength veto at entry any more; that is deliberate and recorded.)
 VETO_IVR_PERCENTILE_MIN = 90.0  # PROPOSED_DEFAULT — ATR expanding AND IVR percentile >= this vetoes
 
 # ---- Symbol Genius (symbol_genius.py) --------------------------------------
@@ -1135,7 +1139,13 @@ JUICE_RICH_FACTOR = 1.75
 # v3: the stock section records rs3m_vs_sector_method ("direct" — the RS3M-vs-
 # sector figure that gated the entry is now the true rs3m(stock, sector_etf)
 # ratio, not the vs-SPY difference approximation). Additive; v1/v2 stay valid.
-SNAPSHOT_SCHEMA_VERSION = 3
+# v4: the stock section DROPS rs3m_vs_sector, rs1m_vs_sector,
+# rs3m_vs_sector_method and rs3m_vs_sector_benchmark — RS3M-vs-Sector was
+# removed system-wide (docs/decision-2026-08-21-remove-sector-rs.md). This is
+# the first SUBTRACTIVE bump: v1/v2/v3 snapshots still carry those fields and
+# stay readable by their own version tag, and entry_context.summary is a pure
+# .get() read, so nothing needs migrating and nothing is rewritten.
+SNAPSHOT_SCHEMA_VERSION = 4
 
 # HARD_CFM_RULE — a trade must NEVER be blocked or delayed because telemetry
 # capture failed. Snapshot capture is best-effort and wrapped so any failure

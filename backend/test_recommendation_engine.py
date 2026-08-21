@@ -74,22 +74,31 @@ def _state(positions):
 
 
 # ---------------------------------------------------------------------------
-# AAPL laggard: RS3M-vs-Sector negative -> EXIT with KILL_RS_SECTOR, first pass
+# AAPL laggard: RS3M-vs-SPY negative -> EXIT with KILL_RS_SPY_CONFIRMED.
+#
+# Was test_aapl_laggard_emits_exit_kill_rs_sector_on_first_pass, driven by a
+# negative rs3m_vs_sector. That trigger was removed 2026-08-21
+# (docs/decision-2026-08-21-remove-sector-rs.md), so the same laggard shape is
+# re-pinned to the SPY leg — the only relative-strength exit that remains. The
+# assertions are otherwise unchanged and equally strict.
 # ---------------------------------------------------------------------------
-def test_aapl_laggard_emits_exit_kill_rs_sector_on_first_pass():
+def test_aapl_laggard_emits_exit_kill_rs_spy_on_first_pass():
     tk = _healthy_tk()
-    tk["rs3m_vs_sector"] = -1.5
-    # bars declining vs a flat sector so condition_first_true_at is derivable
-    tk["bars"] = _frame([200 - i * 0.5 for i in range(90)])
-    tk["sector_bars"] = _frame([100.0] * 90)
+    tk["rs3m_vs_spy"] = -1.5
+    # RELATIVE weakness without absolute damage: the name still rises, SPY rises
+    # faster. That keeps the circuit breaker (drawdown / MA breaches) out of the
+    # picture, so the SPY kill-switch rule is unambiguously the dominant trigger
+    # — _EXIT_PRIORITY puts CIRCUIT_BREAKER above it.
+    tk["bars"] = _frame([200 + i * 0.05 for i in range(90)])
+    tk["spy_bars"] = _frame([100 + i * 0.9 for i in range(90)])
     recs = engine.evaluate(_market({"AAPL": tk}), _state([_position("AAPL")]), NOW, [])
     exits = [r for r in recs if r["action_type"] == ActionType.EXIT]
     assert len(exits) == 1, f"expected one EXIT, got {recs}"
     rec = exits[0]
-    assert rec["trigger_rule"] == TriggerRule.KILL_RS_SECTOR
+    assert rec["trigger_rule"] == TriggerRule.KILL_RS_SPY_CONFIRMED
     assert rec["position_id"] == "AAPL"
     assert rec["proposed_ticket"]["action"] == "close_position"
-    assert rec["proposed_ticket"]["exit_reason_code"] == "KILL_SWITCH_SECTOR"
+    assert rec["proposed_ticket"]["exit_reason_code"] == "KILL_SWITCH_SPY"
     legs = rec["proposed_ticket"]["legs"]
     assert {(l["instruction"], l["role"]) for l in legs} == {
         ("SELL_TO_CLOSE", "leap"), ("BUY_TO_CLOSE", "short")}
@@ -101,9 +110,8 @@ def test_aapl_laggard_emits_exit_kill_rs_sector_on_first_pass():
     assert not [r for r in recs if r["action_type"] == ActionType.NO_ACTION]
 
 
-def test_kill_rs_spy_confirmed_when_sector_leg_waived():
+def test_kill_rs_spy_confirmed_for_an_etf_position():
     tk = _healthy_tk()
-    tk["rs3m_vs_sector"] = None   # sector-ETF position: leg waived
     tk["rs3m_vs_spy"] = -0.5
     recs = engine.evaluate(_market({"XLK": tk}), _state([_position("XLK")]), NOW, [])
     assert recs[0]["trigger_rule"] == TriggerRule.KILL_RS_SPY_CONFIRMED
@@ -182,7 +190,7 @@ def test_scheduled_weekly_roll_when_expiry_imminent():
 
 def test_exit_dominates_roll_triggers():
     tk = _healthy_tk()
-    tk["rs3m_vs_sector"] = -2.0
+    tk["rs3m_vs_spy"] = -2.0             # was rs3m_vs_sector; re-pointed to the SPY leg
     p = _position("AAPL", short_dte=1)   # scheduled roll ALSO fired
     recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
     assert len(recs) == 1
@@ -195,7 +203,7 @@ def test_exit_dominates_roll_triggers():
 # ---------------------------------------------------------------------------
 def test_reevaluation_supersedes_open_recommendation():
     tk_kill = _healthy_tk()
-    tk_kill["rs3m_vs_sector"] = -2.0
+    tk_kill["rs3m_vs_spy"] = -2.0        # was rs3m_vs_sector; re-pointed to the SPY leg
     market1 = _market({"AAPL": tk_kill})
     state = _state([_position("AAPL")])
     first = engine.evaluate(market1, state, NOW, [])
@@ -212,7 +220,7 @@ def test_reevaluation_supersedes_open_recommendation():
 
 def test_condition_cleared_supersedes_with_all_clear():
     tk_kill = _healthy_tk()
-    tk_kill["rs3m_vs_sector"] = -2.0
+    tk_kill["rs3m_vs_spy"] = -2.0        # was rs3m_vs_sector; re-pointed to the SPY leg
     state = _state([_position("AAPL")])
     first = engine.evaluate(_market({"AAPL": tk_kill}), state, NOW, [])
     first[0]["rec_id"] = "rec_00001"

@@ -95,12 +95,12 @@ def test_july6_xlk_rollover_caught_by_both_layers():
     # path (is_etf=True), where the rs3m-vs-sector veto is waived, so this veto is
     # the one that must catch it.
     assert indicators.atr_expanding(df) is True
-    res = stock_lights.compute(df, sector_df=None, ivr_percentile=95.0, is_etf=True)
+    res = stock_lights.compute(df, ivr_percentile=95.0, is_etf=True)
     assert res["verdict"] == stock_lights.RED
     assert "veto:atr_expanding_high_ivr" in res["veto_reasons"]
     # Both layers reach RED on their own: even with a benign IVR (veto disarmed),
     # the lights alone still deny GREEN.
-    no_veto = stock_lights.compute(df, sector_df=None, ivr_percentile=10.0, is_etf=True)
+    no_veto = stock_lights.compute(df, ivr_percentile=10.0, is_etf=True)
     assert no_veto["verdict"] != stock_lights.GREEN
 
 
@@ -109,7 +109,7 @@ def test_july6_xlk_rollover_caught_by_both_layers():
 # ---------------------------------------------------------------------------
 def test_breakout_lights_green_but_right_spot_blocks():
     df = _breakout_frame()
-    res = stock_lights.compute(df, sector_df=None, ivr_percentile=None, is_etf=False)
+    res = stock_lights.compute(df, ivr_percentile=None, is_etf=False)
     assert res["greens"] == 4
     assert res["verdict"] == stock_lights.GREEN          # the LIGHTS are green...
     assert res["right_spot"]["pass"] is False            # ...but it's extended
@@ -122,7 +122,7 @@ def test_breakout_lights_green_but_right_spot_blocks():
 # ---------------------------------------------------------------------------
 def test_consolidation_lights_green_and_in_right_spot_enterable():
     df = _consolidation_frame()
-    res = stock_lights.compute(df, sector_df=None, ivr_percentile=None, is_etf=False)
+    res = stock_lights.compute(df, ivr_percentile=None, is_etf=False)
     assert res["greens"] == 4
     assert res["verdict"] == stock_lights.GREEN
     assert res["right_spot"]["pass"] is True
@@ -135,7 +135,7 @@ def test_consolidation_lights_green_and_in_right_spot_enterable():
 # ---------------------------------------------------------------------------
 def test_three_green_no_veto_is_yellow_watchlist():
     df = _three_green_frame()
-    res = stock_lights.compute(df, sector_df=None, ivr_percentile=None, is_etf=False)
+    res = stock_lights.compute(df, ivr_percentile=None, is_etf=False)
     assert res["greens"] == 3
     assert res["vetoed"] is False
     assert res["verdict"] == stock_lights.YELLOW
@@ -185,28 +185,18 @@ def test_yellow_stock_absent_from_scan_ready(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Test 6 — 4-green + rs3m_vs_sector < 0 (a stock) => RED via the veto.
+# The vs-sector veto test that lived here (4 green lights + rs3m_vs_sector < 0
+# => RED) was DELETED 2026-08-21: the veto itself was removed
+# (docs/decision-2026-08-21-remove-sector-rs.md). Its absence is asserted
+# positively in test_sector_rs_removed.py rather than merely uncovered.
 # ---------------------------------------------------------------------------
-def test_four_green_stock_vetoed_by_negative_rs3m_vs_sector():
-    # The stock is in a clean uptrend (4/4 green) but has UNDER-performed its
-    # sector over 63 bars (the sector ran harder), so rs3m(stock, sector) < 0.
-    stock = _frame(100 + np.cumsum(np.full(230, 0.10)), hi=1.0, lo=1.0)
-    sector = _frame(100 + np.cumsum(np.full(230, 0.50)), hi=1.0, lo=1.0)
-    assert indicators.rs3m(stock, sector) < 0                   # underperformed its sector
-    res = stock_lights.compute(stock, sector_df=sector, ivr_percentile=None, is_etf=False)
-    assert res["greens"] == 4                                    # lights all green...
-    assert res["vetoed"] is True
-    assert "veto:rs3m_vs_sector" in res["veto_reasons"]
-    assert res["verdict"] == stock_lights.RED                    # ...but the veto forces RED
-
-
 # ---------------------------------------------------------------------------
 # Test 7 — a stock and an ETF on IDENTICAL series get identical lights/spot.
 # ---------------------------------------------------------------------------
 def test_stock_and_etf_identical_series_identical_verdicts():
     df = _consolidation_frame()
-    as_stock = stock_lights.compute(df, sector_df=None, ivr_percentile=None, is_etf=False)
-    as_etf = stock_lights.compute(df, sector_df=None, ivr_percentile=None, is_etf=True)
+    as_stock = stock_lights.compute(df, ivr_percentile=None, is_etf=False)
+    as_etf = stock_lights.compute(df, ivr_percentile=None, is_etf=True)
     assert as_stock["lights"] == as_etf["lights"]
     assert as_stock["greens"] == as_etf["greens"]
     assert as_stock["verdict"] == as_etf["verdict"]

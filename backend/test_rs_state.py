@@ -89,9 +89,11 @@ def test_rs_state_none_state_when_data_short():
 # ---------------------------------------------------------------------------
 # The gated WATCH annotation (never changes a verdict)
 # ---------------------------------------------------------------------------
-def test_turning_watch_reason_only_annotates_non_ready_turning():
-    assert rss.turning_watch_reason("WATCH", rss.TURNING) == rss.WATCH_ANNOTATION
-    assert rss.turning_watch_reason("BLOCKED", rss.TURNING) == rss.WATCH_ANNOTATION
-    assert rss.turning_watch_reason("READY", rss.TURNING) is None      # never on READY
-    assert rss.turning_watch_reason("WATCH", rss.RISING) is None       # only TURNING
-    assert rss.turning_watch_reason("WATCH", None) is None
+def test_the_watch_annotation_path_is_gone():
+    """Was test_turning_watch_reason_only_annotates_non_ready_turning. The
+    TURNING vs-sector WATCH annotation was this shadow module's ONE path into a
+    verdict field; it went with the sector pairing itself
+    (docs/decision-2026-08-21-remove-sector-rs.md). Asserted as an absence so
+    nobody reintroduces a write path here by accident."""
+    assert not hasattr(rss, "turning_watch_reason")
+    assert not hasattr(rss, "WATCH_ANNOTATION")

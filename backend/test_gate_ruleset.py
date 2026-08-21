@@ -60,10 +60,10 @@ def test_1_xlk_july6_identical_under_legacy_ruleset(legacy):
 
     # Layer 2 — the ATR/IVR veto still fires independently, through the ETF path.
     assert indicators.atr_expanding(df) is True
-    res = stock_lights.compute(df, sector_df=None, ivr_percentile=95.0, is_etf=True)
+    res = stock_lights.compute(df, ivr_percentile=95.0, is_etf=True)
     assert res["verdict"] == RED
     assert "veto:atr_expanding_high_ivr" in res["veto_reasons"]
-    assert stock_lights.compute(df, sector_df=None, ivr_percentile=10.0,
+    assert stock_lights.compute(df, ivr_percentile=10.0,
                                 is_etf=True)["verdict"] != GREEN
 
     # And the authoritative fields ARE the legacy rule's output, exactly — the
@@ -85,7 +85,7 @@ def test_1b_xlk_july6_cannot_flip_under_the_proposed_ruleset(proposed):
     assert stock_lights.core_is_green(eng["lights"]) is False
 
     for ivr in (95.0, 10.0):
-        res = stock_lights.compute(df, sector_df=None, ivr_percentile=ivr, is_etf=True)
+        res = stock_lights.compute(df, ivr_percentile=ivr, is_etf=True)
         assert res["verdict"] == RED
         assert res["by_ruleset"][LEGACY]["verdict"] == RED
         assert res["by_ruleset"][PROPOSED]["verdict"] == RED

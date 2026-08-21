@@ -46,14 +46,15 @@ const BASE_ORDER = { EARLY_ADVANCE: 0, LATE_ADVANCE: 1, BASING: 2, TOPPING: 3, D
 const INST_ORDER = { ACCUMULATING: 0, EARLY_INTEREST: 1, NO_INTEREST: 2, DISTRIBUTING: 3, INSUFFICIENT_DATA: 4 };
 const SYM_ORDER = { green: 0, yellow: 1, red: 2 };
 // Two-speed RS (shadow): glyph = level sign (⊕ leading / ⊖ lagging), word = the
-// four-state read. Order best->worst mirrors backend rs_state.ORDER.
+// four-state read. Shared by the drawer's RS-vs-SPY readout — the vs-SECTOR
+// table column that also used these was removed 2026-08-21 with the rest of the
+// sector-relative logic (docs/decision-2026-08-21-remove-sector-rs.md).
 const RS_LABELS = { RISING: "rising", FADING: "fading", TURNING: "turning", FALLING: "falling" };
 const RS_GLYPH = { RISING: "⊕", FADING: "⊕", TURNING: "⊖", FALLING: "⊖" };
 const RS_TONE = {
   RISING: "text-emerald-300", FADING: "text-amber-300",
   TURNING: "text-sky-300", FALLING: "text-rose-300",
 };
-const RS_ORDER = { RISING: 0, TURNING: 1, FADING: 2, FALLING: 3 };
 
 function rsTitle(row, benchLabel) {
   const state = row.rs_state;
@@ -85,15 +86,6 @@ const COLUMNS = [
   {
     key: "inst_flow", label: "Inst", sortVal: (r) => INST_ORDER[r.inst_flow] ?? 9,
     render: (r) => <span className={INST_TONE[r.inst_flow] || "text-slate-400"}>{INST_LABELS[r.inst_flow] || "—"}</span>,
-  },
-  {
-    key: "rs_state", label: "RS", sortVal: (r) => RS_ORDER[r.rs_state] ?? 9,
-    render: (r) => (r.rs_state ? (
-      <span className={`inline-flex items-center gap-1 ${RS_TONE[r.rs_state] || "text-slate-400"}`} title={rsTitle(r, "sector")}>
-        <span>{RS_GLYPH[r.rs_state]}</span>
-        <span className="text-[10px] uppercase">{RS_LABELS[r.rs_state]}</span>
-      </span>
-    ) : <span className="text-slate-600">—</span>),
   },
   {
     key: "income_profile", label: "Sleeve", sortVal: (r) => (r.income_profile === "DIVIDEND_COMPOUNDER" ? 1 : 0),
@@ -239,13 +231,10 @@ const COLUMN_HELP = {
     "EARLY ADV / LATE ADV / BASING / TOPPING / DECLINING (from the 150-day slope, price position, base count, ATR posture). Only EARLY ADV is READY-eligible; TOPPING / DECLINING block.",
   inst_flow: "Institutional flow — accumulation vs distribution.\n" +
     "ACCUM / EARLY INT / NO INT / DISTRIB (from 50-day up/down volume, OBV vs its 20-EMA with a price-divergence check, and accumulation/distribution day counts). DISTRIB blocks.",
-  rs_state: "Two-speed relative strength vs the sector (SHADOW — does not affect the verdict).\n" +
-    "Level = 3-month RS (leading ⊕ / lagging ⊖); slope = the 21-day EMA direction of the RS line.\n" +
-    "⊕ rising (leading, improving) · ⊕ fading (leading, rolling over) · ⊖ turning (lagging, recovering) · ⊖ falling (lagging, worsening). vs SPY is in the row drawer.",
   income_profile: "Income sleeve — which set of income expectations this name is judged against.\n" +
     "JUICE = the CFM juice engine (the default; every existing name). DIV = Travis's DIVIDEND_COMPOUNDER extension, for lower-volatility payers held for juice AND dividend.\n" +
     "Provenance: the dividend sleeve is NOT a CFM rule — the source methodology prefers volatile names for their juice and warns against 'safe' low-vol stocks. It is an extension the shares-primary model makes viable: owning the shares, the dividend is actually collected.\n" +
-    "The sleeve changes exactly two things: the RS peer benchmark for the sector leg (a dividend ETF instead of the growth-tilted sector ETF), and which SHADOW floor the row is measured against. Trend quality, the YELLOW watchlist lockout, the earnings-window exclusion and the RS-vs-SPY kill switch are IDENTICAL for both.",
+    "The sleeve now changes exactly one thing: which SHADOW income floor the row is measured against. (It also used to select the RS peer benchmark, but sector-relative RS was removed entirely.) Trend quality, the YELLOW watchlist lockout, the earnings-window exclusion and the RS-vs-SPY kill switch are IDENTICAL for both.",
   lot_cost: "What one 100-share lot costs — spot x 100. A shares-primary entry buys the WHOLE lot, so this, not the share price, is the capital a position actually needs.\n" +
     "Names whose lot costs more than your current dry powder are hidden by default (see the bar above the table); a shown row marked OVER is one you asked to see anyway.",
   juice_weekly_pct: "Juice / week — the weekly covered-call extrinsic as % of SHARE cost (spot). The strategy's stated income bar; the juice ADEQUACY floor gates on this (below the floor → BLOCKED).",
@@ -455,7 +444,7 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                 {(row.is_etf || row.is_sector_etf) && (
                   <span
                     title={row.is_sector_etf
-                      ? "Sector ETF — a valid CFM candidate in its own right. RS vs Sector is N/A (it IS the sector). Runs on the lower ETF juice bar."
+                      ? "Sector ETF — a valid CFM candidate in its own right. Runs on the lower ETF juice bar."
                       : "ETF — steadier, lower-IV income sleeve. Clears a lower weekly-juice bar than growth stocks."}
                     className="rounded border border-sky-600/50 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-sky-400"
                   >
@@ -534,7 +523,6 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
               <div className="grid grid-cols-3 gap-x-6 gap-y-2 sm:grid-cols-4 lg:grid-cols-6">
                 <Readout label="Price" value={fmt(row.price, 2)} />
                 <Readout label="RS3M SPY" value={pct(row.rs3m_vs_spy)} />
-                <Readout label="RS3M Sec" value={pct(row.rs3m_vs_sector)} />
                 <Readout
                   label="RS vs SPY"
                   value={row.rs_state_spy

@@ -52,20 +52,29 @@ def isolated_state(tmp_path, monkeypatch):
 
 
 # ---- individual conditions --------------------------------------------------
-def test_kill_switch_alerts_sector_beats_spy(monkeypatch):
+def test_kill_switch_alerts_are_spy_only(monkeypatch):
+    """Was test_kill_switch_alerts_sector_beats_spy, which pinned the sector
+    rule's precedence over SPY. The sector alert was removed 2026-08-21
+    (docs/decision-2026-08-21-remove-sector-rs.md), so the precedence it tested
+    no longer exists — re-pinned to assert the sector alert can NEVER be emitted,
+    even when a legacy evaluation still carries a negative sector value."""
     import kill_switch
     evs = [
         {"ticker": "AAA", "rs3m_vs_spy": -3.0, "rs3m_vs_sector": -2.0, "status": "red"},
         {"ticker": "BBB", "rs3m_vs_spy": -1.0, "rs3m_vs_sector": 4.0, "status": "red"},
         {"ticker": "CCC", "rs3m_vs_spy": 6.0, "rs3m_vs_sector": 2.0, "status": "green"},
+        # A name that WOULD have exited on the sector leg alone: negative sector,
+        # positive SPY. This is the safety surface given up — now no alert at all.
+        {"ticker": "DDD", "rs3m_vs_spy": 7.0, "rs3m_vs_sector": -6.0, "status": "green"},
     ]
     monkeypatch.setattr(kill_switch, "evaluate_all", lambda state: evs)
     out = alerts.check_kill_switch(_state())
     assert [(a["type"], a["ticker"], a["severity"]) for a in out] == [
-        ("KILL_SWITCH_SECTOR", "AAA", "CRITICAL"),  # sector rule wins when both trip
+        ("KILL_SWITCH_SPY", "AAA", "CRITICAL"),
         ("KILL_SWITCH_SPY", "BBB", "CRITICAL"),
     ]
-    assert "immediately" in out[0]["action"]
+    assert not any(a["type"] == "KILL_SWITCH_SECTOR" for a in out)
+    assert "KILL_SWITCH_SECTOR" not in alerts.ALERT_TYPES
 
 
 def test_delta_uncovered_floor_and_inversion(monkeypatch):
@@ -513,7 +522,7 @@ def test_engineered_state_trips_every_position_condition(isolated_state, monkeyp
 
     fired = sorted((a["type"], a["ticker"]) for a in alerts.evaluate(log.load_state()))
     assert fired == sorted([
-        ("KILL_SWITCH_SECTOR", "PG"),
+        ("KILL_SWITCH_SPY", "PG"),
         ("CIRCUIT_BREAKER", "PG"),
         ("DELTA_UNCOVERED", "PG"),   # below the 0.50 floor
         ("DELTA_UNCOVERED", "PG"),   # long delta < 1-DTE ITM short's delta

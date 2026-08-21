@@ -66,7 +66,13 @@ def evaluate(df: pd.DataFrame | None, *, has_weeklies: bool | None = None) -> di
     the criterion is SKIPPED. Returns {criteria, pass, computed_pass} where ``pass``
     is the offline-computable verdict (descoped/unknown criteria never block)."""
     perf_q = indicators.roc(df, PERF_QUARTER_WINDOW)
-    rsi_v = indicators.rsi(df)
+    # `indicators.rsi` takes a REQUIRED frame (like sma/atr — only the helpers
+    # typed `| None` guard internally), so the None case is the caller's to
+    # handle. `roc` and `avg_volume` already return None here; without this the
+    # nightly sweep raised on the first uncached symbol and lost the whole screen
+    # (maintenance.py catches it into report["errors"]) — a cold cache, a
+    # provider outage, or a newly-added ticker is enough to hit it.
+    rsi_v = indicators.rsi(df) if df is not None and not df.empty else None
     av = avg_volume(df)
 
     criteria = {
@@ -88,7 +94,18 @@ def evaluate(df: pd.DataFrame | None, *, has_weeklies: bool | None = None) -> di
     # criteria are skipped, never a false fail.
     blocking = [c for k, c in criteria.items()
                 if c["computable"] and c["pass"] is not None]
-    passed = bool(blocking) and all(c["pass"] for c in blocking)
+    # ...but a pass must rest on the BARS. `optionable` is provider-probed, not
+    # bar-derived, so a symbol whose frame is missing entirely (uncached, a
+    # provider outage, a brand-new ticker) would otherwise clear the screen on a
+    # successful weeklies probe alone — every bar criterion skipped as
+    # "not computable", `blocking` holding only optionable, and a name we know
+    # NOTHING about admitted to the candidate universe. Requiring at least one
+    # computable bar criterion keeps the partial-data tolerance above (a short
+    # history still skips the criteria it can't form) while making a no-data
+    # name a fail rather than a vacuous pass.
+    from_bars = any(criteria[k]["computable"]
+                    for k in ("perf_quarter", "rsi", "avg_volume"))
+    passed = from_bars and bool(blocking) and all(c["pass"] for c in blocking)
     if has_weeklies is False:
         passed = False
     return {"criteria": criteria, "pass": passed,

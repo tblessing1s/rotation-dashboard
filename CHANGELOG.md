@@ -1,5 +1,80 @@
 # Changelog
 
+## v2.12.0 — RS3M-vs-Sector removed completely
+
+A stock's relative strength against its cap-weighted sector ETF is not a peer
+comparison — XLK and friends are dominated by a handful of mega-caps, so the
+figure largely answered "is this name keeping up with the three biggest
+companies in its sector". It carried no reliable meaning and is gone from the
+entry gate, the kill switch, ranking, display, telemetry and config. A
+rules-based industry peer-basket benchmark is the planned replacement and is
+**not** part of this change.
+
+**This includes a deliberate loosening of a safety mechanism.** The kill
+switch's RS3M-vs-Sector exit-now trigger is removed, with the cases it caught
+and the SPY leg does not enumerated in
+`docs/decision-2026-08-21-remove-sector-rs.md`. Read that before concluding the
+absence is an oversight.
+
+- **Removed:** the Level-3 entry veto (`stock_lights` veto 1); the kill switch's
+  RED exit-now branch, its YELLOW thinning half, its `KILL_SWITCH_SECTOR` alert
+  and exit reason, and its `KILL_RS_SECTOR` recommendation trigger; the
+  suitability AVOID rule; the RS1M-vs-sector ranking key; the two-speed
+  RS-vs-Sector shadow (scan table column, shadow-SCORE component, and the
+  TURNING WATCH annotation); and every display, telemetry and config surface for
+  the above.
+- **Untouched:** RS3M-vs-SPY. The kill switch's confirm-on-close exit behaves
+  identically — same input, same threshold, same wording. The two-speed RS **vs
+  SPY** drawer readout stays.
+
+Three things worth knowing:
+
+- **There is no relative-strength entry veto any more.** RS3M-vs-SPY was never
+  one: the "beats SPY" gate leg had been removed earlier, leaving
+  `config.rs_vs_spy_min()` with no production caller. The sector veto was the
+  only RS check the entry gate had. Entry now rests on the market regime, sector
+  deterioration, the SYM four-light vote with its ATR/IVR and MA200 vetoes,
+  structure entrability, the right spot, and the account overlay.
+- **Share adds loosen too.** The YELLOW "thinning" leg lost its sector half, and
+  `position_manager.can_add_shares` blocks adds on red **or** yellow — so the
+  system will now permit adding to positions it previously refused. There is no
+  way to keep a sector-based YELLOW once the figure is gone, and raising the SPY
+  threshold to compensate would violate the parity requirement on that leg.
+- **The shadow SCORE is recomposed and candidate ordering changed.** Dropping the
+  RS component takes the quality weights 8.5 → 7.0, renormalized: SCORE stays
+  0–10 but the remaining five components carry more of it, so a score is not
+  comparable across this change (it has no authority, so it decides nothing).
+  Ranking within GREENs now uses RS1M-vs-SPY for every name, where stocks
+  previously ranked on RS1M-vs-sector.
+
+Compatibility — historical records are readable and **were not touched**:
+
+- `ExitReason.KILL_SWITCH_SECTOR` and `TriggerRule.KILL_RS_SECTOR` are **retired,
+  not deleted**. Past closes and recommendation records carry those strings and
+  the History tab and CSV export read them back, so both stay valid for reads
+  (a new `exit_reasons.RETIRED` set keeps the exit reason inside `ALL`) and are
+  removed only from the emitting paths and from `CLOSE_TIME`. No new record can
+  be stamped with either.
+- `recompute_derived` reaches entry snapshots only through
+  `entry_context.summary`, a pure `.get()` read, so old snapshots carrying
+  sector fields recompute correctly and silently. No migration, no rewrite.
+- `SNAPSHOT_SCHEMA_VERSION` 3 → 4 and `scan_rejection_log` schema 3 → 4: new
+  records stop carrying the sector fields; older ones keep theirs and stay
+  readable by their own version tag.
+
+A note on the rationale: the removal was originally also motivated by the belief
+that the sector figure was an *approximation* (the difference of two RS-vs-SPY
+values). That is not true — every site already computed the direct
+`indicators.rs3m(stock, peer)` ratio, the codebase migrated off the
+approximation earlier on purpose, and `SNAPSHOT_SCHEMA_VERSION = 3` exists to
+mark that migration. The decision record says so explicitly rather than
+preserving a wrong reason. The invalid-benchmark rationale stands on its own.
+
+`test_sector_rs_removed.py` asserts the removal positively — that the sector
+trigger cannot fire on any input, that no live sector-RS identifier survives
+(checked via the AST, so the explanatory comments don't mask a real one), and
+that the retired constants still read back off historical records.
+
 ## v2.11.0 — Level-4 chart structure (shadow) + a phase-aware volume check
 
 Level 4 measured quietness but not **structure**. All three of its live checks

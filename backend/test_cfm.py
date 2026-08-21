@@ -1074,24 +1074,28 @@ def test_entry_gate_level3_is_the_stock_lights_verdict(monkeypatch):
     assert [c["pass"] for c in l3["checks"]] == [True, True, True, False]
 
 
-def test_stock_row_sector_etf_has_no_vs_sector_rs(monkeypatch):
-    # XLK entered as its own CFM candidate has no distinct peer sector — its
-    # rs3m/rs1m vs Sector are N/A (None, not a misleading 0), and the vs-sector
-    # veto is waived (an ETF has no growth-leader peer). The lights run identically.
+def test_stock_row_sector_etf_carries_no_sector_rs_surface(monkeypatch):
+    # XLK entered as its own CFM candidate used to need three special cases: N/A
+    # rs3m/rs1m-vs-Sector (a self-comparison computes a misleading ~0) and a
+    # waived vs-sector veto. All three went with the sector RS removal on
+    # 2026-08-21 (docs/decision-2026-08-21-remove-sector-rs.md) — there is simply
+    # no sector-relative surface left to special-case. The lights run identically.
     import data_handler
     import screening
 
     df = _frame([100 + i * 0.08 for i in range(230)])   # gentle uptrend -> 4 green + right spot
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
 
-    row = screening._stock_row("XLK", df, df, "XLK", regime_green=True, sector_strong=True)
+    row = screening._stock_row("XLK", df, "XLK", regime_green=True, sector_strong=True)
     assert row["is_sector_etf"] is True
     assert row["is_etf"] is True
-    assert row["rs3m_vs_sector"] is None
-    assert row["rs1m_vs_sector"] is None
-    # The vs-sector veto is waived for the ETF (not applicable), never tripped.
-    veto = next(v for v in row["vetoes"] if v["id"] == "rs3m_vs_sector")
-    assert veto["applicable"] is False and veto["tripped"] is False
+    # Both vs-sector RS legs were removed 2026-08-21
+    # (docs/decision-2026-08-21-remove-sector-rs.md); the fields are gone, not None.
+    assert "rs3m_vs_sector" not in row
+    assert "rs1m_vs_sector" not in row
+    # The veto itself is gone from the list, for every name.
+    assert not any(v["id"] == "rs3m_vs_sector" for v in row["vetoes"])
+    assert {v["id"] for v in row["vetoes"]} == {"atr_expanding_high_ivr", "close_below_ma200"}
     assert row["verdict"] == "green"
     assert row["status"] == "ready"
 
@@ -1147,9 +1151,9 @@ def test_stock_and_etf_get_identical_lights_and_right_spot(monkeypatch):
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
 
     monkeypatch.setattr(sector_data, "is_etf", lambda t: False)
-    as_stock = screening._stock_row("NVDA", df, None, "XLK", regime_green=True, sector_strong=True)
+    as_stock = screening._stock_row("NVDA", df, "XLK", regime_green=True, sector_strong=True)
     monkeypatch.setattr(sector_data, "is_etf", lambda t: True)
-    as_etf = screening._stock_row("QQQ", df, None, "XLK", regime_green=True, sector_strong=True)
+    as_etf = screening._stock_row("QQQ", df, "XLK", regime_green=True, sector_strong=True)
     assert as_stock["lights"] == as_etf["lights"]
     assert as_stock["verdict"] == as_etf["verdict"]
     assert as_stock["right_spot"]["pass"] == as_etf["right_spot"]["pass"]
@@ -1188,13 +1192,13 @@ def test_filter_ready_requires_regime_and_sector(monkeypatch):
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
 
     # A weak regime blocks even a lights-GREEN, in-the-right-spot name.
-    weak_regime = screening._stock_row("NVDA", df, None, "XLK", regime_green=False, sector_strong=True)
+    weak_regime = screening._stock_row("NVDA", df, "XLK", regime_green=False, sector_strong=True)
     assert weak_regime["verdict"] == "green"
     assert weak_regime["enterable"] is True            # the stock itself is enterable...
     assert weak_regime["status"] == "wait"             # ...but the pipeline isn't ready
     assert "regime" in weak_regime["blocked_by"]
 
-    all_green = screening._stock_row("NVDA", df, None, "XLK", regime_green=True, sector_strong=True)
+    all_green = screening._stock_row("NVDA", df, "XLK", regime_green=True, sector_strong=True)
     assert all_green["status"] == "ready"
     assert all_green["blocked_by"] == []
 

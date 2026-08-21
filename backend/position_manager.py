@@ -713,7 +713,7 @@ def _accumulation_block(ticker: str) -> tuple[bool, str | None]:
         return False, None
     if ev.get("status") in ("red", "yellow"):
         return True, (f"kill-switch {ev['status'].upper()} — RS3M vs SPY "
-                      f"{ev.get('rs3m_vs_spy')}, vs Sector {ev.get('rs3m_vs_sector')}")
+                      f"{ev.get('rs3m_vs_spy')}")
     return False, None
 
 

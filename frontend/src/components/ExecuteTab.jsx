@@ -42,7 +42,6 @@ function StockFourLights({ lights, greens, verdict }) {
 // Veto banners — any tripped veto forces the stock verdict to RED, independent of
 // the lights. Shows every veto that fired, worst-signal-wins.
 const VETO_LABELS = {
-  rs3m_vs_sector: "RS3M vs Sector negative (weaker than its own sector)",
   atr_expanding_high_ivr: "ATR expanding into rich IV (IVR ≥ threshold)",
   close_below_ma200: "Close below MA200 (trend broken)",
 };

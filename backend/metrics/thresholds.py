@@ -41,10 +41,11 @@ MFI_MAX = 60.0
 ATR_MOMENTUM_MAX = 1.0
 
 # ---- Relative strength -----------------------------------------------------
-# RS3M vs Sector must be positive — a stock weaker than its own sector is an
-# immediate AVOID. [HARD RULE] mirrors config.STOCK_RS_VS_SECTOR_MIN (the entry
-# gate's Level-3 sector leg); kept here so the verdict reads from one place.
-RS3M_VS_SECTOR_MIN = 0.0
+# RS3M_VS_SECTOR_MIN (0.0) was here, tagged [HARD RULE]: a stock weaker than its
+# own sector was an immediate AVOID. Removed 2026-08-21 — the cap-weighted
+# sector ETF is not a peer group, so the comparison was judged meaningless and
+# taken out system-wide (docs/decision-2026-08-21-remove-sector-rs.md). Removing
+# a [HARD RULE] constant is deliberate here, not incidental.
 
 # ---- Trend filters (boolean, no tunable threshold) -------------------------
 # below_ma200 -> AVOID, below_ma50 -> CAUTION, ma50_slope < 0 -> CAUTION.

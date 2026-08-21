@@ -86,12 +86,16 @@ def test_snapshot_is_complete_on_open(warm):
     assert "verdict" in snap["scorecard"] and "metrics" in snap["scorecard"]
     assert {"status", "breadth", "vix"} <= set(snap["regime"])
     assert {"etf", "rs3m_vs_spy", "breadth"} <= set(snap["sector"])
-    assert {"rs3m_vs_spy", "rs3m_vs_sector", "atr_pct", "atr_value", "rsi",
+    assert {"rs3m_vs_spy", "atr_pct", "atr_value", "rsi",
             "price"} <= set(snap["stock"])
     # R2: the snapshot records WHICH rs-vs-sector variant gated the entry (v3
     # additive field) — always the direct rs3m(stock, sector_etf) now, so a future
     # variant change can never be silent.
-    assert snap["stock"]["rs3m_vs_sector_method"] == "direct"
+    # SNAPSHOT_SCHEMA_VERSION 4 dropped the four vs-sector stock fields
+    # (docs/decision-2026-08-21-remove-sector-rs.md).
+    for gone in ("rs3m_vs_sector", "rs1m_vs_sector",
+                 "rs3m_vs_sector_method", "rs3m_vs_sector_benchmark"):
+        assert gone not in snap["stock"]
     assert config.SNAPSHOT_SCHEMA_VERSION >= 3
     assert {"iv_rank", "iv_percentile"} <= set(snap["iv"])
 
@@ -208,7 +212,7 @@ def test_over_null_threshold_fires_low_alert_and_still_logs(tmp_path, monkeypatc
 # ---------------------------------------------------------------------------
 def test_exit_metrics_mirror_entry_stock_block(warm):
     m = entry_context.exit_metrics("NVDA")
-    assert {"rs3m_vs_spy", "rs3m_vs_sector", "atr_pct", "atr_value", "rsi",
+    assert {"rs3m_vs_spy", "atr_pct", "atr_value", "rsi",
             "pct_above_ma21", "price", "captured_at"} <= set(m)
 
 
@@ -216,4 +220,4 @@ def test_summary_is_compact_digest(warm):
     _open("NVDA")
     snap = log.find_position(log.load_state(), "NVDA")["entry_context"]
     s = entry_context.summary(snap)
-    assert set(s) == {"verdict", "regime", "iv_rank", "rs3m_vs_spy", "rs3m_vs_sector"}
+    assert set(s) == {"verdict", "regime", "iv_rank", "rs3m_vs_spy"}

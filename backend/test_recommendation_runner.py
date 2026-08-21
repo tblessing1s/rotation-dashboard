@@ -63,7 +63,11 @@ def test_runner_emits_persists_dedups_and_dismisses(tmp_path, monkeypatch):
     state = log.load_state()
     rec = state["recommendations"][0]
     assert rec["action_type"] == "EXIT"
-    assert rec["trigger_rule"] == "KILL_RS_SECTOR"
+    # Was KILL_RS_SECTOR — that trigger was removed 2026-08-21
+    # (docs/decision-2026-08-21-remove-sector-rs.md), so this fixture's declining
+    # bars now bind on the circuit breaker instead. The runner behaviour under
+    # test (emit / dedup / dismiss / re-emit) is unchanged.
+    assert rec["trigger_rule"] == "CIRCUIT_BREAKER"
     assert rec["rec_id"] == "rec_00001"
     assert state["trust_scoreboard"]["open_actionable"] == 1
 
@@ -76,7 +80,7 @@ def test_runner_emits_persists_dedups_and_dismisses(tmp_path, monkeypatch):
     log.append_recommendation_override(
         {"rec_id": "rec_00001", "reason": "EXTERNAL_INFO", "note": "spinoff news"})
     state = log.load_state()
-    assert state["recommendations"][0]["trigger_rule"] == "KILL_RS_SECTOR"  # immutable
+    assert state["recommendations"][0]["trigger_rule"] == "CIRCUIT_BREAKER"  # immutable
     res = state["recommendation_resolutions"]
     assert [r for r in res if r["rec_id"] == "rec_00001"
             and r["status"] == "OVERRIDDEN" and r["reason"] == "EXTERNAL_INFO"]

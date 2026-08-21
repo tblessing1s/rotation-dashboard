@@ -3,15 +3,13 @@
 `verdict_reasons` exists per row at render time; what was missing is the PERSISTED
 record of it over time. Each scan run logs, per symbol: the verdict, the BINDING
 CONSTRAINT (the single first-failing check — a READ of the already-computed worst
-input, never a re-evaluation), the shadow SCORE (+ its parts), the two-speed RS
-state (+ raw level/slope), and net juice/week. Plus the structure enums, SYM color,
+input, never a re-evaluation), the shadow SCORE (+ its parts) and net juice/week. Plus the structure enums, SYM color,
 sector RS1M and IVR — so one future calibration pass can jointly evaluate:
 
   * "is the gate too strict" — the distribution of binding constraints over time,
   * the Level-2 RS1M-vs-RS3M choice (sector_rs1m recorded alongside the binding),
   * structure thresholds (base_stage / inst_flow that drove each read),
-  * SCORE weights (score + score_parts, for sensitivity),
-  * RS-slope graduation to blocking (rs_state + raw level/slope over time).
+  * SCORE weights (score + score_parts, for sensitivity).
 
 Like ``symbol_genius_history`` / ``regime_history`` / ``iv_history`` this is DERIVED
 telemetry (recomputable from cached bars + the pure classifiers), kept in a
@@ -48,7 +46,11 @@ _lock = threading.RLock()
 #       judged against, and the consolidation-phase flag the volume check reads. This is the calibration dataset that a future
 #       "should structure block?" decision would rest on — which is exactly why
 #       it is persisted per candidate per scan rather than only rendered.
-SCHEMA_VERSION = 3
+#   4 — RS3M-vs-Sector removed system-wide
+#       (docs/decision-2026-08-21-remove-sector-rs.md): new records drop the
+#       vs-SECTOR two-speed RS shadow (rs_state / rs_level / rs_slope). Older
+#       records keep theirs; reads are unaffected.
+SCHEMA_VERSION = 4
 
 
 def _today() -> str:
@@ -121,9 +123,8 @@ def _record_from_row(row: dict) -> dict:
         "price": row.get("price"),
         "score": row.get("score"),
         "score_parts": row.get("score_parts"),
-        "rs_state": row.get("rs_state"),
-        "rs_level": row.get("rs_level"),
-        "rs_slope": row.get("rs_slope"),
+        # rs_state / rs_level / rs_slope (the vs-SECTOR two-speed shadow) were
+        # here until schema 4 — removed with the sector-relative logic itself.
         "net_juice_weekly_pct": row.get("net_juice_weekly_pct"),
         # Extra provenance for the structure / Level-2 / IVR calibration questions.
         "base_stage": row.get("base_stage"),

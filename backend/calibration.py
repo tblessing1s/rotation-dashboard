@@ -59,15 +59,12 @@ def collect_rows(tickers: list[str] | None = None, step: int = 5) -> list[dict]:
         df = data_handler.get_daily(t)
         if df is None or len(df) < MIN_HISTORY + max_h:
             continue
-        etf = sector_data.sector_for(t) or ""
-        sector_df = data_handler.get_daily(etf) if etf else None
         closes = df["Close"].astype(float)
         for i in range(MIN_HISTORY, len(df) - max_h, step):
             asof = df.index[i]
             sub = df.iloc[: i + 1]
             spy_sub = spy[spy.index <= asof]
-            sec_sub = sector_df[sector_df.index <= asof] if sector_df is not None else None
-            metrics = sc.metrics_for(sub, spy_sub, sec_sub)
+            metrics = sc.metrics_for(sub, spy_sub)
             row = {"ticker": t, "asof": str(asof)[:10], "metrics": metrics,
                    "verdict": sc.compute_verdict(metrics)["verdict"]}
             base = float(closes.iloc[i])

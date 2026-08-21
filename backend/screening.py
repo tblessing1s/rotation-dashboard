@@ -376,7 +376,7 @@ def _compute_sectors() -> dict:
 # ---------------------------------------------------------------------------
 # Levels 3 & 4 — stock filter
 # ---------------------------------------------------------------------------
-def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
+def _stock_row(ticker: str, spy, sector_etf: str,
                regime_green: bool = False, sector_strong: bool = False,
                profile: str | None = None) -> dict:
     """One scan/gate row for a name.
@@ -392,26 +392,25 @@ def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
     import income_profile
     df = data_handler.get_daily(ticker)
     is_etf = sector_data.is_etf(ticker)
-    # The whole vs-peer comparison decision, derived once. For JUICE_ENGINE the
-    # benchmark IS the sector ETF, so the caller's already-warm sector frame is
-    # reused untouched and this reduces to the pre-v21 behavior exactly.
+    # The income-profile resolution. Its vs-peer FRAME is no longer fetched: the
+    # only consumer was the rs3m/rs1m-vs-sector pair, removed 2026-08-21
+    # (docs/decision-2026-08-21-remove-sector-rs.md). The profile and its
+    # benchmark NAME stay — they still drive the dividend sleeve's income floors.
     peer = income_profile.resolve(ticker, profile, sector_etf)
     profile, benchmark = peer["profile"], peer["benchmark"]
     is_sector_etf, is_own_benchmark = peer["is_sector_etf"], peer["is_own_benchmark"]
-    peer_df = sector_df if peer["use_sector_df"] else data_handler.get_daily(benchmark)
 
     # RS3M (3-month) is DISPLAY / kill-switch only now — kept on the row so the UI
     # and snapshot still show it, but it no longer gates entry. A sector ETF has
     # no distinct peer sector to beat (tautologically itself), so its vs-sector RS
     # is N/A.
     rs3m_vs_spy = indicators.rs3m(df, spy) if df is not None else None
-    _peer_applicable = (not is_sector_etf and not is_own_benchmark
-                        and df is not None and peer_df is not None)
-    rs3m_vs_sector = indicators.rs3m(df, peer_df) if _peer_applicable else None
-    # RS1M (1-month) is the RANKING key within GREENs: rs1m_vs_sector desc for
-    # stocks, rs1m_vs_spy desc for ETFs (item F).
+    # RS1M (1-month) vs SPY is the RANKING key within GREENs, for every name.
+    # It used to be rs1m_vs_sector for stocks and rs1m_vs_spy only for ETFs;
+    # the vs-sector leg was removed 2026-08-21 with the rest of the
+    # sector-relative logic (docs/decision-2026-08-21-remove-sector-rs.md), so
+    # stocks and ETFs now rank on one comparable key.
     rs1m_vs_spy = indicators.rs1m(df, spy) if df is not None else None
-    rs1m_vs_sector = indicators.rs1m(df, peer_df) if _peer_applicable else None
     atrp = indicators.atr_pct(df) if df is not None else None
 
     # The per-name Genius lights + vetoes + right-spot gate. The vs-sector veto is
@@ -422,10 +421,7 @@ def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
         ivr_percentile = (iv_history.iv_rank(ticker) or {}).get("iv_percentile")
     except Exception:  # noqa: BLE001
         ivr_percentile = None
-    _veto_frame = None if (is_etf or is_own_benchmark) else peer_df
-    sl = stock_lights.compute(df, sector_df=_veto_frame,
-                              ivr_percentile=ivr_percentile, is_etf=is_etf,
-                              benchmark=None if _veto_frame is None else benchmark)
+    sl = stock_lights.compute(df, ivr_percentile=ivr_percentile, is_etf=is_etf)
     stock_green = sl["verdict"] == stock_lights.GREEN
     spot = sl["right_spot"]
 
@@ -456,15 +452,13 @@ def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
         "ticker": ticker,
         "sector": sector_etf,
         "rs3m_vs_spy": rs3m_vs_spy,
-        "rs3m_vs_sector": rs3m_vs_sector,
         "rs1m_vs_spy": rs1m_vs_spy,
-        "rs1m_vs_sector": rs1m_vs_sector,
         "is_sector_etf": is_sector_etf,
         "is_etf": is_etf,
         "atr_pct": atrp,
-        # Income profile + the benchmark the vs-peer legs were actually measured
-        # against (schema v21). Recorded explicitly so "rs3m_vs_sector" can never be
-        # read without knowing which peer group produced it.
+        # Income profile + its peer benchmark NAME (schema v21). The vs-peer RS
+        # legs this benchmark used to measure are gone; the profile still selects
+        # the dividend sleeve's income floors, so both stay as provenance.
         "income_profile": profile,
         "peer_benchmark": benchmark,
         "is_own_benchmark": is_own_benchmark,
@@ -489,8 +483,8 @@ def _stock_row(ticker: str, spy, sector_df, sector_etf: str,
         # replaced the old single consolidating flag).
         "consolidating": spot["pass"],
         "blocked_by": blocked_by,
-        # Ranking key within GREENs (rs1m_vs_sector for stocks, rs1m_vs_spy for ETFs).
-        "rank_key": (rs1m_vs_spy if is_etf else rs1m_vs_sector),
+        # Ranking key within GREENs — RS1M vs SPY for every name (see above).
+        "rank_key": rs1m_vs_spy,
         "status": status,
     }
 
@@ -528,15 +522,15 @@ def _compute_stock_filter(sector: str | None = None) -> list[dict]:
         sector_strong = sector_status.get(etf, {}).get("status") == "green"
         # The ETF itself is a valid CFM candidate alongside its constituents —
         # liquid, weekly-optionable, and a real entry choice in its own right.
-        rows.append(_stock_row(etf, spy, sector_df, etf,
+        rows.append(_stock_row(etf, spy, etf,
                                regime_green=regime_green, sector_strong=sector_strong,
                                profile=resolve_profile(etf, state=sweep_state)))
         for ticker in sector_data.constituents(etf):
-            rows.append(_stock_row(ticker, spy, sector_df, etf,
+            rows.append(_stock_row(ticker, spy, etf,
                                    regime_green=regime_green, sector_strong=sector_strong,
                                    profile=resolve_profile(ticker, state=sweep_state)))
-    # Ranking (item F): GREENs first, then by the RS1M rank key descending
-    # (rs1m_vs_sector for stocks, rs1m_vs_spy for ETFs); None last within a group.
+    # Ranking (item F): GREENs first, then by the RS1M-vs-SPY rank key
+    # descending; None last within a group.
     rows.sort(key=lambda r: (r.get("verdict") != stock_lights.GREEN,
                              r.get("rank_key") is None, -(r.get("rank_key") or 0)))
     return rows
@@ -668,7 +662,7 @@ def entry_gate(ticker: str, profile: str | None = None) -> dict:
     # never enterable, so it does NOT pass this level.
     spy = data_handler.get_daily(config.BENCHMARK)
     sector_df = data_handler.get_daily(sector_etf) if sector_etf else None
-    row = _stock_row(ticker, spy, sector_df, sector_etf or "",
+    row = _stock_row(ticker, spy, sector_etf or "",
                      regime_green=regime_green, sector_strong=_all(l2_checks),
                      profile=profile)
     row_lights = row.get("lights") or {}

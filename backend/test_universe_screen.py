@@ -106,3 +106,51 @@ def test_active_universe_gated_off_by_default(tmp_path, monkeypatch):
     assert cu.active_universe(["FALLBACK"]) == ["FALLBACK"]     # shadow by default
     monkeypatch.setattr(cu.config, "UNIVERSE_SCREEN_ENABLED", True)
     assert cu.active_universe(["FALLBACK"]) == ["AAA"]          # promoted when enabled
+
+
+# ---------------------------------------------------------------------------
+# Missing / unusable frames. `evaluate` is typed `df: pd.DataFrame | None` and
+# `screen` feeds it `frames.get(t)`, so None is a REAL input: an uncached
+# symbol, a provider outage, or a ticker added since the last warm.
+# ---------------------------------------------------------------------------
+def test_evaluate_tolerates_a_missing_frame():
+    """`indicators.rsi` takes a required frame (only the `| None`-typed helpers
+    guard internally), so this raised TypeError and the nightly sweep lost the
+    whole screen to maintenance's error handler."""
+    res = us.evaluate(None)
+    assert res["pass"] is False
+    for cid in ("perf_quarter", "rsi", "avg_volume"):
+        assert res["criteria"][cid]["computable"] is False
+        assert res["criteria"][cid]["pass"] is None
+    assert res["rsi"] is None and res["perf_quarter"] is None and res["avg_volume"] is None
+    # An empty frame is the same case.
+    assert us.evaluate(pd.DataFrame())["pass"] is False
+
+
+def test_a_symbol_with_no_bars_cannot_pass_on_optionability_alone():
+    """`optionable` is provider-probed, not bar-derived. Without this guard a
+    symbol we know NOTHING about — every bar criterion skipped as "not
+    computable" — cleared the screen on a successful weeklies probe alone and
+    entered the candidate universe."""
+    assert us.evaluate(None, has_weeklies=True)["pass"] is False
+    assert us.evaluate(pd.DataFrame(), has_weeklies=True)["pass"] is False
+    # Too few bars to form ANY criterion is the same: no evidence, no pass.
+    assert us.evaluate(_bars([100.0] * 3), has_weeklies=True)["pass"] is False
+
+
+def test_partial_history_still_skips_only_what_it_cannot_form():
+    """The guard must not become "all criteria required" — the documented
+    tolerance (a criterion it can't compute is skipped, never a false fail)
+    still holds as long as SOMETHING was computed from the bars."""
+    df = _bars(_steady_up(60), volume=600_000)     # avg_volume forms, perf_quarter does not
+    res = us.evaluate(df, has_weeklies=True)
+    assert res["criteria"]["avg_volume"]["computable"] is True
+    assert res["criteria"]["perf_quarter"]["computable"] is False
+    assert res["pass"] is True                      # skipped, not failed
+
+
+def test_screen_survives_a_missing_frame_and_excludes_the_name():
+    good = _bars(_steady_up(120), volume=600_000)
+    out = us.screen(["GOOD", "NODATA"], {"GOOD": good}, weeklies={"GOOD": True, "NODATA": True})
+    assert out["passed"] == ["GOOD"]                # the unfetchable name is not a candidate
+    assert out["results"]["NODATA"]["pass"] is False
