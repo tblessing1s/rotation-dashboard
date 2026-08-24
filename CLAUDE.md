@@ -56,7 +56,8 @@ Match the surrounding style; don't introduce a linter unless asked.
 - **Shadow mode:** several features are computed, displayed and logged with ZERO
   authority pending real-data calibration — the weekly-juice floor
   (`scan_triggers.shadow_floor`), the composite SCORE (`scan_score`), the gate
-  ruleset replay, and the Level-4 structure metrics (`chart_structure`). The
+  ruleset replay, the Level-4 structure metrics (`chart_structure`), and the
+  trailing juice CAPACITY (`juice_capacity`). The
   load-bearing invariant is that none of them is ever appended to the `blocks`
   list feeding `scan_triggers.compose_row_verdict` — that list is what carries
   verdict authority. There is deliberately no config switch that grants a shadow

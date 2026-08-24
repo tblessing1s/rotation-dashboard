@@ -544,6 +544,44 @@ COMBINED_YIELD_FLOOR_WK = 0.5
 # never trigger.
 MIN_WEEKLY_EXTRINSIC_AFTER_SLIPPAGE_PS = 0.05
 
+# ---- Trailing juice CAPACITY (shadow) -------------------------------------
+# TRAVIS_EXTENSION. Every constant here is a PROPOSED_DEFAULT.
+#
+# The scan's weekly juice is a SPOT reading, so it cannot tell a normally-juicy
+# name sitting in IV compression (transient, recoverable) from an instrument that
+# is BUILT low-vol (structural, never recoverable — midstream MLPs, diversified
+# sector ETFs). The discriminator is historical CAPACITY: the trailing median of
+# the achievable combined weekly yield, which a compression leaves near its
+# long-run level and a structurally-thin name never lifts.
+#
+# SHADOW ONLY — see juice_capacity.py. The metric is computed, persisted and
+# displayed with ZERO authority: it gates nothing, hides nothing, ranks nothing.
+# There is deliberately no switch that grants it any; graduating it is a reviewed
+# code change (the same contract scan_triggers.shadow_floor and chart_structure
+# carry).
+CAPACITY_WINDOW_DAYS = 252   # PROPOSED_DEFAULT — trailing observations in the median (~1 trading year)
+# Below this many observations capacity is INSUFFICIENT_HISTORY — never a number.
+# Deliberately the same floor iv_history._MIN_POINTS uses for IV rank: the same
+# "a rank/median over a handful of points is noise" judgement, so the two stores
+# can't disagree about when a trailing statistic becomes meaningful.
+CAPACITY_MIN_OBS = 20        # PROPOSED_DEFAULT — minimum observations before a number
+# Retained distinct observation DATES per symbol. Above the window so the median
+# never sits flush against the trim boundary (a trim at exactly the window would
+# drop the oldest in-window point the moment a new one lands).
+CAPACITY_RETENTION_DAYS = 280   # PROPOSED_DEFAULT
+# The ATR multiplier capacity is denominated against. Bound to SHORT_ATR_MULT so
+# capacity measures EXACTLY what the scan's displayed GROSS/WK measures — an
+# apples-to-apples comparison the operator can verify against the scan table by
+# eye. It is deliberately NOT the regime x posture STRIKE_TABLE nor the
+# documented STRIKE_ATR_MULT_GREEN/YELLOW pair: those drive the option-chain
+# drawer's live suggestion, they disagree with each other (see the strike-policy
+# follow-up above), and denominating capacity differently from the juice shown
+# beside it would make "capacity 0.85 vs current 0.42" partly an artifact of two
+# different strikes. Every observation records the atr_mult and the regime it was
+# taken under, so moving to a regime-aware basis later is a re-derivation over
+# retained inputs rather than a lost history.
+CAPACITY_STRIKE_ATR_MULT = SHORT_ATR_MULT
+
 # Position builder: accrued cash must cover a fresh 100-share lot plus this buffer
 # before LOT_ADD_RECOMMENDED is emitted, so a recommendation isn't invalidated by
 # a tick between the alert and the fill.

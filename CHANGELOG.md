@@ -1,5 +1,78 @@
 # Changelog
 
+## v2.13.0 — Trailing juice CAPACITY (shadow, zero authority)
+
+The scan's weekly juice is a SPOT reading, so it cannot tell two kinds of weak
+juice apart: a normally-juicy name in IV compression (TRANSIENT — the premium
+comes back) and an instrument that is BUILT low-vol (STRUCTURAL — it never
+does). Both read thin today. Only one is worth waiting for.
+
+The consequence in live use: ET (0.14%/wk) and XLE (0.34%/wk) reach WATCH/BENCH
+with a displayed path-to-READY ("pull back within 1 ATR of MA21"), advertising a
+clearable condition in front of an unclearable one. Clearing L4 would only expose
+them to a juice failure they can never clear.
+
+This ships the discriminator — the trailing MEDIAN of achievable combined weekly
+yield — and nothing else. **It changes no behavior whatsoever.** Suppression
+tiers, hiding, rescan cadence and hysteresis are a separate, later change that
+must not start until this metric has been eyeballed against real names.
+
+- **New** `backend/juice_capacity.py` — a `DATA_DIR/juice_capacity.json`
+  telemetry store on the `iv_history` / `regime_history` pattern: derived market
+  data, never `state.json`, never rebuilt by `recompute_derived`. One observation
+  per symbol per calendar DAY, last write wins. The median is a PURE function
+  recomputed from the raw observations on every call — never a stored running
+  value. Below `CAPACITY_MIN_OBS` it returns the `INSUFFICIENT_HISTORY` sentinel,
+  never a number: "not measured yet" and "yields nothing" are opposite facts.
+- **New** `scripts/backfill_juice_capacity.py` — an offline, opt-in bootstrap.
+  The scan's juice is a pure function of the cached daily frame (Black-Scholes at
+  trailing REALIZED vol, no IV input, no provider, no clock), so replaying it over
+  each bar prefix is an EXACT reconstruction of what the scan would have shown,
+  not an approximation. Anchored at bar 0, because Wilder ATR is an EWM seeded
+  from the first bar — the same canonical-start rule `regime_history.backfill`
+  states. Backfilled points are marked `source: backfill_bar_replay` forever and
+  never overwrite a live observation.
+- **New row keys** `juice_capacity`, `short_strike`, `regime_color` — purely
+  additive; the latter two are observation PROVENANCE, so a future move to a
+  regime-aware capacity basis is a re-derivation over retained inputs rather than
+  a lost history.
+- **New drawer readout** — `CAPACITY: 0.31%/wk (floor 0.70%) · 41 obs`, in the
+  expanded row below SUITABILITY, violet + `NO AUTHORITY`, matching the existing
+  shadow chips. No scan-table column, no sorting, no filtering.
+
+**ZERO AUTHORITY, enforced not just asserted.** Nothing here is appended to the
+`blocks` list feeding `scan_triggers.compose_row_verdict` — that list is what
+carries verdict authority, and keeping capacity out of it is the load-bearing
+invariant. `test_juice_capacity` pins a fixture whose capacity is far below the
+floor and asserts the scan row is byte-identical to one computed with the feature
+disabled, greps every gate/verdict/executor module for any import of the store,
+and asserts no boolean `CAPACITY_*` config exists that could act as an authority
+switch. There is deliberately no such switch; graduating the metric is a reviewed
+code change.
+
+Three things worth knowing:
+
+- **The scan's juice never touches an option chain.** `account_gate.juice_estimate`
+  prices a Black-Scholes weekly short at trailing 20-day REALIZED vol off the
+  cached daily frame. This is why the backfill is exact rather than an IV proxy —
+  and why no historical-chain provider is needed (neither client exposes one).
+- **Capacity is denominated on the flat `SHORT_ATR_MULT` strike**, deliberately —
+  the same strike the displayed GROSS/WK uses, so "capacity 0.85 vs current 0.42"
+  is a real comparison rather than partly an artifact of two different strikes.
+  It is NOT the regime x posture `STRIKE_TABLE` (which drives the option-chain
+  drawer and disagrees with the documented `STRIKE_ATR_MULT_GREEN/YELLOW` pair —
+  see the strike-policy follow-up in `config.py`). Every observation records its
+  `atr_mult` and `regime` so that choice stays revisitable.
+- **The dividend leg is real, not stubbed.** `dividends.cached_annual_yield_pct`
+  already feeds the scan row, so capacity reuses `scan_triggers.combined_weekly_yield`
+  verbatim — capacity and the shadow floor therefore measure the same quantity and
+  cannot disagree. An unresolved yield contributes 0.0 but is marked
+  `DIVIDEND_STUBBED`, never recorded as a confident non-payer. The basis
+  (`quoted_annual_yield`, or `current_yield_anachronistic` on a backfilled record)
+  is stored rather than assumed.
+
+Full Phase-0 audit with file:line citations: `AUDIT_JUICE_CAPACITY_PHASE0.md`.
+
 ## v2.12.0 — RS3M-vs-Sector removed completely
 
 A stock's relative strength against its cap-weighted sector ETF is not a peer
