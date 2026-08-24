@@ -544,6 +544,41 @@ COMBINED_YIELD_FLOOR_WK = 0.5
 # never trigger.
 MIN_WEEKLY_EXTRINSIC_AFTER_SLIPPAGE_PS = 0.05
 
+# ---- Trailing juice CAPACITY (schema v21, TRAVIS_EXTENSION) -----------------
+# TRAVIS_EXTENSION. The discriminator between a normally-juicy name in IV
+# compression (recoverable) and an instrument that is simply built low-vol
+# (never recoverable) is not the CURRENT weekly reading — it is the trailing
+# MEDIAN of what the name has been able to pay. That median is "capacity".
+#
+# SHADOW ONLY, and more strictly so than the floors above: capacity has no
+# consumer outside display, the observation store and tests. It does not gate,
+# hide, rank, bench or reorder anything. See juice_capacity.py.
+#
+# Every constant here is a PROPOSED_DEFAULT.
+
+# Trailing window for the median, in DISTINCT OBSERVATION DAYS (~1 trading year).
+# Note this is a CEILING, not a promise: config.HISTORY_DAYS (400 calendar days
+# ~= 275 bars, minus the ATR/HV warm-up) caps a bar-replay backfill at ~254
+# days, so a freshly-backfilled name sits just under a full window. The observed
+# count travels with the metric so a short series is never mistaken for a long
+# one — see juice_capacity.capacity_detail.
+CAPACITY_WINDOW_DAYS = 252
+# Below this many DISTINCT observation days the median is noise, and capacity
+# reports INSUFFICIENT_HISTORY — never a number. Counted in days rather than
+# records on purpose: a regime flip forces a second sweep the same day, and a
+# median that let one turbulent session contribute several points would be
+# weighted toward exactly the days juice is least representative.
+CAPACITY_MIN_OBS = 20
+# Retention for the observation store, in distinct days. One window plus a
+# quarter of slack, so trimming can never eat into a full window.
+CAPACITY_LOG_DAYS = 315
+# Bar-replay backfill: trading days between replayed as-of dates. 1 = every
+# cached bar. The replay is offline (cached parquet only) and cheap, and a
+# median wants the density, so it defaults to every bar rather than
+# calibration.py's thinned step (which exists to de-duplicate adjacent
+# FORWARD-RETURN samples — a concern that does not apply here).
+CAPACITY_BACKFILL_STEP = 1
+
 # Position builder: accrued cash must cover a fresh 100-share lot plus this buffer
 # before LOT_ADD_RECOMMENDED is emitted, so a recommendation isn't invalidated by
 # a tick between the alert and the fill.

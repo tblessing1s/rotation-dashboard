@@ -414,6 +414,64 @@ function StructureShadow({ row }) {
   );
 }
 
+// SHADOW — the trailing juice CAPACITY on the expanded row, styled as an
+// observation (violet, explicit NO AUTHORITY badge) rather than as gate output,
+// matching StructureShadow and ShadowFloorLog. Capacity is the trailing MEDIAN
+// of the combined weekly-equivalent yield: what this name has demonstrated it
+// CAN pay, as opposed to what it pays this week. The pair is the whole point —
+// a high capacity beside a low current reading is IV compression (recoverable);
+// both low is an instrument that is simply built low-vol. Nothing here can move
+// a verdict, a rank or a bench slot.
+function CapacityShadow({ row }) {
+  const cap = row.juice_capacity;
+  if (!cap) return null;
+  const insufficient = cap.insufficient_history;
+  // Provenance matters enough to surface: a backfilled observation is replayed
+  // from bars and carries NO dividend leg, so a backfill-heavy median
+  // understates a dividend payer. See backend/juice_capacity.py.
+  const bySource = cap.by_source || {};
+  const provenance = Object.entries(bySource)
+    .map(([src, n]) => `${n} ${src}`).join(", ");
+  return (
+    <div className="mt-2 border-t border-slate-800 pt-2">
+      <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wide text-slate-500">
+        Juice capacity
+        <span className="rounded bg-slate-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-slate-400">
+          NO AUTHORITY
+        </span>
+      </div>
+      <div className="text-xs" title={
+        `Trailing median combined weekly-equivalent yield over the newest ${cap.window_days} observation days. `
+        + `Minimum ${cap.min_obs} distinct days before a median is reported.`
+        + (provenance ? ` Observations: ${provenance}. A backfilled point is replayed from daily bars and carries no dividend leg.` : "")
+      }>
+        {insufficient ? (
+          <span className="text-slate-400">
+            insufficient history{" "}
+            <span className="tabular-nums text-slate-500">
+              ({cap.obs} of {cap.min_obs} obs)
+            </span>
+          </span>
+        ) : (
+          <>
+            <span className="tabular-nums text-violet-300">{fmt(cap.capacity, 2)}%/wk</span>
+            <span className="text-slate-500">
+              {" "}(floor {fmt(cap.floor_pct, 2)}% {cap.floor_basis}) ·{" "}
+              <span className="tabular-nums">{cap.obs}</span> obs
+            </span>
+            {cap.current_wk_pct != null && (
+              <span className="text-slate-500">
+                {" · now "}
+                <span className="tabular-nums text-slate-300">{fmt(cap.current_wk_pct, 2)}%</span>
+              </span>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Readout({ label, value }) {
   return (
     <div className="min-w-0">
@@ -572,6 +630,7 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                   {row.suitability_notes.map((note, i) => <li key={i}>{note}</li>)}
                 </ul>
               ) : null}
+              <CapacityShadow row={row} />
               <StructureShadow row={row} />
             </div>
           </td>

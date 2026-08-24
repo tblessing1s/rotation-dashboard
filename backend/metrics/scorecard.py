@@ -514,6 +514,10 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["lot_cost"] = est.get("shares_cost_per_lot")
     row["shares_per_lot"] = config.SHARES_PER_LOT
     row["juice_weekly_pct"] = est["weekly_yield_pct"]
+    # The strike the juice figure was priced at — carried so a capacity
+    # observation records WHICH strike produced the number rather than assuming
+    # one. Regime-blind by construction (config.SHORT_ATR_MULT), like the yield.
+    row["short_strike"] = est.get("short_strike")
     # NET juice/week (gross minus LEAP model burn, with slippage) — the ranking
     # key. Kept alongside gross so the panel can show both; ranking sorts on net.
     row["net_juice_weekly_pct"] = est.get("net_weekly_yield_pct")
@@ -548,6 +552,18 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["shadow_floor"] = _st.shadow_floor(
         profile, row["juice_weekly_pct"], annual_div_pct,
         est.get("weekly_extrinsic_per_share"))
+
+    # --- Trailing juice CAPACITY (TRAVIS_EXTENSION) -----------------------------
+    # SHADOW, and stricter than the floors above: a DISPLAY-ONLY read of the
+    # observation store. Additive row key, never appended to `blocks`, never read
+    # by the verdict, the ranking, the bench or the gate — see juice_capacity.
+    # Cheap by construction: the store is memoized on mtime+size, so a
+    # full-universe sweep parses it once rather than once per name.
+    try:
+        import juice_capacity
+        row["juice_capacity"] = juice_capacity.capacity_detail(ticker, profile)
+    except Exception:  # noqa: BLE001 — a shadow readout must never sink a row
+        row["juice_capacity"] = None
 
     # IV Rank (drawer context) — sourced from the local IV-history store the app
     # already accrues (option-chain views + nightly maintenance); NO new provider

@@ -82,7 +82,7 @@ SCAN_ROLL_ET = _time(16, 15)
 #        deploy would keep emitting the thin-participation CAUTION the change
 #        removes — and `suitability` gates the recommendation pool, the queue and
 #        the hot-refresh set.
-SCHEMA = "v3"
+SCHEMA = "v4"   # v4: rows carry short_strike + the shadow juice_capacity readout
 
 _FILENAME = "scan_scorecard.json"
 _lock = threading.Lock()

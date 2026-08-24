@@ -1,5 +1,72 @@
 # Changelog
 
+## v2.13.0 — Trailing juice capacity (shadow, no authority)
+
+`TRAVIS_EXTENSION`. The scan's weekly juice reading answers "what does this name
+pay THIS week", which cannot tell a normally-juicy name in IV compression
+(recoverable) from an instrument that is simply built low-vol (never
+recoverable). Both read thin today. This adds the discriminator: the trailing
+**median** of the combined weekly-equivalent yield — what the name has
+demonstrated it *can* pay. A compressed name carries a high capacity beside a
+low current reading; a structurally low-vol name carries both low.
+
+**It has zero authority, and there is no switch that grants it any.** Capacity
+does not gate, hide, rank, bench or reorder anything; it is computed, persisted
+and displayed only. `test_juice_capacity` pins that with an AST check that no
+module outside `metrics/scorecard.py` (the display row key) and `maintenance.py`
+(the observation emitter) imports it, plus a byte-identical scan-output test at a
+capacity far below any floor. Consuming it is a separate, reviewed change.
+
+- **New:** `backend/juice_capacity.py` — the observation store
+  (`DATA_DIR/juice_capacity_log.json`, standalone and append-only, out of
+  `state.json` like `iv_history` / `regime_history`) and
+  `juice_capacity_wk_pct(symbol)`, the median over the trailing
+  `CAPACITY_WINDOW_DAYS`. Below `CAPACITY_MIN_OBS` distinct days it returns the
+  `INSUFFICIENT_HISTORY` sentinel — never a provisional number, and a string
+  rather than `None` so "not watched long enough" can't be confused with "cannot
+  be priced".
+- **Emission:** one observation per name per scan day, appended by the nightly
+  sweep off rows it has already computed. No new provider call.
+- **Bootstrap:** `scripts/backfill_juice_capacity.py`. Two offline sources, both
+  tagged on every record so they stay distinguishable forever — `--seed`
+  recovers real readings from `scan_rejection_log` (which has been persisting
+  `combined_weekly_yield_pct` per candidate since v21), and `--backfill` replays
+  the computation over cached daily bars.
+- **Display:** a capacity row in the expanded scan card, carrying the same
+  `NO AUTHORITY` badge as the structure and shadow-floor readouts. No scan-table
+  column, no sorting or filtering by capacity.
+
+Three things worth knowing:
+
+- **The bar replay is exact, not approximate.** The juice number is computed
+  entirely from daily bars — Wilder ATR to the strike, 20-day realized vol to
+  sigma, Black-Scholes to the weekly extrinsic, over spot — with no option-chain
+  input at any point. So replaying it against a historical bar slice reproduces
+  the number the live scan *would have printed* that day. The HV-for-IV
+  substitution people reach for as the error term is already the live metric's
+  own convention. `HISTORY_DAYS = 400` bounds a replay at ~254 days, just under a
+  full 252-day window.
+- **Backfilled observations carry no dividend leg**, because no dividend-yield
+  history exists anywhere in the tree. They record `combined == juice` with
+  `dividend_known: False` — never a silent zero. For a dividend payer the
+  dividend leg can be most of the combined number, so a backfill-heavy median
+  *understates* that name's capacity. `capacity_detail` reports the per-source
+  observation counts alongside the median rather than one opaque figure, so a
+  future consumer can require live provenance before treating a low capacity as
+  structural.
+- **The strike is regime-blind, and capacity inherits that.** `juice_estimate`
+  prices a flat `SHORT_ATR_MULT` (1.5×ATR) strike and never reads the regime —
+  the documented `STRIKE_ATR_MULT_GREEN/YELLOW` pair has no consumer, and the
+  live `STRIKE_TABLE` encodes a third scheme used only by the defend/roll
+  selector (see the note at `config.py:596`). Capacity is therefore measured on
+  exactly the basis the scan displays and the floors judge, which is the point;
+  it is not "capacity at the regime-appropriate strike", and reconciling the
+  strike schemes remains its own separate change.
+
+Also: `scan_triggers.floor_for_profile` extracts the profile-aware floor
+resolution that `shadow_floor` had inline, so the capacity readout and the
+shadow floor can never quote different bars for one name. Behaviour unchanged.
+
 ## v2.12.0 — RS3M-vs-Sector removed completely
 
 A stock's relative strength against its cap-weighted sector ETF is not a peer

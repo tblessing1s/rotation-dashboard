@@ -224,6 +224,24 @@ def nightly_refresh() -> dict:
     except Exception as e:  # noqa: BLE001 — a scan-log failure must not sink the sweep
         report["errors"].append(f"scan_rejection_log: {e}")
 
+    # Today's juice CAPACITY observation for every scanned name — one point per
+    # symbol per scan day, read straight off the rows the sweep already computed
+    # (no recomputation, no provider call). The trailing median of these is what
+    # tells IV compression apart from a structurally low-vol instrument.
+    # SHADOW: display + telemetry only, zero authority — see juice_capacity.
+    # Emitted HERE rather than inside the per-name loop on purpose: the scan is
+    # disk-cached per trading-day epoch, so a row is not recomputed on a cache
+    # hit and emitting there would give the median a lumpy, force-rescan-shaped
+    # cadence instead of one clean point per day.
+    try:
+        if sweep_results is not None:
+            import juice_capacity
+            from metrics import scorecard as scorecard_metrics
+            report["juice_capacity"] = juice_capacity.record_scan(
+                sweep_results, regime=scorecard_metrics._current_regime_color())
+    except Exception as e:  # noqa: BLE001 — a capacity append must not sink the sweep
+        report["errors"].append(f"juice_capacity: {e}")
+
     # Daily scan TRANSITION diff — yesterday's per-symbol scan state vs today's:
     # emit BENCH→READY / fresh-READY / degrade / pipeline-entrant / sector-slot-open
     # events, append them to the derived transition log (append-only, Q9 capture),

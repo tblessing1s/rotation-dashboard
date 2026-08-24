@@ -389,6 +389,23 @@ def combined_weekly_yield(juice_weekly_pct: float | None,
     }
 
 
+def floor_for_profile(profile: str | None) -> dict:
+    """The income floor one profile is judged against: ``{floor_pct, basis}``.
+
+    The SINGLE resolution of "which bar applies to this name" — ``shadow_floor``
+    below and the capacity readout (``juice_capacity.capacity_detail``) both read
+    through here, so a name can never be shown a capacity measured against one
+    floor and a shadow verdict measured against another.
+
+    A DIVIDEND_COMPOUNDER is judged on the COMBINED weekly-equivalent yield vs
+    ``config.COMBINED_YIELD_FLOOR_WK``; everything else on juice alone vs
+    ``config.SHARES_JUICE_FLOOR_PCT``. PURE."""
+    import income_profile
+    if income_profile.normalize(profile) == income_profile.DIVIDEND_COMPOUNDER:
+        return {"floor_pct": config.COMBINED_YIELD_FLOOR_WK, "basis": "combined"}
+    return {"floor_pct": config.SHARES_JUICE_FLOOR_PCT, "basis": "juice"}
+
+
 def juice_clears_slippage(weekly_extrinsic_per_share: float | None,
                           roundtrip_haircut_pct: float | None = None) -> dict:
     """Does the weekly extrinsic still pay after the estimated round-trip spread
@@ -448,9 +465,13 @@ def shadow_floor(profile: str | None,
     slip = juice_clears_slippage(weekly_extrinsic_per_share, roundtrip_haircut_pct)
 
     reasons: list[str] = []
-    if profile == income_profile.DIVIDEND_COMPOUNDER:
-        floor, measured, basis = (config.COMBINED_YIELD_FLOOR_WK,
-                                  parts["combined_weekly_yield_pct"], "combined")
+    # One resolution of "which bar applies", and the basis it returns is what
+    # selects the measured leg — so the floor and the number judged against it
+    # can never be chosen by two predicates that later drift apart.
+    bar = floor_for_profile(profile)
+    floor, basis = bar["floor_pct"], bar["basis"]
+    if basis == "combined":
+        measured = parts["combined_weekly_yield_pct"]
         if measured is not None and measured < floor:
             reasons.append("COMBINED_BELOW_FLOOR")
         # The sub-floor is a SEPARATE reason, so a name that clears the combined
@@ -459,8 +480,7 @@ def shadow_floor(profile: str | None,
         if slip["clears"] is False:
             reasons.append("JUICE_BELOW_SLIPPAGE")
     else:
-        floor, measured, basis = (config.SHARES_JUICE_FLOOR_PCT,
-                                  parts["juice_weekly_pct"], "juice")
+        measured = parts["juice_weekly_pct"]
         if measured is not None and measured < floor:
             reasons.append("JUICE_BELOW_FLOOR")
     # An unmeasurable name is UNMEASURED (None), never a recorded failure.
