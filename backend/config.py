@@ -579,6 +579,74 @@ CAPACITY_LOG_DAYS = 315
 # FORWARD-RETURN samples — a concern that does not apply here).
 CAPACITY_BACKFILL_STEP = 1
 
+# ---- Suitability suppression tiers (TRAVIS_EXTENSION) -----------------------
+# TRAVIS_EXTENSION. Consumes the capacity metric above to classify every scanned
+# name, so the scan stops advertising a clearable condition ("pull back within 1
+# ATR of MA21") in front of an UNCLEARABLE juice failure.
+#
+#   SUITABLE               — capacity clears the floor. Normal scan membership.
+#   SUPPRESSED_CONDITION   — capacity clears but the current reading does not
+#                            (IV compression). Hidden; rechecked weekly.
+#   SUPPRESSED_STRUCTURAL  — capacity itself is far below the floor (the
+#                            instrument is built low-vol). Hidden; monthly.
+#   INSUFFICIENT_HISTORY   — unsuppressible. A name is never hidden on a number
+#                            that is not statistically meaningful yet.
+#
+# HARD SAFETY INVARIANT [SUPPRESSION_IS_ENTRY_ONLY]: suppression governs the
+# ENTRY UNIVERSE only. Open positions are monitored, defended, killed and
+# reconciled at full cadence regardless of tier — every position-management path
+# derives its working set from state["positions"], never from scan membership.
+# See suitability_tiers.py and AUDIT_SUITABILITY_SUPPRESSION_PHASE0.md §3.
+#
+# Every constant here is a PROPOSED_DEFAULT.
+
+# Capacity below this FRACTION OF THE FLOOR is structural — the instrument
+# cannot pay, and waiting will not change that.
+SUPPRESS_STRUCTURAL_CAPACITY_RATIO = 0.60
+# Current reading below this fraction of the floor suppresses a name whose
+# CAPACITY still clears (i.e. a recoverable condition, not the instrument).
+SUPPRESS_CONDITION_CURRENT_RATIO = 0.80
+# Readmission from CONDITION needs the current reading at or above the FULL
+# floor. The gap to 0.80 above is the hysteresis band: suppress below 80%,
+# readmit at 100%, and nothing flaps in between.
+READMIT_CURRENT_RATIO = 1.00
+# STRUCTURAL exits only when CAPACITY itself recovers past this fraction. A
+# median moves slowly, so a modest band suffices.
+STRUCTURAL_READMIT_CAPACITY_RATIO = 0.70
+
+# Recheck cadences, in calendar days from the classification.
+RECHECK_CONDITION_DAYS = 7
+RECHECK_STRUCTURAL_DAYS = 30
+
+# A STRUCTURAL verdict needs this many LIVE-provenance observations (live or
+# seeded — both carry a real dividend leg). Backfilled observations are replayed
+# from bars and are JUICE-ONLY, so a backfill-dominated median UNDERSTATES a
+# dividend payer — for ET the dividend leg is most of the combined number. Under
+# a backfill-only history ET reads ~0.14%/wk instead of ~0.31%/wk, which is the
+# difference between STRUCTURAL and CONDITION. Suppressing a payer permanently on
+# a number we know is biased low is the one failure mode of this feature that
+# would be hard to notice, so the structural verdict waits for real observations.
+# CONDITION is unaffected: it is a judgement about the CURRENT reading, which is
+# always live. See juice_capacity.py on source provenance.
+SUPPRESS_STRUCTURAL_MIN_LIVE_OBS = 20
+
+# ---- Shadow-first rollout ---------------------------------------------------
+# Classification, transition events, tier display and the Suppressed section
+# header are all LIVE from day one; HIDING and bench-ineligibility are inert
+# until this flag flips. Names stay in the main table with their tier chip
+# visible, marked NO AUTHORITY.
+SUPPRESSION_ENFORCE = os.environ.get("CFM_SUPPRESSION_ENFORCE", "").strip().lower() in ("1", "true", "yes")
+# Minimum shadow observation period before enforcement may take effect.
+SUPPRESSION_SHADOW_DAYS = 14
+# The date (YYYY-MM-DD) Travis reviewed the CAPACITY numbers against real names.
+# The shadow clock runs from HERE, not from the deploy, and enforcement is inert
+# until it is set — deliberately. Before the capacity numbers are reviewed every
+# name reads INSUFFICIENT_HISTORY and classifies SUITABLE, so a shadow period
+# started at deploy would observe nothing and "14 days of shadow" would be a
+# number with no evidence behind it. Setting this is a manual, dated config
+# change; so is flipping SUPPRESSION_ENFORCE. Neither is ever automated.
+SUPPRESSION_REVIEW_DATE = (os.environ.get("CFM_SUPPRESSION_REVIEW_DATE") or "").strip() or None
+
 # Position builder: accrued cash must cover a fresh 100-share lot plus this buffer
 # before LOT_ADD_RECOMMENDED is emitted, so a recommendation isn't invalidated by
 # a tick between the alert and the fill.

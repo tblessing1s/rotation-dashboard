@@ -830,6 +830,77 @@ def split_by_affordability(rows: list[dict], state: dict) -> tuple[list[dict], l
     return keep, priced_out, bar
 
 
+def split_by_suitability(rows: list[dict]) -> tuple[list[dict], list[dict], dict]:
+    """``(shown_rows, suppressed_rows, suitability)`` — the ONE visibility choke
+    point for suppression tiers (TRAVIS_EXTENSION).
+
+    Mirrors ``split_by_affordability``: rows are annotated with their tier and
+    then partitioned at the ENTRY-FACING API boundary rather than inside the
+    sweep. The sweep keeps computing every name — which is what the nightly
+    telemetry and the capacity observation feed need, and what keeps
+    ``scan_cache`` rows complete.
+
+    COPIES each row rather than annotating in place, which is the one place this
+    departs from the affordability filter. ``scorecard()`` serves rows straight
+    out of the memoized day cache, so those dicts are SHARED: affordability only
+    ADDS keys, which is harmless, but suppression CLEARS ``bench`` — mutating in
+    place would write that into the cached sweep, leak it to every later reader,
+    and leave it stuck there if enforcement were switched back off.
+
+    [SUPPRESSION_IS_ENTRY_ONLY] Call this ONLY on entry-facing surfaces (the scan
+    table, Ready-to-Enter, the ENTER candidate pool). It must never be reached
+    from a position-management path — those derive from ``state["positions"]``
+    and never from scan rows; see suitability_tiers.py.
+
+    SHADOW-FIRST. Until ``suitability_tiers.enforcing()`` is true, the tier is
+    annotated and displayed but NOTHING is hidden and no bench slot is lost: the
+    returned ``shown`` list is every row, in the same order, byte-identical to
+    pre-feature behaviour. Enforcement is what moves rows into ``suppressed`` and
+    clears their ``bench`` flag.
+
+    Bench-ineligibility is applied HERE rather than inside
+    ``scan_triggers.is_bench`` so that function stays a pure fold over the gate —
+    suppression is a visibility concern and is kept structurally outside gate
+    composition.
+    """
+    import suitability_tiers as st
+
+    gate = st.enforcement()
+    active = bool(gate["active"])
+    tiers = st.tiers_now()
+    shown, suppressed = [], []
+    counts: dict[str, int] = {}
+    for original in rows:
+        row = dict(original)
+        sym = (row.get("ticker") or "").strip().upper()
+        rec = tiers.get(sym) or {}
+        tier = rec.get("tier") or st.UNCLASSIFIED
+        counts[tier] = counts.get(tier, 0) + 1
+        row["suitability_tier"] = tier
+        row["suitability_tier_reason"] = rec.get("reason")
+        row["suitability_tier_since"] = rec.get("since")
+        row["next_recheck_date"] = rec.get("next_recheck_date")
+        # NO AUTHORITY while shadow: the chip renders, the row does not move.
+        row["suitability_tier_enforced"] = active
+        if active and tier in st.SUPPRESSED_TIERS:
+            # A name already showing BENCH loses the slot the moment it is
+            # suppressed — the transition event is the audit trail for why.
+            row["bench"] = False
+            suppressed.append(row)
+        else:
+            shown.append(row)
+    return shown, suppressed, {
+        "enforced": active,
+        "reason": gate["reason"],
+        "review_date": gate["review_date"],
+        "shadow_days_elapsed": gate["shadow_days_elapsed"],
+        "shadow_days_required": gate["shadow_days_required"],
+        "counts": counts,
+        "suppressed": len(suppressed),
+        "shown": len(shown),
+    }
+
+
 def _current_regime_color() -> str | None:
     """The invisible market regime for a sweep. Read ONCE per sweep (and once
     more to key the day cache — it is itself memoized, so that is not a second

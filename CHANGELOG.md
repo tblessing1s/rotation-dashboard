@@ -1,5 +1,102 @@
 # Changelog
 
+## v2.14.0 — Suitability suppression tiers (shadow-first)
+
+2026-08-24 · `TRAVIS_EXTENSION`. The scan surfaced names that can never clear the
+juice floor alongside genuinely benchable ones, and the bench then advertised a
+**clearable** condition ("pull back within 1 ATR of MA21") in front of an
+**unclearable** juice failure — ET at 0.14%/wk and XLE at 0.34%/wk reaching
+WATCH/BENCH with a displayed path to READY that leads nowhere. This consumes the
+trailing capacity metric from v2.13.0 to classify every scanned name:
+
+| Tier | Meaning | Recheck |
+|---|---|---|
+| `SUITABLE` | capacity clears the floor | normal cadence |
+| `SUPPRESSED_CONDITION` | capacity clears, the current reading does not (IV compression — recoverable) | 7 days |
+| `SUPPRESSED_STRUCTURAL` | capacity itself is far below the floor (the instrument is built low-vol) | 30 days |
+| INSUFFICIENT_HISTORY | **unsuppressible** — treated as SUITABLE | — |
+
+**Thresholds** (all `PROPOSED_DEFAULT`, all in `config.py`, none inlined at a use
+site): structural below `0.60 ×` floor; condition below `0.80 ×` floor; readmit
+from CONDITION at `1.00 ×` floor; STRUCTURAL exits above `0.70 ×` floor capacity.
+The 0.80/1.00 gap is a hysteresis band — a name that flickers around one
+threshold would otherwise appear and vanish week to week.
+
+### THE HARD SAFETY INVARIANT
+
+**Suppression governs the ENTRY UNIVERSE only.** Open positions are monitored,
+defended, killed and reconciled at full cadence regardless of tier.
+
+This is structural, not conventional. Every position-management path derives its
+working set from `state["positions"]`; none reads scan membership, and
+`refresh_policy` pins open positions in a refresh tier that is never truncated.
+Suppression is applied at exactly one function —
+`metrics.scorecard.split_by_suitability` — called only from the three
+entry-facing surfaces. Three tests pin it: an AST check that no
+position-management module imports the tier machinery, an AST check that none of
+them imports scan machinery at all, and a fixture asserting that an open position
+in a SUPPRESSED_STRUCTURAL name produces byte-identical kill-switch, defend/roll,
+portfolio-risk and reconciliation output with enforcement on. See
+`docs/decision-2026-08-24-suppression-entry-only.md`.
+
+### Shadow-first, and the flip is manual
+
+`SUPPRESSION_ENFORCE` defaults **off**. Classification, transition events, tier
+chips and the "Suppressed (N)" header are all live; hiding and bench-ineligibility
+are inert — names stay in the main table with their tier chip marked NO AUTHORITY,
+and the header reports what *would* be hidden. Enforcement needs three things,
+none automated: the flag on, `SUPPRESSION_REVIEW_DATE` set, and
+`SUPPRESSION_SHADOW_DAYS` (14) elapsed **since that review**.
+
+The clock runs from the capacity review rather than the deploy deliberately.
+Before the capacity numbers are checked against real names every name reads
+INSUFFICIENT_HISTORY and classifies SUITABLE, so a shadow period started at
+deploy would observe nothing and "14 days of shadow" would be a number with no
+evidence behind it.
+
+### Other things worth knowing
+
+- **A STRUCTURAL verdict waits for live observations.**
+  `SUPPRESS_STRUCTURAL_MIN_LIVE_OBS = 20`. Backfilled capacity observations are
+  replayed from bars and carry no dividend leg, so a backfill-dominated median
+  understates a dividend payer — under backfill alone ET reads ~0.14%/wk instead
+  of ~0.31%/wk, which is the difference between STRUCTURAL and CONDITION.
+  Permanently hiding a payer on a number known to be biased low is this feature's
+  worst failure mode, so the structural verdict holds off until real observations
+  exist. CONDITION is unaffected: it judges the current reading, which is always
+  live.
+- **Recheck dates are computed, stored and displayed — they do not gate
+  evaluation.** Every name is still evaluated every sweep. Skipping suppressed
+  names would remove their rows from the day's cached sweep, making them
+  permanently "missing" to `scan_cache.reusable` and re-triggering the incremental
+  recompute on every request; it would also starve the capacity observation feed,
+  so a STRUCTURAL name sampled monthly would eventually age out of its own window,
+  flip to INSUFFICIENT_HISTORY and un-suppress itself. The dates are what the UI
+  shows and what a future optimisation would key off.
+- **`suitability` (GO/CAUTION/AVOID) is unchanged and still gates the
+  recommendation pool, the entry queue and the hot-refresh set.** It measures
+  stock momentum, not whether a name belongs in the entry universe. Its expanded-
+  card label is renamed **"CFM lens"** so the new SUITABILITY row can carry the
+  tier — one label per concept, rather than two "suitability" readouts on one card.
+- **A manual "recheck now" sits on every suppressed row.** Suppression must never
+  leave a name unreachable pending a date; the recheck runs the full evaluation,
+  so the capacity observation series continues at that cadence too.
+- **Tier changes are typed, append-only events** (`DATA_DIR/suitability_tiers.json`,
+  out of `state.json` like the other derived telemetry). The current tier is
+  DERIVED by folding the stream — there is no mutable tier field to drift out of
+  step. No alerting on tier changes, deliberately.
+- **`GDDY Aug 21` does not exist.** The canonical-fixture requirement names it
+  alongside XLK July 6th; XLK is real and is asserted unperturbed with
+  enforcement on and XLK forced STRUCTURAL. GDDY appears nowhere in this repo and
+  was not invented — see `AUDIT_SUITABILITY_SUPPRESSION_PHASE0.md` §8.6.
+
+**Before flipping enforcement:** run `scripts/backfill_juice_capacity.py --seed
+--backfill`, then check ET/XLE and a known-compressed name read sensible
+capacities. Note that ET is a `DIVIDEND_COMPOUNDER` and is judged against the
+0.5%/wk combined floor, not 0.75 — at ~0.31%/wk capacity that is 62% of its
+floor, which lands it **CONDITION, not STRUCTURAL**. If ET should be structural,
+that is a threshold calibration, not a code change.
+
 ## v2.13.0 — Trailing juice capacity (shadow, no authority)
 
 `TRAVIS_EXTENSION`. The scan's weekly juice reading answers "what does this name

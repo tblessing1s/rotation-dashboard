@@ -131,7 +131,14 @@ def _entry_candidates(market: dict, spy_bars) -> list[dict]:
         # the strategy, so it must never become an ENTER candidate. Exclude only
         # KNOWN-no-weeklies (has_weeklies is False); unknown (None, e.g. unprobed
         # offline) stays, matching the Scorecard's default filter.
-        go_rows = [r for r in sc.get("results", [])
+        # SUITABILITY TIERS (TRAVIS_EXTENSION): suppressed names are out of the
+        # ENTRY universe — their juice cannot clear the floor. This is an entry
+        # path only; the position snapshots above are built from
+        # state["positions"] and are untouched by any of this. Inert in shadow
+        # mode. See suitability_tiers.py [SUPPRESSION_IS_ENTRY_ONLY].
+        pool, _suppressed, _tiers = scorecard_metrics.split_by_suitability(
+            list(sc.get("results", [])))
+        go_rows = [r for r in pool
                    if r.get("suitability") == "GO" and r.get("has_weeklies") is not False]
         if not go_rows:
             return []

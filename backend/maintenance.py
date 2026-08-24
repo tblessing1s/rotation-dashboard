@@ -242,6 +242,19 @@ def nightly_refresh() -> dict:
     except Exception as e:  # noqa: BLE001 — a capacity append must not sink the sweep
         report["errors"].append(f"juice_capacity: {e}")
 
+    # Re-classify the universe into suitability tiers and append an event for
+    # every name whose tier CHANGED. Runs AFTER the capacity append above so
+    # today's observation is already in the median it classifies against.
+    # Entry universe only [SUPPRESSION_IS_ENTRY_ONLY] — this writes a tier, and
+    # nothing in the position-management paths reads one.
+    try:
+        if sweep_results is not None:
+            import suitability_tiers
+            report["suitability_tiers"] = suitability_tiers.record_classification(
+                sweep_results)
+    except Exception as e:  # noqa: BLE001 — a classification pass must not sink the sweep
+        report["errors"].append(f"suitability_tiers: {e}")
+
     # Daily scan TRANSITION diff — yesterday's per-symbol scan state vs today's:
     # emit BENCH→READY / fresh-READY / degrade / pipeline-entrant / sector-slot-open
     # events, append them to the derived transition log (append-only, Q9 capture),

@@ -376,13 +376,17 @@ def test_capacity_is_marked_shadow_and_non_blocking():
     assert detail["shadow"] is True and detail["blocking"] is False
 
 
-def test_capacity_has_no_consumer_outside_display_telemetry_and_tests():
+def test_capacity_has_only_its_declared_consumers():
     """The grep-level check prompt 1.4 asks for, as an executable assertion.
 
-    A capacity reference appearing in the gate, the verdict composition, the
-    ranking, the bench or the kill switch is the failure this pins. The one
-    production consumer is the scan ROW (a display key) plus the nightly sweep
-    that emits observations.
+    A capacity reference appearing in the entry GATE, the verdict composition,
+    the ranking or the kill switch is the failure this pins.
+
+    The allow-list grew by one when suppression tiers landed: capacity now has a
+    real consumer in `suitability_tiers`, which is the deliberate, reviewed
+    graduation prompt 1 said would have to happen as its own change. Capacity
+    still touches nothing else, and the tier module is itself bounded — see
+    test_suitability_tiers.test_no_position_management_path_reads_a_tier.
 
     Keyed on the IMPORT, not on the string: a module that merely names capacity
     in a comment or docstring (config.py's constants, scan_triggers' note on the
@@ -393,7 +397,8 @@ def test_capacity_has_no_consumer_outside_display_telemetry_and_tests():
     backend = pathlib.Path(__file__).parent
     allowed = {"juice_capacity.py",            # the module itself
                "metrics/scorecard.py",         # the display row key
-               "maintenance.py"}               # the observation emitter
+               "maintenance.py",               # the observation emitter
+               "suitability_tiers.py"}         # the reviewed consumer
     offenders = []
     for path in sorted(backend.rglob("*.py")):
         rel = path.relative_to(backend).as_posix()

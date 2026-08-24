@@ -422,6 +422,53 @@ function StructureShadow({ row }) {
 // a high capacity beside a low current reading is IV compression (recoverable);
 // both low is an instrument that is simply built low-vol. Nothing here can move
 // a verdict, a rank or a bench slot.
+// Suitability TIER — the entry-universe question ("should this name be in the
+// scan at all"), as opposed to the CFM lens's momentum question. Driven by the
+// trailing capacity median: a name whose capacity cannot clear the juice floor
+// is showing a path to READY that leads nowhere.
+//
+// While enforcement is off the chip renders with a NO AUTHORITY badge and the
+// row stays exactly where it was — nothing is hidden and no bench slot moves.
+const TIER_STYLE = {
+  SUITABLE: "bg-emerald-500/15 text-emerald-300",
+  SUPPRESSED_CONDITION: "bg-amber-500/15 text-amber-300",
+  SUPPRESSED_STRUCTURAL: "bg-rose-500/15 text-rose-300",
+  UNCLASSIFIED: "bg-slate-500/15 text-slate-400",
+};
+const TIER_LABEL = {
+  SUITABLE: "SUITABLE",
+  SUPPRESSED_CONDITION: "COMPRESSED",
+  SUPPRESSED_STRUCTURAL: "STRUCTURAL",
+  UNCLASSIFIED: "—",
+};
+
+function TierChip({ row }) {
+  const tier = row.suitability_tier || "UNCLASSIFIED";
+  const cap = row.juice_capacity || {};
+  const enforced = row.suitability_tier_enforced;
+  const insufficient = cap.insufficient_history;
+  const title = [
+    `Tier: ${tier}${row.suitability_tier_reason ? ` (${row.suitability_tier_reason})` : ""}`,
+    insufficient
+      ? `Capacity: insufficient history (${cap.obs ?? 0} of ${cap.min_obs ?? "?"} obs) — unsuppressible.`
+      : `Capacity ${fmt(cap.capacity, 2)}%/wk vs floor ${fmt(cap.floor_pct, 2)}%.`,
+    row.next_recheck_date ? `Next recheck ${row.next_recheck_date}.` : null,
+    enforced ? null : "Shadow mode — this classification hides nothing.",
+  ].filter(Boolean).join(" ");
+  return (
+    <span className="inline-flex items-center gap-1.5" title={title}>
+      <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold ${TIER_STYLE[tier] || TIER_STYLE.UNCLASSIFIED}`}>
+        {TIER_LABEL[tier] || tier}
+      </span>
+      {!enforced && (
+        <span className="rounded bg-slate-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-slate-400">
+          NO AUTHORITY
+        </span>
+      )}
+    </span>
+  );
+}
+
 function CapacityShadow({ row }) {
   const cap = row.juice_capacity;
   if (!cap) return null;
@@ -614,7 +661,16 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                 <Readout label="ATR mom" value={fmt(row.atr_momentum, 2)} />
                 <Readout label="OBV" value={row.obv_above_ema == null ? "—" : row.obv_above_ema ? "↑ accum" : "↓ distrib"} />
                 <Readout label="Earnings" value={row.earnings_days != null ? `${row.earnings_days}d` : (row.earnings_date || "—")} />
-                <Readout label="Suitability" value={row.suitability || "—"} />
+                {/* The stock-MOMENTUM lens (GO/CAUTION/AVOID), renamed from
+                    "Suitability" when suppression tiers landed: it measures
+                    momentum quality, not whether the name belongs in the entry
+                    universe at all, and that second question is what the
+                    SUITABILITY row below now answers. One label per concept —
+                    two "suitability" labels on one card would be unreadable.
+                    The FIELD is unchanged and still gates the recommendation
+                    pool, the entry queue and the hot-refresh set. */}
+                <Readout label="CFM lens" value={row.suitability || "—"} />
+                <Readout label="Suitability" value={<TierChip row={row} />} />
               </div>
               {/* The CFM-suitability reasons (the internal GO/CAUTION/AVOID lens). */}
               {row.suitability_reasons?.length ? (
@@ -954,8 +1010,132 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
           </tbody>
         </table>
       </div>
+      <SuppressedSection data={data} onRechecked={reload} />
       <ShadowFloorLog />
     </Card>
+  );
+}
+
+// The collapsed "Suppressed (N)" section — names whose trailing juice CAPACITY
+// cannot clear the floor, kept out of the main table so the scan stops
+// advertising a clearable condition in front of an unclearable one.
+//
+// Two tiers, and the distinction is the whole point: COMPRESSED means the name
+// CAN pay and currently is not (IV compression — rechecked weekly); STRUCTURAL
+// means the instrument is built low-vol and never will (rechecked monthly).
+//
+// Every row carries a manual recheck, because suppression must never make a
+// name unreachable pending a date.
+function SuppressedSection({ data, onRechecked }) {
+  const [open, setOpen] = React.useState(false);
+  const [busy, setBusy] = React.useState({});
+  const [result, setResult] = React.useState({});
+  const rows = data?.suppressed || [];
+  const info = data?.suitability || {};
+  const enforced = info.enforced;
+  const counts = info.counts || {};
+  // In shadow mode nothing is hidden, so there is no suppressed LIST — but the
+  // header still reports what WOULD be suppressed, which is the whole point of
+  // a shadow period.
+  const wouldSuppress = (counts.SUPPRESSED_CONDITION || 0) + (counts.SUPPRESSED_STRUCTURAL || 0);
+  const n = enforced ? rows.length : wouldSuppress;
+  if (!n && !info.reason) return null;
+
+  async function recheck(symbol) {
+    setBusy((b) => ({ ...b, [symbol]: true }));
+    try {
+      const out = await api.suitabilityRecheck(symbol);
+      setResult((r) => ({
+        ...r,
+        [symbol]: out.changed ? `→ ${out.tier}` : `unchanged (${out.tier})`,
+      }));
+      if (out.changed && onRechecked) onRechecked();
+    } catch (err) {
+      setResult((r) => ({ ...r, [symbol]: err.message || "failed" }));
+    } finally {
+      setBusy((b) => ({ ...b, [symbol]: false }));
+    }
+  }
+
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 text-xs uppercase tracking-wide text-slate-500 hover:text-slate-300"
+      >
+        <span className={`transition-transform ${open ? "rotate-90" : ""}`}>▸</span>
+        Suppressed ({n})
+        {!enforced && (
+          <span className="rounded bg-slate-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-slate-400">
+            NO AUTHORITY
+          </span>
+        )}
+      </button>
+      {open && (
+        <div className="mt-2 text-xs">
+          <p className="mb-2 text-slate-500">
+            Trailing juice capacity below the income floor — the name cannot clear it,
+            so a displayed path to READY would lead nowhere.{" "}
+            <span className="text-amber-300">COMPRESSED</span> can recover (rechecked
+            weekly); <span className="text-rose-300">STRUCTURAL</span> is how the
+            instrument is built (monthly).{" "}
+            {!enforced && <span className="text-slate-400">{info.reason} — nothing is hidden.</span>}
+          </p>
+          {!enforced && wouldSuppress > 0 && (
+            <p className="mb-2 text-slate-500">
+              {wouldSuppress} name{wouldSuppress === 1 ? "" : "s"} would be hidden once
+              enforcement is on. They are still in the table above, with their tier chip.
+            </p>
+          )}
+          {enforced && rows.length > 0 && (
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="text-left text-[10px] uppercase tracking-wide text-slate-500">
+                    <th className="py-1 pr-3">Symbol</th>
+                    <th className="py-1 pr-3">Tier</th>
+                    <th className="py-1 pr-3">Capacity</th>
+                    <th className="py-1 pr-3">Floor</th>
+                    <th className="py-1 pr-3">Now</th>
+                    <th className="py-1 pr-3">Next recheck</th>
+                    <th className="py-1"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => {
+                    const cap = r.juice_capacity || {};
+                    return (
+                      <tr key={r.ticker} className="border-t border-slate-800/60">
+                        <td className="py-1 pr-3 font-medium text-slate-300">{r.ticker}</td>
+                        <td className="py-1 pr-3"><TierChip row={r} /></td>
+                        <td className="py-1 pr-3 tabular-nums text-slate-300">{fmt(cap.capacity, 2)}%</td>
+                        <td className="py-1 pr-3 tabular-nums text-slate-500">{fmt(cap.floor_pct, 2)}%</td>
+                        <td className="py-1 pr-3 tabular-nums text-slate-400">
+                          {fmt(r.combined_weekly_yield_pct ?? r.juice_weekly_pct, 2)}%
+                        </td>
+                        <td className="py-1 pr-3 text-slate-500">{r.next_recheck_date || "—"}</td>
+                        <td className="py-1 text-right">
+                          <button
+                            onClick={() => recheck(r.ticker)}
+                            disabled={busy[r.ticker]}
+                            className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-slate-400 hover:border-slate-500 hover:text-slate-200 disabled:opacity-50"
+                          >
+                            {busy[r.ticker] ? "checking…" : "recheck now"}
+                          </button>
+                          {result[r.ticker] && (
+                            <span className="ml-2 text-[10px] text-slate-500">{result[r.ticker]}</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

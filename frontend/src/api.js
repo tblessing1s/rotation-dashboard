@@ -72,6 +72,14 @@ export const api = {
   // SHADOW income-floor pass/fail tallies per profile. Read-only telemetry.
   scanRejectionStats: (window) =>
     request(`/api/scan/rejection-stats${window ? `?window=${window}` : ""}`),
+  // Suitability tiers: enforcement state + every name's current tier (derived
+  // from the transition-event stream). With a symbol, that name's history.
+  suitability: (symbol) =>
+    request(`/api/scan/suitability${symbol ? `?symbol=${symbol}` : ""}`),
+  // Force an immediate re-evaluation of one suppressed name — suppression must
+  // never leave a name unreachable pending its recheck date.
+  suitabilityRecheck: (symbol) =>
+    request("/api/scan/suitability/recheck", { method: "POST", body: JSON.stringify({ symbol }) }),
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
   // they can clear the STALE_BLOCKS_GO gate on the next scan.
   refreshReadyQuote: (tickers) =>

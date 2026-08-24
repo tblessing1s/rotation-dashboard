@@ -141,10 +141,19 @@ def api_scorecard():
     try:
         from metrics import scorecard as scorecard_metrics
         out = dict(scorecard_metrics.scorecard(tickers))
+        # SUITABILITY TIERS (TRAVIS_EXTENSION) — annotate every row with its tier,
+        # then partition. Entry universe only; see suitability_tiers.py. In shadow
+        # mode `suppressed` is empty and `results` is byte-identical to before.
+        # Applied BEFORE affordability so a suppressed row is reported once, under
+        # the reason that actually removed it.
+        rows, suppressed, tiers = scorecard_metrics.split_by_suitability(
+            list(out.get("results") or []))
+        out["suitability"] = tiers
+        out["suppressed"] = suppressed
         # Annotate every row, then filter — so the priced-out rows carry their
         # reason whether or not they are being shown.
         keep, priced_out, bar = scorecard_metrics.split_by_affordability(
-            list(out.get("results") or []), log.load_state())
+            rows, log.load_state())
         out["affordability"] = bar
         out["results"] = (keep + priced_out) if include_unaffordable else keep
         out["priced_out_tickers"] = [r["ticker"] for r in priced_out]
@@ -188,7 +197,12 @@ def api_scan_ready():
         # CFM sells a weekly covered call, so a name with NO weekly options can't be
         # entered — exclude known-no-weeklies from the actionable shortlist (matches
         # the Scorecard's default filter; unknown/None stays, never a false hide).
-        ready_rows = [r for r in sc["results"]
+        # SUITABILITY TIERS (TRAVIS_EXTENSION): a suppressed name is not an entry
+        # candidate at any conviction — its juice cannot clear the floor, so a
+        # displayed path to READY would lead nowhere. Inert in shadow mode.
+        ready_pool, _suppressed, _tiers = scorecard_metrics.split_by_suitability(
+            list(sc["results"]))
+        ready_rows = [r for r in ready_pool
                       if r.get("verdict") == "READY" and r.get("has_weeklies") is not False]
         # AFFORDABILITY (schema v21): a shares entry buys a whole 100-share lot, so a
         # name whose lot costs more than the dry powder available right now is not
@@ -914,6 +928,45 @@ def api_symbol_genius_flips():
     try:
         import symbol_genius_history
         return jsonify(symbol_genius_history.flip_stats())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/scan/suitability", methods=["GET"])
+def api_scan_suitability():
+    """Suitability tiers: the enforcement state and every classified name's
+    current tier, DERIVED by folding the transition-event stream. Optional
+    ?symbol=X returns that name's full transition history instead — the audit
+    trail for why it is where it is. Read-only."""
+    try:
+        import suitability_tiers
+        symbol = (request.args.get("symbol") or "").strip().upper()
+        if symbol:
+            return jsonify({"symbol": symbol,
+                            "tier": suitability_tiers.current_tier(symbol),
+                            "events": suitability_tiers.events(symbol)})
+        return jsonify({"enforcement": suitability_tiers.enforcement(),
+                        "tiers": suitability_tiers.tiers_now()})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/scan/suitability/recheck", methods=["POST"])
+def api_scan_suitability_recheck():
+    """Force an immediate re-evaluation of one suppressed name.
+
+    Suppression must never make a name unreachable pending a recheck date, so
+    this bypasses the cadence entirely: it computes a FRESH scan row (which
+    re-runs the full juice computation, so the capacity observation series
+    continues), reclassifies, and appends a transition event if the tier moved."""
+    body = request.get_json(silent=True) or {}
+    symbol = (body.get("symbol") or request.args.get("symbol") or "").strip().upper()
+    if not symbol:
+        return jsonify({"error": "symbol is required"}), 400
+    try:
+        import suitability_tiers
+        out = suitability_tiers.recheck(symbol)
+        return jsonify(out), (200 if out.get("ok") else 400)
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
