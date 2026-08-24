@@ -414,6 +414,82 @@ function StructureShadow({ row }) {
   );
 }
 
+// SHADOW — trailing juice CAPACITY. The scan's juice is a SPOT reading and can't
+// tell a normally-juicy name in IV compression (transient — the premium comes
+// back) from one that is BUILT low-vol (structural — it never does). The trailing
+// median of the combined weekly yield can. Styled as an observation (violet +
+// explicit NO AUTHORITY badge), matching StructureShadow and ShadowFloorLog —
+// deliberately NOT the emerald/amber/rose the blocking gate uses, so it can never
+// be read as a gate result. It moves no verdict, ranking, bench status or filter.
+//
+// "Insufficient history" is rendered as its own state, never as a zero or a dash:
+// "we haven't measured this yet" and "this name yields nothing" are opposite facts.
+function CapacityShadow({ row }) {
+  const cap = row.juice_capacity;
+  if (!cap) return null;
+  const insufficient = cap.status === "INSUFFICIENT_HISTORY";
+  const floor = cap.floor_pct;
+  // The floor shown is the SHARE-denominated shadow floor, never juice_target_pct
+  // (which is LEAP-denominated, ~1.9%/wk, and not on this scale).
+  const detail = insufficient
+    ? `Needs ${cap.min_obs} observations before a median means anything; ${cap.obs} recorded so far. `
+      + `One observation per name per trading day, appended by the scan sweep.`
+    : `Median combined weekly yield (juice + dividend) over the trailing `
+      + `${cap.window_days} observations — ${cap.obs} on record`
+      + `${cap.first_obs ? ` (${cap.first_obs} → ${cap.last_obs})` : ""}.\n`
+      + `The MEDIAN, not the mean: a name whose premium is temporarily compressed `
+      + `still reads near its long-run capacity, while a structurally low-vol name `
+      + `never does. That is the difference between "wait for it" and "never".\n`
+      + (floor != null
+        ? `Shadow floor ${fmt(floor, 2)}%/wk: capacity ${cap.clears_floor ? "clears" : "is below"} it — zero blocking authority.`
+        : "");
+  return (
+    <div className="mt-2 border-t border-slate-800 pt-2">
+      <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wide text-slate-500">
+        Juice capacity
+        <span className="rounded bg-slate-500/15 px-1.5 py-0.5 text-[9px] font-semibold text-slate-400">
+          NO AUTHORITY
+        </span>
+      </div>
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 text-xs" title={detail}>
+        <span className="text-slate-500">CAPACITY</span>
+        {insufficient ? (
+          <span className="text-slate-500">insufficient history</span>
+        ) : (
+          <>
+            <span className="tabular-nums font-medium text-violet-300">
+              {fmt(cap.capacity_wk_pct, 2)}%/wk
+            </span>
+            {floor != null && (
+              <span className={`tabular-nums ${cap.clears_floor === false ? "text-amber-300/80" : "text-slate-500"}`}>
+                (floor {fmt(floor, 2)}%)
+              </span>
+            )}
+          </>
+        )}
+        <span className="text-slate-600">·</span>
+        <span className="tabular-nums text-slate-500">{cap.obs} obs</span>
+        {cap.dividend_stubbed_obs > 0 && (
+          <span
+            className="text-slate-600"
+            title={`${cap.dividend_stubbed_obs} of ${cap.obs} observations had no resolvable dividend yield — the leg was counted as 0 and marked, never as a confident non-payer.`}
+          >
+            *
+          </span>
+        )}
+        {(cap.sources || []).includes("backfill_bar_replay") && (
+          <span
+            className="rounded bg-slate-500/10 px-1 py-0.5 text-[9px] uppercase tracking-wide text-slate-500"
+            title="Some or all observations were replayed offline from cached daily bars rather than recorded live. The replay re-runs the same juice function on the same inputs, so it is exact — but its dividend leg carries today's yield against a past date."
+          >
+            replayed
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Readout({ label, value }) {
   return (
     <div className="min-w-0">
@@ -573,6 +649,7 @@ function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt,
                 </ul>
               ) : null}
               <StructureShadow row={row} />
+              <CapacityShadow row={row} />
             </div>
           </td>
         </tr>

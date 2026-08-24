@@ -549,6 +549,36 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
         profile, row["juice_weekly_pct"], annual_div_pct,
         est.get("weekly_extrinsic_per_share"))
 
+    # --- Trailing juice CAPACITY (SHADOW) --------------------------------------
+    # TRAVIS_EXTENSION. Purely ADDITIVE row keys. Juice above is a SPOT reading and
+    # cannot tell a normally-juicy name in IV compression (transient) from one that
+    # is BUILT low-vol (structural); the trailing median of the combined weekly
+    # yield can. ZERO AUTHORITY — juice_capacity's module docstring states the full
+    # contract: nothing here is appended to `blocks`, so `row["verdict"]` (and
+    # `bench` / `triggers` / `path_to_ready` with it) is bit-for-bit what it was
+    # before this block existed.
+    #
+    # `short_strike` / `regime_color` are surfaced onto the row purely as
+    # observation PROVENANCE — they record which strike and which tape the juice
+    # figure was priced under, so a future move to a regime-aware capacity basis is
+    # a re-derivation over retained inputs rather than a lost history. Both are
+    # already in hand (the estimate dict, the sweep's single regime read): no
+    # recompute, no provider call.
+    #
+    # The capacity READ is a pure lookup in the DATA_DIR telemetry store (memoized
+    # on the file's mtime+size, so a full sweep parses it once, not once per row).
+    # The floor it is shown against is the SHARE-denominated shadow floor resolved
+    # immediately above — never `juice_target_pct`, which is LEAP-denominated and
+    # not on the same scale.
+    row["short_strike"] = est.get("short_strike")
+    row["regime_color"] = regime_color
+    try:
+        import juice_capacity
+        row["juice_capacity"] = juice_capacity.capacity(
+            ticker, floor_pct=(row["shadow_floor"] or {}).get("floor_pct"))
+    except Exception:  # noqa: BLE001 — a shadow readout never sinks a row
+        row["juice_capacity"] = None
+
     # IV Rank (drawer context) — sourced from the local IV-history store the app
     # already accrues (option-chain views + nightly maintenance); NO new provider
     # call. A juicy row sitting at a high IVR deserves suspicion ("don't be lured
@@ -919,6 +949,28 @@ def scorecard(tickers: list[str] | None = None, price_overrides: dict | None = N
     names = sector_data.all_tickers()
 
     def _sweep():
+        """The cached full-universe sweep, plus today's capacity observation.
+
+        The capacity append wraps EVERY return path — including a cache HIT — so
+        the series accrues once per calendar day regardless of which branch served
+        the request. That is safe precisely because the store is idempotent per
+        symbol per DAY (juice_capacity.record_observations): a hundred cache hits
+        write the same day's point a hundred times with identical values rather
+        than appending a hundred observations, which is what keeps a heavily-
+        rescanned day from outvoting a quiet one in the median.
+
+        Best-effort and OUTSIDE the returned result: a telemetry failure can
+        neither sink the sweep nor alter a single row.
+        """
+        out = _sweep_uncounted()
+        try:
+            import juice_capacity
+            juice_capacity.record_observations(out.get("results") or [])
+        except Exception:  # noqa: BLE001 — telemetry never sinks the sweep
+            pass
+        return out
+
+    def _sweep_uncounted():
         # Resolved before the cache read so the regime is part of the key: a
         # regime flip must re-scan rather than serve verdicts composed against
         # the old tape.
