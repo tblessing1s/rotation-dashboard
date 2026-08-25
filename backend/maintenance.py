@@ -224,6 +224,26 @@ def nightly_refresh() -> dict:
     except Exception as e:  # noqa: BLE001 — a scan-log failure must not sink the sweep
         report["errors"].append(f"scan_rejection_log: {e}")
 
+    # Per-candidate, per-GATE evaluation telemetry — the sole-blocker-rate
+    # dataset (gate_telemetry). Distinct from the rejection log above, which
+    # records one BINDING constraint per row: this records EVERY gate's verdict
+    # for every candidate, which is what makes "was this gate the ONLY failure"
+    # answerable. READ-ONLY OBSERVABILITY: no blocking authority, no threshold
+    # touched, no gate logic or ordering changed. Derived telemetry under
+    # DATA_DIR (one file per scan day), append-only, never state.json.
+    #
+    # Shares the sweep's `as_of` as the scan-run identity, so a run's rows here
+    # and in scan_rejection_log join on the same key. A pure READ of rows already
+    # in hand — no provider call, no recompute — and best-effort by contract:
+    # record_scan swallows everything, so this can never sink the sweep.
+    try:
+        if sweep_results is not None:
+            import gate_telemetry
+            report["gate_telemetry"] = gate_telemetry.record_scan(
+                sweep_results, scan_id=sweep.get("as_of"))
+    except Exception as e:  # noqa: BLE001 — telemetry must never sink the sweep
+        report["errors"].append(f"gate_telemetry: {e}")
+
     # Today's per-name JUICE CAPACITY observation — the trailing-median series that
     # separates a name in IV compression (transient) from one built low-vol
     # (structural). SHADOW: computed, persisted and displayed with ZERO authority

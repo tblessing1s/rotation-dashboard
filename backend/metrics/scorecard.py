@@ -693,6 +693,27 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
         row["first_failing_level"] = gate.get("first_failing_level")
         row["gate_rulesets"] = gate.get("rulesets")
 
+    # ---- Per-gate evaluation telemetry (READ-ONLY OBSERVABILITY) -------------
+    # TRAVIS_EXTENSION. A purely ADDITIVE row key. `gate_results` is one
+    # structured entry per gate — id, authority, pass, value, threshold — built
+    # by a pure READ of the gate levels already computed above plus this row's
+    # shadow income floor. It is what makes the SOLE-BLOCKER RATE computable (see
+    # gate_telemetry): Levels 1-4 are evaluated unconditionally by
+    # `screening.entry_gate`, so every gate carries a real pass/fail even for a
+    # candidate that failed at Level 1.
+    #
+    # ZERO AUTHORITY. Nothing here is appended to `blocks`, so `row["verdict"]` —
+    # already finalized above — is bit-for-bit what it was before this block
+    # existed, and `bench` / `triggers` / `path_to_ready` with it. It re-runs no
+    # gate, fetches nothing, and reads no clock. A failure to build it leaves the
+    # key absent (the recorder skips such rows) rather than sinking the row:
+    # telemetry is a side channel and must never perturb a scan.
+    try:
+        import gate_telemetry
+        row["gate_results"] = gate_telemetry.build_results(gate, row)
+    except Exception:  # noqa: BLE001 — a telemetry readout never sinks a row
+        row["gate_results"] = None
+
     # Two-speed RS SHADOW — vs SPY only. Level reuses the displayed RS3M; slope is
     # the RS-line-EMA direction. SHADOW ONLY: never feeds the composed verdict,
     # never blocks, never sizes.
