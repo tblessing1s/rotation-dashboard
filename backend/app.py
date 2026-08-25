@@ -97,6 +97,22 @@ def api_stock_filter():
         return _err(e)
 
 
+def _scan_pending(**extra):
+    """The response for a full-universe read whose sweep is not warm yet.
+
+    Explicitly `scan_pending`, never an empty result set: "the scan has not
+    finished" and "the scan found nothing" are different facts, and a client that
+    rendered the first as the second would show an empty Ready-to-Enter as though
+    the gate had rejected everything. `results`/`ready` are empty ONLY as a shape
+    contract for older clients; `scan_pending` is what a caller must branch on.
+    HTTP 200 — a pending sweep is a state, not an error."""
+    import screening
+    st = screening.scan_status()
+    return {"scan_pending": True, "running": bool(st.get("running")),
+            "scanned_at": st.get("scanned_at"), "scan_day": st.get("scan_day"),
+            "as_of": None, "results": [], **extra}
+
+
 @app.route("/api/scan/refresh", methods=["POST"])
 def api_scan_refresh():
     """Start a full-universe scan in a detached server-side job (deduped — one at
@@ -140,7 +156,18 @@ def api_scorecard():
     include_unaffordable = request.args.get("include_unaffordable", "").strip() in ("1", "true", "yes")
     try:
         from metrics import scorecard as scorecard_metrics
-        out = dict(scorecard_metrics.scorecard(tickers))
+        # An explicit subset is cheap and computes fresh. The FULL universe is a
+        # multi-minute sweep that holds the `scorecard:full` lock, so this read
+        # path only ever PEEKS at it (scorecard_warm) — calling scorecard() here
+        # made this request wait out any in-flight background sweep and the
+        # client aborted at its 60s timeout.
+        if tickers:
+            out = dict(scorecard_metrics.scorecard(tickers))
+        else:
+            warm = scorecard_metrics.scorecard_warm()
+            if warm is None:
+                return jsonify(_scan_pending())
+            out = dict(warm)
         # Annotate every row, then filter — so the priced-out rows carry their
         # reason whether or not they are being shown.
         keep, priced_out, bar = scorecard_metrics.split_by_affordability(
@@ -188,7 +215,15 @@ def api_scan_ready():
         import market_scheduler
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo as _ZI
-        sc = scorecard_metrics.scorecard(tickers)
+        # PEEK, never compute — see api_scorecard above. A full-universe read
+        # that triggered the sweep blocked for its whole duration.
+        if tickers:
+            sc = scorecard_metrics.scorecard(tickers)
+        else:
+            sc = scorecard_metrics.scorecard_warm()
+            if sc is None:
+                return jsonify(_scan_pending(ready=[], near_misses=[],
+                                             stale_blocked=[], priced_out=[]))
         # Ready-to-Enter = the canonical scan VERDICT is READY (the invisible market
         # regime + Symbol Genius + structure entrability all clear). A RED regime
         # forces every verdict to BLOCKED, so the shortlist correctly empties on a

@@ -535,8 +535,10 @@ def test_scan_ready_splits_go_rows_by_level5_and_sorts_by_juice(isolated_state, 
         {"ticker": "BBB", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 3.0, "earnings_date": None},
         {"ticker": "CCC", "sector": "XLK", "verdict": "CAUTION", "juice_weekly_pct": 5.0, "earnings_date": None},
     ]
-    monkeypatch.setattr(scorecard_metrics, "scorecard",
-                        lambda tickers=None: {"as_of": "2026-07-02T00:00:00Z", "results": rows})
+    # The full-universe read paths PEEK (scorecard_warm) and never call the
+    # sweep — calling it made the request block on the sweep's own lock.
+    monkeypatch.setattr(scorecard_metrics, "scorecard_warm",
+                        lambda price_overrides=None: {"as_of": "2026-07-02T00:00:00Z", "results": rows})
 
     def _fake_evaluate_many(tickers, contracts=None):
         # AAA blocked (thin juice), BBB passes — CCC is excluded before this
@@ -565,8 +567,10 @@ def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state
         {"ticker": "LOW", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 2.0, "earnings_date": None},
         {"ticker": "HIGH", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 6.0, "earnings_date": None},
     ]
-    monkeypatch.setattr(scorecard_metrics, "scorecard",
-                        lambda tickers=None: {"as_of": "x", "results": rows})
+    # The full-universe read paths PEEK (scorecard_warm) and never call the
+    # sweep — calling it made the request block on the sweep's own lock.
+    monkeypatch.setattr(scorecard_metrics, "scorecard_warm",
+                        lambda price_overrides=None: {"as_of": "x", "results": rows})
     monkeypatch.setattr(account_gate, "evaluate_many", lambda tickers, contracts=None: {
         t: {"pass": True, "blocking_failures": []} for t in tickers})
 
@@ -595,8 +599,10 @@ def test_scan_ready_fetches_live_quote_on_demand_so_go_clears(isolated_state, mo
 
     rows = [{"ticker": "AAA", "sector": "XLK", "verdict": "READY",
              "juice_weekly_pct": 1.0, "earnings_date": None}]
-    monkeypatch.setattr(scorecard_metrics, "scorecard",
-                        lambda tickers=None: {"as_of": "x", "results": rows})
+    # The full-universe read paths PEEK (scorecard_warm) and never call the
+    # sweep — calling it made the request block on the sweep's own lock.
+    monkeypatch.setattr(scorecard_metrics, "scorecard_warm",
+                        lambda price_overrides=None: {"as_of": "x", "results": rows})
     monkeypatch.setattr(account_gate, "evaluate_many", lambda tickers, contracts=None: {
         t: {"pass": True, "blocking_failures": []} for t in tickers})
     monkeypatch.setattr(market_scheduler, "is_market_open", lambda now: True)

@@ -801,7 +801,7 @@ def test_scan_endpoint_filters_by_default_and_reports_what_it_hid(store, monkeyp
     from metrics import scorecard as sc
     monkeypatch.setattr(config, "PER_POSITION_CAP_USD", 15000.0)
     _funded(23000)   # -> $10k deployable
-    monkeypatch.setattr(sc, "scorecard", lambda tickers=None, **k: {
+    monkeypatch.setattr(sc, "scorecard_warm", lambda price_overrides=None, **k: {
         "as_of": "2026-08-15T00:00:00Z",
         "results": [dict(_row("CHEAP", 6000), verdict="READY"),
                     dict(_row("RICH", 45000), verdict="READY")]})

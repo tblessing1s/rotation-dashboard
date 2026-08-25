@@ -673,15 +673,21 @@ function sortBench(rows) {
   });
 }
 
-export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFocusHandled }) {
+export default function Scorecard({ regimeStatus, refreshKey, scanRunning, focusTicker, onFocusHandled }) {
   // MUST be declared before the useApi below: the fetch is keyed on it, and a
   // `const` read from the deps array before its declaration is a temporal-dead-zone
   // ReferenceError that throws on every render (the app has no error boundary, so
   // that blanks the whole page rather than just this card).
   const [showPricedOut, setShowPricedOut] = React.useState(false);
+  // Held while a full-universe sweep is in flight — this reads the same heavy
+  // sweep Ready-to-Enter does, and racing it meant blocking on the scan's own
+  // lock until the client aborted. `refreshKey` bumps when the sweep lands.
   const { data, error, loading, reload } = useApi(
-    () => api.scorecard(null, { includeUnaffordable: showPricedOut }),
-    [refreshKey, showPricedOut]);
+    () => (scanRunning
+      ? Promise.resolve(null)
+      : api.scorecard(null, { includeUnaffordable: showPricedOut })),
+    [refreshKey, showPricedOut, scanRunning]);
+  const scanPending = scanRunning || !!data?.scan_pending;
   const banner = REGIME_BANNER[regimeStatus];
   const [verdictFilter, setVerdictFilter] = React.useState("ALL");
   const [sectorFilter, setSectorFilter] = React.useState("ALL");
@@ -967,7 +973,11 @@ export default function Scorecard({ regimeStatus, refreshKey, focusTicker, onFoc
               />
             ))}
             {!loading && visible.length === 0 && (
-              <tr><td colSpan={COLUMNS.length} className="py-6 text-center text-slate-500">No tickers.</td></tr>
+              <tr><td colSpan={COLUMNS.length} className="py-6 text-center text-slate-500">
+                {scanPending
+                  ? "Scanning the universe… results appear when the sweep lands."
+                  : "No tickers."}
+              </td></tr>
             )}
           </tbody>
         </table>
