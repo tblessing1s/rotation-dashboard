@@ -48,6 +48,10 @@ export default function App() {
   // Bumped when the detached background scan finishes, so the Scan panels reload
   // with the freshly-warmed data (see ScanProgress).
   const [scanNonce, setScanNonce] = React.useState(0);
+  // Whether a full-universe sweep is in flight, lifted out of ScanProgress. The
+  // panels that read that sweep hold their fetch while it runs instead of racing
+  // it — see ReadyToEnter / Scorecard.
+  const [scanRunning, setScanRunning] = React.useState(false);
   // Build identity shown in the footer (version · commit). Fetched once; the
   // /api/version endpoint is open, so this works before/without a session too.
   const [version, setVersion] = React.useState(null);
@@ -223,8 +227,10 @@ export default function App() {
             )}
             {tab === "Scan" && (
               <div className="grid gap-4">
-                <ScanProgress onComplete={() => setScanNonce((n) => n + 1)} />
-                <ReadyToEnter onSelectStock={openTicket} refreshKey={scanNonce} />
+                <ScanProgress onComplete={() => setScanNonce((n) => n + 1)}
+                              onRunningChange={setScanRunning} />
+                <ReadyToEnter onSelectStock={openTicket} refreshKey={scanNonce}
+                              scanRunning={scanRunning} />
                 <button
                   onClick={() => openTicket("")}
                   className="rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-2 text-left text-sm text-slate-400 hover:bg-slate-900/70"
@@ -242,6 +248,7 @@ export default function App() {
                 </button>
                 {scanDetails && (
                   <Scorecard regimeStatus={regimeStatus} refreshKey={scanNonce}
+                             scanRunning={scanRunning}
                              focusTicker={scanIntent}
                              onFocusHandled={() => setScanIntent(null)} />
                 )}

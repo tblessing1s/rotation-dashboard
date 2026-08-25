@@ -8,12 +8,21 @@ import { Spinner } from "./ui.jsx";
 // the server, it keeps running even if this tab is backgrounded, switched, or the
 // app is closed — so a returning client is served warm. When a running scan
 // finishes, onComplete() lets the parent refresh the panels with the warm data.
-export default function ScanProgress({ onComplete }) {
+export default function ScanProgress({ onComplete, onRunningChange }) {
   const [st, setSt] = React.useState(null);
   const prevRunning = React.useRef(false);
+  // In-flight guard. The interval below fires on a fixed cadence regardless of
+  // whether the previous poll came back, and the server is ONE gunicorn worker:
+  // during a sweep its threads are starved by GIL-bound indicator math, so an
+  // unguarded 2.5s poll piled up ~24 never-returning requests a minute until
+  // every one of them hit the client's 60s abort. One poll at a time.
+  const inFlight = React.useRef(false);
 
   const poll = React.useCallback(async () => {
+    if (inFlight.current) return;
+    inFlight.current = true;
     try { setSt(await api.scanStatus()); } catch { /* transient — next poll retries */ }
+    finally { inFlight.current = false; }
   }, []);
 
   const rescan = React.useCallback(async () => {
@@ -48,6 +57,15 @@ export default function ScanProgress({ onComplete }) {
     if (prevRunning.current && st && !st.running) onComplete?.();
     prevRunning.current = !!st?.running;
   }, [st, onComplete]);
+
+  // Publish the running flag. The panels that read the full-universe sweep hold
+  // their fetch while one is in flight rather than racing it — before this they
+  // mounted alongside the scan they had just triggered and waited out the whole
+  // sweep. `st === null` (status not yet known) is deliberately NOT "running":
+  // it resolves in one poll, and treating it as running would stall a warm load.
+  React.useEffect(() => {
+    onRunningChange?.(!!st?.running);
+  }, [st, onRunningChange]);
 
   if (!st) return null;
 

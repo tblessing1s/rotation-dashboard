@@ -934,6 +934,44 @@ def _compute_scorecard(names: list[str], price_overrides: dict | None = None,
     return {"as_of": log.utcnow(), "results": rows}
 
 
+def scorecard_warm(price_overrides: dict | None = None) -> dict | None:
+    """The full-universe sweep IF it can be served WITHOUT computing one, else None.
+
+    A strictly READ-ONLY peek. It never calls ``_compute_scorecard``, never takes
+    the ``scorecard:full`` memo lock, and so can never block behind an in-flight
+    background sweep — which is the whole point of it existing.
+
+    ``scorecard()`` is not a reader: on a cold memo it IS the sweep, and it holds
+    a per-key lock for the duration (``screening._cached``). The background scan
+    kicked by /api/scan/refresh holds that exact lock, so any request that called
+    ``scorecard()`` during a sweep waited for the entire sweep and the client
+    aborted at its 60s timeout. Read paths call this instead and report "not warm"
+    rather than hanging.
+
+    Two sources, in order — the in-process memo, then the day's disk cache (warm
+    across a process restart, which the memo is not). An incomplete disk hit is
+    NOT served: a partial universe silently rendered as the whole one is exactly
+    the kind of quiet wrongness this dashboard must never show.
+
+    A price-override request always needs fresh numbers, so it is never served
+    from a peek."""
+    if price_overrides:
+        return None
+    import screening
+    hit = screening.peek_cached("scorecard:full")
+    if hit is not None:
+        return hit
+    try:
+        import scan_cache
+        names = sector_data.all_tickers()
+        reuse = scan_cache.reusable(names, _current_regime_color())
+    except Exception:  # noqa: BLE001 — a peek must never raise into a read path
+        return None
+    if reuse is not None and reuse.get("complete") and reuse["result"].get("results"):
+        return reuse["result"]
+    return None
+
+
 def scorecard(tickers: list[str] | None = None, price_overrides: dict | None = None,
               force: bool = False) -> dict:
     """Build the scorecard for a list of tickers (default: every holding across

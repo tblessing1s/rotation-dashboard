@@ -659,9 +659,9 @@ def test_scorecard_response_does_not_ship_the_telemetry_payload(monkeypatch):
 
     rows = [{"ticker": "AAA", "sector": "XLK", "lot_cost": 100.0,
              "verdict": "READY", "gate_results": [{"gate_id": "L4:extension"}]}]
-    monkeypatch.setattr(sc, "scorecard",
-                        lambda t=None, price_overrides=None, force=False:
-                        {"as_of": "x", "results": rows})
+    # The full-universe path PEEKS (scorecard_warm) and never calls the sweep.
+    monkeypatch.setattr(sc, "scorecard_warm",
+                        lambda price_overrides=None: {"as_of": "x", "results": rows})
     monkeypatch.setattr(sc, "split_by_affordability",
                         lambda r, state: (list(r), [], {"active": False}))
     monkeypatch.setattr(log, "load_state", lambda *a, **k: {})
@@ -816,3 +816,123 @@ def test_compaction_materially_shrinks_the_day_file(store):
     inline = len(json.dumps({"candidates": [
         {"symbol": s, "overall_admitted": a, "results": r} for s, a, r in per]}))
     assert compact < inline * 0.5, f"compact={compact} inline={inline}"
+
+
+# ===========================================================================
+# 14. The read paths must never block on the sweep.
+#
+# /api/scan/ready and /api/scan/scorecard used to call scorecard(), which on a
+# cold memo IS the full-universe sweep and holds the `scorecard:full` lock for
+# its duration. The background scan holds that same lock, so a Scan-tab mount
+# during a sweep waited the whole sweep out and the client aborted at 60s. These
+# pin the fix: the read paths peek, and a not-warm peek is reported as PENDING —
+# never as an empty result set.
+# ===========================================================================
+def test_full_universe_reads_never_call_the_sweep(monkeypatch):
+    """The regression. If either endpoint calls scorecard() for the full
+    universe again, this fails — that call is what blocked."""
+    import app as app_module
+    import logging_handler as log
+    from metrics import scorecard as sc
+
+    def _boom(*a, **k):
+        raise AssertionError("read path called the blocking sweep")
+
+    monkeypatch.setattr(sc, "scorecard", _boom)
+    monkeypatch.setattr(sc, "scorecard_warm", lambda price_overrides=None: None)
+    monkeypatch.setattr(log, "load_state", lambda *a, **k: {})
+    client = app_module.app.test_client()
+    for path in ("/api/scan/scorecard", "/api/scan/ready"):
+        res = client.get(path)
+        assert res.status_code == 200, path
+        assert res.get_json()["scan_pending"] is True, path
+
+
+def test_pending_is_never_rendered_as_an_empty_result(monkeypatch):
+    """"The sweep has not finished" and "the gate admitted nobody" are different
+    facts. The payload must carry an explicit marker, not just empty lists."""
+    import app as app_module
+    import logging_handler as log
+    from metrics import scorecard as sc
+
+    monkeypatch.setattr(sc, "scorecard_warm", lambda price_overrides=None: None)
+    monkeypatch.setattr(log, "load_state", lambda *a, **k: {})
+    body = app_module.app.test_client().get("/api/scan/ready").get_json()
+    assert body["scan_pending"] is True
+    assert body["ready"] == [] and body["near_misses"] == []
+    assert "running" in body            # so the client can say WHY it is pending
+
+
+def test_an_explicit_ticker_subset_still_computes_fresh(monkeypatch):
+    """Only the full-universe path peeks. A named subset is cheap and must keep
+    computing, or per-ticker inspection would silently go stale."""
+    import app as app_module
+    import logging_handler as log
+    from metrics import scorecard as sc
+
+    seen = {}
+
+    def _fake_scorecard(t=None, **k):
+        seen["tickers"] = t
+        return {"as_of": "x", "results": [{"ticker": "AAA", "sector": "XLK"}]}
+
+    monkeypatch.setattr(sc, "scorecard", _fake_scorecard)
+    monkeypatch.setattr(sc, "scorecard_warm",
+                        lambda price_overrides=None: (_ for _ in ()).throw(
+                            AssertionError("subset must not peek")))
+    monkeypatch.setattr(sc, "split_by_affordability",
+                        lambda r, state: (list(r), [], {"active": False}))
+    monkeypatch.setattr(log, "load_state", lambda *a, **k: {})
+    body = app_module.app.test_client().get("/api/scan/scorecard?tickers=AAA").get_json()
+    assert body["results"][0]["ticker"] == "AAA"
+    assert seen["tickers"] == ["AAA"]
+
+
+def test_scorecard_warm_prefers_the_memo_then_the_disk_cache(monkeypatch):
+    """Memo first (hot process), then the day's disk cache (survives a restart —
+    which the memo does not, and a restart is exactly when this matters)."""
+    import screening
+    from metrics import scorecard as sc
+
+    monkeypatch.setattr(screening, "peek_cached", lambda k, max_age=None: {"src": "memo"})
+    assert sc.scorecard_warm()["src"] == "memo"
+
+    monkeypatch.setattr(screening, "peek_cached", lambda k, max_age=None: None)
+    monkeypatch.setattr(sc, "_current_regime_color", lambda: "green")
+    import scan_cache
+    monkeypatch.setattr(scan_cache, "reusable",
+                        lambda names, color, now=None: {
+                            "complete": True, "result": {"src": "disk", "results": [1]}})
+    assert sc.scorecard_warm()["src"] == "disk"
+
+
+def test_scorecard_warm_refuses_a_partial_disk_hit(monkeypatch):
+    """A partial universe silently rendered as the whole one is the quiet kind of
+    wrong this dashboard must never show. Incomplete -> not warm."""
+    import scan_cache
+    import screening
+    from metrics import scorecard as sc
+
+    monkeypatch.setattr(screening, "peek_cached", lambda k, max_age=None: None)
+    monkeypatch.setattr(sc, "_current_regime_color", lambda: "green")
+    monkeypatch.setattr(scan_cache, "reusable",
+                        lambda names, color, now=None: {
+                            "complete": False, "result": {"results": [1]}})
+    assert sc.scorecard_warm() is None
+
+
+def test_scorecard_warm_never_raises_into_a_read_path(monkeypatch):
+    import screening
+    from metrics import scorecard as sc
+
+    monkeypatch.setattr(screening, "peek_cached", lambda k, max_age=None: None)
+    monkeypatch.setattr(sc, "_current_regime_color",
+                        lambda: (_ for _ in ()).throw(RuntimeError("no VIX")))
+    assert sc.scorecard_warm() is None
+
+
+def test_a_price_override_request_is_never_served_from_a_peek():
+    """Overrides exist to get CURRENT numbers; serving a cached sweep for one
+    would answer a different question than the caller asked."""
+    from metrics import scorecard as sc
+    assert sc.scorecard_warm({"AAA": 1.0}) is None

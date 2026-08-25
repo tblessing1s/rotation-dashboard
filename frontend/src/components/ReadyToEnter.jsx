@@ -21,8 +21,15 @@ function reasonList(l5) {
   return (l5?.blocking_failures || []).map((id) => REASON_LABELS[id] || id).join(", ");
 }
 
-export default function ReadyToEnter({ onSelectStock, refreshKey }) {
-  const { data, error, loading, reload } = useApi(api.scanReady, [refreshKey], null);
+export default function ReadyToEnter({ onSelectStock, refreshKey, scanRunning }) {
+  // Hold the fetch while a full-universe sweep is in flight. This panel reads the
+  // heaviest sweep in the app; mounting alongside the scan it had just triggered
+  // meant queuing behind that scan's own lock for its entire duration, which the
+  // client then aborted at 60s ("the server is taking too long"). ScanProgress
+  // bumps `refreshKey` when the sweep lands, so the data arrives on its own.
+  const { data, error, loading, reload } = useApi(
+    () => (scanRunning ? Promise.resolve(null) : api.scanReady()),
+    [refreshKey, scanRunning], null);
   const [showMisses, setShowMisses] = React.useState(false);
   // Which tickers are mid live-scan — the tiered poller doesn't quote off-deck
   // names, so a stale row can force its own live quote+bars pull and re-scan.
@@ -49,6 +56,17 @@ export default function ReadyToEnter({ onSelectStock, refreshKey }) {
 
   if (loading && !data) return <Card title="Ready to Enter"><Loading label="Scanning the universe…" /></Card>;
   if (error) return <Card title="Ready to Enter"><ErrorState error={error} onRetry={reload} /></Card>;
+  // A sweep in flight, or one whose results are not warm yet. Rendered as its own
+  // state and never as an empty shortlist: "the scan has not finished" and "the
+  // gate admitted nobody" are different facts, and showing the first as the
+  // second would read as a verdict the gate never reached.
+  if (scanRunning || !data || data.scan_pending) {
+    return (
+      <Card title="Ready to Enter">
+        <Loading label="Scanning the universe… results appear when the sweep lands." />
+      </Card>
+    );
+  }
 
   const ready = data?.ready || [];
   const misses = data?.near_misses || [];
