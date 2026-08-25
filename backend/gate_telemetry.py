@@ -118,7 +118,7 @@ _lock = threading.RLock()
 #   2 — COMPACTED. The repeated gate_id / level / authority / label / direction
 #       (and threshold, where it is constant across the run) are hoisted into a
 #       per-run `gates` MANIFEST, and each candidate's results become a
-#       positional row against it. ~60% smaller on disk for identical
+#       positional row against it. Measured ~86% smaller on disk for identical
 #       information; `decoded_candidates` / `events` reconstruct the schema-1
 #       typed shape, and both schemas are read transparently.
 SCHEMA_VERSION = 2
