@@ -72,6 +72,22 @@ export const api = {
   // SHADOW income-floor pass/fail tallies per profile. Read-only telemetry.
   scanRejectionStats: (window) =>
     request(`/api/scan/rejection-stats${window ? `?window=${window}` : ""}`),
+  // Gate rejection telemetry — the per-gate calibration rollup (sole-blocker
+  // rate, co-block matrix, near-miss distribution). Read-only diagnostics; never
+  // pools across gate rulesets.
+  gateTelemetry: ({ days, ruleset, symbols } = {}) => {
+    const q = new URLSearchParams();
+    if (days) {
+      const end = new Date();
+      const start = new Date(end.getTime() - (days - 1) * 86400000);
+      q.set("start", start.toISOString().slice(0, 10));
+      q.set("end", end.toISOString().slice(0, 10));
+    }
+    if (ruleset) q.set("ruleset", ruleset);
+    if (symbols) q.set("symbols", symbols);
+    const qs = q.toString();
+    return request(`/api/scan/gate-telemetry${qs ? `?${qs}` : ""}`);
+  },
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
   // they can clear the STALE_BLOCKS_GO gate on the next scan.
   refreshReadyQuote: (tickers) =>

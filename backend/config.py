@@ -298,6 +298,34 @@ SYMBOL_GENIUS_HISTORY_DAYS = 90  # PROPOSED_DEFAULT — ~1 quarter of trading da
 # calibration dataset. Derived telemetry, append-only, never in state.json.
 SCAN_REJECTION_LOG_DAYS = 180    # PROPOSED_DEFAULT — ~2 quarters of trading days
 
+# ---- Gate rejection telemetry (read-only observability) --------------------
+# TRAVIS_EXTENSION. The per-candidate, per-gate evaluation record that makes the
+# SOLE-BLOCKER RATE computable: for each gate, the fraction of evaluated
+# candidates where that gate was the ONLY veto-authority failure. A gate with a
+# high block rate but a low sole-blocker rate is co-firing with genuinely bad
+# setups; a gate with a high sole-blocker rate is the binding constraint on the
+# whole system.
+#
+# Everything below is a DIAGNOSTIC INSTRUMENT. Nothing here blocks, ranks, sizes
+# or reorders anything, and no constant here is a HARD_CFM_RULE — none of it
+# derives from the Yegge source material. Loosening decisions, if any, are a
+# separate reviewed change made after this data accumulates.
+#
+# Days of per-day gate-evaluation files retained (DATA_DIR/gate_telemetry/).
+# Larger than the default lookback so a 90-day view always has a full window and
+# the weekly time series has history behind it.
+GATE_TELEMETRY_RETENTION_DAYS = 120      # PROPOSED_DEFAULT
+# Default lookback for the calibration view when the caller names no range.
+GATE_TELEMETRY_LOOKBACK_DAYS = 90        # PROPOSED_DEFAULT
+# Near-miss buckets: how far PAST its threshold a failing gate's value sat, as a
+# fraction of the threshold (0.05 = failed by 5% of the threshold). Ascending,
+# open-ended above the last edge. Only meaningful for numeric gates, over
+# FAILURES only.
+GATE_TELEMETRY_NEAR_MISS_BUCKETS = (0.01, 0.05, 0.10, 0.25, 0.50, 1.00)  # PROPOSED_DEFAULT
+# Below this many evaluated candidates in range, the view shows a low-confidence
+# warning: a rate over three scans is not a rate. ~1 full universe sweep.
+GATE_TELEMETRY_MIN_EVALUATED_N = 500     # PROPOSED_DEFAULT
+
 # ---- Entry-gate ruleset (shadow-first recalibration) -----------------------
 # The gate recalibration ships SHADOW-FIRST: both rulesets are computed on every
 # scan and their divergence is logged, but only ONE carries blocking authority.

@@ -146,7 +146,15 @@ def api_scorecard():
         keep, priced_out, bar = scorecard_metrics.split_by_affordability(
             list(out.get("results") or []), log.load_state())
         out["affordability"] = bar
-        out["results"] = (keep + priced_out) if include_unaffordable else keep
+        shown = (keep + priced_out) if include_unaffordable else keep
+        # `gate_results` (the per-gate calibration telemetry) rides on the sweep
+        # row for the nightly recorder, which reads the sweep directly. Nothing on
+        # this response consumes it and it is ~2 KB per row — ~1 MB across a full
+        # universe — so it is dropped at the API boundary rather than shipped to
+        # every Scan tab mount. The calibration view reads the aggregated rollup
+        # from /api/scan/gate-telemetry instead.
+        out["results"] = [{k: v for k, v in r.items() if k != "gate_results"}
+                          for r in shown]
         out["priced_out_tickers"] = [r["ticker"] for r in priced_out]
         return jsonify(out)
     except Exception as e:  # noqa: BLE001
@@ -929,6 +937,38 @@ def api_scan_rejection_stats():
         import scan_rejection_log
         window = int(request.args.get("window") or 0) or None
         return jsonify(scan_rejection_log.summary(window=window))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/scan/gate-telemetry")
+def api_scan_gate_telemetry():
+    """Gate rejection telemetry — the calibration rollup over the per-candidate,
+    per-gate evaluation record (gate_telemetry).
+
+    The headline metric is SOLE-BLOCKER RATE: for each gate, the fraction of
+    evaluated candidates where that gate failed and every OTHER veto-authority
+    gate passed. A high block rate with a low sole-blocker rate means the gate
+    co-fires with genuinely bad setups; a high sole-blocker rate means the gate is
+    the binding constraint on the whole system.
+
+    READ-ONLY. This endpoint grants no authority, changes no threshold and
+    touches no gate. Optional ?start=/?end= (ISO dates, default the last
+    GATE_TELEMETRY_LOOKBACK_DAYS days), ?ruleset= (never pools across rulesets —
+    an unfiltered range containing more than one returns the counts and no table)
+    and ?symbols= (comma-separated universe filter). Empty until the nightly
+    sweep has recorded a scan; absence of history is reported as absence, never
+    backfilled."""
+    try:
+        import gate_telemetry
+        start = (request.args.get("start") or "").strip() or None
+        end = (request.args.get("end") or "").strip() or None
+        ruleset = (request.args.get("ruleset") or "").strip() or None
+        raw = request.args.get("symbols")
+        symbols = [t.strip() for t in raw.split(",") if t.strip()] if raw else None
+        return jsonify(gate_telemetry.aggregate(start=start, end=end,
+                                                gate_ruleset=ruleset,
+                                                symbols=symbols))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

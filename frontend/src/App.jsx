@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "./api.js";
 import { ErrorBoundary } from "./components/ui.jsx";
 import Navbar from "./components/Navbar.jsx";
+import GateTelemetry from "./components/GateTelemetry.jsx";
 import Login from "./components/Login.jsx";
 import SchwabStatus from "./components/SchwabStatus.jsx";
 import Scorecard from "./components/Scorecard.jsx";
@@ -14,7 +15,11 @@ import Overview from "./components/Overview.jsx";
 import SettingsTab from "./components/SettingsTab.jsx";
 import PayoutsTab from "./components/PayoutsTab.jsx";
 
-const TABS = ["Overview", "Scan", "Positions", "History", "Payouts", "Settings"];
+// "Calibration" is a DIAGNOSTIC surface, deliberately its own tab and
+// deliberately off the daily monitoring path (Overview / Scan): the gate
+// rejection telemetry must be reached on purpose, never encountered while
+// deciding an entry, where it could subtly pressure the decision.
+const TABS = ["Overview", "Scan", "Positions", "History", "Payouts", "Calibration", "Settings"];
 
 export default function App() {
   const [tab, setTab] = React.useState("Overview");
@@ -249,6 +254,7 @@ export default function App() {
             )}
             {tab === "History" && <HistoryTab key={execNonce} />}
             {tab === "Payouts" && <PayoutsTab key={execNonce} />}
+            {tab === "Calibration" && <GateTelemetry />}
             {tab === "Settings" && (
               <SettingsTab demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo}
                            posture={posture} postureBusy={postureBusy}
