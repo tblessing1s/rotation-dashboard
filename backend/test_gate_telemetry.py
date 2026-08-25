@@ -505,11 +505,10 @@ def test_authority_is_read_from_the_record_not_live_config(store, monkeypatch):
     rows = [_row("AAA", _gate(), floor={"pass": False, "measured_pct": 0.1,
                                         "floor_pct": 0.75, "basis": "juice"})]
     gt.record_scan(rows, scan_id="r", day="2026-08-10", ruleset="legacy")
-    # Flip the world: pretend the floor graduated to veto authority today.
+    # The authority lives on the RUN's own manifest, written at record time.
     stored = json.loads((store / "2026-08-10.json").read_text())
-    rec = [r for r in stored["runs"][0]["candidates"][0]["results"]
-           if r["gate_id"] == "shadow:income_floor"][0]
-    assert rec["authority"] == gt.SHADOW
+    manifest = {g["gate_id"]: g for g in stored["runs"][0]["gates"]}
+    assert manifest["shadow:income_floor"]["authority"] == gt.SHADOW
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
     g = {r["gate_id"]: r for r in agg["gates"]}
     assert g["shadow:income_floor"]["authority"] == gt.SHADOW
@@ -671,3 +670,149 @@ def test_scorecard_response_does_not_ship_the_telemetry_payload(monkeypatch):
     assert "gate_results" not in body["results"][0]
     # ...and the sweep row itself still carries it for the recorder.
     assert "gate_results" in rows[0]
+
+
+# ===========================================================================
+# 13. Wire codec (schema 2) — the compaction must be lossless.
+# ===========================================================================
+def _round_trip(per_candidate):
+    gates, rows = gt._encode_run(per_candidate)
+    run = {"gates": gates, "candidates": rows, "schema_version": 2}
+    return list(gt.decoded_candidates(run))
+
+
+def test_codec_round_trip_is_lossless():
+    """Compaction is a STORAGE change, not an information change: decoding must
+    reproduce the typed results exactly, field for field."""
+    src = [("AAA", True, gt.build_results(_gate(), {})),
+           ("BBB", False, gt.build_results(_gate(extension=2.0, rs1m=-0.4), {}))]
+    out = _round_trip(src)
+    assert [(s, a) for s, a, _ in out] == [("AAA", True), ("BBB", False)]
+    for (_sym, _adm, original), (_s2, _a2, decoded) in zip(src, out):
+        assert {r["gate_id"] for r in decoded} == {r["gate_id"] for r in original}
+        by_orig = {r["gate_id"]: r for r in original}
+        for r in decoded:
+            o = by_orig[r["gate_id"]]
+            for k in ("level", "authority", "label", "passed", "value",
+                      "threshold", "direction"):
+                assert r[k] == o[k], f"{r['gate_id']}.{k}: {r[k]!r} != {o[k]!r}"
+
+
+def test_constant_thresholds_are_hoisted_and_varying_ones_stay_on_the_cell():
+    """The whole saving: a config-constant threshold is written once per run. A
+    per-name bar (close_below_ma200's is that name's MA200) cannot be, so it
+    stays on the cell and the manifest says so."""
+    gates, rows = gt._encode_run([
+        ("AAA", True, gt.build_results(_gate(close=100.0, ma200=90.0), {})),
+        ("BBB", True, gt.build_results(_gate(close=200.0, ma200=150.0), {})),
+    ])
+    m = {g["gate_id"]: g for g in gates}
+    # Constant across the run -> hoisted, cells are 2-element.
+    assert m["L4:extension"]["threshold"] == config.SPOT_ATR_EXTENSION_MAX
+    assert m["L4:extension"]["threshold_varies"] is False
+    # Per-candidate -> manifest carries none, every cell carries its own.
+    assert m["L3:veto:close_below_ma200"]["threshold"] is None
+    assert m["L3:veto:close_below_ma200"]["threshold_varies"] is True
+    i = [g["gate_id"] for g in gates].index("L3:veto:close_below_ma200")
+    assert rows[0]["r"][i][2] == 90.0 and rows[1]["r"][i][2] == 150.0
+    # ...and it decodes back to the right per-candidate bar.
+    decoded = dict((s, {r["gate_id"]: r for r in res})
+                   for s, _a, res in gt.decoded_candidates(
+                       {"gates": gates, "candidates": rows}))
+    assert decoded["AAA"]["L3:veto:close_below_ma200"]["threshold"] == 90.0
+    assert decoded["BBB"]["L3:veto:close_below_ma200"]["threshold"] == 150.0
+
+
+def test_heterogeneous_gate_sets_align_via_null_cells():
+    """A run whose candidates carry different gate sets must still align: the
+    manifest is the union, and an absent gate is a null cell — distinct from a
+    present gate that produced no verdict."""
+    with_floor = gt.build_results(_gate(), {"shadow_floor": {
+        "pass": False, "measured_pct": 0.1, "floor_pct": 0.75, "basis": "juice"}})
+    without = gt.build_results(_gate(), {})
+    assert len(with_floor) == len(without) + 1
+    gates, rows = gt._encode_run([("AAA", True, with_floor), ("BBB", True, without)])
+    i = [g["gate_id"] for g in gates].index("shadow:income_floor")
+    assert rows[0]["r"][i] is not None
+    assert rows[1]["r"][i] is None                 # ABSENT, not "no verdict"
+    out = {s: {r["gate_id"] for r in res} for s, _a, res in gt.decoded_candidates(
+        {"gates": gates, "candidates": rows})}
+    assert "shadow:income_floor" in out["AAA"]
+    assert "shadow:income_floor" not in out["BBB"]
+
+
+def test_absent_gate_is_distinct_from_a_gate_with_no_verdict():
+    """`null` cell = the gate was not emitted for this candidate. `[null, value]`
+    = it was emitted and produced no verdict. Conflating them would let an
+    unevaluated veto silently become an absent one, and sole-blocker attribution
+    depends on the difference."""
+    results = gt.build_results(_gate(), {})
+    results.append({"gate_id": "Z:no_verdict", "level": 4, "authority": gt.VETO,
+                    "label": "z", "passed": None, "value": 1.0,
+                    "threshold": 2.0, "direction": gt.LOWER})
+    gates, rows = gt._encode_run([("AAA", True, results), ("BBB", True,
+                                                           gt.build_results(_gate(), {}))])
+    i = [g["gate_id"] for g in gates].index("Z:no_verdict")
+    assert rows[0]["r"][i] == [None, 1.0]          # present, no verdict
+    assert rows[1]["r"][i] is None                 # absent
+    dec = dict((s, {r["gate_id"]: r for r in res})
+               for s, _a, res in gt.decoded_candidates(
+                   {"gates": gates, "candidates": rows}))
+    assert dec["AAA"]["Z:no_verdict"]["passed"] is None
+    assert "Z:no_verdict" not in dec["BBB"]
+
+
+def test_schema_1_runs_are_still_read_transparently(store):
+    """Runs written before the compaction carry typed dicts inline and no
+    manifest. They must keep aggregating, not error — a store spanning the change
+    reads as one series."""
+    results = gt.build_results(_gate(extension=2.0), {})
+    legacy_run = {
+        "scan_run_id": "old", "evaluated_at": "2026-08-10T02:00:00Z",
+        "gate_ruleset": "legacy", "schema_version": 1,
+        "unevaluated_gates": gt.unevaluated_gates(),
+        "candidates": [{"symbol": "AAA", "overall_admitted": False,
+                        "results": results}],
+    }
+    os.makedirs(str(store), exist_ok=True)
+    with open(os.path.join(str(store), "2026-08-10.json"), "w") as fh:
+        json.dump({"date": "2026-08-10", "schema": 1, "runs": [legacy_run]}, fh)
+    # ...and a schema-2 run alongside it.
+    gt.record_scan([_row("BBB", _gate(extension=3.0))], scan_id="new",
+                   day="2026-08-11", ruleset="legacy")
+
+    agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
+    assert agg["evaluated_n"] == 2
+    g = {r["gate_id"]: r for r in agg["gates"]}
+    assert g["L4:extension"]["failed_n"] == 2
+    assert g["L4:extension"]["sole_blocker_rate"] == 1.0
+
+
+def test_events_yields_the_typed_event_shape(store):
+    """The typed event is the contract; the positional packing is an
+    implementation detail of the store."""
+    gt.record_scan([_row("AAA", _gate(extension=2.0))], scan_id="run-1",
+                   day="2026-08-10", ruleset="legacy")
+    evs = list(gt.events(start="2026-08-01", end="2026-08-31"))
+    assert len(evs) == 1
+    e = evs[0]
+    assert set(e) == {"scan_run_id", "evaluated_at", "symbol", "gate_ruleset",
+                      "results", "overall_admitted", "schema_version"}
+    assert e["symbol"] == "AAA" and e["gate_ruleset"] == "legacy"
+    assert e["overall_admitted"] is False
+    assert e["schema_version"] == gt.SCHEMA_VERSION
+    r = {x["gate_id"]: x for x in e["results"]}["L4:extension"]
+    assert r["authority"] == gt.VETO and r["passed"] is False
+    assert r["threshold"] == config.SPOT_ATR_EXTENSION_MAX
+
+
+def test_compaction_materially_shrinks_the_day_file(store):
+    """The point of schema 2. Encoded against the same results, the compact form
+    must be well under half the inline-typed form."""
+    per = [(f"S{i:03d}", False, gt.build_results(_gate(extension=2.0), {}))
+           for i in range(200)]
+    gates, rows = gt._encode_run(per)
+    compact = len(json.dumps({"gates": gates, "candidates": rows}))
+    inline = len(json.dumps({"candidates": [
+        {"symbol": s, "overall_admitted": a, "results": r} for s, a, r in per]}))
+    assert compact < inline * 0.5, f"compact={compact} inline={inline}"

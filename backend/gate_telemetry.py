@@ -32,20 +32,40 @@ STORAGE — one file per scan DAY
 -------------------------------
 ``DATA_DIR/gate_telemetry_log/YYYY-MM-DD.json``, append-only within a day, one
 object per scan RUN. Deliberately NOT the single-JSON shape its siblings
-(``scan_rejection_log``, ``juice_capacity``) use. Measured at the current
-universe: 522 candidates x 12 gates = ~1.16 MB per run, one run/day, so ~0.42
-GB/yr and ~139 MB at the 120-day retention window. In a single file every
-nightly append would load, re-serialize and rewrite all 139 MB — several seconds
-and a multi-hundred-MB peak on a small machine, every night, to add one day.
-Per-day files keep each write proportional to ONE day (~1.16 MB) and let a range
-read stream day by day without ever holding the window in memory. Retention is a
-file unlink (``prune``), not a rewrite.
+(``scan_rejection_log``, ``juice_capacity``) use: in a single file every nightly
+append would load, re-serialize and rewrite the entire retention window, every
+night, to add one day. Per-day files keep each write proportional to ONE day and
+let a range read stream day by day without ever holding the window in memory.
+Retention is a file unlink (``prune``), not a rewrite.
 
-If the window still proves too large, the bounded alternative is to hoist the
-repeated ``gate_id``/``authority``/``threshold`` into the per-run manifest and
-store per-candidate results positionally — roughly a 60% cut. That is a
-deliberate readability trade and is NOT taken here; the current shape stays
-greppable and self-describing.
+COMPACTED (schema 2). The gate identity — ``gate_id``, ``level``, ``authority``,
+``label``, ``direction``, and ``threshold`` where it is constant across the run —
+is written ONCE per run in the ``gates`` manifest, and each candidate's results
+are a POSITIONAL row against it:
+
+    gates:      [ {gate_id: "L4:extension", authority: "veto", threshold: 1.5,
+                   direction: "lower", ...}, ... ]          # once per run
+    candidates: [ {s: "GDDY", a: 0, r: [[1, 2.71], [0, 1.94], null, ...]} ]
+
+Each cell is ``[passed, value]``, or ``[passed, value, threshold]`` for a gate
+whose threshold varies per candidate (``L3:veto:close_below_ma200``, whose bar IS
+that name's MA200). A ``null`` cell means the gate was ABSENT for that candidate
+— distinct from a present gate that produced no verdict, which is
+``[null, value]``. The manifest is the UNION of gates seen across the run, in
+canonical (level, gate_id) order, so a run whose candidates carry different gate
+sets still aligns.
+
+Measured at the current 522-name universe, on high-entropy values (real
+indicator floats, not round test numbers): **~0.16 MB per run**, one run/day —
+~0.06 GB/yr and **~20 MB at the 120-day retention window**, against ~1.23 MB/run
+and ~147 MB for the same information written inline. An 86% cut, and retention
+is now cheap enough that widening the window is a config edit rather than a
+capacity decision (180 days is ~30 MB).
+
+Nothing reads the positional form directly. ``decoded_candidates`` and ``events``
+reconstruct the fully-typed schema-1 shape, so the aggregation, the endpoint and
+every test work against typed results and never against array offsets. Schema-1
+runs written before the compaction are still read transparently.
 
 Never in ``state.json``; never rebuilt by ``recompute_derived`` (which keys off
 the executions ledger). Absence of history is a FACT the reader reports, never a
@@ -93,9 +113,15 @@ _lock = threading.RLock()
 # changes fields, so a calibration pass can tell which rows carry which columns
 # rather than inferring from absence (the discipline scan_rejection_log sets).
 #   1 — initial: per-candidate results for the L1-L4 veto stack + the shadow
-#       income floor, with per-run gate manifest (authority + threshold at write
-#       time) and the Level-5 unevaluated-gate registry.
-SCHEMA_VERSION = 1
+#       income floor, as fully-typed dicts inline on every candidate, plus the
+#       Level-5 unevaluated-gate registry.
+#   2 — COMPACTED. The repeated gate_id / level / authority / label / direction
+#       (and threshold, where it is constant across the run) are hoisted into a
+#       per-run `gates` MANIFEST, and each candidate's results become a
+#       positional row against it. ~60% smaller on disk for identical
+#       information; `decoded_candidates` / `events` reconstruct the schema-1
+#       typed shape, and both schemas are read transparently.
+SCHEMA_VERSION = 2
 
 # Authority vocabulary. `veto` gates are the ONLY ones counted in the
 # "every other gate passed" test that defines the sole-blocker rate — a shadow
@@ -370,6 +396,142 @@ def admitted(results: list[dict]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Wire codec (schema 2) — a per-run gate MANIFEST plus positional candidate rows.
+#
+# The gate identity repeats identically for every candidate in a run, so writing
+# it ~520 times per file was most of the store. Hoisting it cuts the day file by
+# ~60% for byte-identical information. Nothing downstream sees the positional
+# form: `decoded_candidates` reconstructs the typed schema-1 result dicts, so the
+# aggregation and every test work against names, never offsets.
+#
+# Authority still travels ON THE RECORD — it just lives in the run's own manifest
+# instead of being repeated per candidate, which satisfies the same requirement:
+# a gate that graduates out of shadow mode cannot rewrite the runs recorded while
+# it had none, because each run carries the authority in force when it was
+# written.
+# ---------------------------------------------------------------------------
+def _level_key(level) -> float:
+    """Sort key for a gate level (1, 2, 3, 3.5, 4, 5 — or None, which sorts last)."""
+    try:
+        return float(level)
+    except (TypeError, ValueError):
+        return 99.0
+
+
+def _encode_run(per_candidate: list[tuple]) -> tuple[list[dict], list[dict]]:
+    """(gates manifest, positional candidate rows) for one run.
+
+    ``per_candidate`` is [(symbol, admitted, results)]. The manifest is the UNION
+    of gate ids across the run in canonical (level, gate_id) order, so candidates
+    carrying different gate sets still align — a candidate simply has a ``null``
+    cell where a gate was absent for it.
+    """
+    meta: dict[str, dict] = {}
+    seen_thresholds: dict[str, list] = {}
+    for _sym, _adm, results in per_candidate:
+        for r in results:
+            gid = r.get("gate_id")
+            if not gid:
+                continue
+            if gid not in meta:
+                meta[gid] = {"gate_id": gid, "level": r.get("level"),
+                             "authority": r.get("authority"),
+                             "label": r.get("label") or gid,
+                             "direction": r.get("direction")}
+            seen_thresholds.setdefault(gid, []).append(r.get("threshold"))
+
+    order = sorted(meta, key=lambda g: (_level_key(meta[g]["level"]), g))
+    gates: list[dict] = []
+    varies: dict[str, bool] = {}
+    for gid in order:
+        vals = seen_thresholds[gid]
+        first = vals[0]
+        # A threshold that is the same for every candidate (a config constant)
+        # lives in the manifest; one that is per-name (close_below_ma200's bar IS
+        # that name's MA200) stays on the cell.
+        constant = all(v == first for v in vals)
+        varies[gid] = not constant
+        gates.append({**meta[gid],
+                      "threshold": first if constant else None,
+                      "threshold_varies": not constant})
+
+    idx = {gid: i for i, gid in enumerate(order)}
+    rows: list[dict] = []
+    for symbol, adm, results in per_candidate:
+        cells: list = [None] * len(order)
+        for r in results:
+            gid = r.get("gate_id")
+            i = idx.get(gid)
+            if i is None:
+                continue
+            passed = r.get("passed")
+            cell = [None if passed is None else (1 if passed else 0), r.get("value")]
+            if varies[gid]:
+                cell.append(r.get("threshold"))
+            cells[i] = cell
+        rows.append({"s": symbol, "a": 1 if adm else 0, "r": cells})
+    return gates, rows
+
+
+def decoded_candidates(run: dict):
+    """Stream (symbol, overall_admitted, results) for one run, results as fully
+    typed dicts — the schema-1 shape, whichever schema is on disk.
+
+    This is the ONLY place the positional encoding is understood. Schema-1 runs
+    (typed dicts inline, written before the compaction) are yielded unchanged, so
+    a store spanning the change reads cleanly rather than erroring.
+    """
+    gates = run.get("gates")
+    if gates is None:                       # schema 1 — typed dicts inline
+        for c in run.get("candidates") or []:
+            yield (c.get("symbol"), bool(c.get("overall_admitted")),
+                   list(c.get("results") or []))
+        return
+    for c in run.get("candidates") or []:
+        cells = c.get("r") or []
+        results = []
+        for i, g in enumerate(gates):
+            cell = cells[i] if i < len(cells) else None
+            if cell is None:
+                continue                    # gate ABSENT for this candidate
+            passed = cell[0] if cell else None
+            results.append({
+                "gate_id": g.get("gate_id"),
+                "level": g.get("level"),
+                "authority": g.get("authority"),
+                "label": g.get("label") or g.get("gate_id"),
+                "passed": None if passed is None else bool(passed),
+                "value": cell[1] if len(cell) > 1 else None,
+                # A per-candidate threshold wins; otherwise the run's constant.
+                "threshold": cell[2] if len(cell) > 2 else g.get("threshold"),
+                "direction": g.get("direction"),
+            })
+        yield c.get("s"), bool(c.get("a")), results
+
+
+def events(start: str | None = None, end: str | None = None,
+           gate_ruleset: str | None = None):
+    """Stream the fully-typed gate-evaluation EVENT per candidate per scan —
+    ``{scan_run_id, evaluated_at, symbol, gate_ruleset, results, overall_admitted,
+    schema_version}`` — regardless of how it is packed on disk.
+
+    The typed event is the contract; the positional encoding is an implementation
+    detail of the store. Exposed for offline calibration work that wants the raw
+    stream rather than the rollup."""
+    for _day, run in iter_runs(start, end, gate_ruleset):
+        for symbol, adm, results in decoded_candidates(run):
+            yield {
+                "scan_run_id": run.get("scan_run_id"),
+                "evaluated_at": run.get("evaluated_at"),
+                "symbol": symbol,
+                "gate_ruleset": run.get("gate_ruleset"),
+                "results": results,
+                "overall_admitted": adm,
+                "schema_version": run.get("schema_version"),
+            }
+
+
+# ---------------------------------------------------------------------------
 # Storage — one file per scan DAY, one object per scan RUN inside it.
 # ---------------------------------------------------------------------------
 def _day_path(day: str) -> str:
@@ -475,24 +637,25 @@ def record_scan(rows: list[dict], scan_id: str | None = None,
         scan_id = scan_id or datetime.now(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ")
         ruleset = ruleset or config.GATE_RULESET
-        candidates = []
+        per_candidate = []
         for row in rows or []:
             ticker = (row.get("ticker") or "").upper()
             results = row.get("gate_results")
             if not ticker or not results:
                 continue
-            candidates.append({
-                "symbol": ticker,
-                "overall_admitted": admitted(results),
-                "results": results,
-            })
+            per_candidate.append((ticker, admitted(results), results))
+        gates, candidates = _encode_run(per_candidate)
         run = {
             "scan_run_id": scan_id,
             "evaluated_at": _now_iso(),
             "gate_ruleset": ruleset,
             "schema_version": SCHEMA_VERSION,
+            # The gate manifest: identity, authority and (where constant) the
+            # threshold in force AT WRITE TIME, written once for the whole run.
+            # Carried on the record, never looked up at read time.
+            "gates": gates,
             # Authority in force AT WRITE TIME for the gates that never run in a
-            # sweep — carried on the run, never looked up at read time.
+            # sweep — same discipline.
             "unevaluated_gates": unevaluated_gates(),
             "candidates": candidates,
         }
@@ -680,13 +843,14 @@ def aggregate(start: str | None = None, end: str | None = None,
             elif gid and unevaluated[gid].get("authority") != g.get("authority"):
                 unevaluated[gid]["authority_changed_in_range"] = True
 
-        for cand in run.get("candidates") or []:
-            if universe is not None and cand.get("symbol") not in universe:
+        # Decoded to the typed schema-1 shape here, so everything below works
+        # against gate NAMES and never against the store's array offsets.
+        for symbol, cand_admitted, results in decoded_candidates(run):
+            if universe is not None and symbol not in universe:
                 continue
             evaluated_n += 1
-            if cand.get("overall_admitted"):
+            if cand_admitted:
                 admitted_n += 1
-            results = cand.get("results") or []
             # The veto subset defines the sole-blocker test. An unevaluated veto
             # (passed is None) is NOT counted as a pass: it makes the candidate
             # unusable for attributing a sole block, which is tracked below.
