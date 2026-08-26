@@ -282,6 +282,24 @@ def delta_coverage(position: dict, price: float | None, q: float = 0.0) -> dict:
     import indicators
     import logging_handler as log
     import position_types
+    # CASH-SECURED PUT: coverage is UNDEFINED, not zero. A put holds no base leg
+    # to cover anything with, so "how many lots does the long cover" is not a
+    # question with a numeric answer — and `covered_lots(0)` would cheerfully
+    # return `coverable_lots: 0`, a confident answer to a question that should not
+    # have been asked. Every field is None and `assessable` is False so a reader
+    # renders N/A rather than a zero that looks like a real reading.
+    if position_types.is_put(position):
+        return {
+            "assessable": False,
+            "not_applicable": True,
+            "reason": "coverage is undefined for a cash-secured put (no base leg)",
+            "position_type": position_types.CASH_SECURED_PUT,
+            "coverable_lots": None, "fragment_shares": None,
+            "short_contracts": None, "min_leg_delta": None,
+            "long_delta": None, "long_contracts": None, "short_delta": None,
+            "floor": None, "floor_breach": None, "inverted": None,
+            "naked_short": None, "status": None,
+        }
     # SHARES base: coverage is a literal covered-LOT count, not a Greek. A shares
     # delta is permanently 1.0, so the LEAP floor/inversion delta checks can never
     # legitimately fire; the real guardrail is floor(shares/100) >= total short
@@ -501,21 +519,61 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
                                     "insufficient": sg["insufficient"], "lights": sg["lights"]}
         except Exception:  # noqa: BLE001 — informational, never block positions
             out["symbol_genius"] = None
+    # ---- Open short puts (schema v22) + the share readouts they make undefined --
+    open_puts = []
+    for sp in position.get("short_puts") or []:
+        leg = dict(sp)
+        strike = float(leg.get("strike") or 0)
+        n = int(leg.get("contracts") or 0)
+        # Intrinsic / extrinsic through the ONE pricing engine. A short put is
+        # in-the-money when spot is BELOW the strike, so intrinsic inverts relative
+        # to a call. ONLY the extrinsic half is income; the intrinsic half is a
+        # share-purchase obligation and must never reach the juice ledger.
+        intrinsic_ps = max(strike - price, 0.0) if price is not None else None
+        mark_ps = _put_mark_per_share(ticker, leg, price)
+        extrinsic_ps = (None if (mark_ps is None or intrinsic_ps is None)
+                        else max(mark_ps - intrinsic_ps, 0.0))
+        leg["intrinsic_per_share"] = (None if intrinsic_ps is None
+                                      else round(intrinsic_ps, 4))
+        leg["extrinsic_per_share"] = (None if extrinsic_ps is None
+                                      else round(extrinsic_ps, 4))
+        leg["mark_per_share"] = None if mark_ps is None else round(mark_ps, 4)
+        leg["itm"] = None if price is None else bool(price < strike)
+        leg["collateral"] = leg.get("collateral") or scan_verdict_put_collateral(strike, n)
+        open_puts.append(leg)
+    out["short_puts"] = open_puts
+    out["put_collateral"] = round(sum(float(l.get("collateral") or 0)
+                                      for l in open_puts), 2) if open_puts else 0.0
+
     shares = dict(position.get("shares") or {})
     count = int(shares.get("count") or 0)
-    cap = int(shares.get("cap") or config.SHARE_CAP)
-    shares["cap"] = cap
-    shares["pct_to_cap"] = round(count / cap * 100, 1) if cap else 0
-    shares["locked"] = count >= cap
-    # Covered-lot capacity (schema v20): floor(count/100) sellable lots + fragment
-    # flag. For a SHARES base this is the coverage guardrail (short count can never
-    # exceed coverable_lots); harmless/informational on a legacy sidecar.
-    shares.update(covered_lots(count))
-    # Accumulation-vs-kill-switch guard (config flag; see can_add_shares).
-    if config.BLOCK_ACCUMULATION_ON_RS_DETERIORATION:
-        blocked, why = _accumulation_block(ticker)
-        shares["accumulation_blocked"] = blocked
-        shares["accumulation_block_reason"] = why
+    if position_types.is_put(position):
+        # SHARE READOUTS ARE UNDEFINED FOR A PUT, NOT ZERO. A put holds no shares
+        # by construction, so cap progress, covered-lot capacity and the
+        # accumulation guard are not "0 of 500" — they are questions that do not
+        # apply until assignment converts the collateral into shares. Rendering
+        # them as zero would show a full-looking meter at 0% and a coverage
+        # guardrail that reads as satisfied.
+        shares.update({
+            "not_applicable": True,
+            "reason": "a cash-secured put holds no shares until assignment",
+            "count": None, "cap": None, "pct_to_cap": None, "locked": None,
+            "coverable_lots": None, "fragment_shares": None, "has_fragment": None,
+        })
+    else:
+        cap = int(shares.get("cap") or config.SHARE_CAP)
+        shares["cap"] = cap
+        shares["pct_to_cap"] = round(count / cap * 100, 1) if cap else 0
+        shares["locked"] = count >= cap
+        # Covered-lot capacity (schema v20): floor(count/100) sellable lots +
+        # fragment flag. For a SHARES base this is the coverage guardrail (short
+        # count can never exceed coverable_lots); harmless on a legacy sidecar.
+        shares.update(covered_lots(count))
+        # Accumulation-vs-kill-switch guard (config flag; see can_add_shares).
+        if config.BLOCK_ACCUMULATION_ON_RS_DETERIORATION:
+            blocked, why = _accumulation_block(ticker)
+            shares["accumulation_blocked"] = blocked
+            shares["accumulation_block_reason"] = why
     out["shares"] = shares
     try:
         out["earnings"] = earnings.next_earnings(ticker)
@@ -548,6 +606,50 @@ def positions_view(state: dict) -> list[dict]:
     return out
 
 
+def scan_verdict_put_collateral(strike, contracts):
+    """``scan_verdict.put_collateral``, imported lazily.
+
+    The formula is NOT restated here. It already exists because the scan's route
+    selector needs it to say what a put would tie up, and one definition with two
+    callers is the only shape in which the advisory figure and the booked figure
+    cannot drift apart."""
+    import scan_verdict
+    return scan_verdict.put_collateral(strike, contracts) or 0.0
+
+
+def _put_mark_per_share(ticker: str, leg: dict, spot) -> float | None:
+    """Model mark for one short-put leg, per share, through the EXISTING BSM
+    engine (``indicators._bs_put_price``). No second pricing path.
+
+    Vol is the name's trailing realized vol from cached bars — the same input
+    ``account_gate.juice_estimate`` prices the weekly short call at — so an open
+    put is valuable off-hours and offline, which is exactly when expiry-day
+    monitoring needs it. Returns None rather than a guess when the frame, the
+    spot or the DTE cannot be resolved; a put whose mark is unknown must read as
+    unknown, never as zero extrinsic.
+    """
+    import data_handler
+    import indicators
+    from datetime import date as _date
+    try:
+        strike = float(leg.get("strike") or 0)
+        if not (spot and strike > 0):
+            return None
+        exp = _date.fromisoformat(str(leg.get("expiration"))[:10])
+        dte = (exp - _date.today()).days
+        if dte < 0:
+            return None
+        df = data_handler.get_daily(ticker)
+        sigma = indicators.hist_vol(df) if df is not None else None
+        if not sigma:
+            return None
+        T = max(dte, 1) / 365.0
+        return indicators._bs_put_price(float(spot), strike, T,
+                                        config.RISK_FREE_RATE, float(sigma) / 100.0)
+    except Exception:  # noqa: BLE001 — a valuation miss reads as unknown, not zero
+        return None
+
+
 def covered_lots(shares_count) -> dict:
     """Covered-call capacity of an owned-share count (schema v20, SHARES base).
 
@@ -564,11 +666,21 @@ def covered_lots(shares_count) -> dict:
 
 
 def position_capital(p: dict) -> float:
-    """Capital deployed in one position: every LEAP leg's cost basis plus any
-    accumulated shares (count x cost basis per share). The buy executions set
-    these on the position, so this is the source of truth."""
+    """Capital deployed in one position: every LEAP leg's cost basis, plus any
+    accumulated shares (count x cost basis per share), plus any open short-put
+    COLLATERAL. The buy/open executions set these on the position, so this is the
+    source of truth.
+
+    COLLATERAL COUNTS AGAINST THE DEPLOYED-CAPITAL CAP (schema v22) and does NOT
+    draw the ATR cash reserve. Those are two separate figures by construction, not
+    by convention: the reserve is a formula over ATR (RESERVE_ATR_MULT x ATR x
+    contracts x 100, see account_gate) and is not computed from deployed capital
+    at all, so adding a term here cannot reach it. Collateral IS the position —
+    it is not a defence of one — which is why it belongs on this side of the line.
+    """
     import logging_handler as log
     total = sum(float(l.get("cost_basis") or 0) for l in log.leap_legs(p))
+    total += sum(float(sp.get("collateral") or 0) for sp in p.get("short_puts") or [])
     shares = p.get("shares") or {}
     count = int(shares.get("count") or 0)
     cps = shares.get("cost_basis_per_share")

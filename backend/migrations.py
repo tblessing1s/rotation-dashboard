@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 21
+CURRENT_VERSION = 22
 
 
 class MigrationAbortedError(RuntimeError):
@@ -361,6 +361,41 @@ def _v20_to_v21(state: dict) -> dict:
     return state
 
 
+def _v21_to_v22(state: dict) -> dict:
+    """v22 (cash-secured put lifecycle, Stage 1 — TRACK): make room for a put.
+
+    PURELY ADDITIVE. Nothing is rewritten, nothing is backfilled, and an old state
+    file loads through this unchanged — there are no puts in any existing book, so
+    there is nothing to convert. The migration exists so a reader on a v21 store
+    never key-errors on the new containers, and so the schema version records WHEN
+    the app became able to represent a put.
+
+    Two seeds:
+
+    - ``short_puts`` on every open position: the per-position list of open short
+      put legs, mirroring ``short_calls``. Seeded EMPTY on every position
+      including legacy ones, because "this position has no puts" is true of all of
+      them and an absent key would make a reader guess.
+    - ``put_ledger``: the DERIVED per-ticker roll-up of open collateral and
+      realized put premium, rebuilt from the executions by
+      ``recompute_derived`` exactly like the theta / payback / accrual ledgers.
+      Seeded here only so a reader on an un-recomputed load finds the shape.
+
+    ``position_type`` is deliberately NOT touched. A put is opened by an explicit
+    ``put_opened`` execution which stamps the tag; inferring one from shape is the
+    thing ``position_types.of`` refuses to do (see that module's docstring).
+
+    IMMUTABILITY: the three new typed events (``put_opened`` / ``put_closed`` /
+    ``put_assigned``) are APPENDED by the executor going forward and are never
+    synthesized from history here. A put that predates this version was never
+    recorded and must be adopted through the ingestion path, not fabricated."""
+    for p in state.get("positions", []):
+        p.setdefault("short_puts", [])
+    state.setdefault("put_ledger", {"by_ticker": {}, "open_collateral": 0.0,
+                                    "realized_premium": 0.0})
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -382,6 +417,7 @@ MIGRATIONS = {
     18: _v18_to_v19,
     19: _v19_to_v20,
     20: _v20_to_v21,
+    21: _v21_to_v22,
 }
 
 

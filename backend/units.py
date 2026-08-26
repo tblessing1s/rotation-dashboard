@@ -33,6 +33,16 @@ def leap_per_share(per_contract) -> float:
     return float(per_contract) / SHARES_PER_CONTRACT
 
 
+def total_dollars(per_share, contracts) -> float:
+    """Per-share price/premium -> WHOLE-POSITION dollars across ``contracts``.
+
+    The exact mirror of ``frontend/src/units.js`` ``totalDollars``, added for the
+    short-put leg (schema v22), which stores premium per share and collateral in
+    whole-position dollars like every other leg. Named for the frontend function
+    it mirrors so the two stay findable together."""
+    return float(per_share) * SHARES_PER_CONTRACT * int(contracts or 0)
+
+
 def leap_extrinsic_per_share(per_contract_total, contracts) -> float:
     """Per-contract *total* extrinsic (across ``contracts``) -> per-share.
 

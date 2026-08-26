@@ -94,6 +94,12 @@ def _default_state() -> dict:
         # DERIVED from executions by recompute_derived; seeded here so a reader on
         # a fresh book never key-errors.
         "accrual_ledger": {"by_ticker": {}, "records": [], "recommendations": []},
+        # Cash-secured put roll-up (schema v22) — open collateral and realized put
+        # premium per ticker. DERIVED from the put_opened / put_closed /
+        # put_assigned executions by recompute_derived; seeded here so a reader on
+        # a fresh book never key-errors.
+        "put_ledger": {"by_ticker": {}, "open_collateral": 0.0,
+                       "realized_premium": 0.0},
     }
 
 
@@ -1021,6 +1027,53 @@ def recompute_derived(state: dict) -> dict:
     # accrual.credit_for; derived here so it can never be bypassed by a writer.
     import accrual
     state["accrual_ledger"] = accrual.derive(state, execs)
+
+    # Put ledger (schema v22) — open collateral and realized put premium, per
+    # ticker, derived from the three put events. Realized premium is the net of
+    # premium received at open minus any debit paid to close; an ASSIGNED put also
+    # realizes its full premium, because the premium was earned whether or not the
+    # shares arrived.
+    #
+    # PREMIUM IS NOT NETTED INTO COST BASIS ANYWHERE [HARD_CFM_RULE]. Extrinsic is
+    # INCOME and stays visible as income; the assigned shares' basis is the STRIKE,
+    # full stop (see executor._put_assigned). Netting it would make a put look like
+    # a discounted share purchase and would quietly delete the income record.
+    #
+    # TAX NOTE, and the boundary: for TAX purposes premium received DOES reduce the
+    # basis of shares acquired by assignment, and an assignment shortly after
+    # exiting the same name can trigger a wash-sale adjustment on top. This
+    # application is NOT the tax record and deliberately does not model either.
+    # Take the execution log to a tax professional; do not read these figures as
+    # a cost basis for filing.
+    puts: dict[str, dict] = {}
+    for e in execs:
+        a = e.get("action")
+        if a not in ("put_opened", "put_closed", "put_assigned"):
+            continue
+        t = e.get("ticker", "")
+        row = puts.setdefault(t, {"ticker": t, "open_collateral": 0.0,
+                                  "premium_received": 0.0, "debit_paid": 0.0,
+                                  "realized_premium": 0.0, "open_contracts": 0})
+        if a == "put_opened":
+            row["open_collateral"] += float(e.get("collateral") or 0)
+            row["premium_received"] += float(e.get("premium_total") or 0)
+            row["open_contracts"] += int(e.get("contracts") or 0)
+        else:
+            # Both terminal events release the collateral and realize the premium.
+            row["open_collateral"] -= float(e.get("collateral") or 0)
+            row["debit_paid"] += float(e.get("debit_total") or 0)
+            row["open_contracts"] -= int(e.get("contracts") or 0)
+    for row in puts.values():
+        row["open_collateral"] = round(max(row["open_collateral"], 0.0), 2)
+        row["open_contracts"] = max(row["open_contracts"], 0)
+        row["realized_premium"] = round(row["premium_received"] - row["debit_paid"], 2)
+        row["premium_received"] = round(row["premium_received"], 2)
+        row["debit_paid"] = round(row["debit_paid"], 2)
+    state["put_ledger"] = {
+        "by_ticker": puts,
+        "open_collateral": round(sum(r["open_collateral"] for r in puts.values()), 2),
+        "realized_premium": round(sum(r["realized_premium"] for r in puts.values()), 2),
+    }
 
     # Roll-cost / whipsaw ledger — derived from the paired roll executions
     # (executor stamps both legs with roll_id + roll_reason). This is the data

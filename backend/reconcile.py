@@ -270,6 +270,21 @@ def expected_view_from_state(state: dict, live_only: bool = True) -> tuple[list[
                 None, ticker, OPTION, CALL, sc.get("strike"),
                 _norm_date(sc.get("expiration")), -n))
 
+        # Short PUTS (schema v22). THE STAGE-1 BLOCKER: without this the app can
+        # hold a put that reconciliation cannot see, and an assignment stops being
+        # a two-diff anomaly (put MISSING + shares UNEXPECTED) and becomes silent.
+        # Before v22 a manually-opened put was caught only because it was foreign
+        # to state entirely — an accident of not supporting the feature, not a
+        # safety property. Modelling the put without emitting it here would have
+        # spent that accident and replaced it with nothing.
+        for sp in p.get("short_puts") or []:
+            n = int(sp.get("contracts") or 0)
+            if not n:
+                continue
+            out.append(_instrument(
+                None, ticker, OPTION, PUT, sp.get("strike"),
+                _norm_date(sp.get("expiration")), -n))
+
         shares = p.get("shares") or {}
         count = int(shares.get("count") or 0)
         if count:
@@ -469,11 +484,18 @@ def _economic_diff(idx, exp, brk) -> dict | None:
 
 
 def _classify_missing(idx, exp, close_on_expiry, today) -> dict:
-    """A state-expected instrument the broker doesn't hold. Short calls get the
-    expiry carve-out; a long call (LEAP) or equity is always MISSING_AT_BROKER."""
-    is_short_call = (exp["instrument_type"] == OPTION and exp["put_call"] == CALL
-                     and float(exp["quantity"]) < 0)
-    if is_short_call and _in_past(exp["expiry"], today):
+    """A state-expected instrument the broker doesn't hold. Short OPTIONS get the
+    expiry carve-out; a long call (LEAP) or equity is always MISSING_AT_BROKER.
+
+    THE WORTHLESS TEST INVERTS BY SIDE. A short CALL expires worthless when the
+    close is BELOW the strike; a short PUT expires worthless when the close is
+    ABOVE it. Before schema v22 this branch was hardcoded to CALL, so a missing
+    short put past expiry fell through to a plain MISSING — loud, but silent about
+    the one thing worth knowing, which is whether it was assigned."""
+    is_short_option = (exp["instrument_type"] == OPTION
+                       and float(exp["quantity"]) < 0)
+    is_put = is_short_option and exp["put_call"] == PUT
+    if is_short_option and _in_past(exp["expiry"], today):
         strike = exp["strike"]
         close = None
         try:
@@ -481,16 +503,22 @@ def _classify_missing(idx, exp, close_on_expiry, today) -> dict:
         except Exception:  # noqa: BLE001 — a lookup failure must never crash the run
             close = None
         if close is not None and strike is not None:
-            if float(close) < float(strike):
+            worthless = (float(close) > float(strike) if is_put
+                         else float(close) < float(strike))
+            if worthless:
+                rel = ">" if is_put else "<"
                 return _diff(
                     idx, EXPIRED_WORTHLESS_PENDING, exp, exp["quantity"], None,
-                    (f"{_fmt_inst(exp)} expired worthless (close {close:.2f} < strike "
+                    (f"{_fmt_inst(exp)} expired worthless (close {close:.2f} {rel} strike "
                      f"{strike}) — book it at $0."),
                     expiry_close=round(float(close), 2))
-            # At/above strike on expiry -> assignment is the likely cause.
+            # The wrong side of the strike on expiry -> assignment is the likely
+            # cause. For a PUT that means shares are about to arrive, which is a
+            # very different event from a call being exercised away.
+            rel = "≤" if is_put else "≥"
             return _diff(
                 idx, MISSING_AT_BROKER, exp, exp["quantity"], None,
-                (f"{_fmt_inst(exp)} gone at broker; close {close:.2f} ≥ strike {strike} on "
+                (f"{_fmt_inst(exp)} gone at broker; close {close:.2f} {rel} strike {strike} on "
                  f"expiry — assignment suspected."),
                 assignment_suspected=True, expiry_close=round(float(close), 2))
         # Past expiry but no cached close for that day -> never silently benign.

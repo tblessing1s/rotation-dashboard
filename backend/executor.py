@@ -33,6 +33,12 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
                  # real-share base; close_shares_assigned books a called-away exit at the
                  # short strike (a clean delivery of owned shares — see _close_shares_assigned).
                  "buy_shares", "sell_shares", "close_shares_assigned",
+                 # Cash-secured put lifecycle (schema v22, Stage 1 — TRACK). Three
+                 # append-only typed events, NO order path: a put is opened
+                 # manually at the broker and booked here, exactly like an
+                 # `adjustment`. Order placement is Stage 3, behind a flag that
+                 # does not exist yet.
+                 "put_opened", "put_closed", "put_assigned",
                  # Held-share cash dividend, booked as its OWN income event (kept out of
                  # the juice/theta ledger — derived into state['dividend_ledger']).
                  "dividend_income",
@@ -515,6 +521,26 @@ def execute(payload: dict, now: datetime | None = None) -> dict:
     # capture, no order. Recorded as its own event and derived into dividend_ledger.
     if action == "dividend_income":
         return _dividend_income(payload, ticker)
+
+    # Cash-secured put lifecycle (schema v22, Stage 1 — TRACK). Booked BEFORE the
+    # execution-window and spread gates deliberately: those gate ORDER PLACEMENT,
+    # and none of these three places an order. `put_opened` records a fill that
+    # already happened at the broker; `put_assigned` records an event the operator
+    # did not choose at all. Gating either on a time-of-day window would refuse to
+    # write down something that has already occurred, which is how a state file
+    # starts disagreeing with an account.
+    #
+    # They DO sit after the freeze check above: a position under reconciliation
+    # review still accepts a booking that explains the divergence.
+    if action in ("put_opened", "put_closed", "put_assigned"):
+        strike = payload.get("strike")
+        contracts = int(payload.get("contracts") or 0)
+        stock_price, price_source = _capture_price(ticker, payload.get("stock_price"))
+        if action == "put_opened":
+            return _put_opened(payload, ticker, strike, contracts, stock_price)
+        if action == "put_closed":
+            return _put_closed(payload, ticker, strike, contracts, stock_price)
+        return _put_assigned(payload, ticker, strike, contracts, stock_price)
 
     # Builder telemetry — a recommendation, not a trade: no gate, no price capture,
     # no order, no position mutation. The ADD it recommends is a separate,
@@ -2093,6 +2119,265 @@ def _commit_assignment(payload, ticker, strike, contracts, stock_price, mode, pr
     return {"success": True, "status": "filled", "execution_ids": committed,
             "execution_id": committed[-1], "mode": mode, "captured_price": stock_price,
             "realized_pnl": de["realized_pnl"], "execution": stored}
+
+
+# ---------------------------------------------------------------------------
+# Cash-secured put lifecycle (schema v22, Stage 1 — TRACK)
+#
+# THREE APPEND-ONLY TYPED EVENTS AND NO ORDER PATH. Stage 1 exists to represent a
+# put opened MANUALLY in Schwab, so nothing here constructs, prices, previews or
+# submits an order — `put_opened` is a booking of a fill that already happened,
+# exactly like the `adjustment` and `dividend_income` paths above. Order placement
+# is Stage 3, behind CSP_ORDER_PLACEMENT_ENABLED, and that flag does not exist yet.
+#
+# The formulas are REUSED, not restated: collateral and the collateral-denominated
+# yield live in `scan_verdict.put_collateral` / `put_juice_pct`, which the scan's
+# route selector already calls. One definition, two callers — a second copy here
+# would be the first place the advisory number and the booked number could drift.
+# ---------------------------------------------------------------------------
+_PUT_CLOSE_REASONS = ("expired_worthless", "closed_gate_failure",
+                      "closed_structural", "closed_manual")
+
+
+def _put_leg(position: dict, strike, expiration=None) -> dict | None:
+    """The matching open short-put leg on a position, or None."""
+    for leg in position.get("short_puts") or []:
+        if _strike_eq(leg.get("strike"), strike) and (
+                expiration is None or _exp_eq(leg.get("expiration"), expiration)):
+            return leg
+    return None
+
+
+def _put_opened(payload, ticker, strike, contracts, stock_price):
+    """Book a short put opened at the broker. Collateral is committed; no shares.
+
+    PREMIUM IS NOT NETTED INTO ANYTHING [HARD_CFM_RULE]. It is recorded as its own
+    field on its own event and stays visible as INCOME. If this put is later
+    assigned, the shares' cost basis is the STRIKE — see `_put_assigned` — and the
+    premium remains separately booked. Netting would turn an income record into a
+    discount and delete the income.
+
+    TAX NOTE: for TAX purposes premium received DOES reduce the basis of shares
+    acquired by assignment, and an assignment shortly after exiting the same name
+    can additionally trigger a wash-sale adjustment. **This application is not the
+    tax record** and models neither. Take the execution log to a tax professional.
+    """
+    import scan_verdict
+    n = int(contracts or 0)
+    if n <= 0:
+        raise ValueError("contracts must be > 0 for put_opened")
+    strike_f = float(strike or 0)
+    if strike_f <= 0:
+        raise ValueError("strike must be > 0 for put_opened")
+    expiration = _norm_exp(payload.get("expiration"))
+    if not expiration:
+        raise ValueError("expiration is required for put_opened")
+
+    premium_ps = float(payload.get("premium_per_share") or 0)
+    collateral = scan_verdict.put_collateral(strike_f, n)
+
+    execution = {
+        "ticker": ticker, "action": "put_opened",
+        "strike": strike_f, "expiration": expiration, "contracts": n,
+        # Per share AND whole-position, both stored, because every other leg in
+        # this codebase stores per-share and every capital figure is whole-position
+        # (see units.py). Deriving one from the other at read time is where the
+        # x100 drifts.
+        "premium_per_share": round(premium_ps, 4),
+        "premium_total": round(units.total_dollars(premium_ps, n), 2),
+        "collateral": collateral,
+        # Collateral-denominated yield — a DIFFERENT denominator from the
+        # covered-call floor (share cost) and deliberately a different constant.
+        "yield_on_collateral_pct": scan_verdict.put_juice_pct(premium_ps, strike_f),
+        "stock_price": stock_price,
+        "entry_route": "csp",
+        # Entry provenance, frozen at open so a later calibration pass can ask what
+        # the tape and the chart looked like when this put was written.
+        "regime_at_entry": payload.get("regime_at_entry"),
+        "extension_from_ma21": payload.get("extension_from_ma21"),
+        "benchmark_config_version": payload.get("benchmark_config_version"),
+        # Where the collateral actually sits and what it earns. Idle cash at a
+        # near-zero sweep rate versus a money-market fund is a real cost that is
+        # otherwise invisible; recorded when the operator supplies it, never
+        # guessed (the provider does not expose it today).
+        "collateral_venue": payload.get("collateral_venue"),
+        "collateral_yield_pct": payload.get("collateral_yield_pct"),
+    }
+
+    def apply(position):
+        # The tag is stamped ONLY here. `position_types.of` never infers a put from
+        # shape, so a position that never traversed this function stays legacy-
+        # shaped and visibly wrong rather than silently becoming a put.
+        if not (position.get("shares") or {}).get("count") and not log.leap_legs(position):
+            position["position_type"] = position_types.CASH_SECURED_PUT
+        position.setdefault("short_puts", []).append({
+            "strike": strike_f, "expiration": expiration, "contracts": n,
+            "premium_per_share": round(premium_ps, 4),
+            "collateral": collateral,
+            "opened_date": log.utcnow()[:10],
+            "source": payload.get("source") or "manual",
+        })
+
+    stored = _commit_one(execution, apply, ticker, "logged", "operator")
+    return {"success": True, "status": "filled", "execution_id": stored["id"],
+            "mode": "logged", "captured_price": stock_price, "execution": stored}
+
+
+def _put_closed(payload, ticker, strike, contracts, stock_price):
+    """Book a short put closed or expired. Releases the collateral.
+
+    ``reason`` is a closed enum, validated here at the operator-facing boundary so
+    an unrecognized reason is rejected BEFORE anything is appended — the same
+    discipline `_validate_exit_reason` applies to share exits.
+
+    There is deliberately NO roll path. A put roll is a DEBIT and a Martingale
+    structure: it converts a bounded mistake into an unbounded one by paying to
+    take on more downside in the same name. If the position needs defending,
+    CLOSE it. This is not an omission to be filled in later.
+    """
+    import scan_verdict
+    reason = (payload.get("reason") or "").strip()
+    if reason not in _PUT_CLOSE_REASONS:
+        raise ValueError(f"reason must be one of {list(_PUT_CLOSE_REASONS)}")
+
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    leg = _put_leg(position, strike, payload.get("expiration")) if position else None
+    if leg is None:
+        raise ValueError(f"no open short put on {ticker} at strike {strike}")
+
+    n = int(contracts or 0) or int(leg.get("contracts") or 0)
+    strike_f = float(leg.get("strike"))
+    debit_ps = float(payload.get("debit_per_share") or 0)
+    premium_ps = float(leg.get("premium_per_share") or 0)
+
+    execution = {
+        "ticker": ticker, "action": "put_closed",
+        "strike": strike_f, "expiration": leg.get("expiration"), "contracts": n,
+        "reason": reason,
+        "debit_per_share": round(debit_ps, 4),
+        "debit_total": round(units.total_dollars(debit_ps, n), 2),
+        # Realized premium = what was received minus what it cost to be rid of it.
+        # Expiring worthless pays no debit, so the full premium realizes.
+        "realized_premium": round(units.total_dollars(premium_ps - debit_ps, n), 2),
+        "collateral": scan_verdict.put_collateral(strike_f, n),
+        "stock_price": stock_price,
+    }
+
+    def apply(pos):
+        legs = pos.get("short_puts") or []
+        for i, l in enumerate(legs):
+            if _strike_eq(l.get("strike"), strike_f) and _exp_eq(
+                    l.get("expiration"), leg.get("expiration")):
+                remaining = int(l.get("contracts") or 0) - n
+                if remaining > 0:
+                    l["contracts"] = remaining
+                else:
+                    legs.pop(i)
+                break
+        _close_if_empty(pos)
+
+    stored = _commit_one(execution, apply, ticker, "logged", "operator")
+    return {"success": True, "status": "filled", "execution_id": stored["id"],
+            "mode": "logged", "captured_price": stock_price, "execution": stored}
+
+
+def _put_assigned(payload, ticker, strike, contracts, stock_price):
+    """Book a short put assignment: collateral converts into shares AT THE STRIKE.
+
+    EARLY AND EXPIRY ASSIGNMENT ARE THE SAME EVENT here, deliberately. Early
+    assignment on a short put is more likely than intuition suggests when short
+    rates are elevated — the holder earns interest on the strike proceeds against
+    the put's remaining extrinsic — so a path that only handled expiry-day
+    assignment would be wrong on exactly the cases that surprise you.
+
+    Cost basis is the STRIKE, not the strike net of premium. See `_put_opened` for
+    why, and for the tax boundary.
+
+    The handoff is to the EXISTING covered-call machinery, UNMODIFIED: this writes
+    a shares lot in the same shape `_buy_shares` writes, retags the position
+    SHARES, and stops. Nothing downstream needs to know the shares arrived by
+    assignment rather than by purchase — which is the point.
+    """
+    import scan_verdict
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    leg = _put_leg(position, strike, payload.get("expiration")) if position else None
+    if leg is None:
+        raise ValueError(f"no open short put on {ticker} at strike {strike}")
+
+    n = int(contracts or 0) or int(leg.get("contracts") or 0)
+    strike_f = float(leg.get("strike"))
+    shares_received = n * config.SHARES_PER_LOT
+    assigned_date = str(payload.get("assignment_date") or log.utcnow()[:10])[:10]
+
+    execution = {
+        "ticker": ticker, "action": "put_assigned",
+        "strike": strike_f, "expiration": leg.get("expiration"), "contracts": n,
+        "shares_received": shares_received,
+        # THE STRIKE. Not the strike minus premium.
+        "cost_basis_per_share": round(strike_f, 4),
+        "execution_total": round(strike_f * shares_received, 2),
+        "assignment_date": assigned_date,
+        "transition_target": position_types.SHARES,
+        "collateral": scan_verdict.put_collateral(strike_f, n),
+        # The premium stays its own figure and is realized in full: it was earned
+        # whether or not the shares arrived.
+        "realized_premium": round(
+            units.total_dollars(float(leg.get("premium_per_share") or 0), n), 2),
+        "stock_price": stock_price,
+    }
+
+    def apply(pos):
+        legs = pos.get("short_puts") or []
+        for i, l in enumerate(legs):
+            if _strike_eq(l.get("strike"), strike_f) and _exp_eq(
+                    l.get("expiration"), leg.get("expiration")):
+                remaining = int(l.get("contracts") or 0) - n
+                if remaining > 0:
+                    l["contracts"] = remaining
+                else:
+                    legs.pop(i)
+                break
+        shares = pos.setdefault("shares", {
+            "count": 0, "cost_basis_per_share": None, "cap": config.SHARE_CAP,
+            "pct_to_cap": 0, "acquisition_records": []})
+        shares.setdefault("acquisition_records", [])
+        old_count = int(shares.get("count") or 0)
+        old_cb = float(shares.get("cost_basis_per_share") or 0)
+        new_count = old_count + shares_received
+        shares["cost_basis_per_share"] = round(
+            (old_count * old_cb + shares_received * strike_f) / new_count, 4)
+        shares["count"] = new_count
+        cap = int(shares.get("cap") or config.SHARE_CAP)
+        shares["cap"] = cap
+        shares["pct_to_cap"] = round(new_count / cap * 100) if cap else 0
+        shares["acquisition_records"].append({
+            "date": assigned_date, "qty": shares_received,
+            "price": round(strike_f, 4), "source": "put_assignment",
+            "execution_id": execution.get("id"),
+        })
+        # THE HANDOFF. From here the position is an ordinary SHARES position and
+        # the covered-call machinery engages with no knowledge that a put was ever
+        # involved.
+        pos["position_type"] = position_types.SHARES
+        pos["status"] = "active"
+
+    stored = _commit_one(execution, apply, ticker, "logged", "operator")
+    return {"success": True, "status": "filled", "execution_id": stored["id"],
+            "mode": "logged", "captured_price": stock_price,
+            "shares_received": shares_received, "execution": stored}
+
+
+def _close_if_empty(position: dict) -> None:
+    """Mark a position closed once it holds no shares, no LEAP legs, no short calls
+    and no short puts. The put is the newest of the four and was the one term the
+    pre-v22 emptiness test could not see."""
+    if (not int((position.get("shares") or {}).get("count") or 0)
+            and not log.leap_legs(position)
+            and not (position.get("short_calls") or [])
+            and not (position.get("short_puts") or [])):
+        position["status"] = "closed"
 
 
 def _stamp_roll_linkage(execution: dict, source: dict) -> None:

@@ -130,6 +130,10 @@ def parse_transaction(txn: dict) -> tuple[dict | None, str | None]:
     ttype = (txn.get("type") or "").upper()
     if ttype and ttype != "TRADE":
         # Non-trade activity (dividends, transfers, fees) — not an execution.
+        # NOTE the reason is None, so `parse_transactions` drops the row with no
+        # error recorded. That silence is correct for a fee row and WRONG for an
+        # assignment; `assignment_proposals` below is the recognizer, and
+        # `unrecognized_on_open_puts` is the loud backstop for anything it misses.
         return None, None
     txn_id = txn.get("activityId") or txn.get("transactionId") or txn.get("id")
     if txn_id is None:
@@ -188,6 +192,167 @@ def parse_dividend(txn: dict) -> dict | None:
             "amount": round(float(amount), 2),
             "time": txn.get("time") or txn.get("tradeDate") or txn.get("settlementDate"),
             "type": (txn.get("type") or "").upper()}
+
+
+# ---------------------------------------------------------------------------
+# Option assignment / exercise (schema v22)
+#
+# LIVE_VERIFY — THESE STRINGS ARE UNCONFIRMED AGAINST A LIVE FEED.
+#
+# The exact Schwab transaction ``type`` for an option assignment is not documented
+# in a form worth trusting, and this codebase has been burned by exactly that once
+# already: DIVIDEND_TYPES above is itself an unverified candidate set, added after
+# cash dividends were found to be silently discarded by the non-TRADE drop.
+#
+# So the recognizer is deliberately NOT the safety mechanism. The safety mechanism
+# is `unrecognized_on_open_puts`, which fires on ANY non-TRADE row touching a
+# symbol that holds an open put — INCLUDING a type absent from this set. Getting
+# these strings wrong costs a manual classification step; it does not cost a
+# missed assignment. Confirm them against one real assignment and narrow the set.
+# ---------------------------------------------------------------------------
+ASSIGNMENT_TYPES = {"RECEIVE_AND_DELIVER", "ASSIGNMENT", "OPTION_ASSIGNMENT",
+                    "EXERCISE", "OPTION_EXERCISE", "OPTION_EXPIRATION",
+                    "EXPIRATION"}
+
+
+def parse_assignment(txn: dict) -> dict | None:
+    """Recognize an option assignment/exercise and normalize it. None otherwise.
+
+    Early and expiry assignment look IDENTICAL here, deliberately — the broker
+    reports the same event shape and the app treats them the same way. Early
+    assignment on a short put is more likely than intuition suggests when short
+    rates are elevated (the holder earns interest on the strike proceeds against
+    the put's remaining extrinsic), so a recognizer that keyed off the expiry date
+    would miss the surprising half of the cases."""
+    if not isinstance(txn, dict):
+        return None
+    if (txn.get("type") or "").upper() not in ASSIGNMENT_TYPES:
+        return None
+    txn_id = txn.get("activityId") or txn.get("transactionId") or txn.get("id")
+    if txn_id is None:
+        return None
+    ticker = strike = expiration = put_call = None
+    shares = 0
+    for it in (txn.get("transferItems") or txn.get("transactionItems") or []):
+        inst = it.get("instrument") or {}
+        asset = (inst.get("assetType") or "").upper()
+        if asset == "OPTION":
+            sym = inst.get("symbol")
+            parsed = _parse_occ(sym) if sym else None
+            if parsed:
+                ticker = ticker or parsed["underlying"]
+                strike, expiration = parsed["strike"], parsed["expiry"]
+                put_call = parsed["put_call"]
+        elif asset == "EQUITY":
+            ticker = ticker or (inst.get("symbol") or "").upper() or None
+            shares = int(abs(_num(it.get("amount")) or 0))
+    if not ticker:
+        return None
+    return {"transaction_id": str(txn_id), "ticker": str(ticker).upper(),
+            "strike": strike, "expiration": expiration, "put_call": put_call,
+            "shares": shares,
+            "time": txn.get("time") or txn.get("tradeDate") or txn.get("settlementDate"),
+            "type": (txn.get("type") or "").upper()}
+
+
+def _parse_occ(symbol: str) -> dict | None:
+    """Underlying / expiry / side / strike from an OCC option symbol.
+
+    Reuses ``reconcile``'s parser rather than restating the 21-char layout — the
+    broker view already had to read these symbols to compare holdings, and two
+    parsers for one format is two places to get the strike scale wrong."""
+    try:
+        import reconcile
+        parsed = reconcile.parse_option_symbol(symbol)
+    except Exception:  # noqa: BLE001 — an unreadable symbol is not an assignment
+        return None
+    if not parsed:
+        return None
+    return {"underlying": parsed.get("underlying"), "strike": parsed.get("strike"),
+            "expiry": parsed.get("expiry"), "put_call": parsed.get("put_call")}
+
+
+def assignment_proposals(feed: list, already: set, open_puts: dict) -> list[dict]:
+    """Not-yet-ingested assignment rows on symbols holding an open put, as
+    one-click ``put_assigned`` proposals.
+
+    The app NEVER auto-books one [NO_AUTO_REMEDIATION]: an assignment converts
+    collateral into shares and retags the position, which is exactly the class of
+    change that must be a human's decision even when the evidence is unambiguous.
+    """
+    out: list[dict] = []
+    for txn in feed or []:
+        a = parse_assignment(txn)
+        if not a or a["transaction_id"] in already:
+            continue
+        leg = (open_puts or {}).get(a["ticker"])
+        if not leg:
+            continue
+        out.append({
+            **a, "proposal_id": f"assign_{a['transaction_id']}",
+            "action": "put_assigned",
+            "strike": a.get("strike") or leg.get("strike"),
+            "expiration": a.get("expiration") or leg.get("expiration"),
+            "contracts": leg.get("contracts"),
+            "source": "broker_assignment",
+        })
+    return out
+
+
+def unrecognized_on_open_puts(feed: list, open_puts: dict) -> list[dict]:
+    """THE LOUD BACKSTOP, and the point of this whole section.
+
+    Any non-TRADE transaction touching a symbol that holds an open put, whose type
+    ``parse_assignment`` did NOT recognize. Those rows are otherwise dropped with
+    no error by ``parse_transaction`` — the same silent discard that swallowed cash
+    dividends until ``parse_dividend`` was added.
+
+    The failure this prevents is specific and expensive: if an assignment is not
+    detected, the application believes it holds cash and collateral while the
+    account actually holds 100 shares and no put. The covered-call machinery never
+    engages, the shares sit uncovered, and nothing on the screen says so.
+
+    Correctness here does NOT depend on ``ASSIGNMENT_TYPES`` being right. A type
+    absent from that set lands in this list instead, and a reconciliation
+    discrepancy is a worse outcome than a clean proposal but an incomparably
+    better one than silence.
+    """
+    out: list[dict] = []
+    for txn in feed or []:
+        if not isinstance(txn, dict):
+            continue
+        ttype = (txn.get("type") or "").upper()
+        if not ttype or ttype == "TRADE" or parse_assignment(txn) is not None:
+            continue
+        for it in (txn.get("transferItems") or txn.get("transactionItems") or []):
+            inst = it.get("instrument") or {}
+            sym = (inst.get("underlyingSymbol") or inst.get("symbol") or "")
+            base = str(sym).split()[0].upper() if sym else ""
+            if base and base in (open_puts or {}):
+                out.append({
+                    "transaction_id": str(txn.get("activityId")
+                                          or txn.get("transactionId") or ""),
+                    "ticker": base, "type": ttype,
+                    "time": txn.get("time") or txn.get("tradeDate"),
+                    "summary": (f"Unrecognized '{ttype}' activity on {base}, which holds "
+                                f"an open short put — could be an assignment. Classify "
+                                f"it manually; do NOT assume it is benign."),
+                })
+                break
+    return out
+
+
+def open_put_legs(state: dict) -> dict:
+    """{ticker: the first open short-put leg} across open positions — the lookup
+    both recognizers above key off."""
+    out: dict = {}
+    for p in (state or {}).get("positions", []):
+        if p.get("status") == "closed":
+            continue
+        legs = p.get("short_puts") or []
+        if legs:
+            out[(p.get("ticker") or "").upper()] = legs[0]
+    return out
 
 
 def dividend_proposals(feed: list, already: set) -> list[dict]:
@@ -478,6 +643,7 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
                 summary=(f"out-of-band {action} on {_underlying(g['legs']) or '?'} "
                          f"(broker order {g['order_id'] or 'n/a'}) — adopt to book it")))
 
+    _open_puts = open_put_legs(state)
     return {
         "as_of": as_of,
         "fetched": len(feed or []),
@@ -487,6 +653,13 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
         # Cash dividends on held shares (schema v20) — previously DROPPED. Surfaced
         # as one-click dividend_income proposals; never auto-booked (NO_AUTO_REMEDIATION).
         "dividend_proposals": dividend_proposals(feed, already),
+        # Option assignment/exercise on a symbol holding an open put (schema v22).
+        # Surfaced as one-click put_assigned proposals; never auto-booked.
+        "assignment_proposals": assignment_proposals(feed, already, _open_puts),
+        # THE LOUD BACKSTOP. Non-TRADE activity on a put-holding symbol that the
+        # recognizer did not classify — otherwise dropped with no error at all.
+        # These are discrepancies, not proposals: they require a human to look.
+        "unrecognized_put_activity": unrecognized_on_open_puts(feed, _open_puts),
         "skipped_duplicates": skipped,
         "errors": errors,
     }
