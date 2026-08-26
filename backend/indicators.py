@@ -622,29 +622,65 @@ def call_greeks(S: float | None, K: float | None, dte: int | None, mark: float |
 # schwab_api.parse_call_chain (strike/expiration/dte/bid/ask/mark/delta/...), so
 # the math stays provider-agnostic and JSON-serializable.
 
+def spread_pct(bid: float | None, ask: float | None) -> float | None:
+    """Bid/ask spread as a percentage of the midpoint — the tradeability figure.
+
+    The ONE definition, because two would silently disagree: `scan_verdict`'s
+    `untradeable_spread` veto, the executor's put ticket gate
+    (`TRADEABILITY_MAX_SPREAD_PCT`) and the put ticket's display all read the same
+    number. Returns None when the quote is missing or the midpoint is zero — an
+    unmeasurable spread is UNKNOWN, never 0.0, which would read as "perfectly
+    tight" and wave a name through the very gate this feeds.
+    """
+    if bid is None or ask is None:
+        return None
+    mid = (float(bid) + float(ask)) / 2
+    if mid <= 0:
+        return None
+    return round(abs(float(ask) - float(bid)) / mid * 100, 2)
+
+
+def intrinsic_value(strike: float, underlying_price: float | None,
+                    put: bool = False) -> float:
+    """Intrinsic value per share — the ONE place the option side flips the sign.
+
+    A call is in the money above its strike (underlying − strike); a put is in
+    the money BELOW it (strike − underlying). Both clamp at zero. Hard-coding the
+    call form is safe only while the app trades calls exclusively, which stopped
+    being true at schema v22 — and it fails silently rather than loudly: a put
+    would simply report zero intrinsic and book its whole premium as time value.
+    """
+    if underlying_price is None:
+        return 0.0
+    diff = (strike - underlying_price) if put else (underlying_price - strike)
+    return round(max(diff, 0), 4)
+
+
 def calculate_extrinsic(bid: float | None, ask: float | None, strike: float,
-                        underlying_price: float | None) -> float | None:
+                        underlying_price: float | None,
+                        put: bool = False) -> float | None:
     """Extrinsic (time) value per share = option midpoint − intrinsic.
 
-    Midpoint is (bid+ask)/2; intrinsic for a call is max(underlying − strike, 0).
-    Returns None when the quote is missing; clamps to ≥ 0 (a stale ITM mark can
-    print just under intrinsic)."""
+    Midpoint is (bid+ask)/2; intrinsic comes from `intrinsic_value`, which knows
+    which side it is pricing. Returns None when the quote is missing; clamps to
+    ≥ 0 (a stale ITM mark can print just under intrinsic)."""
     if bid is None or ask is None:
         return None
     mid = (bid + ask) / 2
-    intrinsic = max((underlying_price or 0) - strike, 0)
-    return round(max(mid - intrinsic, 0), 4)
+    return round(max(mid - intrinsic_value(strike, underlying_price, put), 0), 4)
 
 
-def _augment(contract: dict, underlying_price: float | None) -> dict:
+def _augment(contract: dict, underlying_price: float | None,
+             put: bool = False) -> dict:
     """Add mark (midpoint fallback), intrinsic, and extrinsic to a contract."""
     bid, ask = contract.get("bid"), contract.get("ask")
     mark = contract.get("mark")
     if mark is None and bid is not None and ask is not None:
         mark = round((bid + ask) / 2, 4)
-    intrinsic = round(max((underlying_price or 0) - contract["strike"], 0), 4)
-    return {**contract, "mark": mark, "intrinsic": intrinsic,
-            "extrinsic": calculate_extrinsic(bid, ask, contract["strike"], underlying_price)}
+    return {**contract, "mark": mark,
+            "intrinsic": intrinsic_value(contract["strike"], underlying_price, put),
+            "extrinsic": calculate_extrinsic(bid, ask, contract["strike"],
+                                             underlying_price, put)}
 
 
 def find_leap_strike(contracts: list[dict], underlying_price: float | None,
@@ -726,10 +762,15 @@ def get_leap_strikes(contracts: list[dict], underlying_price: float | None,
 
 
 def get_nearby_strikes(contracts: list[dict], target_strike: float,
-                       underlying_price: float | None, count: int = 3) -> list[dict]:
+                       underlying_price: float | None, count: int = 3,
+                       put: bool = False) -> list[dict]:
     """The `count` available strikes nearest `target_strike` (a single
     expiration's contracts), sorted ascending and each augmented with
-    mark/intrinsic/extrinsic plus a `suggested` flag on the closest strike."""
+    mark/intrinsic/extrinsic plus a `suggested` flag on the closest strike.
+
+    ``put`` only changes how intrinsic/extrinsic are computed — strike selection
+    is side-agnostic, so the cash-secured put ticket reuses this rather than
+    growing a parallel picker that could drift from it."""
     by_strike = {c["strike"]: c for c in contracts if c.get("strike") is not None}
     if not by_strike:
         return []
@@ -737,7 +778,7 @@ def get_nearby_strikes(contracts: list[dict], target_strike: float,
     closest = min(by_strike, key=lambda s: abs(s - target_strike))
     out = []
     for c in sorted(nearest, key=lambda c: c["strike"]):
-        row = _augment(c, underlying_price)
+        row = _augment(c, underlying_price, put)
         row["suggested"] = c["strike"] == closest
         out.append(row)
     return out

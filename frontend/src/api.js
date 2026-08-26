@@ -120,6 +120,12 @@ export const api = {
   coverage: (ticker) => request(`/api/coverage?ticker=${ticker}`),
   optionChain: (ticker, strategy = "atr", refresh = false) =>
     request(`/api/option-chain/${ticker}?strategy=${strategy}${refresh ? "&refresh=1" : ""}`),
+  // Cash-secured put ticket (schema v22). Separate from optionChain because it
+  // answers a different question — not "what do I sell against shares I hold"
+  // but "where would I be happy to be assigned". Same Schwab payload underneath.
+  putChain: (ticker, refresh = false) =>
+    request(`/api/put-chain/${ticker}${refresh ? "?refresh=1" : ""}`),
+  putPlacementStatus: () => request("/api/put-placement-status"),
   execute: (payload) => request("/api/execute", { method: "POST", body: JSON.stringify(payload) }),
   // Live order lifecycle (used when an order comes back "working"; paper fills immediately).
   orderStatus: (orderId) => request(`/api/order-status?order_id=${encodeURIComponent(orderId)}`),

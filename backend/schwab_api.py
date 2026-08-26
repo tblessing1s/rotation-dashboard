@@ -797,13 +797,34 @@ def parse_call_chain(payload: dict) -> tuple[float | None, list[dict]]:
     dte, bid, ask, mark, last, delta, theta, open_interest, symbol — so the
     indicator helpers and the JSON API stay provider-agnostic.
     """
+    return _parse_chain(payload, "callExpDateMap")
+
+
+def parse_put_chain(payload: dict) -> tuple[float | None, list[dict]]:
+    """The same, for putExpDateMap — the cash-secured put's chain (schema v22).
+
+    Schwab returns both sides in ONE payload, so this needs no extra fetch: the
+    call chain is already pulled and cached per ticker, and the put side has been
+    riding along unread except for `parse_put_iv` / `parse_put_quotes`, which
+    mine it for skew-aware call vol. Same normalized shape as the call side, so
+    `indicators.get_nearby_strikes` and the rest work on it unchanged.
+
+    Note the sign convention Schwab uses: put deltas come back NEGATIVE. Callers
+    that want "how far out of the money" should read the magnitude.
+    """
+    return _parse_chain(payload, "putExpDateMap")
+
+
+def _parse_chain(payload: dict, map_key: str) -> tuple[float | None, list[dict]]:
+    """Shared flattener for either side of the chain. One parser, so a field the
+    call side normalizes can never quietly differ on the put side."""
     underlying = _num(payload.get("underlyingPrice"))
     if underlying is None:
         u = payload.get("underlying") or {}
         underlying = _num(u.get("last")) or _num(u.get("mark"))
 
     contracts: list[dict] = []
-    for exp_key, strikes in (payload.get("callExpDateMap") or {}).items():
+    for exp_key, strikes in (payload.get(map_key) or {}).items():
         # exp_key looks like "2025-12-19:178" (expiration date : days-to-expiry).
         date_part = exp_key.split(":")[0]
         for strike_str, rows in (strikes or {}).items():
