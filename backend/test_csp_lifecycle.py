@@ -413,17 +413,19 @@ def test_holds_shares_is_false_only_for_a_put():
 # ---------------------------------------------------------------------------
 # §1.5 — nothing in this stage touches the scan
 # ---------------------------------------------------------------------------
-def test_stage_1_adds_no_order_path():
-    """No order construction anywhere in Stage 1. Asserted by absence: the three
-    put actions never reach the live-placement path, and no put order builder
-    exists. Placement is Stage 3, behind a flag that does not exist yet."""
+def test_the_put_committers_construct_no_order():
+    """The put *committers* build no order, at any stage. Placement (Stage 3)
+    happens at the dispatch site through the shared ``_place_live`` path; the
+    ``_put_*`` functions only mutate state from an already-terminal execution.
+    Kept from Stage 1, where it also asserted the placement flag's absence --
+    Stage 3 legitimately adds that flag, so the assertion moved to its default."""
     import inspect
     src = inspect.getsource(executor)
     put_block = src[src.index("def _put_opened("):src.index("def _close_if_empty(")]
     for forbidden in ("_place_live", "build_single_leg_order", "submit_order",
                       "place_order", "preview_order"):
         assert forbidden not in put_block, forbidden
-    assert not hasattr(config, "CSP_ORDER_PLACEMENT_ENABLED")
+    assert config.CSP_ORDER_PLACEMENT_ENABLED is False
 
 
 def test_the_put_events_never_reach_the_juice_ledger(store):
@@ -697,3 +699,256 @@ def test_the_expiry_alert_says_close_when_the_name_would_be_refused(store, monke
     st = log.load_state()
     st["positions"][0]["short_puts"][0]["expiration"] = _date.today().isoformat()
     assert "CLOSE" in alerts.check_put_expiry_day(st)[0]["action"]
+
+
+# ===========================================================================
+# STAGE 3 — PLACE
+#
+# The flag is FALSE by default and every test here that exercises placement
+# turns it on explicitly. The most important tests are the two that assert
+# what happens when it is OFF: the behaviour must be byte-identical to Stage 1,
+# because "we shipped the code but left it off" is only a safe position if the
+# off path is genuinely the old path and not a new one wearing its clothes.
+# ===========================================================================
+import schwab_api  # noqa: E402
+
+
+@pytest.fixture()
+def placement_on(monkeypatch):
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(executor, "live_transmit", lambda: True)
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    return True
+
+
+# ---------------------------------------------------------------------------
+# The flag, and what it is worth
+# ---------------------------------------------------------------------------
+def test_the_placement_flag_is_false_by_default():
+    """Stages 1 and 2 track and monitor a put opened by hand. This flag is the
+    only thing that lets the app PLACE one, and it is not to be turned on until
+    Stage 2 has run against a real position for 14 days and a human has reviewed
+    what it did."""
+    assert config.CSP_ORDER_PLACEMENT_ENABLED is False
+
+
+def test_with_the_flag_off_a_put_books_and_never_places(store, monkeypatch):
+    """The off path must be the STAGE 1 path, not a new one wearing its clothes."""
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", False)
+    monkeypatch.setattr(executor, "live_transmit", lambda: True)   # live, but flag off
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    called = []
+    monkeypatch.setattr(executor, "_place_live",
+                        lambda *a, **k: called.append(a) or {"status": "working"})
+    res = _open_put()
+    assert called == []                       # nothing was transmitted
+    assert res["status"] == "filled"          # booked immediately, as in Stage 1
+    assert _position()["short_puts"][0]["strike"] == STRIKE
+
+
+def test_with_the_flag_off_placement_is_unreachable_even_in_live_mode(store, monkeypatch):
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", False)
+    monkeypatch.setattr(executor, "live_transmit", lambda: True)
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(executor, "_place_live",
+                        lambda *a, **k: pytest.fail("placement reached with the flag off"))
+    _open_put()
+
+
+def test_paper_mode_never_places_even_with_the_flag_on(store, monkeypatch):
+    """All three gates must be true. The flag alone is not enough."""
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(executor, "live_transmit", lambda: False)   # paper
+    monkeypatch.setattr(executor, "_place_live",
+                        lambda *a, **k: pytest.fail("placement reached in paper mode"))
+    assert _open_put()["status"] == "filled"
+
+
+# ---------------------------------------------------------------------------
+# The option SIDE — the silent wrong-contract risk
+# ---------------------------------------------------------------------------
+def test_a_put_order_builds_a_PUT_symbol_not_a_call():
+    """`occ_option_symbol` defaults call=True and its docstring says "CFM trades
+    calls". A missed call=False does NOT fail loudly — it builds a VALID symbol
+    for the WRONG instrument and sells a call against a position with no shares to
+    cover it. The side is derived from PUT_ACTIONS at the one placement site."""
+    put = schwab_api.occ_option_symbol("AAA", "2026-09-18", 50.0, call=False)
+    call = schwab_api.occ_option_symbol("AAA", "2026-09-18", 50.0, call=True)
+    assert put[12] == "P" and call[12] == "C"
+    assert put != call
+    # And the derivation is a set membership, not a defaulted argument.
+    assert "put_opened" in executor.PUT_ACTIONS
+    assert "sell_short" not in executor.PUT_ACTIONS
+
+
+def test_the_placement_site_derives_the_side_from_put_actions():
+    import inspect
+    src = inspect.getsource(executor._place_live)
+    assert "call=action not in PUT_ACTIONS" in src
+    assert "call=True" not in src          # no defaulted side anywhere on the path
+
+
+def test_the_put_instructions_are_the_same_verbs_as_the_call_leg():
+    """The side is carried by the OCC symbol's C/P flag, not by the instruction —
+    which is why the order builder needed no put-specific branch."""
+    assert executor.INSTRUCTION["put_opened"] == "SELL_TO_OPEN"
+    assert executor.INSTRUCTION["put_closed"] == "BUY_TO_CLOSE"
+
+
+# ---------------------------------------------------------------------------
+# §Stage 3 — weekly expiries only
+# ---------------------------------------------------------------------------
+def _gate(expiration, **payload):
+    return executor._enforce_put_ticket_gates(
+        {"expiration": expiration, **payload}, "AAA", STRIKE, expiration, 1)
+
+
+def test_a_monthly_expiry_is_refused(placement_on):
+    from datetime import timedelta as _td
+    far = (_date.today() + _td(days=45)).isoformat()
+    with pytest.raises(ValueError, match="weekly expiries only"):
+        _gate(far)
+
+
+def test_an_unparseable_expiry_is_refused(placement_on):
+    with pytest.raises(ValueError, match="parseable expiration"):
+        _gate("next friday")
+
+
+def test_the_weekly_bar_is_a_named_constant():
+    assert config.PUT_MAX_DTE == 10
+
+
+# ---------------------------------------------------------------------------
+# §Stage 3 — the executor re-checks the FULL veto set at the ticket
+# ---------------------------------------------------------------------------
+def _next_weekly():
+    from datetime import timedelta as _td
+    d = _date.today() + _td(days=1)
+    while d.weekday() != 4:                   # Friday
+        d += _td(days=1)
+    return d.isoformat()
+
+
+def test_the_ticket_re_enforces_the_veto_set(placement_on, monkeypatch):
+    """Scan output is ADVISORY; the executor enforces. The route selector may have
+    said 'sell a put here' hours ago off a memoized sweep."""
+    import screening
+    monkeypatch.setattr(screening, "regime", lambda: {"published_regime": "red"})
+    with pytest.raises(ValueError, match="the entry rules refuse this name"):
+        _gate(_next_weekly())
+
+
+def test_a_put_earns_no_exemption_for_being_an_option(placement_on, monkeypatch):
+    """A put is a synthetic LONG position. Every veto that would refuse a shares
+    entry refuses a put entry too."""
+    import screening
+    monkeypatch.setattr(screening, "regime", lambda: {"published_regime": "green"})
+    with pytest.raises(ValueError, match="no_weeklies"):
+        _gate(_next_weekly(), has_weeklies=False)
+    with pytest.raises(ValueError, match="stale_inputs"):
+        _gate(_next_weekly(), stale=True)
+
+
+def test_an_eligible_name_passes_the_ticket_gates(placement_on, monkeypatch):
+    import screening
+    monkeypatch.setattr(screening, "regime", lambda: {"published_regime": "green"})
+    _gate(_next_weekly())                     # must not raise
+
+
+# ---------------------------------------------------------------------------
+# §Stage 3 — put-side spread floor
+# ---------------------------------------------------------------------------
+def test_a_wide_put_side_spread_is_refused(placement_on, monkeypatch):
+    """Put-side spreads run wider than call-side on many names, and a weekly
+    cadence pays the round trip 52 times a year."""
+    import screening
+    monkeypatch.setattr(screening, "regime", lambda: {"published_regime": "green"})
+    with pytest.raises(ValueError, match="tradeability floor"):
+        _gate(_next_weekly(),
+              put_spread_pct=config.TRADEABILITY_MAX_SPREAD_PCT + 0.1)
+
+
+def test_a_tight_put_side_spread_passes(placement_on, monkeypatch):
+    import screening
+    monkeypatch.setattr(screening, "regime", lambda: {"published_regime": "green"})
+    _gate(_next_weekly(), put_spread_pct=1.0)      # must not raise
+
+
+def test_an_unknown_put_spread_does_not_block(placement_on, monkeypatch):
+    """Unknown is not wide. The spread probe is provider-dependent."""
+    import screening
+    monkeypatch.setattr(screening, "regime", lambda: {"published_regime": "green"})
+    _gate(_next_weekly(), put_spread_pct=None)
+
+
+def test_the_gates_are_inert_when_the_flag_is_off(monkeypatch):
+    """Nothing is being placed, so nothing is gated — and a monthly expiry that
+    would be refused for a PLACED put is irrelevant to a BOOKED one."""
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", False)
+    from datetime import timedelta as _td
+    _gate((_date.today() + _td(days=45)).isoformat())     # must not raise
+
+
+# ---------------------------------------------------------------------------
+# §Stage 3 — the EXISTING machinery, reused rather than duplicated
+# ---------------------------------------------------------------------------
+def test_placement_reuses_the_existing_lifecycle_machinery():
+    """§Stage 3: 'Put orders go through the existing executor, order state
+    machine, resubmission lock, and reconciliation.' Asserted at the dispatch."""
+    import inspect
+    src = inspect.getsource(executor.execute)
+    branch = src[src.index("if action in PUT_ACTIONS:"):]
+    for shared in ("_enforce_execution_window", "_enforce_spread_quality",
+                   "_place_live"):
+        assert shared in branch, shared
+    # And _place_live itself carries the resubmission lock for every action.
+    assert "_guard_resubmit" in inspect.getsource(executor._place_live)
+
+
+def test_a_filled_put_order_commits_through_the_same_committer(store):
+    """One committer, two ways in. A second one would be the first place a PLACED
+    put and a BOOKED put could diverge."""
+    import inspect
+    src = inspect.getsource(executor._commit_from_pending)
+    assert "_put_opened if action ==" in src
+    # The fill price lands on the right field for each side.
+    assert 'payload["debit_per_share"] = fill_price' in src
+
+
+def test_the_order_state_machine_stays_instrument_agnostic():
+    """It was already generic — Phase 0 found zero instrument coupling. This is a
+    regression lock so a put-specific branch cannot be added to it later."""
+    import inspect
+    import order_lifecycle
+    src = inspect.getsource(order_lifecycle).lower()
+    for word in ("put_opened", "put_closed", "putcall", "is_put"):
+        assert word not in src, word
+
+
+# ---------------------------------------------------------------------------
+# §DO NOT — still true at Stage 3
+# ---------------------------------------------------------------------------
+def test_no_put_roll_path_exists_at_stage_3():
+    assert "roll_put" not in executor.VALID_ACTIONS
+    assert "put_roll" not in executor.VALID_ACTIONS
+    assert "roll_put" not in executor.INSTRUCTION
+    for name in dir(executor):
+        low = name.lower()
+        assert not ("roll" in low and "put" in low), name
+
+
+def test_an_assignment_is_never_placed(store, monkeypatch):
+    """An assignment is an event the operator did not choose. It books directly
+    whatever the flag says — there is no order to place."""
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(executor, "live_transmit", lambda: True)
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", False)
+    _open_put()
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(executor, "_place_live",
+                        lambda *a, **k: pytest.fail("an assignment was placed"))
+    executor.execute({"action": "put_assigned", "ticker": "AAA", "strike": STRIKE,
+                      "contracts": 1, "expiration": EXPIRY, "stock_price": 47.0})
+    assert _position()["shares"]["count"] == 100
