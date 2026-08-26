@@ -155,20 +155,25 @@ def test_2_juice_engine_verdict_is_byte_identical_to_no_profile():
 
 def test_2b_shadow_floor_never_reaches_the_verdict_composition():
     """The load-bearing invariant: a shadow-floor observation is NOT a block. It
-    must never enter the list that compose_row_verdict derives authority from."""
+    must never enter the list ``scan_verdict.compose`` derives authority from."""
+    import pytest as _pytest
+    import scan_verdict as sv
     floor = st.shadow_floor(ip.DIVIDEND_COMPOUNDER, 0.05, 0.0, 0.01)
     assert floor["pass"] is False and floor["reasons"]        # it DID fail...
     assert floor["shadow"] is True and floor["blocking"] is False
-    # ...and a failing floor carries none of the shape gate_blocks/compose_row_verdict
-    # consume, so it cannot be mistaken for a block.
-    assert "level" not in floor and "id" not in floor
+    # ...and it carries none of the shape a veto block has, so it cannot be
+    # mistaken for one.
+    assert "veto" not in floor and "id" not in floor
+    assert "income" not in " ".join(sv.VETO_IDS)
 
-    # The blocking juice floor stays silent in shares mode, exactly as before.
-    # (conftest's autouse fixture flips LEGACY_LEAP_READONLY off for legacy-LEAP
-    # fixtures, so pin it explicitly rather than assuming the ambient value.)
-    import unittest.mock
-    with unittest.mock.patch.object(config, "LEGACY_LEAP_READONLY", True):
-        assert st.juice_floor_block(-0.5, 0.1) is None
+    # The LEAP-denominated blocking juice floor is DELETED, not merely silent: it
+    # returned None unconditionally in shares mode, which is a declared veto that
+    # could never fire. §1.1's veto set contains no income floor at all — income
+    # is a RANKING input now (scan_score's multiplicative viability factor).
+    assert not hasattr(st, "juice_floor_block")
+    for name in ("juice", "net_juice_weekly_pct", "shadow_floor"):
+        with _pytest.raises(TypeError):
+            sv.evaluate(**{name: 0.0})
 
 
 def test_2c_no_switch_can_give_a_shadow_floor_authority():

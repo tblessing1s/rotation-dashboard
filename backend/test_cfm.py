@@ -1045,14 +1045,14 @@ def test_entry_gate_is_json_serializable(monkeypatch):
     gate = screening.entry_gate("NVDA")
     # Must not raise:
     json.dumps(gate)
-    assert all(isinstance(lv["pass"], bool) for lv in gate["levels"])
+    assert gate["verdict"] in ("ELIGIBLE", "BLOCKED")
+    assert isinstance(gate["blocked_by"], list)
 
 
-def test_entry_gate_level3_is_the_stock_lights_verdict(monkeypatch):
-    # Level 3 is now the per-name Genius lights: it passes iff the stock verdict is
-    # GREEN (4/4 lights + no veto). Its sub-checks are the four lights, and a
-    # YELLOW (exactly 3 green) name does NOT clear it — a watchlist state, never
-    # enterable.
+def test_the_light_vote_ranks_and_no_longer_blocks(monkeypatch):
+    # This used to assert that a YELLOW (3-of-4) name did NOT clear Level 3 — a
+    # watchlist state, never enterable. The light vote is a RANKING input now, so
+    # the same name is ELIGIBLE and carries its missing light in `ranking`.
     import screening
     screening._results.clear()
     monkeypatch.setattr(screening, "regime",
@@ -1068,10 +1068,9 @@ def test_entry_gate_level3_is_the_stock_lights_verdict(monkeypatch):
         "right_spot": {"pass": True, "checks": [], "blocked_by": []}, "status": "wait"})
 
     gate = screening.entry_gate("NVDA")
-    l3 = next(l for l in gate["levels"] if l["level"] == 3)
-    assert l3["pass"] is False                    # YELLOW verdict does not clear L3
-    assert len(l3["checks"]) == 4                  # the four Genius lights as sub-checks
-    assert [c["pass"] for c in l3["checks"]] == [True, True, True, False]
+    assert gate["verdict"] == "ELIGIBLE"           # 3-of-4 no longer blocks
+    assert gate["ranking"]["stock_greens"] == 3    # ...and the vote is carried to rank
+    assert gate["lights"] is lights
 
 
 def test_stock_row_sector_etf_carries_no_sector_rs_surface(monkeypatch):
@@ -1124,12 +1123,11 @@ def test_entry_gate_level4_is_the_right_spot_gate(monkeypatch):
                                          "breadth": 70, "atr_expanding": False, "status": "green"}})
 
     gate = screening.entry_gate("XLK")
-    l3 = next(l for l in gate["levels"] if l["level"] == 3)
-    l4 = next(l for l in gate["levels"] if l["level"] == 4)
-    assert l3["pass"] is True                       # lights are all green...
-    assert l4["pass"] is False                       # ...but it's extended (right spot blocks)
-    assert any(not c["pass"] for c in l4["checks"])
-    assert l4["detail"]["right_spot"]["pass"] is False
+    # Extended past the old Level-4 bar. That no longer blocks — it selects the
+    # ROUTE: you are paid to wait for the price via a weekly put instead.
+    assert gate["verdict"] == "ELIGIBLE"
+    assert gate["ranking"]["right_spot"]["pass"] is False
+    assert gate["route"]["route"] == "CASH_SECURED_PUT"
 
 
 def test_rs_vs_spy_min_uses_a_lower_bar_for_etfs():
@@ -1214,23 +1212,22 @@ def test_level2_is_a_veto_not_a_selector(monkeypatch):
     monkeypatch.setattr(__import__("data_handler"), "get_daily", lambda s, force=False: df)
     monkeypatch.setattr(screening, "regime", lambda: {"status": "green", "published_regime": "green"})
 
-    # Neutral sector: RS1M positive but weak, breadth below the old 60 bar yet above
-    # the 40 collapse floor, not under distribution -> Level 2 PASSES (veto clear).
-    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {
-        "rs1m": 1.0, "breadth": 50.0, "inst_flow": "NO_INTEREST", "status": "yellow"}})
-    l2 = next(l for l in screening.entry_gate("NVDA")["levels"] if l["level"] == 2)
-    assert l2["pass"] is True
+    # SECTOR NO LONGER VETOES. All three of these — weak RS1M, collapsing breadth,
+    # a sector under distribution — used to be Level-2 veto legs. They are ranking
+    # inputs now: a deteriorating sector costs a name rank, never eligibility.
+    import scan_score
+    for sector in ({"rs1m": 1.0, "breadth": 50.0, "inst_flow": "NO_INTEREST"},
+                   {"rs1m": -3.0, "breadth": 70.0, "inst_flow": "ACCUMULATING"},
+                   {"rs1m": 5.0, "breadth": 20.0, "inst_flow": "DISTRIBUTING"}):
+        screening._results.clear()
+        monkeypatch.setattr(screening, "sectors", lambda s=sector: {"XLK": s})
+        gate = screening.entry_gate("NVDA")
+        assert gate["verdict"] == "ELIGIBLE", sector
+        assert not any("sector" in b for b in gate["blocked_by"]), sector
 
-    # Deteriorating sector: RS1M negative -> Level 2 VETOES.
-    screening._results.clear()
-    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {
-        "rs1m": -3.0, "breadth": 70.0, "inst_flow": "ACCUMULATING", "status": "red"}})
-    l2b = next(l for l in screening.entry_gate("NVDA")["levels"] if l["level"] == 2)
-    assert l2b["pass"] is False
-
-    # Under distribution alone also vetoes, even with strong RS/breadth.
-    screening._results.clear()
-    monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {
-        "rs1m": 5.0, "breadth": 70.0, "inst_flow": "DISTRIBUTING", "status": "green"}})
-    l2c = next(l for l in screening.entry_gate("NVDA")["levels"] if l["level"] == 2)
-    assert l2c["pass"] is False
+    # A weak sector DOES cost rank — the input is wired, not merely dropped.
+    strong = scan_score.compute_score(sector_rs1m=5.0, sector_breadth=70.0,
+                                      net_juice_weekly_pct=2.0)
+    weak = scan_score.compute_score(sector_rs1m=-5.0, sector_breadth=20.0,
+                                    net_juice_weekly_pct=2.0)
+    assert weak["score"] < strong["score"]

@@ -107,7 +107,9 @@ def test_snapshot_regime_section_carries_full_trace():
     trace = _trace("green", raw="green")
     trace["lights"] = {"close_vs_ma": {"signal": "green"}, "fast_vs_slow": {"signal": "green"},
                        "sar": {"signal": "green"}, "momentum": {"signal": "green"}}
-    gate = {"levels": [{"level": 1, "detail": trace}]}
+    # The regime trace rides on the gate's own `regime` block now — the per-level
+    # detail lists went with the serial filter.
+    gate = {"regime": trace}
     missing = []
     section = entry_context._regime_section(gate, lambda p, v, r: v, "unavailable")
     # legacy v1 fields still present...

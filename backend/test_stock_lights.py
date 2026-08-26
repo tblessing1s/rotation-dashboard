@@ -142,7 +142,7 @@ def test_three_green_no_veto_is_yellow_watchlist():
     assert res["enterable"] is False                     # YELLOW is never enterable
 
 
-def test_yellow_stock_absent_from_scan_ready(monkeypatch):
+def test_yellow_stock_is_eligible_with_a_rank_penalty(monkeypatch):
     """A YELLOW (3-green) name never appears on /api/scan/ready: the scorecard
     verdict short-circuits to AVOID on the Level-3 (stock lights) miss, so it is
     not a GO row and the ready endpoint never emits it."""
@@ -171,17 +171,33 @@ def test_yellow_stock_absent_from_scan_ready(monkeypatch):
                                          "breadth": 80.0, "atr_expanding": False, "status": "green"}})
     screening.clear_cache()
 
-    # The gate does not clear Level 3 (stock lights), and the scorecard verdicts AVOID.
+    # THE INVERSION. A YELLOW (3-of-4 light) name used to be locked out of the
+    # shortlist entirely: 4/4 was the only passing state and 3/4 was a hard stop.
+    # The light vote RANKS now, so the name IS eligible — and pays for the missing
+    # light in its rank rather than in its eligibility. This is the single largest
+    # source of newly-admitted names in the redesign.
     gate = screening.entry_gate("NVDA")
-    l3 = next(lv for lv in gate["levels"] if lv["level"] == 3)
-    assert l3["pass"] is False
-    row = sc.scorecard(["NVDA"])["results"][0]
-    assert row["suitability"] != "GO"
+    assert gate["verdict"] == "ELIGIBLE"
+    assert "lights" not in " ".join(gate["blocked_by"])
 
+    # ...and the missing light costs it RANK, which is where it should show up.
+    import scan_score
+    full = scan_score.compute_score(stock_greens=4, net_juice_weekly_pct=2.0)
+    short = scan_score.compute_score(stock_greens=3, net_juice_weekly_pct=2.0)
+    assert short["score"] < full["score"] and short["score"] > 0
+
+    # At the endpoint the name reaches the account overlay — which is where this
+    # unfunded test store stops it. That is the RIGHT reason: cash reserve is a
+    # hard account constraint and IS in the veto set. What matters is that nothing
+    # light-related is among the reasons.
     client = app_module.app.test_client()
     body = client.get("/api/scan/ready?tickers=NVDA").get_json()
-    names = {e["ticker"] for e in body["ready"] + body["near_misses"] + body.get("stale_blocked", [])}
-    assert "NVDA" not in names
+    seen = {e["ticker"]: e for e in body["eligible"] + body["blocked"]}
+    assert "NVDA" in seen
+    reasons = seen["NVDA"].get("blocked_by") or []
+    assert all(r in ("cash_reserve", "position_limit", "capital_limit",
+                     "sector_concentration", "round_lot_size", "earnings_in_cycle",
+                     "stale_inputs") for r in reasons), reasons
 
 
 # ---------------------------------------------------------------------------

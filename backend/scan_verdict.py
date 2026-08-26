@@ -1,93 +1,319 @@
-"""The single shared scan VERDICT — the worst-signal-wins composition of the three
-scan signals into READY / CAUTION / WATCH / BLOCKED.
+"""The scan DECISION layer — a thin veto set, a two-state verdict, and the entry route.
 
-This is the ONE place the composition lives. The entry gate, the scorecard
-display, and /api/scan/ready all call ``compose_verdict`` instead of re-deriving a
-verdict of their own (today there are three divergent computations — the stock
-lights verdict, the gate's cleared-level, and the scorecard's GO/CAUTION/AVOID;
-this replaces them with one shared function, the same principle as the
-recommendation record sharing the future automation code path).
+The scan used to answer "may I enter?" as a serial filter with eight veto levels
+evaluated stop-on-first-fail. A serial filter's pass rate collapses
+multiplicatively, and levels 2-4 screened for momentum LEADERSHIP — a screen for
+appreciation — while an ITM covered call earns from time decay and sideways drift
+with upside capped. Screening for the strongest movers systematically selected the
+names most likely to blow through the strike. That was a structural mismatch, not a
+calibration error.
 
-Inputs — each an already-computed signal, so this module stays PURE (no I/O, no
-clock, no fetching):
+This module is the replacement. The scan now answers "what is the best available
+entry today?" — a thin hard floor here, plus a ranker in ``scan_score``.
 
-  * Market Genius (regime)  — the published market regime color. This is the
-    INVISIBLE input: there is no per-row regime column, but a RED regime BLOCKS
-    every row (the Level-1 entry rule, unchanged).
-  * Symbol Genius (SYM)     — the per-name four-light color (``symbol_genius``).
-  * Structure               — the (BaseStage, InstFlow) cell, mapped through
-    ``structure_classifier.structure_entrability``.
+THE GOVERNING PRINCIPLE
+-----------------------
+**The entry veto set equals the exit trigger set plus hard account constraints.
+Everything else ranks. Nothing else blocks.** A condition that will not make you
+EXIT a position has no business preventing you from ENTERING one. Every veto in
+:data:`VETOES` names the exit rule it mirrors; a veto that cannot name one does not
+belong here.
 
-Each input is placed on one severity ladder and the WORST (most restrictive)
-input wins:
+WHAT THIS MEANS IN PRACTICE
 
-    READY  <  CAUTION  <  WATCH  <  BLOCKED
+  * ``regime_red``       mirrors the CFM stated regime rule    [HARD_CFM_RULE]
+  * ``rs3m_vs_spy``      mirrors ``kill_switch.classify``      [HARD_CFM_RULE]
+  * ``close_below_ma50`` mirrors ``circuit_breaker`` fast-MA   [HARD_CFM_RULE]
+  * ``close_below_ma200`` mirrors ``circuit_breaker`` slow-MA  [HARD_CFM_RULE]
+  * ``line_in_the_sand`` mirrors ``circuit_breaker`` manual    [TRAVIS_EXTENSION]
+  * the L5 account constraints and tradeability/staleness are hard account facts,
+    not opinions about the chart.
 
-    regime : green -> READY    yellow -> WATCH    red -> BLOCKED
-    symbol : green -> READY    yellow -> WATCH    red -> BLOCKED   (YELLOW = watchlist, never enterable)
-    struct : READY / CAUTION / WATCH / BLOCKED straight from the grid
+Everything the old stack blocked on and this list omits — sector relative strength,
+sector breadth, sector ATR expansion, the per-name four-light vote, RS3M-vs-SPY
+MAGNITUDE above zero, ATR% of price, ATR vs its 5-EMA, extension above MA21,
+structure entrability, and all five shadow features — is now a RANKING input in
+``scan_score``. None of them may veto. **None may be reintroduced as a floor without
+a separate reviewed change.**
 
-READY therefore means ALL THREE inputs are clear; a single blocking input (a red
-regime, a red SYM, or a topping/declining/distributing structure) forces BLOCKED
-regardless of the other two. A missing/unknown regime or SYM color degrades to
-WATCH (never READY) — the scan never emits an entrable verdict it can't stand behind.
+RESIDUAL RISK, STATED PLAINLY
+-----------------------------
+RS3M-vs-SECTOR was removed system-wide on 2026-08-21
+(``docs/decision-2026-08-21-remove-sector-rs.md``). With it gone, protection against
+entering a sector LAGGARD now rests entirely on ``rs3m_vs_spy`` not being negative,
+which is weaker than what the AAPL post-mortem concluded. Restoring RS-vs-sector on
+an EQUAL-WEIGHTED benchmark would return to this veto list — as the exit mirror, per
+the governing principle above — and is tracked separately. Do not paper over the gap
+with a ranking weight; a rank cannot stop an entry.
+
+PURITY
+------
+Everything here is a pure function of already-computed values. No I/O, no clock, no
+provider access, no state load. The caller resolves the inputs (``metrics/scorecard``
+for the chart values, ``account_gate.evaluate`` for the account overlay,
+``data_cache`` for freshness) and passes them in.
 """
 from __future__ import annotations
 
-import genius_lights
-import structure_classifier as sclf
+import config
 
-# Final verdict vocabulary (also the structure grid's vocabulary, so the two align).
-READY = "READY"
-CAUTION = "CAUTION"
-WATCH = "WATCH"
+# ---------------------------------------------------------------------------
+# Verdict vocabulary — TWO states.
+#
+# CAUTION and WATCH were deleted with the filter they described. With a veto set
+# this thin they no longer name anything the RANK does not: a name that clears
+# every veto is entrable and its quality is a number, not a third adjective.
+# ---------------------------------------------------------------------------
+ELIGIBLE = "ELIGIBLE"
 BLOCKED = "BLOCKED"
 
-# Severity ladder — worst (highest) wins.
-_SEVERITY = {READY: 0, CAUTION: 1, WATCH: 2, BLOCKED: 3}
+# The exhaustive veto registry: id -> (label, the exit rule or account constraint
+# it mirrors). This tuple IS the contract — `evaluate` emits no id absent from it,
+# and `test_scan_verdict` asserts the two stay in sync, so a veto cannot be added
+# by editing one site.
+VETOES = (
+    ("regime_red", "Market regime RED", "CFM stated regime rule"),
+    ("rs3m_vs_spy", "RS3M vs SPY negative", "kill switch"),
+    ("close_below_ma50", "Close below the 50-day MA", "circuit breaker (fast MA)"),
+    ("close_below_ma200", "Close below the 200-day MA", "circuit breaker (slow MA)"),
+    ("line_in_the_sand", "Close at/below the stored line", "circuit breaker (manual)"),
+    ("earnings_in_cycle", "Earnings inside the cycle", "CFM stated earnings rule"),
+    ("no_weeklies", "No weekly options", "account constraint"),
+    ("untradeable_spread", "Spread above the tradeability floor", "account constraint"),
+    ("stale_inputs", "Input data stale or freshness unknown", "STALE_BLOCKS_GO"),
+    # The Level-5 account overlay. Emitted with the account gate's own check id so
+    # the blocked reason names the specific constraint (cash_reserve,
+    # position_limit, capital_limit, sector_concentration, round_lot_size).
+    ("account", "Account constraint", "account constraint"),
+)
 
-# A Genius color (regime or SYM) placed on the ladder. GREEN clears, YELLOW is a
-# watchlist "wait" (never entrable), RED blocks. Anything unknown -> WATCH.
-_COLOR_LEVEL = {
-    genius_lights.GREEN: READY,
-    genius_lights.YELLOW: WATCH,
-    genius_lights.RED: BLOCKED,
-}
+VETO_IDS = tuple(v[0] for v in VETOES)
+_LABELS = {v[0]: v[1] for v in VETOES}
+_MIRRORS = {v[0]: v[2] for v in VETOES}
 
 
-def _color_level(color: str | None) -> str:
-    return _COLOR_LEVEL.get(color, WATCH)
+def _block(veto_id: str, observed: dict, *, detail_id: str | None = None) -> dict:
+    """One veto failure. ``detail_id`` narrows the account veto to its specific
+    account-gate check without inventing a veto id outside the registry."""
+    return {"id": detail_id or veto_id, "veto": veto_id,
+            "label": _LABELS[veto_id], "mirrors": _MIRRORS[veto_id],
+            "observed": observed}
 
 
-def compose_verdict(regime_color: str | None, symbol_color: str | None,
-                    base_stage: str, inst_flow: str) -> dict:
-    """Compose the three scan signals into a single VERDICT (worst-signal-wins).
+def evaluate(*, regime_color: str | None = None,
+             rs3m_vs_spy: float | None = None,
+             below_ma50: bool | None = None,
+             below_ma200: bool | None = None,
+             price: float | None = None,
+             line_in_the_sand: float | None = None,
+             has_weeklies: bool | None = None,
+             spread_pct: float | None = None,
+             stale: bool | None = None,
+             account_gate: dict | None = None) -> list[dict]:
+    """Every FAILING veto for one candidate, as structured blocks. PURE.
 
-    ``regime_color`` / ``symbol_color`` are Genius colors ("green"/"yellow"/"red");
-    ``base_stage`` / ``inst_flow`` are the classifier enums. Returns the verdict,
-    the structure-cell entrability it derived, the per-input levels, and the
-    reason(s) — the input(s) at the worst level — for the detail drawer / blocked_by.
-    PURE: no I/O.
+    The returned list IS the authority-carrying ``blocks`` list. Nothing outside
+    this function may append to it — that invariant is the whole safety property
+    of the scan layer and is asserted by ``test_juice_capacity`` and
+    ``test_scan_verdict``.
+
+    MISSING-DATA POLICY, which differs by veto and is deliberate:
+
+      * The three chart vetoes (``below_ma50`` / ``below_ma200`` / ``rs3m_vs_spy``)
+        **fail open on None**. They mirror EXIT triggers, and the exit rules
+        themselves do not fire on an unknown — ``kill_switch.classify`` holds green
+        when ``rs_vs_spy`` is None, and ``circuit_breaker`` needs a close to compare.
+        A veto that fired on absence would block every name with short history,
+        which is the multiplicative collapse this redesign exists to remove.
+      * ``stale`` **fails closed**: ``config.STALE_BLOCKS_GO`` is a HARD rule and
+        unknown freshness has always read as stale — it never permits action.
+      * ``has_weeklies`` blocks only on an explicit ``False``. Unknown is not a
+        false hide; the weeklies probe is provider-dependent and often None.
     """
-    structure = sclf.structure_entrability(base_stage, inst_flow)
-    inputs = {
-        "regime": _color_level(regime_color),
-        "symbol": _color_level(symbol_color),
-        "structure": structure,
-    }
-    verdict = max(inputs.values(), key=lambda level: _SEVERITY[level])
-    worst = _SEVERITY[verdict]
-    # The input(s) that drove the verdict (excluding any that are merely READY).
-    reasons = [f"{name}:{level}" for name, level in inputs.items()
-               if _SEVERITY[level] == worst and level != READY]
-    return {
-        "verdict": verdict,
-        "structure_entrability": structure,
-        "inputs": inputs,
-        "reasons": reasons,
-    }
+    blocks: list[dict] = []
+
+    # 1. Regime RED [HARD_CFM_RULE]. YELLOW does NOT block an entry — it constrains
+    #    the ROUTE (see `route`: a wobbling tape gets shares, never a put that
+    #    commits capital a week out).
+    if regime_color == "red":
+        blocks.append(_block("regime_red", {"regime_color": regime_color}))
+
+    # 2-4. The exit mirrors. Fail-open on None — see the missing-data policy above.
+    if rs3m_vs_spy is not None and rs3m_vs_spy < 0:
+        blocks.append(_block("rs3m_vs_spy", {"rs3m_vs_spy": rs3m_vs_spy}))
+    if below_ma50 is True:
+        blocks.append(_block("close_below_ma50", {"below_ma50": True}))
+    if below_ma200 is True:
+        blocks.append(_block("close_below_ma200", {"below_ma200": True}))
+
+    # 5. The operator's stored line-in-the-sand, when one exists. A scan candidate
+    #    with no position has no line, so this is inert for most rows — it binds a
+    #    name the operator has already drawn a line under.
+    if (line_in_the_sand is not None and price is not None
+            and price <= line_in_the_sand):
+        blocks.append(_block("line_in_the_sand",
+                             {"price": price, "line": line_in_the_sand}))
+
+    # 6. Tradeability. CFM sells a WEEKLY covered call, so a name with no weekly
+    #    chain cannot be entered at all; a spread above the floor means the round
+    #    trip eats the premium the trade exists to collect.
+    if has_weeklies is False:
+        blocks.append(_block("no_weeklies", {"has_weeklies": False}))
+    if (spread_pct is not None
+            and spread_pct > config.TRADEABILITY_MAX_SPREAD_PCT):
+        blocks.append(_block("untradeable_spread",
+                             {"spread_pct": spread_pct,
+                              "floor": config.TRADEABILITY_MAX_SPREAD_PCT}))
+
+    # 7. Staleness [HARD_CFM_RULE STALE_BLOCKS_GO] — fails CLOSED.
+    if stale:
+        blocks.append(_block("stale_inputs", {"stale": True}))
+
+    # 8. The Level-5 account overlay + the earnings-in-cycle rule, both already
+    #    evaluated by `account_gate.evaluate`. A READ of its blocking failures,
+    #    never a re-evaluation — the executor enforces the same gate at the ticket,
+    #    and two evaluations that could disagree would be worse than one.
+    if account_gate:
+        by_id = {c.get("id"): c for c in account_gate.get("checks") or []}
+        for cid in account_gate.get("blocking_failures") or []:
+            check = by_id.get(cid) or {}
+            veto_id = "earnings_in_cycle" if cid == "earnings_in_cycle" else "account"
+            blocks.append(_block(veto_id, check.get("detail") or {}, detail_id=cid))
+
+    return blocks
 
 
-def is_ready(verdict: dict) -> bool:
-    """True iff the composed verdict is READY — the Ready-to-Enter membership test."""
-    return verdict.get("verdict") == READY
+def compose(blocks: list[dict] | None) -> dict:
+    """The two-state verdict over the veto blocks. PURE.
+
+    There is no severity ladder any more: a veto is a "no" and there is exactly one
+    kind of no. ``blocked_by`` preserves registry order so the reason a reader sees
+    first is stable across scans rather than depending on evaluation order.
+    """
+    blocks = list(blocks or [])
+    if not blocks:
+        return {"verdict": ELIGIBLE, "blocks": [], "blocked_by": []}
+    order = {vid: i for i, vid in enumerate(VETO_IDS)}
+    ordered = sorted(blocks, key=lambda b: (order.get(b.get("veto"), 99),
+                                            str(b.get("id"))))
+    return {"verdict": BLOCKED, "blocks": ordered,
+            "blocked_by": [b["id"] for b in ordered]}
+
+
+def is_eligible(verdict) -> bool:
+    """Membership test for the ranked shortlist. Accepts the composed dict or the
+    bare verdict string, so callers holding either shape ask the same question."""
+    v = verdict.get("verdict") if isinstance(verdict, dict) else verdict
+    return v == ELIGIBLE
+
+
+# ---------------------------------------------------------------------------
+# Entry route selection — ADVISORY OUTPUT ONLY.
+#
+# There is no put order construction and no execution path here or anywhere else
+# in this change. `route` returns a recommendation the operator reads.
+# ---------------------------------------------------------------------------
+SHARES = "SHARES"
+CASH_SECURED_PUT = "CASH_SECURED_PUT"
+
+
+def route(*, extension_atr: float | None, regime_color: str | None = None,
+          ma21: float | None = None) -> dict:
+    """Which route enters an ELIGIBLE name: buy the shares, or sell a weekly put.
+
+    The put is NOT a way to rescue an ineligible name — an ineligible name is
+    BLOCKED and has no route. It is a route CHOICE **within** an eligible one:
+
+      * near or below MA21          -> buy shares. There is no reason to wait a
+                                       week for a fill that is available today.
+      * extended beyond the threshold -> sell a weekly put struck at the MA21 zone.
+                                       You are paid to wait for the price the
+                                       strategy would rather pay.
+      * regime YELLOW               -> shares only. A put commits capital a week
+                                       out on a tape that is already wobbling.
+      * regime RED                  -> the name is BLOCKED; no route is offered.
+
+    Keyed off ``extension_atr`` — the SAME volatility-normalized extension the
+    ranker consumes (``scan_score._extension_sub``), so the route and the rank can
+    never disagree about how extended a name is. The threshold is
+    ``config.SPOT_ATR_EXTENSION_MAX``, which is exactly the old Level-4 right-spot
+    veto bar: **what used to block an entry now selects its route.** That is why
+    this needs no constant of its own.
+
+    An unmeasurable extension routes to SHARES: the put route is the one that
+    commits capital forward on a chart read, so an absent read takes the route that
+    does not. PURE — no clock, no chain, no I/O.
+    """
+    threshold = config.SPOT_ATR_EXTENSION_MAX
+    if regime_color == "red":
+        return {"route": None, "reason": "regime_red",
+                "detail": {"regime_color": regime_color}}
+    if extension_atr is None:
+        return {"route": SHARES, "reason": "extension_unknown",
+                "detail": {"extension_atr": None, "threshold": threshold}}
+    extended = extension_atr > threshold
+    if extended and regime_color == "yellow":
+        return {"route": SHARES, "reason": "regime_yellow_shares_only",
+                "detail": {"extension_atr": extension_atr, "threshold": threshold,
+                           "regime_color": regime_color}}
+    if extended:
+        return {"route": CASH_SECURED_PUT, "reason": "extended_above_ma21",
+                "detail": {"extension_atr": extension_atr, "threshold": threshold,
+                           "target_strike_zone": ma21}}
+    return {"route": SHARES, "reason": "near_or_below_ma21",
+            "detail": {"extension_atr": extension_atr, "threshold": threshold}}
+
+
+def put_collateral(strike: float | None, contracts: int = 1) -> float | None:
+    """Cash-secured put collateral: ``strike x 100 x contracts``.
+
+    This counts against the DEPLOYED-CAPITAL cap (``config.MAX_DEPLOYED_CAPITAL``)
+    and does **not** draw from the ATR cash reserve — the reserve exists to defend
+    open positions, and collateral is not a defence, it is the position. Keeping
+    the two apart is why this is its own function rather than an inline product.
+    """
+    if strike is None or strike <= 0 or contracts <= 0:
+        return None
+    return round(float(strike) * config.SHARES_PER_LOT * int(contracts), 2)
+
+
+def put_juice_pct(premium_per_share: float | None, strike: float | None) -> float | None:
+    """The put's weekly yield on COLLATERAL: ``premium / (strike x 100)``, percent.
+
+    A DIFFERENT denominator from the covered-call floor, which is share cost. The
+    covered-call constant must not be reused here and is not
+    (``config.PUT_JUICE_FLOOR_PCT`` vs ``config.SHARES_JUICE_FLOOR_PCT``): the two
+    measure a yield on different capital and a shared bar would silently mean two
+    different things. RANKING input only — like the covered-call floor it has no
+    veto authority.
+    """
+    collateral = put_collateral(strike, 1)
+    if premium_per_share is None or not collateral:
+        return None
+    return round(premium_per_share * config.SHARES_PER_LOT / collateral * 100, 4)
+
+
+def put_close_advice(*, blocks: list[dict] | None) -> dict:
+    """Whether a notionally-open put should be CLOSED rather than assigned.
+
+    Re-gate before assignment: the veto set is re-evaluated daily while a put is
+    notionally open and mandatorily on expiry day. If the name would be BLOCKED
+    today, the recommendation is **close the put**, not accept assignment — you are
+    about to be handed shares in a name the entry rules would refuse.
+
+    **A close below MA21 is NOT a reversal and is NOT a close trigger.** MA21 is a
+    timing reference — it is what put you on this route in the first place, and a
+    put struck at the MA21 zone is SUPPOSED to be approached. Only the structural
+    vetoes close a put, and they are exactly the ones in :data:`VETOES`; because
+    MA21 appears nowhere in that registry, this function cannot fire on it even by
+    accident. That is the point of routing this through the same blocks list rather
+    than a bespoke predicate.
+
+    Rolling a short put down or out is deliberately NOT offered: it is a debit and a
+    Martingale structure. Close instead.
+    """
+    composed = compose(blocks)
+    if is_eligible(composed):
+        return {"action": "hold", "reason": "still_eligible", "blocked_by": []}
+    return {"action": "close", "reason": "would_be_blocked",
+            "blocked_by": composed["blocked_by"]}

@@ -30,6 +30,31 @@ import structure_classifier as sc
 import symbol_genius
 from structure_classifier import BaseStage, InstFlow, Entrability
 
+
+def _compose_signal(regime_color, symbol_color, base_stage, inst_flow):
+    """The old three-signal composition, kept HERE as a test helper.
+
+    It was deleted from ``scan_verdict`` with the severity ladder it fed: regime
+    YELLOW and a 3-of-4 SYM no longer block anything, so composing them into a
+    verdict decided nothing. These fixtures still assert facts about the SIGNALS
+    themselves, which are unchanged and still displayed, so the composition moves
+    into the test that wants it rather than surviving as production code that
+    nothing reads.
+    """
+    import structure_classifier as _sclf
+    order = {"READY": 0, "CAUTION": 1, "WATCH": 2, "BLOCKED": 3}
+    level = {"green": "READY", "yellow": "WATCH", "red": "BLOCKED"}
+    inputs = {"regime": level.get(regime_color, "WATCH"),
+              "symbol": level.get(symbol_color, "WATCH"),
+              "structure": _sclf.structure_entrability(base_stage, inst_flow)}
+    worst = max(inputs.values(), key=lambda v: order[v])
+    return {"verdict": worst, "inputs": inputs,
+            "structure_entrability": inputs["structure"],
+            "reasons": [f"{k}:{v}" for k, v in inputs.items()
+                        if order[v] == order[worst] and v != "READY"]}
+
+
+
 FIX = os.path.join(os.path.dirname(__file__), "fixtures", "structure")
 
 
@@ -101,8 +126,8 @@ def test_fixture_b_red_regime_composes_to_blocked():
     base, inst = sc.classify_symbol(df)
     assert sc.structure_entrability(base, inst) == Entrability.READY
     assert _symbol_genius_greens(df) == 4
-    assert sv.compose_verdict("green", "green", base, inst)["verdict"] == "READY"
-    assert sv.compose_verdict("red", "green", base, inst)["verdict"] == "BLOCKED"
+    assert _compose_signal("green", "green", base, inst)["verdict"] == "READY"
+    assert _compose_signal("red", "green", base, inst)["verdict"] == "BLOCKED"
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +182,8 @@ def test_fixture_c_verdict_non_ready_binding_is_symbol_level3():
     stock = _load("turning_recovery")
     base, inst = sc.classify_symbol(stock)
     sym = symbol_genius.compute(stock)["color"]
-    composed = sv.compose_verdict("green", sym, base, inst)
-    assert composed["verdict"] != sv.READY
+    composed = _compose_signal("green", sym, base, inst)
+    assert composed["verdict"] != "READY"
     assert composed["reasons"] == ["symbol:WATCH"]            # SYM is the binding input
 
 
@@ -172,8 +197,8 @@ def test_fixture_c_has_no_annotation_path_left():
     sector = _load("turning_recovery_sector")
     base, inst = sc.classify_symbol(stock)
     sym = symbol_genius.compute(stock)["color"]
-    verdict = sv.compose_verdict("green", sym, base, inst)["verdict"]
-    assert verdict != sv.READY                       # the fixture is still non-READY
+    verdict = _compose_signal("green", sym, base, inst)["verdict"]
+    assert verdict != "READY"                        # the SIGNAL read is still non-READY
     # The vs-sector state is still COMPUTABLE as a pure pairing...
     assert rss.rs_state(stock, sector)["state"] == rss.TURNING
     # ...but nothing can turn it into a verdict_reasons entry any more.

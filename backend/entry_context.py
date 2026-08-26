@@ -205,22 +205,27 @@ def _level_detail(gate: dict | None, level: int) -> dict:
 
 
 def _gate_levels(gate: dict | None) -> dict | None:
-    """Per-level pass/fail for entry-gate levels 1-4 with their check detail."""
+    """The frozen entry evaluation: the VERDICT, every veto that fired, and the
+    ranking inputs.
+
+    The per-level pass/fail record this used to freeze went with the levels. What
+    replaces it is strictly richer for calibration: the old form could only say
+    which level a name stopped at (stop-on-first-fail hid everything downstream),
+    while this records EVERY veto that fired plus the full value of every ranking
+    input that did not."""
     if not gate:
         return None
     return {
         "verdict": gate.get("verdict"),
-        "cleared_level": gate.get("cleared_level"),
-        "levels": [
-            {"level": lv.get("level"), "name": lv.get("name"),
-             "pass": lv.get("pass"), "checks": lv.get("checks")}
-            for lv in gate.get("levels") or []
-        ],
+        "blocked_by": gate.get("blocked_by"),
+        "blocks": gate.get("blocks"),
+        "ranking": gate.get("ranking"),
+        "route": gate.get("route"),
     }
 
 
 def _regime_section(gate: dict | None, track, reason: str) -> dict:
-    d = _level_detail(gate, 1)
+    d = (gate or {}).get("regime") or {}
     # v1 fields (unchanged, still tracked for data-quality) + the full Genius
     # four-light decision trace added in SNAPSHOT_SCHEMA_VERSION 2. All new fields
     # are additive: a v1 snapshot simply lacks them and still loads.
@@ -241,7 +246,7 @@ def _regime_section(gate: dict | None, track, reason: str) -> dict:
 
 
 def _sector_section(gate: dict | None, track, reason: str) -> dict:
-    d = _level_detail(gate, 2)
+    d = (gate or {}).get("sector_detail") or {}
     return {
         "etf": d.get("sector"),
         "name": d.get("name"),
@@ -256,7 +261,7 @@ def _sector_section(gate: dict | None, track, reason: str) -> dict:
 
 def _stock_section(ticker: str, gate: dict | None, row: dict | None,
                    bars_stale: bool, track, reason: str) -> dict:
-    d = _level_detail(gate, 3)   # the _stock_row (lights, rs pairs, atr_pct, right-spot)
+    d = (gate or {}).get("stock_detail") or {}   # lights, rs pairs, atr_pct, right-spot
     row = row or {}
     # ATR value + RSI are not on the scorecard/gate row — compute from cached
     # bars (unless bars are stale, in which case they stay null with reason).

@@ -531,9 +531,9 @@ def test_scan_ready_splits_go_rows_by_level5_and_sorts_by_juice(isolated_state, 
     import app as app_module
 
     rows = [
-        {"ticker": "AAA", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 1.0, "earnings_date": None},
-        {"ticker": "BBB", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 3.0, "earnings_date": None},
-        {"ticker": "CCC", "sector": "XLK", "verdict": "CAUTION", "juice_weekly_pct": 5.0, "earnings_date": None},
+        {"ticker": "AAA", "sector": "XLK", "verdict": "ELIGIBLE", "juice_weekly_pct": 1.0, "earnings_date": None},
+        {"ticker": "BBB", "sector": "XLK", "verdict": "ELIGIBLE", "juice_weekly_pct": 3.0, "earnings_date": None},
+        {"ticker": "CCC", "sector": "XLK", "verdict": "BLOCKED", "juice_weekly_pct": 5.0, "earnings_date": None},
     ]
     # The full-universe read paths PEEK (scorecard_warm) and never call the
     # sweep — calling it made the request block on the sweep's own lock.
@@ -545,8 +545,9 @@ def test_scan_ready_splits_go_rows_by_level5_and_sorts_by_juice(isolated_state, 
         # is even called since it isn't a READY row.
         assert set(tickers) == {"AAA", "BBB"}
         return {
-            "AAA": {"pass": False, "blocking_failures": ["juice_adequacy"]},
-            "BBB": {"pass": True, "blocking_failures": []},
+            "AAA": {"pass": False, "blocking_failures": ["cash_reserve"],
+                        "checks": [{"id": "cash_reserve", "detail": {}}]},
+            "BBB": {"pass": True, "blocking_failures": [], "checks": []},
         }
     monkeypatch.setattr(account_gate, "evaluate_many", _fake_evaluate_many)
 
@@ -554,9 +555,9 @@ def test_scan_ready_splits_go_rows_by_level5_and_sorts_by_juice(isolated_state, 
     resp = client.get("/api/scan/ready")
     assert resp.status_code == 200
     body = resp.get_json()
-    assert [r["ticker"] for r in body["ready"]] == ["BBB"]
-    assert [r["ticker"] for r in body["near_misses"]] == ["AAA"]
-    assert body["near_misses"][0]["level5"]["blocking_failures"] == ["juice_adequacy"]
+    assert [r["ticker"] for r in body["eligible"]] == ["BBB"]
+    assert [r["ticker"] for r in body["blocked"]] == ["AAA"]
+    assert body["blocked"][0]["level5"]["blocking_failures"] == ["cash_reserve"]
 
 
 def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state, monkeypatch):
@@ -564,8 +565,8 @@ def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state
     import app as app_module
 
     rows = [
-        {"ticker": "LOW", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 2.0, "earnings_date": None},
-        {"ticker": "HIGH", "sector": "XLK", "verdict": "READY", "juice_weekly_pct": 6.0, "earnings_date": None},
+        {"ticker": "LOW", "sector": "XLK", "verdict": "ELIGIBLE", "juice_weekly_pct": 2.0, "earnings_date": None},
+        {"ticker": "HIGH", "sector": "XLK", "verdict": "ELIGIBLE", "juice_weekly_pct": 6.0, "earnings_date": None},
     ]
     # The full-universe read paths PEEK (scorecard_warm) and never call the
     # sweep — calling it made the request block on the sweep's own lock.
@@ -576,7 +577,7 @@ def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state
 
     client = app_module.app.test_client()
     body = client.get("/api/scan/ready").get_json()
-    assert [r["ticker"] for r in body["ready"]] == ["HIGH", "LOW"]
+    assert [r["ticker"] for r in body["eligible"]] == ["HIGH", "LOW"]
 
 
 def test_scan_ready_fetches_live_quote_on_demand_so_go_clears(isolated_state, monkeypatch):
@@ -597,7 +598,7 @@ def test_scan_ready_fetches_live_quote_on_demand_so_go_clears(isolated_state, mo
     data_cache.put("AAA", BARS, "df", "schwab", Tier.T1, fetched_at=time.time() - 60)
     data_cache.put("SPY", QUOTE, 1.0, "schwab", Tier.T1, fetched_at=time.time() - 5)
 
-    rows = [{"ticker": "AAA", "sector": "XLK", "verdict": "READY",
+    rows = [{"ticker": "AAA", "sector": "XLK", "verdict": "ELIGIBLE",
              "juice_weekly_pct": 1.0, "earnings_date": None}]
     # The full-universe read paths PEEK (scorecard_warm) and never call the
     # sweep — calling it made the request block on the sweep's own lock.
@@ -617,8 +618,8 @@ def test_scan_ready_fetches_live_quote_on_demand_so_go_clears(isolated_state, mo
 
     body = app_module.app.test_client().get("/api/scan/ready").get_json()
     assert calls == [{"AAA": Tier.T1}]          # only the quote-less GO name was fetched
-    assert [r["ticker"] for r in body["ready"]] == ["AAA"]
-    assert body["stale_blocked"] == []
+    assert [r["ticker"] for r in body["eligible"]] == ["AAA"]
+    assert body["blocked"] == []          # nothing left stale-blocked
     data_cache.reset()
 
 

@@ -1,33 +1,29 @@
 """Daily scan TRANSITION diff — the scan as a pipeline, not a snapshot.
 
 Given yesterday's per-symbol scan state and today's, emit machine-readable
-transition EVENTS: a bench name that went READY, any fresh READY, a watched name
+transition EVENTS: a name that became ELIGIBLE, a watched name
 that degraded, a new pipeline entrant, and a sector slot that opened with a
-bench/ready name waiting for it. The events fan out through the EXISTING notifier
+an eligible name waiting for it. The events fan out through the EXISTING notifier
 (``alerts.record_event``) — this module builds NO notification infrastructure and
 mutates NO state; it is a PURE fold over two record maps.
 
 Event kinds (also the new ``alerts.ALERT_TYPES`` ids):
 
-  * ``SCAN_BENCH_READY``      — a BENCH name is now READY (highest priority: it was
-    one trigger away and the trigger cleared).
-  * ``SCAN_NEW_READY``        — a non-bench name became READY (was not READY before).
+  * ``SCAN_NEW_READY``        — a name became ELIGIBLE (was BLOCKED before).
   * ``SCAN_DEGRADED``         — a watched name's structure/flow/RS rolled over
     (BASE→TOPPING/DECLINING, INST→DISTRIBUTING, RS→FADING/FALLING).
   * ``SCAN_PIPELINE_ENTRANT`` — a BASING + EARLY_INTEREST name newly appeared.
-  * ``SCAN_SECTOR_SLOT_OPEN`` — a sector position exited AND a bench/ready name
+  * ``SCAN_SECTOR_SLOT_OPEN`` — a sector position exited AND an ELIGIBLE name
     exists in that now-free sector.
 
-Records carry: verdict, bench, base_stage, inst_flow, rs_state, sector (today rows
-also carry path_to_ready/eligible_days for the alert payload). PURE — no I/O, no
+Records carry: verdict, base_stage, inst_flow, rs_state, sector (today rows
+PURE — no I/O, no
 clock; the caller supplies today, yesterday, and the occupied-sector snapshots.
 """
 from __future__ import annotations
 
 # Event type ids (mirror ALERT_TYPES).
-BENCH_READY = "SCAN_BENCH_READY"
 NEW_READY = "SCAN_NEW_READY"
-WATCH_BENCH = "SCAN_WATCH_BENCH"
 DEGRADED = "SCAN_DEGRADED"
 PIPELINE_ENTRANT = "SCAN_PIPELINE_ENTRANT"
 SECTOR_SLOT_OPEN = "SCAN_SECTOR_SLOT_OPEN"
@@ -51,31 +47,17 @@ def diff_symbol(prev: dict | None, today: dict | None) -> list[dict]:
     events: list[dict] = []
     tv = today.get("verdict")
     pv = (prev or {}).get("verdict")
-    was_bench = bool((prev or {}).get("bench"))
-
-    # READY transitions (bench-cleared is the headline).
-    if tv == "READY" and pv != "READY":
-        if was_bench:
-            events.append(_event(BENCH_READY, tkr,
-                                 f"{disp} cleared its trigger — now READY",
-                                 {"from": "BENCH", "sector": today.get("sector")}))
-        else:
-            events.append(_event(NEW_READY, tkr,
-                                 f"{disp} is now READY",
-                                 {"from": pv, "sector": today.get("sector")}))
-    # Pipeline PROGRESS — a name that moved onto the bench (structure complete, now
-    # waiting on a clearable trigger with a schedule) without yet being READY. This
-    # is NOT actionable like BENCH→READY; it's a heads-up that a name advanced from
-    # WATCH intake to "waiting, with a schedule". Never fires alongside a READY event.
-    elif today.get("bench") and not was_bench:
-        events.append(_event(WATCH_BENCH, tkr,
-                             f"{disp} moved to the bench — {today.get('path_to_ready') or 'waiting on a trigger'}",
-                             {"sector": today.get("sector"),
-                              "eligible_days": today.get("eligible_days")}))
+    
+    # ELIGIBLE transition. With two verdict states there is no bench and no
+    # "waiting, with a schedule" tier — a name is enterable or it is not, so the
+    # BENCH_READY / WATCH_BENCH events went with the verdicts they described.
+    if tv == "ELIGIBLE" and pv != "ELIGIBLE":
+        events.append(_event(NEW_READY, tkr, f"{disp} is now ELIGIBLE",
+                             {"from": pv, "sector": today.get("sector")}))
 
     if prev:
         # Degradations — only for a name we were WATCHING (prev not BLOCKED).
-        watched = pv != "BLOCKED"
+        watched = pv == "ELIGIBLE"
         if watched:
             pb, tb = prev.get("base_stage"), today.get("base_stage")
             if tb in _DEGRADE_BASE and pb not in _DEGRADE_BASE:
@@ -107,17 +89,17 @@ def diff_symbol(prev: dict | None, today: dict | None) -> list[dict]:
 
 def sector_slot_events(prev_occupied, occupied_now, today_by_sym) -> list[dict]:
     """A SECTOR_SLOT_OPEN event for every sector that was occupied yesterday and is
-    free today AND has a bench-or-ready candidate waiting in it. PURE."""
+    free today AND has an ELIGIBLE candidate waiting in it. PURE."""
     prev_occupied = set(prev_occupied or [])
     occupied_now = set(occupied_now or [])
     freed = prev_occupied - occupied_now
     if not freed:
         return []
-    # Candidates waiting per now-free sector: a READY or bench name in that sector.
+    # Candidates waiting per now-free sector: an ELIGIBLE name in that sector.
     events = []
     for sector in sorted(freed):
         waiting = [r for r in today_by_sym.values()
-                   if r.get("sector") == sector and (r.get("verdict") == "READY" or r.get("bench"))]
+                   if r.get("sector") == sector and r.get("verdict") == "ELIGIBLE"]
         if not waiting:
             continue
         names = ", ".join(sorted((r.get("ticker") or "").upper() for r in waiting)[:5])

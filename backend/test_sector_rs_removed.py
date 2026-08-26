@@ -118,24 +118,16 @@ def test_a_severe_sector_laggard_is_not_vetoed():
     assert not any("sector" in r for r in res["veto_reasons"])
 
 
-def test_no_sector_veto_id_can_reach_the_block_or_trigger_maps():
-    """The id is gone from both static maps, and — more importantly — the gate
-    can no longer PRODUCE it, because the veto that emitted it is gone.
+def test_no_sector_veto_id_can_reach_the_veto_registry():
+    """The trigger KIND map this used to check went with the trigger machinery.
+    The guarantee moved somewhere stronger: the veto REGISTRY is now the exhaustive
+    list of everything that can block, so a sector-relative veto cannot exist
+    without appearing in it."""
+    import scan_verdict as sv
+    for vid in sv.VETO_IDS:
+        assert "sector" not in vid or vid == "account", vid
+    assert not any("rs3m_vs_sector" in vid for vid in sv.VETO_IDS)
 
-    (A hand-forged legacy gate dict would still classify: `_kind_for` defaults
-    unknown ids to CONDITIONAL. That is the generic fallback, not a sector rule,
-    and no live gate emits the id — asserted below.)"""
-    assert "veto:rs3m_vs_sector" not in scan_triggers._KIND
-    assert "veto:rs3m_vs_sector" not in scan_triggers._CLEARS
-    df = _frame(_ramp(230, 0.10))
-    real = {"levels": [{"level": 3, "pass": False, "detail": {
-        "vetoes": stock_lights.evaluate_vetoes(df, 95.0, False)}}]}
-    assert all(b["id"] != "veto:rs3m_vs_sector" for b in scan_triggers.gate_blocks(real))
-
-
-# ===========================================================================
-# 3. Suitability / ranking / shadow SCORE
-# ===========================================================================
 def test_suitability_has_no_sector_rule():
     src = inspect.getsource(sc.compute_verdict)
     assert "RS3M_VS_SECTOR_MIN" not in src

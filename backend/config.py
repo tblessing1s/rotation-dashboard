@@ -326,44 +326,11 @@ GATE_TELEMETRY_NEAR_MISS_BUCKETS = (0.01, 0.05, 0.10, 0.25, 0.50, 1.00)  # PROPO
 # warning: a rate over three scans is not a rate. ~1 full universe sweep.
 GATE_TELEMETRY_MIN_EVALUATED_N = 500     # PROPOSED_DEFAULT
 
-# ---- Entry-gate ruleset (shadow-first recalibration) -----------------------
-# The gate recalibration ships SHADOW-FIRST: both rulesets are computed on every
-# scan and their divergence is logged, but only ONE carries blocking authority.
-#
-#   "legacy"   — the shipped rules: symbol verdict 4/4 green = GREEN / exactly 3
-#                = YELLOW, and the Level-4 right spot requires ATR/ATR_5EMA <=
-#                SPOT_ATR_MOMENTUM_MAX (contracting or flat).
-#   "proposed" — mandatory-core 3-of-4 (see SYM_MIN_GREEN_LIGHTS) and a Level-4
-#                right spot that only requires ATR not EXPANDING (see
-#                L4_ATR_EXPANSION_MAX).
-#
-# Default "legacy". Flipping authority is a HUMAN decision made once the
-# divergence record justifies it — there is deliberately no date-based auto-flip.
-RULESET_LEGACY = "legacy"
-RULESET_PROPOSED = "proposed"
-GATE_RULESETS = (RULESET_LEGACY, RULESET_PROPOSED)
-GATE_RULESET = os.environ.get("CFM_GATE_RULESET", RULESET_LEGACY).strip().lower()
-if GATE_RULESET not in GATE_RULESETS:      # an unknown value is never authority
-    GATE_RULESET = RULESET_LEGACY
-
-# Mandatory-core 3-of-4 (TRAVIS_EXTENSION). The symbol verdict under the proposed
-# ruleset is GREEN when the MANDATORY CORE light (close > SMA50 — the light that
-# maps to the Consider-Going-To-Cash exit level) is green AND at least this many
-# of the four lights are green. Core failure alone is RED regardless of the rest.
-# The point is that no single non-core light — Parabolic SAR above all, whose seed
-# is path-dependent on the frame's first bar — can unilaterally veto an entry.
-# The MARKET (SPY) vote is NOT affected: it has its own >=3 rule + yellow dwell
-# (GENIUS_VOTE_GREEN_MIN / GENIUS_YELLOW_DWELL_DAYS above).
-SYM_MIN_GREEN_LIGHTS = 3       # PROPOSED_DEFAULT — green lights needed alongside the core
-
-# Level-4 right spot under the proposed ruleset: ATR/ATR_5EMA must not be
-# EXPANDING, rather than actively contracting. Rationale: contracting ATR
-# compresses extrinsic, so the legacy bar systematically selects premium-poor
-# charts that the income checks then fail — the gate disagreeing with itself.
-# Deliberately SEPARATE from SPOT_ATR_MOMENTUM_MAX (the legacy veto) and from the
-# shadow SCORE's own ATR posture band (scan_score.ATR_CONTRACTING/ATR_EXPANDING),
-# so the veto and the rank stay independently tunable.
-L4_ATR_EXPANSION_MAX = 1.05    # PROPOSED_DEFAULT — ATR/ATR_5EMA <= this = not expanding
+# The entry-gate RULESET switch (legacy vs proposed, CFM_GATE_RULESET) lived here.
+# Deleted with the serial filter it existed to recalibrate: both rulesets differed
+# only on the L3 light vote and the L4 right spot, and both of those are now
+# RANKING inputs that cannot block. SYM_MIN_GREEN_LIGHTS and L4_ATR_EXPANSION_MAX
+# went with it — a threshold for a veto that no longer exists is not a tunable.
 
 # Scan transition-events log (DATA_DIR/scan_diff_log.json) — the append-only
 # audit trail of daily BENCH→READY / degrade / entrant / slot-open transitions,
@@ -524,6 +491,25 @@ PER_POSITION_CAP_USD = float(os.environ.get("PER_POSITION_CAP_USD") or 15000)
 # scan_triggers.shadow_floor. SHADOW ONLY — see that function; it has zero
 # blocking authority and no switch exists to give it any.
 SHARES_JUICE_FLOOR_PCT = 0.75
+
+# ---- Tradeability floor (scan veto) ---------------------------------------
+# PROPOSED_DEFAULT. A hard ACCOUNT constraint, not an opinion about the chart, so
+# it is one of the few things that still vetoes an entry outright: a name whose
+# round-trip crossing costs more than the premium the trade exists to collect is
+# not enterable at any rank. Denominated as the bid-ask spread as a PERCENT of the
+# contract mid, which is the shape `spread_monitor` already samples — so the veto
+# and the execution-time spread gate speak the same units.
+TRADEABILITY_MAX_SPREAD_PCT = 15.0
+
+# Cash-secured-put weekly yield floor, denominated on COLLATERAL (premium /
+# (strike x 100)) — deliberately NOT SHARES_JUICE_FLOOR_PCT above, which is
+# denominated on share cost. The two measure a yield on different capital and
+# sharing one constant would make the same number mean two things. Lower than the
+# share floor because collateral is the full strike rather than the discounted
+# entry the put is trying to win. RANKING input only: like the share-side floor it
+# carries NO veto authority, and no switch exists to give it any.
+PUT_JUICE_FLOOR_PCT = 0.50
+
 # ---- Dividend income profile (schema v21) ---------------------------------
 # TRAVIS_EXTENSION — NOT a CFM rule. The CFM source prefers volatile names for
 # their juice and warns against "safe" low-vol stocks; the dividend sleeve is an

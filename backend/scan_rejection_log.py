@@ -37,9 +37,9 @@ _lock = threading.RLock()
 # changes fields, so a calibration pass can tell which records carry which
 # columns rather than inferring from absence.
 #   1 — verdict + binding + score/RS/juice + shadow floor (schema v21)
-#   2 — gate-recalibration shadow record: scan_id, both rulesets' verdicts and
-#       their divergence, the full per-level results, the SYM light breakdown and
+#   2 — gate-recalibration shadow record: scan_id, the SYM light breakdown and
 #       the raw ATR ratio. Writes become append-per-SCAN-RUN (see record_scan).
+#       The dual-ruleset verdict pair it also carried was dropped in schema 4.
 #   3 — Level-4 CHART-STRUCTURE shadow metrics (chart_structure): the four raw
 #       values, their constructive verdicts, structure_score / _of, the
 #       insufficient list, the tightness basis AND the per-basis ceiling it was
@@ -87,10 +87,10 @@ def _save(data: dict) -> None:
 # ---------------------------------------------------------------------------
 def binding_constraint(row: dict) -> str | None:
     """The single first-failing check for a row — the first entry of the canonical
-    verdict's ``reasons`` (compose_verdict already ordered them worst-first). None
-    for a READY row. This is a READ of the already-computed reasons, NOT a
+    verdict's ``blocked_by`` (already in veto-registry order). None
+    for an ELIGIBLE row. This is a READ of the already-computed reasons, NOT a
     re-evaluation of the gate."""
-    if row.get("verdict") == "READY":
+    if row.get("verdict") == "ELIGIBLE":
         return None
     reasons = row.get("verdict_reasons") or []
     # Skip the informational RS TURNING annotation (appended after the real inputs);
@@ -113,7 +113,7 @@ def _record_from_row(row: dict) -> dict:
         # Structured binding (Phase-0 Q9 capture): the level / check id / trigger
         # kind of the first-failing gate check, so the deferred miss-analysis can
         # ask "did L4-blocked names resolve into entries we missed" without a
-        # string parse. None on a READY row.
+        # string parse. None on an ELIGIBLE row.
         "binding_level": binding.get("level"),
         "binding_check": binding.get("id"),
         "binding_kind": binding.get("kind"),
@@ -149,20 +149,17 @@ def _record_from_row(row: dict) -> dict:
         "shadow_floor_basis": floor.get("basis"),
         "shadow_floor_reasons": floor.get("reasons"),
         # --- Gate recalibration shadow record (schema 2) ----------------------
-        # BOTH rulesets' verdicts and whether they diverged. The authoritative one
-        # is named by `gate_ruleset`; `verdict` above always follows it. This is
-        # the dataset a human reads before deciding whether to flip authority —
-        # recording it grants none.
-        "gate_ruleset": row.get("gate_ruleset"),
-        "legacy_verdict": row.get("legacy_verdict"),
-        "proposed_verdict": row.get("proposed_verdict"),
-        "ruleset_divergence": bool(row.get("ruleset_divergence")),
         # The FULL conditional gate picture — every level's result, recorded even
         # past the first failure, so a later pass can ask which levels were
         # redundant. `first_failing_level` is the lowest failing level in gate
         # order; it is NOT `binding_level` above (the most DECISIVE block).
-        "first_failing_level": row.get("first_failing_level"),
-        "all_level_results": row.get("all_level_results"),
+        # The per-level record went with the levels. What replaces it is the
+        # exhaustive veto list (`blocked_by`) plus the rank's per-input
+        # contributions — a strictly richer calibration record: the old form said
+        # WHICH level stopped a name, this says which vetoes fired AND what every
+        # ranking input contributed to the ones that did not.
+        "blocked_by": row.get("blocked_by"),
+        "score_contributions": row.get("score_contributions"),
         # Inputs needed to re-derive the symbol vote offline, so a rule change can
         # be replayed against history without refetching bars.
         "sym_lights": row.get("sym_lights"),
@@ -223,7 +220,7 @@ def latest_before(day: str | None = None) -> dict:
 
 def summary(window: int | None = None) -> dict:
     """A calibration-oriented rollup over the retained records: how often each
-    binding constraint bound, and the READY rate — the empirical read on whether
+    binding constraint bound, and the ELIGIBLE rate — the empirical read on whether
     the gate is too strict. ``window`` bounds each symbol to its newest N records."""
     from metrics import thresholds as _T
     vol_floor = _T.VOLUME_RATIO_MIN            # read, never written — see chart_structure
@@ -272,20 +269,7 @@ def summary(window: int | None = None) -> dict:
             if (rec.get("consolidation_phase") and rec.get("volume_ratio") is not None
                     and rec["volume_ratio"] < vol_floor):
                 phase_suppressed += 1
-    ready = verdict_counts.get("READY", 0)
-    # Ruleset-divergence tally (schema 2): how often the proposed rules would have
-    # reached a different verdict than the shipped ones, and in which direction.
-    # The empirical basis for a human decision to flip GATE_RULESET — no more.
-    diverged = 0
-    divergence_pairs: dict[str, int] = {}
-    for recs in data.values():
-        for rec in (recs[-window:] if window else recs):
-            if rec.get("legacy_verdict") is None and rec.get("proposed_verdict") is None:
-                continue                       # schema 1 record — nothing to compare
-            if rec.get("ruleset_divergence"):
-                diverged += 1
-                pair = f"{rec.get('legacy_verdict')}->{rec.get('proposed_verdict')}"
-                divergence_pairs[pair] = divergence_pairs.get(pair, 0) + 1
+    eligible = verdict_counts.get("ELIGIBLE", 0)
     for agg in floor.values():
         seen = agg["pass"] + agg["fail"]
         agg["evaluated"] = seen
@@ -306,19 +290,13 @@ def summary(window: int | None = None) -> dict:
         "verdict_counts": verdict_counts,
         "binding_counts": dict(sorted(binding_counts.items(),
                                       key=lambda kv: kv[1], reverse=True)),
-        "ready_rate": round(ready / total * 100, 1) if total else None,
+        "eligible_rate": round(eligible / total * 100, 1) if total else None,
         # SHADOW-floor calibration read: how often each profile's floor would have
         # bound had it any authority. This is the evidence a future graduation
         # decision needs; it does not itself grant any.
         "shadow_floor": floor,
         "shadow_floor_reasons": dict(sorted(floor_reasons.items(),
                                             key=lambda kv: kv[1], reverse=True)),
-        # Gate-recalibration divergence read (schema 2).
-        "ruleset": config.GATE_RULESET,
-        "ruleset_divergences": diverged,
-        "ruleset_divergence_rate": (round(diverged / total * 100, 1) if total else None),
-        "ruleset_divergence_pairs": dict(sorted(divergence_pairs.items(),
-                                                key=lambda kv: kv[1], reverse=True)),
     }
 
 

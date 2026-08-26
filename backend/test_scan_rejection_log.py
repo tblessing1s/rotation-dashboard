@@ -24,7 +24,7 @@ def test_binding_constraint_is_first_reason():
 
 
 def test_binding_constraint_none_for_ready():
-    assert srl.binding_constraint(_row("A", "READY", [])) is None
+    assert srl.binding_constraint(_row("A", "ELIGIBLE", [])) is None
 
 
 def test_binding_constraint_skips_rs_annotation():
@@ -62,11 +62,11 @@ def test_record_scan_idempotent_within_one_run(tmp_path, monkeypatch):
     monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
     srl.record_scan([_row("AAA", "BLOCKED", ["structure:BLOCKED"], score=1.0)],
                     day="2026-07-16", scan_id="run-1")
-    srl.record_scan([_row("AAA", "READY", [], score=8.0)],
+    srl.record_scan([_row("AAA", "ELIGIBLE", [], score=8.0)],
                     day="2026-07-16", scan_id="run-1")   # same RUN — replaces
     recs = srl.series("AAA")
     assert len(recs) == 1
-    assert recs[0]["verdict"] == "READY" and recs[0]["scan_id"] == "run-1"
+    assert recs[0]["verdict"] == "ELIGIBLE" and recs[0]["scan_id"] == "run-1"
 
 
 def test_record_scan_appends_per_run_and_never_rewrites(tmp_path, monkeypatch):
@@ -75,18 +75,18 @@ def test_record_scan_appends_per_run_and_never_rewrites(tmp_path, monkeypatch):
     monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
     srl.record_scan([_row("AAA", "BLOCKED", ["structure:BLOCKED"], score=1.0)],
                     day="2026-07-16", scan_id="run-1")
-    srl.record_scan([_row("AAA", "READY", [], score=8.0)],
+    srl.record_scan([_row("AAA", "ELIGIBLE", [], score=8.0)],
                     day="2026-07-16", scan_id="run-2")   # same day, DIFFERENT run
     srl.record_scan([_row("AAA", "WATCH", ["symbol:WATCH"], score=5.0)],
                     day="2026-07-17", scan_id="run-3")
     recs = srl.series("AAA")
     assert len(recs) == 3                                     # nothing was rewritten
-    assert [r["verdict"] for r in recs] == ["BLOCKED", "READY", "WATCH"]
+    assert [r["verdict"] for r in recs] == ["BLOCKED", "ELIGIBLE", "WATCH"]
     assert [r["scan_id"] for r in recs] == ["run-1", "run-2", "run-3"]
     assert all(r["schema"] == srl.SCHEMA_VERSION for r in recs)
     # An omitted scan_id is still its own run (microsecond identity), never a
     # silent overwrite of the last one.
-    srl.record_scan([_row("AAA", "READY", [])], day="2026-07-17")
+    srl.record_scan([_row("AAA", "ELIGIBLE", [])], day="2026-07-17")
     assert len(srl.series("AAA")) == 4
 
 
@@ -96,8 +96,8 @@ def test_retention_trims_by_date_not_record_count(tmp_path, monkeypatch):
     monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
     for day in ("2026-07-14", "2026-07-15", "2026-07-16"):
         for run in ("a", "b"):
-            srl.record_scan([_row("AAA", "READY", [])], day=day, scan_id=f"{day}-{run}")
-    srl.record_scan([_row("AAA", "READY", [])], day="2026-07-17",
+            srl.record_scan([_row("AAA", "ELIGIBLE", [])], day=day, scan_id=f"{day}-{run}")
+    srl.record_scan([_row("AAA", "ELIGIBLE", [])], day="2026-07-17",
                     scan_id="2026-07-17-a", max_days=2)
     recs = srl.series("AAA")
     assert sorted({r["date"] for r in recs}) == ["2026-07-16", "2026-07-17"]
@@ -112,24 +112,24 @@ def test_latest_before_still_returns_the_newest_prior_day(tmp_path, monkeypatch)
                     day="2026-07-16", scan_id="run-1")
     srl.record_scan([_row("AAA", "WATCH", ["symbol:WATCH"])],
                     day="2026-07-16", scan_id="run-2")
-    srl.record_scan([_row("AAA", "READY", [])], day="2026-07-17", scan_id="run-3")
+    srl.record_scan([_row("AAA", "ELIGIBLE", [])], day="2026-07-17", scan_id="run-3")
     prior = srl.latest_before("2026-07-17")
     assert prior["AAA"]["verdict"] == "WATCH"          # last run OF the prior day
 
 
 def test_record_scan_skips_rows_without_ticker(tmp_path, monkeypatch):
     monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
-    out = srl.record_scan([{"verdict": "READY"}, _row("BBB", "READY", [])], day="2026-07-16")
+    out = srl.record_scan([{"verdict": "ELIGIBLE"}, _row("BBB", "ELIGIBLE", [])], day="2026-07-16")
     assert out["recorded"] == 1
 
 
 # ---------------------------------------------------------------------------
 # summary — the "is the gate too strict" rollup
 # ---------------------------------------------------------------------------
-def test_summary_counts_binding_and_ready_rate(tmp_path, monkeypatch):
+def test_summary_counts_binding_and_eligible_rate(tmp_path, monkeypatch):
     monkeypatch.setattr(srl, "LOG_PATH", str(tmp_path / "log.json"))
     srl.record_scan([
-        _row("A", "READY", []),
+        _row("A", "ELIGIBLE", []),
         _row("B", "WATCH", ["symbol:WATCH"]),
         _row("C", "BLOCKED", ["structure:BLOCKED"]),
         _row("D", "WATCH", ["symbol:WATCH"]),
@@ -138,4 +138,4 @@ def test_summary_counts_binding_and_ready_rate(tmp_path, monkeypatch):
     assert s["records"] == 4
     assert s["verdict_counts"]["WATCH"] == 2
     assert s["binding_counts"]["symbol:WATCH"] == 2
-    assert s["ready_rate"] == 25.0
+    assert s["eligible_rate"] == 25.0
