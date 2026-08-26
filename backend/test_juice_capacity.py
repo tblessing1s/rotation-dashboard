@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import copy
 import json
+import inspect
 import os
 import tempfile
 
@@ -487,19 +488,49 @@ def test_no_authority_row_is_identical_with_and_without_capacity(shares_mode, st
     assert a == b
 
 
-def test_capacity_is_never_appended_to_the_verdict_blocks():
-    """The load-bearing invariant, asserted structurally: `blocks` is what carries
-    verdict authority (scan_triggers.compose_row_verdict), and no capacity value
-    may ever enter it. Grep-level check that no gate/verdict module imports the
-    capacity store at all."""
+def test_capacity_reaches_the_ranker_and_never_the_blocks_list():
+    """THE INVARIANT, rewritten for the ranker (§1.7) rather than deleted.
+
+    Capacity now reaches the RANKER — granted deliberately by this reviewed
+    change. What is unchanged, and is the whole safety property, is that it can
+    never reach ``blocks``, the list that carries VETO authority.
+
+    Asserted two ways, both structural:
+
+      1. no VETO-authority module IMPORTS the capacity store. Checked against the
+         parsed import graph rather than a substring grep, because a grep over
+         source also matches prose in a docstring — which made the old check pass
+         or fail on comment wording rather than on behaviour.
+      2. ``scan_verdict.evaluate`` is keyword-only and accepts no capacity-shaped
+         argument, so there is no parameter through which one could become a block.
+    """
+    import ast
+    import pytest as _pytest
+    import scan_score
+    import scan_verdict as _sv
+
     here = os.path.dirname(os.path.abspath(__file__))
     for module in ("scan_triggers.py", "scan_verdict.py", "screening.py",
                    "account_gate.py", "execution_gate.py", "executor.py",
-                   "scan_score.py", "queue_state.py", "recommendation_engine.py",
+                   "queue_state.py", "recommendation_engine.py",
                    "recommendation_runner.py", "position_manager.py", "alerts.py"):
         with open(os.path.join(here, module), encoding="utf-8") as fh:
-            src = fh.read()
-        assert "juice_capacity" not in src, f"{module} consumes the capacity metric"
+            tree = ast.parse(fh.read())
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imported |= {a.name.split(".")[0] for a in node.names}
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imported.add(node.module.split(".")[0])
+        assert "juice_capacity" not in imported, \
+            f"{module} imports the capacity store"
+
+    # No parameter through which capacity could reach the veto set...
+    for name in ("capacity", "capacity_pct", "juice_capacity"):
+        with _pytest.raises(TypeError):
+            _sv.evaluate(**{name: 0.0})
+    # ...and a live one on the RANKER, which is where it belongs now.
+    assert "capacity_pct" in inspect.signature(scan_score.compute_score).parameters
 
 
 def test_capacity_declares_itself_shadow_and_non_blocking(store):

@@ -31,6 +31,8 @@ backend/state.demo.json.tmp.*
 backend/*.json.tmp.*
 # Derived scan-pipeline telemetry stores (DATA_DIR; recomputable, never committed)
 backend/scan_rejection_log.json
+# Trailing juice-capacity observations (DATA_DIR; derived, recomputable).
+backend/juice_capacity.json
 backend/gate_telemetry_log/
 data/gate_telemetry_log/
 backend/scan_diff_log.json

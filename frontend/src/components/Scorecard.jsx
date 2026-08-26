@@ -40,8 +40,12 @@ const INST_TONE = {
   NO_INTEREST: "text-slate-400", DISTRIBUTING: "text-rose-300",
   INSUFFICIENT_DATA: "text-slate-500",
 };
-const VERDICT_STATUS = { READY: "ready", CAUTION: "caution", WATCH: "watch", BLOCKED: "blocked" };
-const VERDICT_ORDER = { READY: 0, CAUTION: 1, WATCH: 2, BLOCKED: 3 };
+// Two states. CAUTION and WATCH were deleted with the serial filter they
+// described: with a veto set this thin they no longer name anything the RANK
+// does not, and a third adjective between "enterable" and "not" invited exactly
+// the hedging the rank exists to replace.
+const VERDICT_STATUS = { ELIGIBLE: "ready", BLOCKED: "blocked" };
+const VERDICT_ORDER = { ELIGIBLE: 0, BLOCKED: 1 };
 const BASE_ORDER = { EARLY_ADVANCE: 0, LATE_ADVANCE: 1, BASING: 2, TOPPING: 3, DECLINING: 4, INSUFFICIENT_DATA: 5 };
 const INST_ORDER = { ACCUMULATING: 0, EARLY_INTEREST: 1, NO_INTEREST: 2, DISTRIBUTING: 3, INSUFFICIENT_DATA: 4 };
 const SYM_ORDER = { green: 0, yellow: 1, red: 2 };
@@ -182,7 +186,7 @@ const COLUMNS = [
         `${ok == null ? "·" : ok ? "✓" : "✗"} ${label}: ${val ?? "insufficient data"}`;
       const title = [
         `SHADOW — chart structure ${r.structure_score}/${of} constructive. `
-          + `Zero blocking authority: it does not affect the verdict, ranking, bench or Ready-to-Enter.`,
+          + `Zero BLOCKING authority: it can lower a name's rank, but it can never make a name ineligible.`,
         "",
         line("dist below 126d high", st.dist_from_high_pct == null ? null : `${fmt(st.dist_from_high_pct, 2)}%`, c.dist_from_high_pct),
         line("MA21 slope", st.ma21_slope == null ? null : `${fmt(st.ma21_slope, 3)} ATR/bar (${st.ma21_slope_state})`, c.ma21_slope),
@@ -209,7 +213,7 @@ const COLUMNS = [
     render: (r) => (
       <span className="inline-flex items-center gap-1.5">
         <Pill status={VERDICT_STATUS[r.verdict] || "unknown"}>{r.verdict || "—"}</Pill>
-        {r.bench && (
+        {false && (
           <span
             title={r.path_to_ready ? `Bench — path to READY: ${r.path_to_ready}` : "Bench — waiting on a calendar/conditional trigger"}
             className="text-[10px] font-medium uppercase tracking-wide text-sky-400"
@@ -246,20 +250,20 @@ const COLUMN_HELP = {
   score: "Composite SCORE 0–10 (SHADOW — zero authority).\n" +
     "A quality rank over the non-blocking inputs (sector strength, base maturity, InstFlow grade, ATR posture, MA21 distance, net juice/wk, RS state). All weights are PROPOSED_DEFAULT and logged for calibration. It does NOT feed the verdict, Ready-to-Enter, or sizing — it only ranks names within a tier.",
   verdict: "The composed verdict — worst-signal-wins of the (invisible) market regime, Symbol Genius, and the structure cell, folded with the FULL entry gate.\n" +
-    "READY (the whole L1–L4 gate clears — will pass Execute) · CAUTION (entrable with care) · WATCH (valid setup, not entrable) · BLOCKED. A RED market regime forces every row to BLOCKED even though regime has no column.\n" +
-    "BENCH tag = a WATCH row that is one calendar/conditional trigger away from READY (no safety block). Hover it for the path to READY.",
+    "ELIGIBLE (every veto clears — will pass Execute) · BLOCKED (at least one veto fired; the reason is listed). Only the exit mirrors and hard account constraints veto: regime RED, RS3M-vs-SPY negative, a close below the 50- or 200-day, your stored line, the account limits, earnings in the cycle, tradeability, and stale inputs.\n" +
+    "Everything else RANKS. A name with a weak sector, a missing light or an extended chart is ELIGIBLE with a lower SCORE — never blocked. Read the score, not just the position.",
 };
 
-// The filter set. BENCH is not a verdict value — it's a derived VIEW over WATCH rows
-// whose only blockers are calendar/conditional triggers (server flag row.bench).
-const BENCH = "BENCH";
+// The filter set. The BENCH derived view went with the WATCH verdict it was a
+// view over: with two states there is no "waiting, with a schedule" tier.
+const BENCH = "BENCH";   // retained as a no-op filter key; never matches a row
 
 // When the market regime isn't green it's the invisible input driving BLOCKED/WATCH
 // verdicts below — surface it so the table's verdicts are read in context.
 const REGIME_BANNER = {
   yellow: {
     cls: "border-amber-500/40 bg-amber-500/10 text-amber-200",
-    text: "Market regime YELLOW — the invisible verdict input caps every row at WATCH (no fresh entries). Structure/SYM still rank names for when the tape clears.",
+    text: "Market regime YELLOW — entries are still allowed (only RED blocks), but the ROUTE is constrained to shares: a put commits capital a week out on a tape that is already wobbling.",
   },
   red: {
     cls: "border-rose-500/40 bg-rose-500/10 text-rose-200",
@@ -420,7 +424,7 @@ function StructureShadow({ row }) {
 // median of the combined weekly yield can. Styled as an observation (violet +
 // explicit NO AUTHORITY badge), matching StructureShadow and ShadowFloorLog —
 // deliberately NOT the emerald/amber/rose the blocking gate uses, so it can never
-// be read as a gate result. It moves no verdict, ranking, bench status or filter.
+// be read as a gate result. It moves no VERDICT — it can only move the rank.
 //
 // "Insufficient history" is rendered as its own state, never as a zero or a dash:
 // "we haven't measured this yet" and "this name yields nothing" are opposite facts.
@@ -501,7 +505,7 @@ function Readout({ label, value }) {
 
 function ScoreRow({ row, expanded, onToggle, onRefresh, refreshing, refreshedAt, refreshError, innerRef }) {
   const blocked = row.verdict === "BLOCKED";
-  const caution = row.verdict === "CAUTION";
+  const caution = false;
   return (
     <>
       <tr

@@ -370,7 +370,9 @@ def test_no_hard_cfm_rule_or_level_4_threshold_moved():
     assert config.CONSOLIDATION_ATR_PCT_MAX == 5.0
     assert config.SPOT_ATR_MOMENTUM_MAX == 1.0
     assert config.SPOT_ATR_EXTENSION_MAX == 1.5
-    assert config.L4_ATR_EXPANSION_MAX == 1.05
+    # L4_ATR_EXPANSION_MAX went with the dual-ruleset switch: a threshold for a
+    # veto that no longer exists is not a tunable.
+    assert not hasattr(config, "L4_ATR_EXPANSION_MAX")
 
 
 # ---- the phase flag itself -------------------------------------------------
@@ -438,10 +440,9 @@ def test_xlk_july6_right_spot_is_byte_identical():
     structure metric had leaked into `_right_spot_from`'s checks list, this fails."""
     df = _xlk()
     res = stock_lights.compute(df, ivr_percentile=95.0, is_etf=True)
-    assert res["right_spot"] == stock_lights.right_spot(df, config.RULESET_LEGACY)
+    assert res["right_spot"] == stock_lights.right_spot(df)
     assert res["verdict"] == stock_lights.RED
     assert "veto:atr_expanding_high_ivr" in res["veto_reasons"]
-    assert res["by_ruleset"][config.RULESET_LEGACY]["right_spot"] == res["right_spot"]
     # Exactly three checks, exactly these ids, in this order — no fourth leg.
     assert [c["id"] for c in res["right_spot"]["checks"]] == [
         "atr_pct", "atr_5d_ema", "extension"]
@@ -469,13 +470,13 @@ def test_structure_metrics_do_not_perturb_the_right_spot_for_any_fixture():
 # 4. ZERO BLOCKING AUTHORITY
 # ===========================================================================
 def _ready_row_verdict(structure=None, phase=False):
-    """The canonical row verdict for a clean READY name, with an arbitrary
-    structure record attached. The structure record is deliberately NOT passed
-    into any of the composing calls — that IS the invariant under test."""
-    from structure_classifier import BaseStage, InstFlow
-    composed = sv.compose_verdict("green", "green",
-                                  BaseStage.EARLY_ADVANCE, InstFlow.ACCUMULATING)
-    return st.compose_row_verdict(composed, [])
+    """The canonical verdict for a clean name, with an arbitrary structure record
+    attached. The structure record is deliberately NOT passed into the veto
+    evaluation — that IS the invariant under test, and it is now enforced by the
+    signature rather than by discipline."""
+    return sv.compose(sv.evaluate(regime_color="green", rs3m_vs_spy=2.0,
+                                  below_ma50=False, below_ma200=False,
+                                  has_weeklies=True))
 
 
 WORST_CASE = {
@@ -488,37 +489,47 @@ WORST_CASE = {
 }
 
 
-def test_worst_case_structure_leaves_a_ready_verdict_ready():
-    """Force all four metrics to their worst possible values on a READY fixture.
-    The verdict, and everything derived from it, must not move."""
+def test_worst_case_structure_leaves_an_eligible_verdict_eligible():
+    """Force all four metrics to their worst possible values. The VERDICT must not
+    move — the rank absorbs the bad news, which is the whole design."""
     clean = _ready_row_verdict()
-    assert clean["verdict"] == sv.READY
+    assert clean["verdict"] == sv.ELIGIBLE
 
     worst = _ready_row_verdict(structure=WORST_CASE)
-    assert worst["verdict"] == sv.READY
+    assert worst["verdict"] == sv.ELIGIBLE
     assert worst == clean                       # byte-identical, not merely equal-verdict
-    assert st.is_bench(worst["verdict"], worst["triggers"]) is False
+
+    # ...and the rank DOES move, which is where a worst-case structure belongs.
+    import scan_score
+    good = scan_score.compute_score(structure_score=4, structure_score_of=4,
+                                    net_juice_weekly_pct=2.0)
+    bad = scan_score.compute_score(structure_score=0, structure_score_of=4,
+                                   net_juice_weekly_pct=2.0)
+    assert bad["score"] < good["score"]
 
 
-def test_structure_produces_no_gate_block_and_no_trigger():
-    """`blocks` is the authority boundary. Nothing structure-shaped may appear in
-    it, in the triggers derived from it, or in the static kind map."""
+def test_structure_never_appends_to_the_blocks_list():
+    """THE INVARIANT, restated for the ranker (§1.7).
+
+    Chart structure now reaches the RANKER — that authority was granted
+    deliberately by a reviewed change. It must still never reach ``blocks``, which
+    is the list that carries VETO authority. The two are different powers and this
+    is the boundary between them.
+
+    Asserted structurally: ``scan_verdict.evaluate`` is keyword-only and accepts no
+    structure-shaped argument, so there is no parameter through which a structure
+    metric could become a block even by mistake.
+    """
+    import pytest as _pytest
+    import scan_verdict as _sv
     structural = set(cs.METRICS) | {"structure_score", "consolidation_phase"}
-    # NB "structure" itself IS a legitimate pre-existing key — the classifier's
-    # entrability SIGNAL input, which predates this change and is unrelated to the
-    # shadow metrics. The four metric ids and the score must not join it.
-    assert structural.isdisjoint(st._KIND.keys())
-    assert "structure" in st._KIND                    # the pre-existing signal, untouched
-
-    gate = {"levels": [
-        {"level": 1, "pass": True}, {"level": 2, "pass": True},
-        {"level": 3, "pass": True, "detail": {"vetoes": []}},
-        {"level": 3.5, "pass": True},
-        {"level": 4, "pass": True,
-         "detail": {"right_spot": stock_lights.right_spot(ideal_coil())}},
-    ]}
-    blocks = st.gate_blocks(gate)
+    for name in structural:
+        with _pytest.raises(TypeError):
+            _sv.evaluate(**{name: 1.0})
+    # And no emitted block can carry a structure-shaped id.
+    blocks = _sv.evaluate(regime_color="red", below_ma200=True, stale=True)
     assert structural.isdisjoint({b["id"] for b in blocks})
+    assert structural.isdisjoint(set(_sv.VETO_IDS))
 
 
 def test_structure_is_not_a_right_spot_check():
@@ -531,14 +542,22 @@ def test_structure_is_not_a_right_spot_check():
     assert set(cs.METRICS).isdisjoint(set(spot["blocked_by"]))
 
 
-def test_structure_is_not_in_the_shadow_score_inputs():
-    """The shadow SCORE is a RANKING. Structure must not reach it either — the
-    prompt bars ranking authority as well as blocking authority."""
+def test_structure_now_reaches_the_ranker_and_only_the_ranker():
+    """The inverse of what this used to assert, and the change is the point.
+
+    Structure was shadow — computed, displayed, read by nothing. It is now a
+    RANKING input, granted by this reviewed change. What did NOT change is the
+    thing that matters: it ranks, it does not block (see the test above).
+    """
     import inspect
     import scan_score
     params = set(inspect.signature(scan_score.compute_score).parameters)
-    assert set(cs.METRICS).isdisjoint(params)
-    assert "structure_score" not in params
+    assert "structure_score" in params and "structure_score_of" in params
+    # Normalized against its variable denominator, because the raw count is not
+    # comparable across names.
+    assert scan_score.compute_score(structure_score=2, structure_score_of=2,
+                                    net_juice_weekly_pct=2.0
+                                    )["parts"]["chart_structure"] == 1.0
 
 
 def test_no_config_switch_can_grant_structure_authority():
@@ -563,8 +582,8 @@ def _score_row(df, gate=None, monkeypatch=None):
 
 def test_row_carries_the_structure_record_and_the_phase_flag(monkeypatch):
     df = ideal_coil()
-    gate = {"levels": [{"level": 4, "pass": True,
-                        "detail": {"right_spot": stock_lights.right_spot(df)}}]}
+    gate = {"verdict": sv.ELIGIBLE, "blocks": [],
+            "ranking": {"right_spot": stock_lights.right_spot(df)}}
     row = _score_row(df, gate, monkeypatch)
     assert row["structure"]["structure_score"] == row["structure_score"]
     assert row["structure_score_of"] == row["structure"]["structure_score_of"]
@@ -577,11 +596,12 @@ def test_structure_is_attached_even_when_level_4_fails(monkeypatch):
     "gate failed, structure N/4" is half the comparison the calibration is FOR —
     so the record must be attached BEFORE the short-circuit, not after."""
     df = post_run_drift()
-    gate = {"levels": [{"level": 4, "pass": False,
-                        "detail": {"right_spot": stock_lights.right_spot(df)}}]}
+    gate = {"verdict": sv.BLOCKED,
+            "blocks": sv.evaluate(below_ma200=True),
+            "ranking": {"right_spot": stock_lights.right_spot(df)}}
     row = _score_row(df, gate, monkeypatch)
     assert row["suitability"] == "AVOID"                 # the short-circuit fired
-    assert "fails entry gate level 4" in row["suitability_reasons"][0]
+    assert "close_below_ma200" in row["suitability_reasons"][0]
     assert row["structure"] is not None                  # ...and structure survived it
     assert row["structure_score"] is not None
     assert "consolidation_phase" in row
@@ -712,6 +732,9 @@ BEST_CASE = {
 }
 
 _STRUCTURE_KEYS = {"structure", "structure_score", "structure_score_of"}
+# The rank keys. Structure REACHES these deliberately — that is the granted
+# ranking authority — and reaches nothing else.
+_RANK_KEYS = {"score", "score_quality", "score_parts", "score_contributions"}
 
 
 def _row_with_structure(df, gate, forced, monkeypatch):
@@ -726,21 +749,31 @@ def _row_with_structure(df, gate, forced, monkeypatch):
 def test_every_non_structure_row_key_is_identical_under_worst_and_best(shape, monkeypatch):
     df = {"ideal_coil": ideal_coil, "post_run_drift": post_run_drift,
           "fresh_breakout": fresh_breakout}[shape]()
-    gate = {"levels": [{"level": 4, "pass": True,
-                        "detail": {"right_spot": stock_lights.right_spot(df)}}]}
+    gate = {"verdict": sv.ELIGIBLE, "blocks": [],
+            "ranking": {"right_spot": stock_lights.right_spot(df)}}
 
     worst = _row_with_structure(df, gate, WORST_CASE, monkeypatch)
     best = _row_with_structure(df, gate, BEST_CASE, monkeypatch)
 
     assert set(worst) == set(best)
     differing = {k for k in worst if repr(worst[k]) != repr(best[k])}
-    # The ONLY keys allowed to move are the structure record itself.
-    assert differing <= _STRUCTURE_KEYS, differing
-    # Spelled out, because these are the ones that matter.
-    for key in ("verdict", "verdict_reasons", "binding", "triggers", "path_to_ready",
-                "eligible_days", "bench", "suitability", "suitability_reasons",
-                "score", "score_parts", "legacy_verdict", "proposed_verdict",
-                "ruleset_divergence", "all_level_results", "first_failing_level"):
+    # The keys allowed to move are the structure record AND the RANK — that second
+    # half is the change. Structure was shadow; it is now a ranking input, so a
+    # worst-case read is SUPPOSED to move the score. What must not move is
+    # anything carrying authority.
+    assert differing <= _STRUCTURE_KEYS | _RANK_KEYS, differing
+    # And it must ACTUALLY move the rank, or the input is not wired up. Compared
+    # on the CONTRIBUTION rather than the total: these synthetic frames price at no
+    # net juice, so the multiplicative viability factor zeroes the total for both
+    # and would hide a genuinely unwired input behind 0.0 == 0.0.
+    assert (worst["score_contributions"]["chart_structure"]
+            < best["score_contributions"]["chart_structure"])
+    assert worst["score_quality"] < best["score_quality"]
+    # Spelled out, because these are the ones that matter: the veto verdict and
+    # everything derived from it is untouched by a ranking input, in both
+    # directions.
+    for key in ("verdict", "verdict_reasons", "blocks", "blocked_by", "route",
+                "earnings_trigger", "suitability", "suitability_reasons"):
         assert repr(worst.get(key)) == repr(best.get(key)), key
 
 
@@ -753,28 +786,21 @@ def test_a_worst_case_structure_leaves_a_ready_row_ready(monkeypatch):
     bars, so a short hand-built frame reads INSUFFICIENT_DATA and blocks for
     reasons that have nothing to do with these shadow metrics.
 
-    The juice floor is relaxed for the same reason: under conftest's mock chain
-    this fixture prices at 1.1%/wk gross, under the 1.5% adequacy floor, which is
-    a Level-5 SAFETY block and would make the row BLOCKED for a reason unrelated
-    to what is being tested. Relaxing it isolates the variable under test; the
-    parametrized independence test above covers the general case without touching
-    any threshold."""
-    monkeypatch.setattr(config, "JUICE_FLOOR_WK", 0.5)
+    The juice floor no longer needs relaxing: the LEAP-denominated floor could not
+    fire in shares mode and was deleted with the filter, and the share-denominated
+    replacement is a RANKING input. A thin-juice name is now ELIGIBLE with a low
+    rank, which is exactly the behaviour this test wants to isolate."""
     df = pd.read_parquet(os.path.join(
         os.path.dirname(os.path.abspath(__file__)),
         "fixtures", "structure", "early_advance_accum.parquet"))
-    gate = {"levels": [
-        {"level": 1, "pass": True}, {"level": 2, "pass": True},
-        {"level": 3, "pass": True, "detail": {"vetoes": []}},
-        {"level": 3.5, "pass": True},
-        {"level": 4, "pass": True,
-         "detail": {"right_spot": stock_lights.right_spot(df)}},
-    ]}
+    gate = {"verdict": sv.ELIGIBLE, "blocks": [],
+            "ranking": {"right_spot": stock_lights.right_spot(df)}}
     row = _row_with_structure(df, gate, WORST_CASE, monkeypatch)
-    assert row["structure_score"] == 0            # the shadow read is as bad as it gets
-    assert row["verdict"] == sv.READY             # ...and the verdict does not care
-    assert row["bench"] is False
+    assert row["structure_score"] == 0            # the read is as bad as it gets
+    assert row["verdict"] == sv.ELIGIBLE          # ...and the VERDICT does not care
     assert row["verdict_reasons"] == []
+    # The RANK is where a worst-case structure is supposed to show up.
+    assert row["score_contributions"]["chart_structure"] == 0.0
 
 
 def test_the_phase_flag_changes_suitability_and_nothing_else(monkeypatch):
@@ -783,8 +809,8 @@ def test_the_phase_flag_changes_suitability_and_nothing_else(monkeypatch):
     must move nothing else, least of all the canonical verdict."""
     import data_handler
     df = ideal_coil()
-    gate = {"levels": [{"level": 4, "pass": True,
-                        "detail": {"right_spot": stock_lights.right_spot(df)}}]}
+    gate = {"verdict": sv.ELIGIBLE, "blocks": [],
+            "ranking": {"right_spot": stock_lights.right_spot(df)}}
     monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: df)
 
     rows = {}

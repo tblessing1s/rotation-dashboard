@@ -66,7 +66,9 @@ def test_score_ticker_carries_rs_score_and_ivr_fields(monkeypatch):
     assert "rs_state" not in row and "rs_level" not in row and "rs_slope" not in row
     # SCORE shadow: a 0–10 number with its component parts, no RS component.
     assert 0.0 <= row["score"] <= 10.0
-    assert set(row["score_parts"]) >= {"inst_flow", "base", "net_juice"}
+    assert set(row["score_parts"]) >= {"inst_flow", "base", "juice_viability"}
+    # Per-input contributions make a rank explainable without re-running it.
+    assert set(row["score_contributions"]) == set(__import__("scan_score")._WEIGHTS)
     assert "rs_state" not in row["score_parts"]
     # IVR drawer field present (None here — no accrued history in the test store).
     assert "iv_rank" in row and "iv_percentile" in row
@@ -83,14 +85,20 @@ def test_no_rs_annotation_can_reach_verdict_reasons(monkeypatch):
     the shadow layer never touches verdict_reasons — is now stronger."""
     import data_handler
     import rs_state
-    import scan_triggers
     stock = _load_fixture("turning_recovery")
     sector = _load_fixture("turning_recovery_sector")
     monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: stock)
-    monkeypatch.setattr(scan_triggers, "juice_floor_block", lambda _n, _g=None: None)
     row = sc.score_ticker("NVDA", stock, "XLK", sector, regime_color="green")
-    assert row["verdict"] != "READY"
-    assert row["verdict_reasons"][0] == "symbol:WATCH"          # binding constraint leads
+    # A YELLOW symbol no longer blocks anything — the light vote RANKS. The
+    # guarantee this test protects is unchanged and now stronger: no shadow module
+    # can write into a verdict field, because verdict_reasons IS blocked_by and
+    # blocked_by only ever contains veto registry ids.
+    import scan_verdict as _sv
+    assert set(row["verdict_reasons"]) <= set(_sv.VETO_IDS) | {
+        c["id"] for c in [] } or all(
+        r in _sv.VETO_IDS or r in ("cash_reserve", "position_limit", "capital_limit",
+                                   "sector_concentration", "round_lot_size")
+        for r in row["verdict_reasons"])
     assert not any("TURNING" in r for r in row["verdict_reasons"])
     assert not any(r.startswith("rs:") for r in row["verdict_reasons"])
     # The helper that produced it is gone, not merely unused.
@@ -102,7 +110,6 @@ def test_score_does_not_leak_into_the_verdict(monkeypatch):
     """SCORE boundary: the verdict is recomputed purely from regime/SYM/structure —
     it can never depend on the shadow score, whatever the score's value."""
     import data_handler
-    import scan_triggers
     import scan_verdict
     import symbol_genius
     import structure_classifier
@@ -112,12 +119,14 @@ def test_score_does_not_leak_into_the_verdict(monkeypatch):
     # With no gate blocks and juice adequate, the verdict is exactly the signal
     # composition — proving the shadow SCORE never leaks into it. (The juice safety
     # gate is exercised separately; neutralize it here to isolate the boundary.)
-    monkeypatch.setattr(scan_triggers, "juice_floor_block", lambda _n, _g=None: None)
     row = sc.score_ticker("NVDA", stock, "XLK", sector, regime_color="green")
     base, inst = structure_classifier.classify_symbol(stock)
     sym = symbol_genius.compute(stock)["color"]
-    expected = scan_verdict.compose_verdict("green", sym, base, inst)["verdict"]
-    assert row["verdict"] == expected                # verdict is score-independent
+    # The verdict is the VETO SET's output and nothing else. Neither the score nor
+    # the signals that used to compose it can reach it: a clean chart with no veto
+    # failure is ELIGIBLE whatever its rank, and whatever SYM/structure say.
+    assert row["verdict"] == scan_verdict.compose(row["blocks"])["verdict"]
+    assert row["verdict"] in (scan_verdict.ELIGIBLE, scan_verdict.BLOCKED)
 
 
 # ---- extension metrics -----------------------------------------------------
@@ -320,10 +329,13 @@ def test_score_ticker_surfaces_stock_level_gate_failure(monkeypatch):
     df = _frame(100 + np.cumsum(np.random.RandomState(5).normal(0, 1, 260)))
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
     # Level 3 (stock beating peers) failed: cleared 2 -> first fail = 3 (stock-level).
-    gate = {"verdict": "WAIT", "cleared_level": 2}
+    gate = {"verdict": "BLOCKED",
+            "blocks": [{"id": "close_below_ma200", "veto": "close_below_ma200",
+                        "label": "Close below the 200-day MA",
+                        "mirrors": "circuit breaker (slow MA)", "observed": {}}]}
     row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
     assert row["suitability"] == "AVOID"
-    assert "entry gate level 3" in row["suitability_reasons"][0]
+    assert "close_below_ma200" in row["suitability_reasons"][0]
     # Numeric fields are still present (nothing hidden) even on a gate failure.
     assert "atr_extension" in row and "mfi" in row and row["ticker"] == "AAPL"
 
@@ -335,13 +347,11 @@ def test_score_ticker_market_regime_fail_does_not_blanket_avoid(monkeypatch):
     import data_handler
     df = _frame(100 + np.cumsum(np.random.RandomState(8).normal(0, 1, 260)))
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
-    gate = {"verdict": "WAIT", "cleared_level": 0, "levels": [
-        {"level": 1, "pass": False}, {"level": 2, "pass": True},
-        {"level": 3, "pass": True}, {"level": 4, "pass": True}]}
+    gate = {"verdict": "ELIGIBLE", "blocks": []}
     row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
-    # Verdict came from the scorecard rules, not a blanket gate AVOID.
+    # Suitability came from the scorecard rules, not a blanket gate AVOID.
     assert row["suitability"] in ("GO", "CAUTION", "AVOID")
-    assert not any("entry gate" in r for r in row["suitability_reasons"])
+    assert not any("blocked:" in r for r in row["suitability_reasons"])
     assert sc.compute_verdict(row)["verdict"] == row["suitability"]
 
 
@@ -360,18 +370,20 @@ def test_score_ticker_weak_sector_does_not_gate(monkeypatch):
     assert sc.compute_verdict(row)["verdict"] == row["suitability"]
 
 
-def test_score_ticker_stock_level_fail_behind_regime_fail_still_avoids(monkeypatch):
-    # Even when Level 1 also fails, a Level 4 (consolidating) miss is stock-level
-    # and must short-circuit to AVOID — read from the level flags, not cleared.
+def test_every_failing_veto_is_named_not_just_the_first(monkeypatch):
+    """Stop-on-first-fail is gone. A BLOCKED row names EVERY veto that fired, in
+    registry order — the old gate could only ever report the level it stopped at,
+    which is what made the sole-blocker rate incomputable for anything downstream
+    of it."""
     import data_handler
     df = _frame(100 + np.cumsum(np.random.RandomState(12).normal(0, 1, 260)))
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
-    gate = {"verdict": "WAIT", "cleared_level": 0, "levels": [
-        {"level": 1, "pass": False}, {"level": 2, "pass": True},
-        {"level": 3, "pass": True}, {"level": 4, "pass": False}]}
-    row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
+    import scan_verdict as _sv
+    blocks = _sv.evaluate(regime_color="red", below_ma200=True, has_weeklies=False)
+    row = sc.score_ticker("AAPL", df, "XLK", df,
+                          gate={"verdict": _sv.BLOCKED, "blocks": blocks})
+    assert row["blocked_by"] == ["regime_red", "close_below_ma200", "no_weeklies"]
     assert row["suitability"] == "AVOID"
-    assert "entry gate level 4" in row["suitability_reasons"][0]
 
 
 def test_score_ticker_verdict_matches_displayed_values(monkeypatch):
@@ -410,10 +422,10 @@ def test_score_ticker_runs_scorecard_when_gate_passes(monkeypatch):
     import data_handler
     df = _frame(100 + np.cumsum(np.random.RandomState(6).normal(0, 1, 260)))
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
-    gate = {"verdict": "READY TO ENTER", "cleared_level": 4}
+    gate = {"verdict": "ELIGIBLE", "blocks": []}
     row = sc.score_ticker("MSFT", df, "XLK", df, gate=gate)
     assert row["suitability"] in ("GO", "CAUTION", "AVOID")
-    assert row["gate_cleared_level"] == 4
+    assert row["verdict"] == "ELIGIBLE" and row["blocked_by"] == []
 
 
 # ---- integration: the endpoint ---------------------------------------------

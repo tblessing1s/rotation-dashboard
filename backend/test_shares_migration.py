@@ -28,6 +28,31 @@ import position_types  # noqa: E402
 import reconcile  # noqa: E402
 
 
+def _compose_signal(regime_color, symbol_color, base_stage, inst_flow):
+    """The old three-signal composition, kept HERE as a test helper.
+
+    It was deleted from ``scan_verdict`` with the severity ladder it fed: regime
+    YELLOW and a 3-of-4 SYM no longer block anything, so composing them into a
+    verdict decided nothing. These fixtures still assert facts about the SIGNALS
+    themselves, which are unchanged and still displayed, so the composition moves
+    into the test that wants it rather than surviving as production code that
+    nothing reads.
+    """
+    import structure_classifier as _sclf
+    order = {"READY": 0, "CAUTION": 1, "WATCH": 2, "BLOCKED": 3}
+    level = {"green": "READY", "yellow": "WATCH", "red": "BLOCKED"}
+    inputs = {"regime": level.get(regime_color, "WATCH"),
+              "symbol": level.get(symbol_color, "WATCH"),
+              "structure": _sclf.structure_entrability(base_stage, inst_flow)}
+    worst = max(inputs.values(), key=lambda v: order[v])
+    return {"verdict": worst, "inputs": inputs,
+            "structure_entrability": inputs["structure"],
+            "reasons": [f"{k}:{v}" for k, v in inputs.items()
+                        if order[v] == order[worst] and v != "READY"]}
+
+
+
+
 @pytest.fixture()
 def store(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", str(tmp_path))
@@ -387,5 +412,5 @@ def test_verdict_engine_unchanged_by_migration():
     import scan_verdict
     # XLK July-6 regression: TOPPING x ACCUMULATING -> BLOCKED, keyed off none of
     # the migrated surfaces. compose_verdict has no position_type/burn/leap term.
-    v = scan_verdict.compose_verdict("GREEN", "GREEN", "TOPPING", "ACCUMULATING")
+    v = _compose_signal("GREEN", "GREEN", "TOPPING", "ACCUMULATING")
     assert v["verdict"] == "BLOCKED"

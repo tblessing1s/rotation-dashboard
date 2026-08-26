@@ -99,10 +99,11 @@ def test_snapshot_is_complete_on_open(warm):
     assert config.SNAPSHOT_SCHEMA_VERSION >= 3
     assert {"iv_rank", "iv_percentile"} <= set(snap["iv"])
 
-    # Gates: entry-gate levels 1, 2, 3, 3.5 (structure), 4 + account-gate checks +
-    # typed override.
-    levels = snap["gates"]["entry_gate"]["levels"]
-    assert [lv["level"] for lv in levels] == [1, 2, 3, 3.5, 4]
+    # Gates: the entry evaluation's VERDICT + the vetoes that fired (the levels
+    # went with the serial filter), plus account-gate checks + typed override.
+    eg = snap["gates"]["entry_gate"]
+    assert eg["verdict"] in ("ELIGIBLE", "BLOCKED")
+    assert isinstance(eg["blocked_by"], list)
     assert snap["gates"]["account_gate"]["checks"]  # per-check detail present
     assert snap["gates"]["override"]["reason"] == "fixture"  # typed override logged
 

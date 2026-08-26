@@ -126,6 +126,8 @@ SCHEMA_VERSION = 2
 # Authority vocabulary. `veto` gates are the ONLY ones counted in the
 # "every other gate passed" test that defines the sole-blocker rate — a shadow
 # metric flagging is not a block, and getting that wrong inverts the diagnostic.
+RULESET_MARKER = "ranker"   # the rule regime every run since the ranker records
+
 VETO = "veto"
 RANK = "rank"
 SHADOW = "shadow"
@@ -229,154 +231,60 @@ def _num(x):
     return f if f == f and f not in (float("inf"), float("-inf")) else None
 
 
-def build_results(gate: dict | None, row: dict | None = None,
-                  ruleset: str | None = None) -> list[dict]:
-    """Every evaluated gate for one candidate, as structured results. PURE.
+def build_results(gate: dict | None, row: dict | None = None) -> list[dict]:
+    """Every gate evaluated for one candidate, as structured results. PURE.
 
-    A READ of ``screening.entry_gate``'s already-computed level details plus the
-    row's shadow income floor — it never re-runs a gate, never fetches, and never
-    reads a clock. The one derivation is the Level-3 SYM vote in ISOLATION (see
-    below), which is a pure function call over values the gate already produced.
+    A READ of ``screening.entry_gate``'s already-computed output plus the row's
+    shadow floor — it never re-runs a gate, never fetches, and never reads a clock.
 
-    Levels 1-4 are evaluated unconditionally by ``entry_gate``, so every gate
-    below carries a real pass/fail even for a candidate that failed at Level 1 —
-    which is exactly what makes the sole-blocker rate computable.
+    WHAT CHANGED WITH THE RANKER. This used to walk the four gate LEVELS and emit
+    one result per level check. There are no levels any more: there is a flat VETO
+    SET (``scan_verdict.VETOES``) and a RANK. So the emission is now:
+
+      * one ``veto`` result per registry veto — PASS or FAIL, for every candidate.
+        The whole veto set is evaluated unconditionally (no stop-on-first-fail
+        anywhere in the new path), which is exactly what keeps the SOLE-BLOCKER
+        RATE computable: "this veto failed and no other did" is answerable for
+        every name, every scan.
+      * one ``rank`` result per ranking input, carrying its 0..1 contribution.
+        Recorded with RANK authority so the aggregation's veto-only sole-blocker
+        test cannot pick them up — a rank input is not a block and counting it as
+        one would invert the whole diagnostic.
+      * the shadow income floor, unchanged, at SHADOW authority.
+
+    The instrument survives this change deliberately (§1.7 retention): it is the
+    only thing that can tell us afterwards whether thinning the veto set actually
+    moved the admission rate, and deleting the measurement device in the same
+    change that makes the change unmeasurable would be the wrong trade.
     """
     if not gate:
         return []
-    ruleset = ruleset or gate.get("ruleset") or config.GATE_RULESET
-    by_level = {lv.get("level"): lv for lv in (gate.get("levels") or [])}
+    import scan_verdict
+
     out: list[dict] = []
+    failed = {b.get("veto"): b for b in (gate.get("blocks") or [])}
 
-    # ---- Level 1 — market regime ------------------------------------------
-    # The level's pass is the dwell-adjusted PUBLISHED regime, NOT the four-light
-    # vote (screening.py: "the level does NOT require all four green"). The four
-    # lights are therefore deliberately NOT emitted as gates: their block rate is
-    # not this gate's block rate, and emitting them would invite exactly that
-    # misreading. Non-numeric — a colour has no near-miss distance.
-    l1 = by_level.get(1)
-    if l1 is not None:
-        reg = l1.get("detail") or {}
-        published = reg.get("published_regime") or reg.get("status")
-        out.append(_result("L1:regime_green", 1, VETO, l1.get("pass"),
-                           value=published, threshold="green",
-                           label="Market regime green"))
+    # ---- The veto set. Every registry veto, pass or fail, for every candidate.
+    for veto_id, label, mirrors in scan_verdict.VETOES:
+        block = failed.get(veto_id)
+        observed = (block or {}).get("observed") or {}
+        # The one numeric veto with a real near-miss distance. The rest are
+        # booleans or colours — a colour has no distance, and reporting one would
+        # be fabricated precision.
+        value = _num(observed.get("rs3m_vs_spy")) if veto_id == "rs3m_vs_spy" else None
+        out.append(_result(f"veto:{veto_id}", 1, VETO, block is None,
+                           value=value,
+                           threshold=0.0 if veto_id == "rs3m_vs_spy" else None,
+                           direction=HIGHER if veto_id == "rs3m_vs_spy" else None,
+                           label=f"{label} (mirrors {mirrors})"))
 
-    # ---- Level 2 — sector not deteriorating -------------------------------
-    # Three independent vetoes; the level fails if ANY fires. `detail` is the
-    # sector row itself, so the raw numerics are in hand.
-    l2 = by_level.get(2)
-    if l2 is not None:
-        det = l2.get("detail") or {}
-        reasons = set(det.get("deteriorating_reasons") or [])
-        rs1m, breadth = _num(det.get("rs1m")), _num(det.get("breadth"))
-        out.append(_result("L2:rs1m_negative", 2, VETO,
-                           "rs1m_negative" not in reasons,
-                           value=rs1m, threshold=0.0, direction=HIGHER,
-                           label="Sector RS1M vs SPY not negative"))
-        out.append(_result("L2:breadth_collapsing", 2, VETO,
-                           "breadth_collapsing" not in reasons,
-                           value=breadth, threshold=config.SECTOR_BREADTH_COLLAPSE,
-                           direction=HIGHER, label="Sector breadth not collapsing"))
-        out.append(_result("L2:under_distribution", 2, VETO,
-                           "under_distribution" not in reasons,
-                           value=det.get("inst_flow"), threshold="DISTRIBUTING",
-                           label="Sector not under distribution"))
+    # ---- The rank inputs. RANK authority — never a block, by construction.
+    for key, contribution in ((row or {}).get("score_contributions") or {}).items():
+        out.append(_result(f"rank:{key}", 2, RANK, None,
+                           value=_num(contribution),
+                           label=f"Rank contribution: {key}"))
 
-    # ---- Level 3 — stock lights -------------------------------------------
-    # The level's pass folds THREE independent things together: the light vote,
-    # the two entry vetoes, and insufficient history. Emitted separately, because
-    # a sole-blocker rate over a gate that is really three gates is meaningless —
-    # and because the two vetoes are not in `checks` at all (only in `detail`),
-    # so nothing downstream could otherwise see them.
-    l3 = by_level.get(3)
-    if l3 is not None:
-        det = l3.get("detail") or {}
-        greens = det.get("greens")
-        insufficient = bool(det.get("insufficient"))
-        # The vote IN ISOLATION — vetoes held out so the vote gate and the veto
-        # gates are independent and a sole-block is attributable. A pure call
-        # into the same dispatch the gate used (stock_lights.verdict_for), over
-        # values the gate already computed: a READ, not a re-evaluation.
-        vote_pass = None
-        if greens is not None:
-            import stock_lights
-            vote_pass = stock_lights.verdict_for(
-                int(greens), insufficient, False,
-                core_green=bool(det.get("core_green")),
-                ruleset=ruleset) == stock_lights.GREEN
-        # Threshold is the ruleset's green bar: legacy 4/4, proposed the
-        # mandatory-core N-of-4 count.
-        vote_floor = (config.SYM_MIN_GREEN_LIGHTS
-                      if ruleset == config.RULESET_PROPOSED else 4)
-        out.append(_result("L3:sym_vote", 3, VETO, vote_pass,
-                           value=None if greens is None else float(greens),
-                           threshold=float(vote_floor), direction=HIGHER,
-                           label="Symbol Genius light vote"))
-
-        vetoes = {v.get("id"): v for v in (det.get("vetoes") or [])}
-        v1 = vetoes.get("atr_expanding_high_ivr")
-        if v1 is not None:
-            val = v1.get("value") or {}
-            # Only trips when ATR is expanding AND IVR percentile is at/above the
-            # bar, so the IVR-vs-bar comparison is the meaningful one over
-            # FAILURES (which is the only population near-miss is computed over).
-            out.append(_result("L3:veto:atr_expanding_high_ivr", 3, VETO,
-                               not v1.get("tripped"),
-                               value=_num(val.get("ivr_percentile")),
-                               threshold=_num(val.get("ivr_min")),
-                               direction=LOWER,
-                               label="ATR expanding into rich IV"))
-        v2 = vetoes.get("close_below_ma200")
-        if v2 is not None:
-            val = v2.get("value") or {}
-            out.append(_result("L3:veto:close_below_ma200", 3, VETO,
-                               not v2.get("tripped"),
-                               value=_num(val.get("close")),
-                               threshold=_num(val.get("ma200")),
-                               direction=HIGHER, label="Close above MA200"))
-
-    # ---- Level 3.5 — structure entrability --------------------------------
-    l35 = by_level.get(3.5)
-    if l35 is not None:
-        det = l35.get("detail") or {}
-        out.append(_result("L3.5:structure_entrable", 3.5, VETO, l35.get("pass"),
-                           value=det.get("entrability"),
-                           threshold="READY|CAUTION",
-                           label="Structure entrable"))
-
-    # ---- Level 4 — right spot ---------------------------------------------
-    # Read from the RULESET's own right-spot replay when one is named, matching
-    # scan_triggers.gate_blocks: only the ATR-momentum ceiling differs, and both
-    # rulesets were already computed upstream in stock_lights.compute.
-    l4 = by_level.get(4)
-    if l4 is not None:
-        det = l4.get("detail") or {}
-        alt = (det.get("right_spot_by_ruleset") or {}).get(ruleset)
-        spot = alt if alt is not None else (det.get("right_spot") or {})
-        checks = {c.get("id"): c for c in (spot.get("checks") or [])}
-        import stock_lights
-        l4_thresholds = {
-            "atr_pct": config.CONSOLIDATION_ATR_PCT_MAX,
-            "atr_5d_ema": stock_lights.atr_momentum_max(ruleset),
-            "extension": config.SPOT_ATR_EXTENSION_MAX,
-        }
-        l4_labels = {"atr_pct": "ATR% of price within range",
-                     "atr_5d_ema": "ATR contracting or flat",
-                     "extension": "Not extended above MA21"}
-        for cid, thr in l4_thresholds.items():
-            c = checks.get(cid)
-            if c is None:
-                continue
-            out.append(_result(f"L4:{cid}", 4, VETO, c.get("pass"),
-                               value=_num(c.get("value")), threshold=float(thr),
-                               direction=LOWER, label=l4_labels[cid]))
-
-    # ---- Shadow income floor ----------------------------------------------
-    # The share-denominated replacement for the (inactive) LEAP juice floor. It
-    # is the live income constraint in shares mode and carries ZERO authority, so
-    # it is recorded with authority=shadow and is excluded from the sole-blocker
-    # test by construction. `pass: None` means unpriceable, never a failure.
+    # ---- The shadow income floor. Unchanged; still zero authority.
     floor = (row or {}).get("shadow_floor") or {}
     if floor:
         out.append(_result("shadow:income_floor", 5, SHADOW, floor.get("pass"),
@@ -636,7 +544,12 @@ def record_scan(rows: list[dict], scan_id: str | None = None,
         # makes a retry of that sweep genuinely idempotent.
         scan_id = scan_id or datetime.now(timezone.utc).strftime(
             "%Y-%m-%dT%H:%M:%S.%fZ")
-        ruleset = ruleset or config.GATE_RULESET
+        # Provenance for THIS run's rule regime. The legacy/proposed switch was
+        # deleted with the serial filter, so every new run records "ranker" — which
+        # keeps post-change runs segmented from the legacy/proposed history rather
+        # than silently pooling two incomparable rule regimes into one table. Old
+        # records keep the label they were written under; nothing is relabelled.
+        ruleset = ruleset or RULESET_MARKER
         per_candidate = []
         for row in rows or []:
             ticker = (row.get("ticker") or "").upper()

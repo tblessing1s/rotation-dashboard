@@ -34,65 +34,38 @@ def store(tmp_path, monkeypatch):
 # ===========================================================================
 # Helpers — synthetic gate dicts with hand-computed outcomes.
 # ===========================================================================
-def _gate(*, regime="green", rs1m=1.0, breadth=60.0, inst_flow="ACCUMULATING",
-          greens=4, core_green=True, insufficient=False,
-          ivr=10.0, atr_expanding=False, close=100.0, ma200=90.0,
-          entrability="READY", atr_pct=2.0, atr_5d=0.9, extension=0.5,
-          ruleset="legacy"):
-    """A synthetic entry-gate dict shaped exactly like screening.entry_gate's,
-    carrying only the fields build_results reads. Defaults are an all-pass
-    candidate; each test perturbs one axis."""
-    reasons = []
-    if rs1m is not None and rs1m < 0:
-        reasons.append("rs1m_negative")
-    if breadth is not None and breadth < config.SECTOR_BREADTH_COLLAPSE:
-        reasons.append("breadth_collapsing")
-    if inst_flow == "DISTRIBUTING":
-        reasons.append("under_distribution")
-    veto1 = bool(atr_expanding and ivr is not None
-                 and ivr >= config.VETO_IVR_PERCENTILE_MIN)
-    veto2 = bool(close is not None and ma200 is not None and close < ma200)
-    spot = {"pass": atr_pct <= config.CONSOLIDATION_ATR_PCT_MAX
-                    and atr_5d <= config.SPOT_ATR_MOMENTUM_MAX
-                    and extension <= config.SPOT_ATR_EXTENSION_MAX,
-            "checks": [
-                {"id": "atr_pct", "value": atr_pct,
-                 "pass": atr_pct <= config.CONSOLIDATION_ATR_PCT_MAX},
-                {"id": "atr_5d_ema", "value": atr_5d,
-                 "pass": atr_5d <= config.SPOT_ATR_MOMENTUM_MAX},
-                {"id": "extension", "value": extension,
-                 "pass": extension <= config.SPOT_ATR_EXTENSION_MAX},
-            ]}
+def _gate(*, regime="green", rs3m_vs_spy=1.0, below_ma50=False, below_ma200=False,
+          has_weeklies=True, stale=False, account_gate=None,
+          greens=4, entrability="READY", atr_5d=0.9, extension=0.5,
+          sector_rs1m=1.0, sector_breadth=60.0, inst_flow="ACCUMULATING"):
+    """A synthetic entry-gate dict shaped exactly like ``screening.entry_gate``'s,
+    carrying only what ``build_results`` reads. Defaults are an all-pass candidate.
+
+    Note what is NO LONGER an axis of this helper's VETO output: sector strength,
+    sector breadth, sector distribution, the light vote, structure entrability and
+    the right spot. They are ranking inputs now, so they arrive through ``ranking``
+    and can never appear in ``blocks``. That asymmetry is the change, expressed in
+    a fixture.
+    """
+    import scan_verdict as sv
+    blocks = sv.evaluate(regime_color=regime, rs3m_vs_spy=rs3m_vs_spy,
+                         below_ma50=below_ma50, below_ma200=below_ma200,
+                         has_weeklies=has_weeklies, stale=stale,
+                         account_gate=account_gate)
     return {
-        "ticker": "TEST", "ruleset": ruleset,
-        "levels": [
-            {"level": 1, "name": "Market regime green", "pass": regime == "green",
-             "checks": [], "detail": {"published_regime": regime}},
-            {"level": 2, "name": "Sector not deteriorating", "pass": not reasons,
-             "checks": [], "detail": {"rs1m": rs1m, "breadth": breadth,
-                                      "inst_flow": inst_flow,
-                                      "deteriorating_reasons": reasons}},
-            {"level": 3, "name": "Stock lights green",
-             "pass": greens >= 4 and not veto1 and not veto2 and not insufficient,
-             "checks": [], "detail": {
-                 "greens": greens, "core_green": core_green,
-                 "insufficient": insufficient,
-                 "vetoes": [
-                     {"id": "atr_expanding_high_ivr", "tripped": veto1,
-                      "value": {"atr_expanding": atr_expanding,
-                                "ivr_percentile": ivr,
-                                "ivr_min": config.VETO_IVR_PERCENTILE_MIN}},
-                     {"id": "close_below_ma200", "tripped": veto2,
-                      "value": {"close": close, "ma200": ma200}},
-                 ]}},
-            {"level": 3.5, "name": "Structure entrable",
-             "pass": entrability in ("READY", "CAUTION"),
-             "checks": [], "detail": {"entrability": entrability}},
-            {"level": 4, "name": "Right spot (not extended)", "pass": spot["pass"],
-             "checks": [], "detail": {"right_spot": spot,
-                                      "right_spot_by_ruleset": {"legacy": spot}}},
-        ],
+        "ticker": "TEST",
+        "verdict": sv.compose(blocks)["verdict"],
+        "blocks": blocks,
+        "ranking": {"stock_greens": greens, "entrability": entrability,
+                    "atr_momentum": atr_5d, "extension_atr": extension,
+                    "sector_rs1m": sector_rs1m, "sector_breadth": sector_breadth,
+                    "inst_flow": inst_flow},
     }
+
+
+_ACCOUNT_EARNINGS = {"checks": [{"id": "earnings_in_cycle",
+                                 "detail": {"earnings": {"date": "2026-09-10"}}}],
+                     "blocking_failures": ["earnings_in_cycle"]}
 
 
 def _row(ticker, gate, floor=None):
@@ -124,10 +97,11 @@ def test_xlk_july6_gate_outcome_is_byte_identical_with_telemetry():
     before = stock_lights.compute(df, ivr_percentile=95.0, is_etf=True)
     snapshot = json.dumps(before, sort_keys=True, default=str)
 
-    gate = _gate(greens=before["greens"],
-                 core_green=bool(before.get("core_green")),
-                 insufficient=bool(before["insufficient"]),
-                 ivr=95.0, atr_expanding=True)
+    # The IVR veto is not in the §1.1 registry — a rich-IV expanding-ATR name is
+    # not something you would EXIT for, so under the governing principle it cannot
+    # block an entry either. It survives as a stock-lights read (asserted below)
+    # with no authority. The telemetry sees the tradeability veto instead.
+    gate = _gate(greens=before["greens"], has_weeklies=False)
     results = gt.build_results(gate, {})
 
     after = stock_lights.compute(df, ivr_percentile=95.0, is_etf=True)
@@ -135,7 +109,7 @@ def test_xlk_july6_gate_outcome_is_byte_identical_with_telemetry():
     assert before["verdict"] == stock_lights.RED
     assert "veto:atr_expanding_high_ivr" in before["veto_reasons"]
     # And the telemetry SAW the veto it must not have caused.
-    assert _by_id(results)["L3:veto:atr_expanding_high_ivr"]["passed"] is False
+    assert _by_id(results)["veto:no_weeklies"]["passed"] is False
 
 
 def test_low_juice_fixture_gate_outcome_is_byte_identical_with_telemetry():
@@ -150,10 +124,7 @@ def test_low_juice_fixture_gate_outcome_is_byte_identical_with_telemetry():
     before = stock_lights.compute(df, ivr_percentile=20.0, is_etf=False)
     snapshot = json.dumps(before, sort_keys=True, default=str)
 
-    gate = _gate(greens=before["greens"],
-                 core_green=bool(before.get("core_green")),
-                 insufficient=bool(before["insufficient"]),
-                 ivr=20.0, atr_expanding=False)
+    gate = _gate(greens=before["greens"])
     row = {"shadow_floor": {"pass": False, "measured_pct": 0.41,
                             "floor_pct": 0.75, "basis": "juice"}}
     results = gt.build_results(gate, row)
@@ -180,7 +151,7 @@ def test_score_ticker_row_is_unchanged_where_no_gate_was_built(monkeypatch):
                         lambda t, state=None: None)
     row = sc.score_ticker("TEST", spy, "XLK", spy, gate=None)
     assert row.get("gate_results") in (None, [])
-    assert row["verdict"] in ("READY", "CAUTION", "WATCH", "BLOCKED")
+    assert row["verdict"] in ("ELIGIBLE", "BLOCKED")
     assert row["suitability"] in ("GO", "CAUTION", "AVOID")
 
 
@@ -191,25 +162,25 @@ def test_score_ticker_row_is_unchanged_where_no_gate_was_built(monkeypatch):
 def hand_scan(store):
     """Five candidates with hand-computed veto outcomes, one scan run.
 
-      AAA — all pass                                   -> admitted
-      BBB — ONLY extension fails                       -> sole block: L4:extension
-      CCC — ONLY extension fails                       -> sole block: L4:extension
-      DDD — regime RED and under_distribution          -> co-block pair
-      EEE — ONLY regime RED                            -> sole block: L1:regime_green
+      AAA — all pass                          -> admitted
+      BBB — ONLY RS3M-vs-SPY fails            -> sole block: veto:rs3m_vs_spy
+      CCC — ONLY RS3M-vs-SPY fails            -> sole block: veto:rs3m_vs_spy
+      DDD — regime RED **and** below MA200    -> co-block pair
+      EEE — ONLY regime RED                   -> sole block: veto:regime_red
 
-    Veto gates evaluated per candidate: L1:regime_green, L2:rs1m_negative,
-    L2:breadth_collapsing, L2:under_distribution, L3:sym_vote,
-    L3:veto:atr_expanding_high_ivr, L3:veto:close_below_ma200,
-    L3.5:structure_entrable, L4:atr_pct, L4:atr_5d_ema, L4:extension = 11.
+    Every candidate is evaluated against the WHOLE veto registry (10 gates), which
+    is what keeps the sole-blocker rate computable: there is no stop-on-first-fail
+    anywhere in the new path, so "this veto failed and no other did" is answerable
+    for every name in every run.
     """
     rows = [
         _row("AAA", _gate()),
-        _row("BBB", _gate(extension=2.0)),
-        _row("CCC", _gate(extension=3.0)),
-        _row("DDD", _gate(regime="red", inst_flow="DISTRIBUTING")),
+        _row("BBB", _gate(rs3m_vs_spy=-1.0)),
+        _row("CCC", _gate(rs3m_vs_spy=-1.0)),
+        _row("DDD", _gate(regime="red", below_ma200=True)),
         _row("EEE", _gate(regime="red")),
     ]
-    gt.record_scan(rows, scan_id="run-1", day="2026-08-10", ruleset="legacy")
+    gt.record_scan(rows, scan_id="run-1", day="2026-08-10")
     return rows
 
 
@@ -224,26 +195,26 @@ def test_exact_block_and_sole_blocker_rates(hand_scan):
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
     g = {row["gate_id"]: row for row in agg["gates"]}
 
-    ext = g["L4:extension"]
+    ext = g["veto:rs3m_vs_spy"]
     assert ext["evaluated_n"] == 5
     assert ext["failed_n"] == 2                       # BBB, CCC
     assert ext["block_rate"] == 0.4                   # 2/5
     assert ext["sole_blocker_n"] == 2
     assert ext["sole_blocker_rate"] == 0.4
 
-    reg = g["L1:regime_green"]
+    reg = g["veto:regime_red"]
     assert reg["failed_n"] == 2                       # DDD, EEE
     assert reg["block_rate"] == 0.4
     assert reg["sole_blocker_n"] == 1                 # EEE only (DDD co-fires)
     assert reg["sole_blocker_rate"] == 0.2
 
-    dist = g["L2:under_distribution"]
+    dist = g["veto:close_below_ma200"]
     assert dist["failed_n"] == 1                      # DDD
     assert dist["block_rate"] == 0.2
     assert dist["sole_blocker_n"] == 0                # never alone
     assert dist["sole_blocker_rate"] == 0.0
 
-    clean = g["L2:rs1m_negative"]
+    clean = g["veto:line_in_the_sand"]
     assert clean["failed_n"] == 0 and clean["block_rate"] == 0.0
     assert clean["sole_blocker_rate"] == 0.0
 
@@ -253,7 +224,7 @@ def test_sorted_by_sole_blocker_rate_descending(hand_scan):
     rated = [row for row in agg["gates"] if not row["indeterminate"]]
     rates = [row["sole_blocker_rate"] for row in rated]
     assert rates == sorted(rates, reverse=True)
-    assert rated[0]["gate_id"] == "L4:extension"
+    assert rated[0]["gate_id"] == "veto:rs3m_vs_spy"
     # Indeterminate rows sort LAST — never floated to the top on a null.
     assert all(row["indeterminate"] for row in agg["gates"][len(rated):])
 
@@ -262,11 +233,11 @@ def test_exact_co_block_matrix(hand_scan):
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
     m = agg["co_block_matrix"]
     # DDD is the only candidate with two veto failures.
-    assert m["L1:regime_green"]["L2:under_distribution"] == 1
-    assert m["L2:under_distribution"]["L1:regime_green"] == 1
+    assert m["veto:regime_red"]["veto:close_below_ma200"] == 1
+    assert m["veto:close_below_ma200"]["veto:regime_red"] == 1
     # Symmetric, and zero everywhere else.
-    assert m["L4:extension"]["L1:regime_green"] == 0
-    assert m["L1:regime_green"]["L4:extension"] == 0
+    assert m["veto:rs3m_vs_spy"]["veto:regime_red"] == 0
+    assert m["veto:regime_red"]["veto:rs3m_vs_spy"] == 0
     for a, rowm in m.items():
         for b, n in rowm.items():
             assert n == m[b][a], f"{a}/{b} asymmetric"
@@ -275,21 +246,22 @@ def test_exact_co_block_matrix(hand_scan):
 def test_near_miss_distribution_is_over_failures_only(hand_scan):
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
     g = {row["gate_id"]: row for row in agg["gates"]}
-    nm = g["L4:extension"]["near_miss"]
-    # threshold 1.5; failures at 2.0 and 3.0 -> overshoot 0.3333 and 1.0
-    assert nm["n"] == 2 and nm["normalized"] is True
-    assert round(nm["median"], 4) == 0.3333
-    assert round(nm["p75"], 4) == 1.0
-    assert sum(nm["buckets"].values()) == 2
+    nm = g["veto:rs3m_vs_spy"]["near_miss"]
+    # RS3M-vs-SPY's threshold IS zero (the kill-switch line), so a FRACTIONAL
+    # distance from it is undefined and the raw distance is reported instead —
+    # the same discipline the old zero-threshold sector gate got. Both failures
+    # sat at -1.0, i.e. 1.0 past the line.
+    assert nm["normalized"] is False and nm["n"] == 0
+    assert nm["raw_n"] == 2 and round(nm["raw_median"], 4) == 1.0
     # Passing candidates contribute nothing.
-    assert g["L4:atr_pct"]["near_miss"]["n"] == 0
+    assert g["veto:no_weeklies"]["near_miss"]["raw_n"] == 0
 
 
 def test_weekly_time_series(hand_scan):
-    rows = [_row("FFF", _gate(extension=9.0))]
-    gt.record_scan(rows, scan_id="run-2", day="2026-08-17", ruleset="legacy")
+    rows = [_row("FFF", _gate(rs3m_vs_spy=-1.0))]
+    gt.record_scan(rows, scan_id="run-2", day="2026-08-17")
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
-    series = agg["time_series"]["L4:extension"]
+    series = agg["time_series"]["veto:rs3m_vs_spy"]
     assert [p["week"] for p in series] == ["2026-08-10", "2026-08-17"]
     assert series[0]["block_rate"] == 0.4 and series[0]["evaluated_n"] == 5
     assert series[1]["block_rate"] == 1.0 and series[1]["sole_blocker_rate"] == 1.0
@@ -302,7 +274,7 @@ def test_weekly_time_series(hand_scan):
 def test_shadow_failure_does_not_block_or_register_as_a_sole_block(store):
     rows = [_row("AAA", _gate(), floor={"pass": False, "measured_pct": 0.30,
                                         "floor_pct": 0.75, "basis": "juice"})]
-    gt.record_scan(rows, scan_id="r", day="2026-08-10", ruleset="legacy")
+    gt.record_scan(rows, scan_id="r", day="2026-08-10")
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
     g = {row["gate_id"]: row for row in agg["gates"]}
 
@@ -321,13 +293,13 @@ def test_shadow_failure_does_not_block_or_register_as_a_sole_block(store):
 def test_shadow_gate_never_suppresses_a_real_sole_block(store):
     """A veto failing alongside a shadow failure is still a SOLE block — the
     shadow flag must not be counted as "another gate failed"."""
-    rows = [_row("BBB", _gate(extension=2.0),
+    rows = [_row("BBB", _gate(rs3m_vs_spy=-1.0),
                  floor={"pass": False, "measured_pct": 0.1, "floor_pct": 0.75,
                         "basis": "juice"})]
-    gt.record_scan(rows, scan_id="r", day="2026-08-10", ruleset="legacy")
+    gt.record_scan(rows, scan_id="r", day="2026-08-10")
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
     g = {row["gate_id"]: row for row in agg["gates"]}
-    assert g["L4:extension"]["sole_blocker_rate"] == 1.0
+    assert g["veto:rs3m_vs_spy"]["sole_blocker_rate"] == 1.0
 
 
 # ===========================================================================
@@ -364,17 +336,17 @@ def test_an_unevaluated_veto_blocks_sole_attribution(store):
     """When some veto gate did not run for a candidate, no sole block may be
     attributed from that candidate — an unevaluated gate is an unknown, never an
     assumed pass."""
-    row = _row("AAA", _gate(extension=2.0))
+    row = _row("AAA", _gate(rs3m_vs_spy=-1.0))
     # Simulate a gate that ran but produced no verdict.
     row["gate_results"].append({"gate_id": "L9:unknown", "level": 9,
                                 "authority": gt.VETO, "label": "unknown",
                                 "passed": None, "value": None,
                                 "threshold": None, "direction": None})
-    gt.record_scan([row], scan_id="r", day="2026-08-10", ruleset="legacy")
+    gt.record_scan([row], scan_id="r", day="2026-08-10")
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
     g = {r["gate_id"]: r for r in agg["gates"]}
-    assert g["L4:extension"]["failed_n"] == 1
-    assert g["L4:extension"]["sole_blocker_n"] == 0     # not imputed
+    assert g["veto:rs3m_vs_spy"]["failed_n"] == 1
+    assert g["veto:rs3m_vs_spy"]["sole_blocker_n"] == 0     # not imputed
     # The unknown gate is counted as neither pass nor fail.
     assert g["L9:unknown"]["evaluated_n"] == 0
 
@@ -383,7 +355,10 @@ def test_an_unevaluated_veto_blocks_sole_attribution(store):
 # 5. Ruleset segmentation — never pool.
 # ===========================================================================
 def test_never_pools_across_rulesets(store):
-    gt.record_scan([_row("AAA", _gate(extension=2.0))],
+    """Segmentation survives the ruleset switch's deletion, and matters MORE now:
+    runs recorded under the old legacy/proposed filter are not comparable to runs
+    recorded under the veto set, so the aggregation must refuse to merge them."""
+    gt.record_scan([_row("AAA", _gate(rs3m_vs_spy=-1.0))],
                    scan_id="r1", day="2026-08-10", ruleset="legacy")
     gt.record_scan([_row("BBB", _gate())],
                    scan_id="r2", day="2026-08-11", ruleset="proposed")
@@ -397,30 +372,14 @@ def test_never_pools_across_rulesets(store):
     legacy = gt.aggregate(start="2026-08-01", end="2026-08-31",
                           gate_ruleset="legacy")
     assert legacy["evaluated_n"] == 1
-    assert {g["gate_id"]: g for g in legacy["gates"]}["L4:extension"]["failed_n"] == 1
+    assert {g["gate_id"]: g for g in legacy["gates"]}["veto:rs3m_vs_spy"]["failed_n"] == 1
 
     proposed = gt.aggregate(start="2026-08-01", end="2026-08-31",
                             gate_ruleset="proposed")
     assert proposed["evaluated_n"] == 1
-    assert {g["gate_id"]: g for g in proposed["gates"]}["L4:extension"]["failed_n"] == 0
+    assert {g["gate_id"]: g for g in proposed["gates"]}["veto:rs3m_vs_spy"]["failed_n"] == 0
 
 
-def test_ruleset_selects_the_level4_replay():
-    """The proposed ruleset relaxes only the ATR-momentum ceiling; build_results
-    must read that ruleset's own right-spot, not the authoritative one."""
-    import stock_lights
-    assert stock_lights.atr_momentum_max("proposed") > stock_lights.atr_momentum_max("legacy")
-    gate = _gate(atr_5d=1.02)                      # fails legacy (1.0), passes proposed (1.05)
-    legacy = _by_id(gt.build_results(gate, {}, ruleset="legacy"))
-    assert legacy["L4:atr_5d_ema"]["passed"] is False
-    assert legacy["L4:atr_5d_ema"]["threshold"] == config.SPOT_ATR_MOMENTUM_MAX
-    prop = _by_id(gt.build_results(gate, {}, ruleset="proposed"))
-    assert prop["L4:atr_5d_ema"]["threshold"] == config.L4_ATR_EXPANSION_MAX
-
-
-# ===========================================================================
-# 6. Absence of history is reported, never fabricated.
-# ===========================================================================
 def test_empty_store_reports_absence_and_does_not_error(store):
     agg = gt.aggregate(start="2026-01-01", end="2026-01-31")
     assert agg["evaluated_n"] == 0
@@ -470,7 +429,7 @@ def test_append_only_across_runs_and_idempotent_within_one(store):
 def test_prior_runs_are_never_mutated(store):
     gt.record_scan([_row("AAA", _gate())], scan_id="run-1", day="2026-08-10")
     first = json.loads((store / "2026-08-10.json").read_text())["runs"][0]
-    gt.record_scan([_row("BBB", _gate(extension=9.0))], scan_id="run-2",
+    gt.record_scan([_row("BBB", _gate(rs3m_vs_spy=-1.0))], scan_id="run-2",
                    day="2026-08-10")
     after = json.loads((store / "2026-08-10.json").read_text())["runs"][0]
     assert after == first
@@ -504,7 +463,7 @@ def test_authority_is_read_from_the_record_not_live_config(store, monkeypatch):
     rows recorded while it had none."""
     rows = [_row("AAA", _gate(), floor={"pass": False, "measured_pct": 0.1,
                                         "floor_pct": 0.75, "basis": "juice"})]
-    gt.record_scan(rows, scan_id="r", day="2026-08-10", ruleset="legacy")
+    gt.record_scan(rows, scan_id="r", day="2026-08-10")
     # The authority lives on the RUN's own manifest, written at record time.
     stored = json.loads((store / "2026-08-10.json").read_text())
     manifest = {g["gate_id"]: g for g in stored["runs"][0]["gates"]}
@@ -526,8 +485,8 @@ def test_authority_change_within_a_range_is_flagged(store):
                                   "authority": gt.VETO, "label": "x",
                                   "passed": False, "value": 1.0,
                                   "threshold": 2.0, "direction": gt.LOWER})
-    gt.record_scan([row_a], scan_id="r1", day="2026-08-10", ruleset="legacy")
-    gt.record_scan([row_b], scan_id="r2", day="2026-08-11", ruleset="legacy")
+    gt.record_scan([row_a], scan_id="r1", day="2026-08-10")
+    gt.record_scan([row_b], scan_id="r2", day="2026-08-11")
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
     g = {r["gate_id"]: r for r in agg["gates"]}
     assert g["X:gate"].get("authority_changed_in_range") is True
@@ -537,33 +496,34 @@ def test_authority_change_within_a_range_is_flagged(store):
 # 9. Near-miss edge cases.
 # ===========================================================================
 def test_zero_threshold_gate_reports_raw_distance_not_a_fabricated_ratio(store):
-    """`L2:rs1m_negative` has threshold 0.0 — a fractional distance from zero is
-    undefined, so the raw distance is reported and `normalized` is False."""
-    gt.record_scan([_row("AAA", _gate(rs1m=-0.8))], scan_id="r", day="2026-08-10")
+    """`veto:rs3m_vs_spy` has threshold 0.0 — the kill-switch line — so a
+    fractional distance from it is undefined. The raw distance is reported and
+    `normalized` is False rather than a ratio being invented."""
+    gt.record_scan([_row("AAA", _gate(rs3m_vs_spy=-0.8))], scan_id="r", day="2026-08-10")
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
-    nm = {r["gate_id"]: r for r in agg["gates"]}["L2:rs1m_negative"]["near_miss"]
+    nm = {r["gate_id"]: r for r in agg["gates"]}["veto:rs3m_vs_spy"]["near_miss"]
     assert nm["n"] == 0 and nm["normalized"] is False and nm["median"] is None
     assert nm["raw_n"] == 1 and round(nm["raw_median"], 4) == 0.8
 
 
 def test_non_numeric_gate_has_no_near_miss(store):
-    gt.record_scan([_row("AAA", _gate(entrability="TOPPING"))],
+    gt.record_scan([_row("AAA", _gate(account_gate=_ACCOUNT_EARNINGS))],
                    scan_id="r", day="2026-08-10")
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
-    g = {r["gate_id"]: r for r in agg["gates"]}["L3.5:structure_entrable"]
+    g = {r["gate_id"]: r for r in agg["gates"]}["veto:earnings_in_cycle"]
     assert g["failed_n"] == 1
     assert g["near_miss"]["n"] == 0 and g["near_miss"]["raw_n"] == 0
 
 
 def test_higher_is_better_gate_near_miss_is_positive_on_failure(store):
-    """close_below_ma200 fails when close < ma200; the overshoot must be a
-    positive "how far past the line" number, comparable with a lower-is-better
-    gate's."""
-    gt.record_scan([_row("AAA", _gate(close=90.0, ma200=100.0))],
+    """A higher-is-better gate's overshoot must be a POSITIVE "how far past the
+    line" number, comparable with a lower-is-better gate's rather than signed by
+    direction. RS3M-vs-SPY is the one numeric veto, and it is higher-is-better."""
+    gt.record_scan([_row("AAA", _gate(rs3m_vs_spy=-2.5))],
                    scan_id="r", day="2026-08-10")
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
-    nm = {r["gate_id"]: r for r in agg["gates"]}["L3:veto:close_below_ma200"]["near_miss"]
-    assert nm["n"] == 1 and round(nm["median"], 4) == 0.1     # 10/100
+    nm = {r["gate_id"]: r for r in agg["gates"]}["veto:rs3m_vs_spy"]["near_miss"]
+    assert nm["raw_n"] == 1 and round(nm["raw_median"], 4) == 2.5
 
 
 # ===========================================================================
@@ -573,7 +533,7 @@ def test_symbol_universe_filter_narrows_the_denominator(hand_scan):
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31", symbols=["BBB", "CCC"])
     assert agg["evaluated_n"] == 2
     g = {r["gate_id"]: r for r in agg["gates"]}
-    assert g["L4:extension"]["block_rate"] == 1.0
+    assert g["veto:rs3m_vs_spy"]["block_rate"] == 1.0
 
 
 def test_date_range_bounds_the_denominator(hand_scan):
@@ -623,15 +583,16 @@ def test_no_config_switch_can_grant_telemetry_blocking_authority():
 # ===========================================================================
 def test_endpoint_returns_the_rollup(store):
     import app as app_module
-    gt.record_scan([_row("AAA", _gate(extension=2.0))], scan_id="r",
-                   day="2026-08-10", ruleset="legacy")
+    gt.record_scan([_row("AAA", _gate(rs3m_vs_spy=-1.0))], scan_id="r",
+                   day="2026-08-10")
     res = app_module.app.test_client().get(
-        "/api/scan/gate-telemetry?start=2026-08-01&end=2026-08-31&ruleset=legacy")
+        "/api/scan/gate-telemetry?start=2026-08-01&end=2026-08-31"
+        "&ruleset=ranker")
     assert res.status_code == 200
     data = res.get_json()
     assert data["evaluated_n"] == 1
     by_id = {g["gate_id"]: g for g in data["gates"]}
-    assert by_id["L4:extension"]["sole_blocker_rate"] == 1.0
+    assert by_id["veto:rs3m_vs_spy"]["sole_blocker_rate"] == 1.0
     assert by_id["L5:cash_reserve"]["indeterminate"] is True
 
 
@@ -658,7 +619,7 @@ def test_scorecard_response_does_not_ship_the_telemetry_payload(monkeypatch):
     from metrics import scorecard as sc
 
     rows = [{"ticker": "AAA", "sector": "XLK", "lot_cost": 100.0,
-             "verdict": "READY", "gate_results": [{"gate_id": "L4:extension"}]}]
+             "verdict": "READY", "gate_results": [{"gate_id": "veto:rs3m_vs_spy"}]}]
     # The full-universe path PEEKS (scorecard_warm) and never calls the sweep.
     monkeypatch.setattr(sc, "scorecard_warm",
                         lambda price_overrides=None: {"as_of": "x", "results": rows})
@@ -685,7 +646,7 @@ def test_codec_round_trip_is_lossless():
     """Compaction is a STORAGE change, not an information change: decoding must
     reproduce the typed results exactly, field for field."""
     src = [("AAA", True, gt.build_results(_gate(), {})),
-           ("BBB", False, gt.build_results(_gate(extension=2.0, rs1m=-0.4), {}))]
+           ("BBB", False, gt.build_results(_gate(rs3m_vs_spy=-1.0, below_ma200=True), {}))]
     out = _round_trip(src)
     assert [(s, a) for s, a, _ in out] == [("AAA", True), ("BBB", False)]
     for (_sym, _adm, original), (_s2, _a2, decoded) in zip(src, out):
@@ -698,30 +659,45 @@ def test_codec_round_trip_is_lossless():
                 assert r[k] == o[k], f"{r['gate_id']}.{k}: {r[k]!r} != {o[k]!r}"
 
 
-def test_constant_thresholds_are_hoisted_and_varying_ones_stay_on_the_cell():
-    """The whole saving: a config-constant threshold is written once per run. A
-    per-name bar (close_below_ma200's is that name's MA200) cannot be, so it
-    stays on the cell and the manifest says so."""
+def test_constant_thresholds_are_hoisted_into_the_run_manifest():
+    """The whole saving: a threshold that is constant across a run is written ONCE
+    into the manifest instead of on every candidate row.
+
+    Under the veto set every threshold is constant — the vetoes are booleans and
+    one zero-line comparison, none of them a per-name bar. The varying-threshold
+    path is still exercised by `test_a_varying_threshold_stays_on_the_cell` below,
+    which drives it directly rather than through a gate that no longer produces
+    one."""
     gates, rows = gt._encode_run([
-        ("AAA", True, gt.build_results(_gate(close=100.0, ma200=90.0), {})),
-        ("BBB", True, gt.build_results(_gate(close=200.0, ma200=150.0), {})),
+        ("AAA", True, gt.build_results(_gate(), {})),
+        ("BBB", True, gt.build_results(_gate(), {})),
     ])
     m = {g["gate_id"]: g for g in gates}
-    # Constant across the run -> hoisted, cells are 2-element.
-    assert m["L4:extension"]["threshold"] == config.SPOT_ATR_EXTENSION_MAX
-    assert m["L4:extension"]["threshold_varies"] is False
-    # Per-candidate -> manifest carries none, every cell carries its own.
-    assert m["L3:veto:close_below_ma200"]["threshold"] is None
-    assert m["L3:veto:close_below_ma200"]["threshold_varies"] is True
-    i = [g["gate_id"] for g in gates].index("L3:veto:close_below_ma200")
-    assert rows[0]["r"][i][2] == 90.0 and rows[1]["r"][i][2] == 150.0
-    # ...and it decodes back to the right per-candidate bar.
-    decoded = dict((s, {r["gate_id"]: r for r in res})
-                   for s, _a, res in gt.decoded_candidates(
-                       {"gates": gates, "candidates": rows}))
-    assert decoded["AAA"]["L3:veto:close_below_ma200"]["threshold"] == 90.0
-    assert decoded["BBB"]["L3:veto:close_below_ma200"]["threshold"] == 150.0
+    assert m["veto:rs3m_vs_spy"]["threshold"] == 0.0        # the kill-switch line
+    assert m["veto:rs3m_vs_spy"]["threshold_varies"] is False
+    # Hoisted -> every cell is 2-element (passed, value), not 3.
+    i = [g["gate_id"] for g in gates].index("veto:rs3m_vs_spy")
+    assert all(len(r["r"][i]) == 2 for r in rows)
 
+
+def test_a_varying_threshold_stays_on_the_cell():
+    """A gate whose bar differs per candidate cannot be hoisted; the manifest
+    carries none and each cell carries its own."""
+    def _res(threshold):
+        return [gt._result("veto:custom", 1, gt.VETO, False, value=1.0,
+                           threshold=threshold, direction=gt.HIGHER, label="x")]
+    gates, rows = gt._encode_run([("AAA", False, _res(90.0)),
+                                  ("BBB", False, _res(150.0))])
+    m = {g["gate_id"]: g for g in gates}
+    assert m["veto:custom"]["threshold"] is None
+    assert m["veto:custom"]["threshold_varies"] is True
+    i = [g["gate_id"] for g in gates].index("veto:custom")
+    assert rows[0]["r"][i][2] == 90.0 and rows[1]["r"][i][2] == 150.0
+    decoded = dict((sym, {r["gate_id"]: r for r in res})
+                   for sym, _a, res in gt.decoded_candidates(
+                       {"gates": gates, "candidates": rows}))
+    assert decoded["AAA"]["veto:custom"]["threshold"] == 90.0
+    assert decoded["BBB"]["veto:custom"]["threshold"] == 150.0
 
 def test_heterogeneous_gate_sets_align_via_null_cells():
     """A run whose candidates carry different gate sets must still align: the
@@ -766,10 +742,10 @@ def test_schema_1_runs_are_still_read_transparently(store):
     """Runs written before the compaction carry typed dicts inline and no
     manifest. They must keep aggregating, not error — a store spanning the change
     reads as one series."""
-    results = gt.build_results(_gate(extension=2.0), {})
+    results = gt.build_results(_gate(rs3m_vs_spy=-1.0), {})
     legacy_run = {
         "scan_run_id": "old", "evaluated_at": "2026-08-10T02:00:00Z",
-        "gate_ruleset": "legacy", "schema_version": 1,
+        "gate_ruleset": gt.RULESET_MARKER, "schema_version": 1,
         "unevaluated_gates": gt.unevaluated_gates(),
         "candidates": [{"symbol": "AAA", "overall_admitted": False,
                         "results": results}],
@@ -778,38 +754,38 @@ def test_schema_1_runs_are_still_read_transparently(store):
     with open(os.path.join(str(store), "2026-08-10.json"), "w") as fh:
         json.dump({"date": "2026-08-10", "schema": 1, "runs": [legacy_run]}, fh)
     # ...and a schema-2 run alongside it.
-    gt.record_scan([_row("BBB", _gate(extension=3.0))], scan_id="new",
-                   day="2026-08-11", ruleset="legacy")
+    gt.record_scan([_row("BBB", _gate(rs3m_vs_spy=-1.0))], scan_id="new",
+                   day="2026-08-11")
 
     agg = gt.aggregate(start="2026-08-01", end="2026-08-31")
     assert agg["evaluated_n"] == 2
     g = {r["gate_id"]: r for r in agg["gates"]}
-    assert g["L4:extension"]["failed_n"] == 2
-    assert g["L4:extension"]["sole_blocker_rate"] == 1.0
+    assert g["veto:rs3m_vs_spy"]["failed_n"] == 2
+    assert g["veto:rs3m_vs_spy"]["sole_blocker_rate"] == 1.0
 
 
 def test_events_yields_the_typed_event_shape(store):
     """The typed event is the contract; the positional packing is an
     implementation detail of the store."""
-    gt.record_scan([_row("AAA", _gate(extension=2.0))], scan_id="run-1",
-                   day="2026-08-10", ruleset="legacy")
+    gt.record_scan([_row("AAA", _gate(rs3m_vs_spy=-1.0))], scan_id="run-1",
+                   day="2026-08-10")
     evs = list(gt.events(start="2026-08-01", end="2026-08-31"))
     assert len(evs) == 1
     e = evs[0]
     assert set(e) == {"scan_run_id", "evaluated_at", "symbol", "gate_ruleset",
                       "results", "overall_admitted", "schema_version"}
-    assert e["symbol"] == "AAA" and e["gate_ruleset"] == "legacy"
+    assert e["symbol"] == "AAA" and e["gate_ruleset"] == gt.RULESET_MARKER
     assert e["overall_admitted"] is False
     assert e["schema_version"] == gt.SCHEMA_VERSION
-    r = {x["gate_id"]: x for x in e["results"]}["L4:extension"]
+    r = {x["gate_id"]: x for x in e["results"]}["veto:rs3m_vs_spy"]
     assert r["authority"] == gt.VETO and r["passed"] is False
-    assert r["threshold"] == config.SPOT_ATR_EXTENSION_MAX
+    assert r["threshold"] == 0.0        # the kill-switch line
 
 
 def test_compaction_materially_shrinks_the_day_file(store):
     """The point of schema 2. Encoded against the same results, the compact form
     must be well under half the inline-typed form."""
-    per = [(f"S{i:03d}", False, gt.build_results(_gate(extension=2.0), {}))
+    per = [(f"S{i:03d}", False, gt.build_results(_gate(rs3m_vs_spy=-1.0), {}))
            for i in range(200)]
     gates, rows = gt._encode_run(per)
     compact = len(json.dumps({"gates": gates, "candidates": rows}))
@@ -859,7 +835,7 @@ def test_pending_is_never_rendered_as_an_empty_result(monkeypatch):
     monkeypatch.setattr(log, "load_state", lambda *a, **k: {})
     body = app_module.app.test_client().get("/api/scan/ready").get_json()
     assert body["scan_pending"] is True
-    assert body["ready"] == [] and body["near_misses"] == []
+    assert body["eligible"] == [] and body["blocked"] == []
     assert "running" in body            # so the client can say WHY it is pending
 
 

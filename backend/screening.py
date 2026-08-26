@@ -1,6 +1,11 @@
-"""The CFM scan: market regime, sector strength, stock filter, and the 4-level
-entry gate. All read cached/fetched daily bars via data_handler and compute with
+"""The CFM scan: market regime, sector strength, stock filter, and the entry
+evaluation. All read cached/fetched daily bars via data_handler and compute with
 indicators — no provider calls beyond what data_handler caches.
+
+``entry_gate`` is no longer a four-level filter. It evaluates the thin VETO SET
+(``scan_verdict.VETOES`` — the exit mirrors plus hard account constraints) and
+gathers the RANKING inputs everything else became. See ``scan_verdict`` for the
+governing principle and ``scan_score`` for the rank.
 """
 from __future__ import annotations
 
@@ -473,11 +478,7 @@ def _stock_row(ticker: str, spy, sector_etf: str,
         "right_spot": spot,
         "enterable": sl["enterable"],
         # SHADOW record (gate recalibration): the mandatory-core light state, the
-        # ruleset that decided `verdict`/`right_spot`/`enterable` above, and what
-        # every ruleset would have said. Carried, never read by the gate.
         "core_green": sl["core_green"],
-        "ruleset": sl["ruleset"],
-        "by_ruleset": sl["by_ruleset"],
         "stock_green": stock_green,
         # Back-compat: `consolidating` now means "in the right spot" (the gate that
         # replaced the old single consolidating flag).
@@ -548,16 +549,6 @@ def _all(checks: list[dict]) -> bool:
     return all(c["pass"] for c in checks)
 
 
-def _cleared_level(passes: list[tuple]) -> float:
-    """The highest CONTIGUOUS passing level from the first — stop on first fail.
-    ``passes`` is [(level, passed), ...] in gate order."""
-    cleared = 0
-    for level, ok in passes:
-        if not ok:
-            break
-        cleared = level
-    return cleared
-
 
 def resolve_profile_detail(ticker: str, state: dict | None = None,
                            overrides: dict | None = None) -> tuple[str, float | None]:
@@ -593,197 +584,129 @@ def resolve_profile(ticker: str, state: dict | None = None) -> str:
     return resolve_profile_detail(ticker, state=state)[0]
 
 
-def entry_gate(ticker: str, profile: str | None = None) -> dict:
-    """The 4-level entry gate (stop on first fail).
 
-    ``profile`` (schema v21) is resolved when omitted. It swaps ONLY the Level-3
-    vs-peer comparison benchmark (see _stock_row). Levels 1, 2, 3.5 and 4 — market
-    regime, sector deterioration, structure entrability and the right-spot
-    consolidation gate — are byte-identical for both profiles, as is the YELLOW
-    lockout at Level 3 [HARD_CFM_RULE]. TRAVIS_EXTENSION.
+
+def entry_gate(ticker: str, profile: str | None = None) -> dict:
+    """Evaluate one candidate against the VETO SET, and gather its ranking inputs.
+
+    This is no longer a filter. It used to be a four-level, stop-on-first-fail gate
+    whose pass rate collapsed multiplicatively and whose middle levels screened for
+    momentum LEADERSHIP — a screen for appreciation, which is the wrong thing to
+    want when the upside is capped by a short call. It now answers two separate
+    questions and keeps them separate:
+
+      * **May I enter?**  ``scan_verdict.evaluate`` over the thin veto set. Only the
+        exit mirrors and hard account constraints block.
+      * **How good is it?**  the ``ranking`` block below, consumed by
+        ``scan_score.compute_score``. Nothing in it can block.
+
+    The Level-5 account overlay is NOT evaluated here — it needs a state load and a
+    live cash resolution per name, which a ~500-name sweep cannot afford. The caller
+    layers it (``/api/scan/ready`` via ``account_gate.evaluate_many``), and the
+    executor enforces it independently at the ticket. This function's output is
+    ADVISORY; ``executor.execute`` remains the sole enforcement point.
+
+    ``profile`` (schema v21) swaps only the vs-peer comparison benchmark.
     """
     ticker = ticker.upper()
     sector_etf = sector_data.sector_for(ticker)
     if profile is None:
         profile = resolve_profile(ticker)
-    levels = []
 
-    # Level 1 — market regime. The Genius four-light regime: Level 1 passes iff the
-    # dwell-adjusted PUBLISHED regime is green. The traffic light is decided by the
-    # four lights + the yellow dwell ONLY; breadth/VIX are secondary informational
-    # indicators (carried in `detail.secondary`), NOT gate conditions. The four
-    # lights are shown as sub-checks — the level does NOT require all four green (a
-    # green vote is >=3 of 4), so the level's pass is the published regime itself,
-    # not _all(checks). `detail` carries the full trace for the snapshot.
+    # ---- Inputs (the only I/O in this function) ------------------------------
     reg = regime()
-    lights = reg.get("lights") or {}
-
-    def _light_check(label: str, key: str) -> dict:
-        sig = (lights.get(key) or {}).get("signal")
-        return _check(label, sig, sig == "green")
-
-    l1_checks = [
-        _light_check(f"Close > {config.GENIUS_SLOW_MA} SMA", "close_vs_ma"),
-        _light_check(f"EMA{config.GENIUS_FAST_MA} > SMA{config.GENIUS_SLOW_MA}", "fast_vs_slow"),
-        _light_check("Parabolic SAR below price", "sar"),
-        _light_check(f"ROC({config.GENIUS_MOMENTUM_ROC}) > 0", "momentum"),
-    ]
-
-    # `published_regime` is the app-facing regime; fall back to the legacy `status`
-    # so callers/tests that stub regime() with just {"status": ...} still gate.
-    regime_green = (reg.get("published_regime") or reg.get("status")) == "green"
-    levels.append({"level": 1, "name": "Market regime green", "pass": regime_green,
-                   "checks": l1_checks, "detail": reg})
-
-    # Level 2 — sector NOT deteriorating (a VETO, not a selector). The old bar
-    # required the sector to be strong (RS1M vs SPY > 0 AND breadth ≥ 60); the
-    # reframe blocks only on positive evidence of deterioration — RS1M negative,
-    # breadth collapsing, or the sector ETF under distribution — and otherwise
-    # passes through, letting SYM + BASE + INST carry selection. Missing data never
-    # vetoes (fail-open). One-position-per-sector at Level 5 still caps the
-    # concentration this bar used to manage implicitly.
+    regime_color = reg.get("published_regime") or reg.get("status")
     sec = sectors().get(sector_etf, {}) if sector_etf else {}
-    l2_checks = [
-        _check(f"Sector RS1M vs SPY not negative", sec.get("rs1m"),
-               not (sec.get("rs1m") is not None and sec.get("rs1m") < 0)),
-        _check(f"Sector breadth not collapsing (≥ {config.SECTOR_BREADTH_COLLAPSE:g}%)", sec.get("breadth"),
-               not (sec.get("breadth") is not None and sec.get("breadth") < config.SECTOR_BREADTH_COLLAPSE)),
-        _check("Sector not under distribution", sec.get("inst_flow"),
-               sec.get("inst_flow") != "DISTRIBUTING"),
-    ]
-    levels.append({"level": 2, "name": "Sector not deteriorating", "pass": _all(l2_checks),
-                   "checks": l2_checks, "detail": {"sector": sector_etf, **sec}})
-
-    # Level 3 — stock lights GREEN. The SAME four Genius lights as the market
-    # regime, applied per name (stock_lights). Level 3 passes iff the stock verdict
-    # is GREEN (4/4 lights green AND no veto). The four lights are shown as
-    # sub-checks; a veto (folded into the verdict) or an insufficient light both
-    # drop the verdict below GREEN. YELLOW (exactly 3 green) is a watchlist state,
-    # never enterable, so it does NOT pass this level.
     spy = data_handler.get_daily(config.BENCHMARK)
-    sector_df = data_handler.get_daily(sector_etf) if sector_etf else None
+    df = data_handler.get_daily(ticker)
     row = _stock_row(ticker, spy, sector_etf or "",
-                     regime_green=regime_green, sector_strong=_all(l2_checks),
+                     regime_green=(regime_color == "green"),
+                     sector_strong=True,   # no longer a gate leg; sector now RANKS
                      profile=profile)
-    row_lights = row.get("lights") or {}
 
-    def _row_light_check(label: str, key: str) -> dict:
-        sig = (row_lights.get(key) or {}).get("signal")
-        return _check(label, sig, sig == "green")
-
-    l3_checks = [
-        _row_light_check(f"Close > {config.GENIUS_SLOW_MA} SMA", "close_vs_ma"),
-        _row_light_check(f"EMA{config.GENIUS_FAST_MA} > SMA{config.GENIUS_SLOW_MA}", "fast_vs_slow"),
-        _row_light_check("Parabolic SAR below price", "sar"),
-        _row_light_check(f"ROC({config.GENIUS_MOMENTUM_ROC}) > 0", "momentum"),
-    ]
-    stock_green = row.get("verdict") == stock_lights.GREEN
-    levels.append({"level": 3, "name": "Stock lights green", "pass": stock_green,
-                   "checks": l3_checks, "detail": row})
-
-    # Level 3.5 — structure. The pure classifier's (BaseStage, InstFlow) mapped
-    # through the entrability grid, inserted between "beats peers" (L3) and "right
-    # spot" (L4): a topping / declining / distributing / insufficient structure
-    # (BLOCKED) or a watchlist-only cell (WATCH) is not entrable and stops the gate.
-    # Reads only price/volume structure, so it runs IDENTICALLY for stocks and ETFs
-    # (no is_etf branch, no vs-sector path). All classifier thresholds are
-    # PROPOSED_DEFAULT. Stop-on-first-fail is preserved: with the level ordered 3.5
-    # here, a structure miss holds cleared at 3 (WAIT), and a full clear still
-    # reaches cleared == 4 only when 3.5 AND 4 both pass.
     import structure_classifier
-    df_struct = data_handler.get_daily(ticker)
-    base_stage, inst_flow = structure_classifier.classify_symbol(df_struct)
+    import scan_verdict
+    base_stage, inst_flow = structure_classifier.classify_symbol(df)
     entrability = structure_classifier.structure_entrability(base_stage, inst_flow)
-    l35_pass = entrability in (structure_classifier.Entrability.READY,
-                               structure_classifier.Entrability.CAUTION)
-    l35_checks = [_check(f"Structure entrable ({base_stage} × {inst_flow})",
-                         entrability, l35_pass)]
-    levels.append({"level": 3.5, "name": "Structure entrable", "pass": bool(l35_pass),
-                   "checks": l35_checks,
-                   "detail": {"base_stage": base_stage, "inst_flow": inst_flow,
-                              "entrability": entrability}})
 
-    # Level 4 — right spot. A SEPARATE, blocking gate applied AFTER the lights (the
-    # consolidation "right spot" checks are NOT lights). Identical for stocks/ETFs.
-    spot = row.get("right_spot") or {"checks": [], "pass": False}
-    spot_by_id = {c["id"]: c for c in spot.get("checks") or []}
-    l4_checks = [
-        _check(f"ATR% ≤ {config.CONSOLIDATION_ATR_PCT_MAX:g}",
-               (spot_by_id.get("atr_pct") or {}).get("value"),
-               (spot_by_id.get("atr_pct") or {}).get("pass")),
-        _check(f"ATR contracting/flat (≤ {config.SPOT_ATR_MOMENTUM_MAX:g})",
-               (spot_by_id.get("atr_5d_ema") or {}).get("value"),
-               (spot_by_id.get("atr_5d_ema") or {}).get("pass")),
-        _check(f"Extension ≤ {config.SPOT_ATR_EXTENSION_MAX:g} ATR above MA21",
-               (spot_by_id.get("extension") or {}).get("value"),
-               (spot_by_id.get("extension") or {}).get("pass")),
-    ]
-    levels.append({"level": 4, "name": "Right spot (not extended)", "pass": bool(spot.get("pass")),
-                   "checks": l4_checks,
-                   "detail": {"atr_pct": row["atr_pct"], "right_spot": spot,
-                              "consolidating": row["consolidating"],
-                              # Both rulesets' right spots, so the shadow fold can
-                              # read the non-authoritative one without recomputing.
-                              "right_spot_by_ruleset": {
-                                  rs: (alt or {}).get("right_spot")
-                                  for rs, alt in (row.get("by_ruleset") or {}).items()}}})
+    # None-safe throughout: a name with no cached frame (a fresh universe add, a
+    # provider outage) must produce an UNKNOWN read, never an exception. The three
+    # chart vetoes fail OPEN on None, so an unmeasurable name is eligible-by-
+    # default rather than blocked-by-accident — see scan_verdict's missing-data
+    # policy. `indicators.sma` is the one helper that is not None-tolerant.
+    price = indicators.last(df)
+    ma21 = indicators.sma(df, config.MA_WINDOW) if df is not None else None
+    extension_atr = indicators.atr_extension(df)
+    below_ma50 = below_ma200 = None
+    if price is not None and df is not None:
+        ma50 = indicators.sma(df, config.GENIUS_SLOW_MA)
+        ma200 = indicators.sma(df, stock_lights.MA200_WINDOW)
+        below_ma50 = None if ma50 is None else bool(price < ma50)
+        below_ma200 = None if ma200 is None else bool(price < ma200)
 
-    # Stop-on-fail: the cleared level is the highest contiguous pass from 1.
-    cleared = _cleared_level([(lv["level"], bool(lv["pass"])) for lv in levels])
-    verdict = "READY TO ENTER" if cleared == 4 else "WAIT"
+    # ---- The veto set. This list is the ONLY thing that blocks. ---------------
+    blocks = scan_verdict.evaluate(
+        regime_color=regime_color,
+        rs3m_vs_spy=row.get("rs3m_vs_spy"),
+        below_ma50=below_ma50,
+        below_ma200=below_ma200,
+        price=price,
+        line_in_the_sand=None,     # a scan candidate has no stored line; the
+                                   # caller supplies one for a name that does
+        has_weeklies=row.get("has_weeklies"),
+        spread_pct=None,           # resolved at the ticket, not in a bulk sweep
+        stale=None,                # layered by the caller from data_cache
+        account_gate=None,         # layered by the caller (see docstring)
+    )
+    composed = scan_verdict.compose(blocks)
 
-    # ---- Calibration telemetry (records only — changes no verdict) ------------
-    # EVERY level's result, recorded past the first failure. Stop-on-first-fail
-    # still governs `cleared_level` above; the log needs the full conditional
-    # picture so redundant levels can be identified later. This is free: `levels`
-    # is built unconditionally and only the cleared-level derivation stops early.
-    # Level 5 is NOT here — it is a separate account overlay (account_gate.
-    # evaluate) applied per request in /api/scan/ready, and evaluating it for
-    # every swept name would mean a state load + live cash resolution per name.
-    # It is recorded as "not_evaluated" rather than guessed.
-    all_level_results = {
-        f"L{lv['level']:g}": {
-            "pass": bool(lv["pass"]),
-            "name": lv["name"],
-            "failing_checks": [c["label"] for c in (lv.get("checks") or [])
-                               if not c.get("pass")],
-        } for lv in levels
+    # ---- Ranking inputs. NONE of these may veto. ------------------------------
+    # Everything the old Levels 2, 3, 3.5 and 4 blocked on lives here now, as
+    # values rather than verdicts. `scan_score.compute_score` consumes this dict
+    # directly; keeping the shapes aligned is what stops a ranking input from being
+    # re-derived differently in two places.
+    spot = row.get("right_spot") or {}
+    ranking = {
+        "inst_flow": inst_flow,
+        "base_stage": base_stage,
+        "entrability": entrability,
+        "extension_atr": extension_atr,
+        "stock_greens": row.get("greens"),
+        "rs3m_vs_spy": row.get("rs3m_vs_spy"),
+        "sector_rs1m": sec.get("rs1m"),
+        "sector_breadth": sec.get("breadth"),
+        "sector_atr_expanding": sec.get("atr_expanding"),
+        "sector_inst_flow": sec.get("inst_flow"),
+        "atr_momentum": row.get("atr_momentum"),
+        "atr_pct": row.get("atr_pct"),
+        "right_spot": spot,
     }
-    all_level_results["L5"] = {"pass": None, "name": "Account & juice overlay",
-                               "failing_checks": [], "note": "not_evaluated"}
-    first_failing = next((lv["level"] for lv in levels if not lv["pass"]), None)
 
-    # Per-ruleset replay. Only L3 (the symbol vote) and L4 (the right spot) differ
-    # between rulesets, and both were already computed for EVERY ruleset upstream
-    # in stock_lights.compute — this is a READ of that shadow record, never a
-    # re-evaluation, and it costs no extra indicator work.
-    by_rs = row.get("by_ruleset") or {}
-    rulesets = {}
-    for rs in config.GATE_RULESETS:
-        alt = by_rs.get(rs)
-        passes = []
-        for lv in levels:
-            if alt and lv["level"] == 3:
-                passes.append((3, alt.get("verdict") == stock_lights.GREEN))
-            elif alt and lv["level"] == 4:
-                passes.append((4, bool((alt.get("right_spot") or {}).get("pass"))))
-            else:
-                passes.append((lv["level"], bool(lv["pass"])))
-        rs_cleared = _cleared_level(passes)
-        rulesets[rs] = {
-            "cleared_level": rs_cleared,
-            "verdict": "READY TO ENTER" if rs_cleared == 4 else "WAIT",
-            "levels": {f"L{lvl:g}": ok for lvl, ok in passes},
-        }
-
-    return {"ticker": ticker, "sector": sector_etf, "levels": levels,
-            "cleared_level": cleared, "verdict": verdict,
-            "income_profile": row.get("income_profile"),
-            "peer_benchmark": row.get("peer_benchmark"),
-            # Shadow-first record. `ruleset` is the one that produced `levels` /
-            # `cleared_level` / `verdict` above; `rulesets` is every ruleset's
-            # replay of the same evaluation.
-            "ruleset": config.GATE_RULESET,
-            "rulesets": rulesets,
-            "all_level_results": all_level_results,
-            "first_failing_level": first_failing}
+    return {
+        "ticker": ticker,
+        "sector": sector_etf,
+        "verdict": composed["verdict"],
+        "blocks": composed["blocks"],
+        "blocked_by": composed["blocked_by"],
+        "ranking": ranking,
+        # The entry ROUTE — advisory output only. No put order is ever constructed
+        # from this; it tells the operator whether today's entry is shares or a
+        # weekly put struck at the MA21 zone.
+        "route": scan_verdict.route(extension_atr=extension_atr,
+                                    regime_color=regime_color, ma21=ma21),
+        "regime_color": regime_color,
+        # The three provenance blocks `entry_context` freezes onto the immutable
+        # execution. A READ of what was already computed above — the snapshot has
+        # to capture the values that produced a verdict, and they must come from
+        # the same evaluation rather than a second one that could disagree.
+        "regime": reg,
+        "sector_detail": {"sector": sector_etf, **sec},
+        "stock_detail": row,
+        "income_profile": row.get("income_profile"),
+        "peer_benchmark": row.get("peer_benchmark"),
+        # Per-name Genius detail, retained for the drawer + entry_context snapshot.
+        # A READ of what `_stock_row` already computed — never a re-evaluation.
+        "lights": row.get("lights"),
+        "stock_verdict": row.get("verdict"),
+        "stock_vetoes": row.get("vetoes"),
+    }

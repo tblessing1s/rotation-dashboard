@@ -190,21 +190,38 @@ def api_scorecard():
 
 @app.route("/api/scan/ready")
 def api_scan_ready():
-    """Tickers whose canonical scan VERDICT is READY (the FULL Level 1–4 gate
-    clears — regime + sector + stock lights + structure + the Level-4 right spot),
-    then layered with Level 5 (Account & Juice) — a ready-to-enter shortlist.
+    """The RANKED shortlist: every ELIGIBLE name, best first.
 
-    Verdict-completeness (Phase-0 fix): the READY verdict now consumes the whole
-    L1–L4 gate, so a name extended past the Level-4 right spot is WATCH, never
-    READY — it can no longer reach this shortlist (the AAPL "READY + fails level 4"
-    bug). Level 5 is the account overlay evaluated here, with the SAME account
-    context Execute uses (account_gate loads state + resolves live cash once); a
-    name that clears L1–L4 but fails L5 lands in ``near_misses`` with its L5
-    triggers so the operator sees the path (earnings date, sector slot, cash).
+    The scan is a thin hard floor plus a ranker. A name reaches this list by
+    clearing the whole VETO SET (``scan_verdict.VETOES`` — the exit mirrors plus
+    hard account constraints); its POSITION on the list is its rank, and the rank
+    blocks nothing. A name that scores badly is still here, near the bottom, which
+    is the point: the old serial filter's answer to a weak field was an empty list,
+    and an empty list is not the same claim as "here is the best available, and it
+    is not very good".
 
-    Juice numbers are always the history-implied estimate (no live chain in a bulk
-    sweep); optional ?contracts= sizes the capital/reserve checks
-    (default LEAP_CONTRACTS)."""
+    THE PRESSURE GUARD (§1.5). A ranker always produces a #1, and an operator who
+    wants to be deployed plus a #1 is a mechanism for entering the least-bad name on
+    a bad day. So:
+
+      * ``eligible_of_evaluated`` is returned on every response and is meant to be
+        read as prominently as the list itself. **Zero eligible is a normal,
+        expected outcome, not an error state.**
+      * nothing here auto-selects, pre-fills, or flags the top-ranked name as an
+        action. The response carries no "recommended" field and the rank is not a
+        recommendation.
+      * every entry carries its absolute ``score`` alongside its ``rank``. "Best
+        available" and "good" are different claims and the UI must never be able to
+        show the first while implying the second.
+      * the structural vetoes carry NO override path. ``blocked`` names are
+        reported with the veto that stopped them and there is no parameter that
+        admits them anyway; the L5 account overrides that exist today are unchanged
+        and remain the executor's business.
+
+    Level 5 and input staleness are layered HERE, where the account context and the
+    freshness read live — the memoized market sweep has neither. The executor
+    re-enforces L5 at the ticket regardless: this list is advisory.
+    """
     raw = request.args.get("tickers")
     tickers = [t.strip().upper() for t in raw.split(",") if t.strip()] if raw else None
     contracts = int(request.args.get("contracts") or 0) or None
@@ -213,115 +230,110 @@ def api_scan_ready():
         import account_gate
         import data_cache
         import market_scheduler
+        import scan_score
+        import scan_verdict
         from datetime import datetime as _dt
         from zoneinfo import ZoneInfo as _ZI
-        # PEEK, never compute — see api_scorecard above. A full-universe read
-        # that triggered the sweep blocked for its whole duration.
+        # PEEK, never compute — a full-universe read that triggered the sweep
+        # blocked for its whole duration.
         if tickers:
             sc = scorecard_metrics.scorecard(tickers)
         else:
             sc = scorecard_metrics.scorecard_warm()
             if sc is None:
-                return jsonify(_scan_pending(ready=[], near_misses=[],
-                                             stale_blocked=[], priced_out=[]))
-        # Ready-to-Enter = the canonical scan VERDICT is READY (the invisible market
-        # regime + Symbol Genius + structure entrability all clear). A RED regime
-        # forces every verdict to BLOCKED, so the shortlist correctly empties on a
-        # red tape — the invisible-regime rule, now enforced here.
-        # CFM sells a weekly covered call, so a name with NO weekly options can't be
-        # entered — exclude known-no-weeklies from the actionable shortlist (matches
-        # the Scorecard's default filter; unknown/None stays, never a false hide).
-        ready_rows = [r for r in sc["results"]
-                      if r.get("verdict") == "READY" and r.get("has_weeklies") is not False]
-        # AFFORDABILITY (schema v21): a shares entry buys a whole 100-share lot, so a
-        # name whose lot costs more than the dry powder available right now is not
-        # actionable at any conviction — it is not a near-miss with a path either,
-        # it simply cannot be bought today. Priced-out names are removed from the
-        # shortlist and reported separately so nothing vanishes silently. An
-        # unpriceable lot cost is never treated as unaffordable.
-        ready_rows, priced_out, afford = scorecard_metrics.split_by_affordability(
-            ready_rows, log.load_state())
-        level5 = account_gate.evaluate_many([r["ticker"] for r in ready_rows], contracts=contracts)
+                return jsonify(_scan_pending(eligible=[], blocked=[],
+                                             priced_out=[],
+                                             eligible_of_evaluated={"eligible": 0,
+                                                                    "evaluated": 0}))
+        rows = list(sc["results"])
+        evaluated_n = len(rows)
 
-        # HARD_CFM_RULE (STALE_BLOCKS_GO): a GO that the operator would act on must
-        # not be emitted on stale inputs. Only enforced once the tiered scheduler is
-        # actually populating quotes (data_cache.active), and only in a live, open-
-        # market context — a bulk warm scan legitimately has no live quotes and must
-        # behave as before. Blocked names are surfaced separately, never silently.
+        # Affordability is not a veto — a lot the account cannot buy today is
+        # simply not actionable today, which is a different fact from failing the
+        # gate. Reported separately so nothing vanishes silently.
+        candidate_rows, priced_out, afford = scorecard_metrics.split_by_affordability(
+            [r for r in rows if scan_verdict.is_eligible(r.get("verdict"))],
+            log.load_state())
+
+        level5 = account_gate.evaluate_many([r["ticker"] for r in candidate_rows],
+                                            contracts=contracts)
+
+        # STALE_BLOCKS_GO [HARD_CFM_RULE] — enforced only once the tiered poller is
+        # actually populating quotes, and only in a live, open-market context: a
+        # bulk warm scan legitimately has no live quotes.
         now_et = _dt.now(_ZI("America/New_York"))
         mkt_open = market_scheduler.is_market_open(now_et)
         live = mkt_open and not config.demo_enabled() and data_cache.active()
-
-        # On-demand quote fetch: the tiered poller only quotes open positions,
-        # on-deck queue names, and held sector ETFs, so a fresh GO that isn't
-        # queued for a slot has no live quote and would be perpetually
-        # stale-blocked below. When live, pull a live quote for exactly the GO
-        # names that lack a fresh one, so this shortlist reflects what the
-        # operator could actually enter — not just what happens to be on-deck.
-        if live and ready_rows:
+        if live and candidate_rows:
             import data_transport
             from market_scheduler import QUOTE as _QUOTE
-            need = [r["ticker"] for r in ready_rows
+            need = [r["ticker"] for r in candidate_rows
                     if data_cache.get_with_staleness(
                         r["ticker"], _QUOTE, tier=market_scheduler.Tier.T1)[2]]
             if need:
                 try:
                     data_transport.fetch_quotes_batched(
                         {s: market_scheduler.Tier.T1 for s in need})
-                except Exception as fe:  # noqa: BLE001 — scan still returns on a miss
+                except Exception as fe:  # noqa: BLE001 — the scan still returns
                     logging.getLogger("cfm.app").warning(
                         "scan_ready on-demand quote fetch failed: %s", fe)
 
-        import scan_triggers
-        ready, near_misses, stale_blocked = [], [], []
-        for r in ready_rows:
+        eligible, blocked = [], []
+        for r in candidate_rows:
             l5 = level5.get(r["ticker"])
-            # Level-5 account overlay: classify the L5 blocking failures into the
-            # same forward triggers the table uses (earnings CALENDAR, sector-slot
-            # CONDITIONAL, cash/capital CONDITIONAL) so a near-miss shows its path.
-            l5_blocks = scan_triggers.gate_blocks(None, account_gate=l5)
-            l5_triggers = scan_triggers.triggers_for_blocks(l5_blocks)
-            blocked, stale_inputs = data_cache.stale_blocks_go(
+            stale, stale_inputs = data_cache.stale_blocks_go(
                 r["ticker"], market_scheduler.Tier.T1, market_open=mkt_open, live=live)
-            entry = {"ticker": r["ticker"], "sector": r["sector"],
-                     "juice_weekly_pct": r.get("juice_weekly_pct"),
-                     "net_juice_weekly_pct": r.get("net_juice_weekly_pct"),
-                     "earnings_date": r.get("earnings_date"), "level5": l5,
-                     # The per-symbol scan cells (SYM | BASE | INST | VERDICT) so the
-                     # shortlist can show the same read as the table.
-                     "sym": r.get("sym"), "base_stage": r.get("base_stage"),
-                     "inst_flow": r.get("inst_flow"), "verdict": r.get("verdict"),
-                     # Per-name Genius lights so the shortlist can show the four-light
-                     # row + verdict + right-spot at a glance (same data as the gate).
-                     "lights": r.get("lights"), "stock_greens": r.get("stock_greens"),
-                     "stock_verdict": r.get("stock_verdict"),
-                     "stock_vetoes": r.get("stock_vetoes"), "right_spot": r.get("right_spot"),
-                     # L5 overlay triggers + rendered path (near-miss "path to READY").
-                     "l5_triggers": l5_triggers,
-                     "l5_path_to_ready": scan_triggers.path_to_ready(l5_triggers),
-                     "l5_eligible_days": scan_triggers.earliest_eligible_days(l5_triggers),
-                     # What a lot actually costs, and the bar it cleared.
-                     "lot_cost": r.get("lot_cost"), "affordable": r.get("affordable"),
-                     "max_lot_cost": r.get("max_lot_cost"),
-                     "stale": blocked, "stale_inputs": stale_inputs}
-            if blocked:
-                stale_blocked.append(entry)
+            # The account + staleness vetoes, evaluated through the SAME registry
+            # the sweep used. A second, differently-shaped evaluation here is
+            # exactly how a scan and a ticket start disagreeing.
+            late = scan_verdict.evaluate(stale=stale, account_gate=l5)
+            entry = {
+                "ticker": r["ticker"], "sector": r.get("sector"),
+                # Rank ALWAYS travels with its absolute score (§1.5).
+                "score": r.get("score"),
+                "score_quality": r.get("score_quality"),
+                "score_contributions": r.get("score_contributions"),
+                "route": r.get("route"),
+                "juice_weekly_pct": r.get("juice_weekly_pct"),
+                "net_juice_weekly_pct": r.get("net_juice_weekly_pct"),
+                "earnings_date": r.get("earnings_date"),
+                "earnings_trigger": r.get("earnings_trigger"),
+                "level5": l5,
+                "sym": r.get("sym"), "base_stage": r.get("base_stage"),
+                "inst_flow": r.get("inst_flow"),
+                "lights": r.get("lights"), "stock_greens": r.get("stock_greens"),
+                "right_spot": r.get("right_spot"),
+                "lot_cost": r.get("lot_cost"), "affordable": r.get("affordable"),
+                "max_lot_cost": r.get("max_lot_cost"),
+                "stale_inputs": stale_inputs,
+            }
+            if late:
+                composed = scan_verdict.compose(late)
+                entry["verdict"] = composed["verdict"]
+                entry["blocked_by"] = composed["blocked_by"]
+                blocked.append(entry)
             else:
-                (ready if l5 and l5["pass"] else near_misses).append(entry)
-        # Rank on NET juice/week (gross minus LEAP burn) — never gross. Fall back
-        # to gross only when net is unavailable so a pricing gap can't drop a name.
-        ready.sort(key=lambda r: (r.get("net_juice_weekly_pct")
-                                  if r.get("net_juice_weekly_pct") is not None
-                                  else r.get("juice_weekly_pct") or 0), reverse=True)
-        return jsonify({"as_of": sc["as_of"], "ready": ready, "near_misses": near_misses,
-                        "stale_blocked": stale_blocked,
-                        # The affordability bar + what it excluded. Reported, never
-                        # silent: a name absent because it is too expensive today is
-                        # a different fact from a name that failed the gate.
-                        "affordability": afford,
-                        "priced_out": [{"ticker": r["ticker"], "lot_cost": r.get("lot_cost"),
-                                        "over_by": r.get("lot_cost_over_by")}
-                                       for r in priced_out]})
+                entry["verdict"] = scan_verdict.ELIGIBLE
+                entry["blocked_by"] = []
+                eligible.append(entry)
+
+        # The rank. Deterministic: ties break by symbol, so two runs over identical
+        # inputs produce identical ordering.
+        eligible = scan_score.rank(eligible)
+
+        return jsonify({
+            "as_of": sc["as_of"],
+            "eligible": eligible,
+            # Names the veto set stopped, with WHICH veto. No override path.
+            "blocked": blocked,
+            # THE PRESSURE GUARD HEADLINE. Read this before the list.
+            "eligible_of_evaluated": {"eligible": len(eligible),
+                                      "evaluated": evaluated_n},
+            "affordability": afford,
+            "priced_out": [{"ticker": r["ticker"], "lot_cost": r.get("lot_cost"),
+                            "over_by": r.get("lot_cost_over_by")}
+                           for r in priced_out],
+        })
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

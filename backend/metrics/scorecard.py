@@ -20,6 +20,7 @@ import data_handler
 import indicators
 import rs_state as rss
 import scan_score
+import scan_triggers
 import scan_verdict
 import sector_data
 import structure_classifier
@@ -328,59 +329,12 @@ _ROUND = {  # display rounding per field (verdict is computed from full precisio
     "volume_acceleration": 2, "obv_pct_distance": 1, "mfi": 1, "atr_momentum": 2,
 }
 
-_GATE_LEVEL_NAMES = {1: "market regime", 2: "sector strength",
-                     3: "stock beating peers", 3.5: "structure", 4: "consolidating"}
-
-# Only the stock's OWN gate legs decide the verdict: Level 3 (beats peers),
-# Level 3.5 (structure — the classifier's entrability), and Level 4 (consolidating).
-# The market-wide legs — Level 1 (regime) and Level 2 (sector strength) — are
-# EXCLUDED: they're context, not a property of the stock, and letting them blanket
-# the table to AVOID would defeat the per-stock comparison exactly when it's most
-# wanted (e.g. a yellow regime, or a sector that's merely lagging while the stock
-# itself leads its peers and consolidates).
-_STOCK_GATE_LEVELS = (3, 3.5, 4)
-
-
 def _round_row(metrics: dict) -> dict:
     out = dict(metrics)
     for key, digits in _ROUND.items():
         if out.get(key) is not None:
             out[key] = round(out[key], digits)
     return out
-
-
-def _gate_level_detail(gate: dict | None, level: int) -> dict:
-    """The ``detail`` dict for one entry-gate level (or {} when absent). Used to
-    lift the stock lights / right-spot off the gate onto the scorecard row."""
-    if not gate:
-        return {}
-    for lv in gate.get("levels") or []:
-        if lv.get("level") == level:
-            return lv.get("detail") or {}
-    return {}
-
-
-def _failed_stock_gate_level(gate: dict | None) -> int | None:
-    """First failing stock-level gate leg (Level 3, then 4), or None.
-
-    Reads the per-level pass flags from the gate's `levels` list when present, so
-    a stock-level miss is caught even behind an earlier (regime/sector) failure —
-    the gate computes all four levels regardless of stop-on-fail. Falls back to
-    the stop-on-fail `cleared_level` (first failing = cleared+1) when `levels` is
-    absent. The market-wide legs (Level 1 regime, Level 2 sector) never
-    short-circuit here, by design."""
-    if not gate:
-        return None
-    levels = gate.get("levels")
-    if levels:
-        by_level = {lv.get("level"): lv for lv in levels}
-        for lvl in _STOCK_GATE_LEVELS:
-            leg = by_level.get(lvl)
-            if leg is not None and not leg.get("pass", False):
-                return lvl
-        return None
-    first_failed = (gate.get("cleared_level", 0) or 0) + 1
-    return first_failed if first_failed in _STOCK_GATE_LEVELS else None
 
 
 def _apply_price_override(df, price_override):
@@ -398,31 +352,6 @@ def _apply_price_override(df, price_override):
     df.iat[-1, hi] = max(float(df.iat[-1, hi]), px)
     df.iat[-1, lo] = min(float(df.iat[-1, lo]), px)
     return df
-
-
-def _ext_trigger_context(df: pd.DataFrame | None) -> dict:
-    """The extra observed values the two Level-4 ESTIMATED triggers need for a
-    crude days-to-trigger (``scan_triggers._estimate_days``): the ATR beyond the
-    max in ATR units, the recent MA21 daily rise ($/day), and the current ATR.
-    Pure over the frame; None-safe. All estimation is labelled EST downstream."""
-    if df is None or len(df) < 26:
-        return {}
-    price = indicators.last(df)
-    atr = indicators.atr(df)
-    ma21 = indicators.sma(df, 21)
-    ma21_prev = indicators.sma(df.iloc[:-5], 21)
-    ext = indicators.atr_extension(df)
-    momentum = indicators.atr_momentum(df)
-    out: dict = {}
-    if None not in (ext, atr) and atr:
-        excess = ext - config.SPOT_ATR_EXTENSION_MAX
-        rise = (ma21 - ma21_prev) / 5.0 if (ma21 is not None and ma21_prev is not None) else None
-        out["extension"] = {"excess_atr": excess if excess > 0 else None,
-                            "ma21_rise_per_day": rise, "atr": atr}
-    if momentum is not None:
-        excess_m = momentum - config.SPOT_ATR_MOMENTUM_MAX
-        out["atr_5d_ema"] = {"momentum_excess": excess_m if excess_m > 0 else None}
-    return out
 
 
 def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
@@ -484,18 +413,16 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["is_own_benchmark"] = peer["is_own_benchmark"]
     row["has_weeklies"] = has_weeklies
     if gate is not None:
-        row["gate_cleared_level"] = gate.get("cleared_level", 0)
+        rk0 = gate.get("ranking") or {}
         # Surface the per-name Genius lights + verdict + right-spot from the gate so
         # the Scorecard and Ready-to-Enter can render the four-light row at a glance
         # (they're already computed in the entry gate's Level 3/4 detail — no
         # recompute). None-safe for the synthetic gate dicts used in tests.
-        l3 = _gate_level_detail(gate, 3)
-        l4 = _gate_level_detail(gate, 4)
-        row["lights"] = l3.get("lights")
-        row["stock_greens"] = l3.get("greens")
-        row["stock_verdict"] = l3.get("verdict")
-        row["stock_vetoes"] = l3.get("vetoes")
-        row["right_spot"] = l4.get("right_spot") or l3.get("right_spot")
+        row["lights"] = gate.get("lights")
+        row["stock_greens"] = rk0.get("stock_greens")
+        row["stock_verdict"] = gate.get("stock_verdict")
+        row["stock_vetoes"] = gate.get("stock_vetoes")
+        row["right_spot"] = rk0.get("right_spot")
 
     # Juice adequacy (history-implied weekly extrinsic / LEAP cost) + next
     # earnings — so weak-premium and earnings-soon names are visible BEFORE the
@@ -535,7 +462,7 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # TRAVIS_EXTENSION. Purely ADDITIVE row keys, using the profile already
     # resolved above: nothing here is appended to `blocks` below, so the canonical
     # verdict is bit-for-bit what it was before this block existed.
-    import scan_triggers as _st
+    _st = scan_triggers
     row["annual_dividend_yield_pct"] = annual_div_pct
     row["income_profile"] = profile
     row["income_profile_badge"] = income_profile.badge(profile)
@@ -614,8 +541,8 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # different thing (stock-momentum suitability, not the regime-aware composition).
     sym = symbol_genius.compute(df)
     cls = structure_classifier.classify(df)
-    composed = scan_verdict.compose_verdict(regime_color, sym["color"],
-                                            cls["base_stage"], cls["inst_flow"])
+    entrability = structure_classifier.structure_entrability(
+        cls["base_stage"], cls["inst_flow"])
     row["sym"] = sym["color"]
     row["sym_greens"] = sym["greens"]
     # The individual SYM lights + the mandatory-core state, so the recalibration
@@ -625,73 +552,31 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["sym_core_green"] = sym.get("core_green")
     row["base_stage"] = cls["base_stage"]
     row["inst_flow"] = cls["inst_flow"]
-    row["structure_entrability"] = composed["structure_entrability"]
+    row["structure_entrability"] = entrability
 
-    # VERDICT COMPLETENESS (Phase-0 fix): the canonical verdict is worst-of the
-    # three SIGNAL inputs composed above AND every failing FULL-gate block — so a
-    # name extended past the Level-4 right spot can never read READY (the AAPL bug).
-    # Blocks are a READ of the gate ALREADY computed for this row (never a re-eval);
-    # Level 5 (account) is layered as a per-request overlay in /api/scan/ready where
-    # the account context Execute uses is loaded (see app.api_scan_ready). Triggers
-    # are the forward-looking "path to READY" annotations over the SAME evaluation.
-    import scan_triggers
-    ext_context = _ext_trigger_context(df)
-    # NET juice-floor SAFETY block — the viability gate, folded into the canonical
-    # verdict here (pure over the row's net juice, no account state, so the memoized
-    # market sweep can carry it). A sub-floor name is BLOCKED, off the bench, with an
-    # L5-juice binding constraint — closing the "bench led by names that can't pay".
-    juice_block = scan_triggers.juice_floor_block(row.get("net_juice_weekly_pct"),
-                                                  row.get("juice_weekly_pct"))
-
-    def _fold(sym_color, ruleset):
-        """One ruleset's row verdict: signal composition + the gate fold. A READ of
-        already-computed state — the gate and the lights were evaluated once."""
-        c = scan_verdict.compose_verdict(regime_color, sym_color,
-                                         cls["base_stage"], cls["inst_flow"])
-        blocks = scan_triggers.gate_blocks(gate, ext_context=ext_context,
-                                           ruleset=ruleset)
-        if juice_block is not None:
-            blocks.append(juice_block)
-        return scan_triggers.compose_row_verdict(c, blocks)
-
-    # AUTHORITATIVE. ruleset=None reads the gate levels' own verdicts, so with
-    # GATE_RULESET="legacy" every line below is byte-identical to the pre-
-    # recalibration path.
-    rv = _fold(sym["color"], None)
-    row["verdict"] = rv["verdict"]                       # the canonical scan verdict
-    row["verdict_reasons"] = list(rv["reasons"])
-    row["binding"] = rv["binding"]                       # structured first-fail (Q9)
-    row["triggers"] = rv["triggers"]                     # per-block forward triggers
-    row["path_to_ready"] = scan_triggers.path_to_ready(rv["triggers"])
-    row["eligible_days"] = scan_triggers.earliest_eligible_days(rv["triggers"])
-    row["bench"] = scan_triggers.is_bench(rv["verdict"], rv["triggers"])
-
-    # ---- SHADOW-FIRST dual compute (gate recalibration) ----------------------
-    # Every ruleset's row verdict, so the divergence between the shipped rules and
-    # the proposed ones is measurable per name per scan. ZERO authority: nothing
-    # below is read by /api/scan/ready, the executor, sizing, alerts or the
-    # recommendation pipeline — they all key off `row["verdict"]` above, which
-    # follows config.GATE_RULESET. Flipping that flag is a HUMAN decision.
-    sym_by_rs = sym.get("by_ruleset") or {}
-    verdict_by_ruleset = {}
-    for rs_name in config.GATE_RULESETS:
-        if rs_name == sym.get("ruleset"):
-            verdict_by_ruleset[rs_name] = rv["verdict"]   # already the authoritative fold
-        else:
-            verdict_by_ruleset[rs_name] = _fold(
-                sym_by_rs.get(rs_name) or sym["color"], rs_name)["verdict"]
-    row["gate_ruleset"] = config.GATE_RULESET
-    row["verdict_by_ruleset"] = verdict_by_ruleset
-    row["legacy_verdict"] = verdict_by_ruleset.get(config.RULESET_LEGACY)
-    row["proposed_verdict"] = verdict_by_ruleset.get(config.RULESET_PROPOSED)
-    row["ruleset_divergence"] = bool(row["legacy_verdict"] != row["proposed_verdict"])
-    # Full conditional gate picture (every level, recorded past the first fail) +
-    # the lowest failing level. Distinct from `binding`, which is the most
-    # DECISIVE block (worst severity first), not the first one in gate order.
-    if gate is not None:
-        row["all_level_results"] = gate.get("all_level_results")
-        row["first_failing_level"] = gate.get("first_failing_level")
-        row["gate_rulesets"] = gate.get("rulesets")
+    # ---- THE VETO SET. This is the only thing that blocks. -------------------
+    # The scan answers "may I enter?" here and "how good is it?" in the ranker
+    # below, and keeps the two apart. Only the exit mirrors and hard account
+    # constraints veto (scan_verdict.VETOES); everything the old four-level filter
+    # blocked on that did not mirror an exit rule now RANKS and cannot block.
+    #
+    # Level 5 (account) and staleness are layered by the caller — /api/scan/ready
+    # has the account context and the freshness read; a ~500-name sweep has
+    # neither. The executor enforces L5 independently at the ticket, so this row
+    # is advisory in exactly the way it was before.
+    blocks = list((gate or {}).get("blocks") or [])
+    composed = scan_verdict.compose(blocks)
+    row["verdict"] = composed["verdict"]                 # ELIGIBLE | BLOCKED
+    row["blocks"] = composed["blocks"]
+    row["blocked_by"] = composed["blocked_by"]
+    row["verdict_reasons"] = list(composed["blocked_by"])
+    # The one surviving forward trigger: earnings clears on a DETERMINISTIC date.
+    row["earnings_trigger"] = scan_triggers.earnings_trigger(blocks)
+    # The entry ROUTE — advisory output only, never an order. Reads the same
+    # extension the ranker consumes, so route and rank cannot disagree.
+    row["route"] = (gate or {}).get("route") or scan_verdict.route(
+        extension_atr=row.get("atr_extension"), regime_color=regime_color,
+        ma21=None)
 
     # ---- Per-gate evaluation telemetry (READ-ONLY OBSERVABILITY) -------------
     # TRAVIS_EXTENSION. A purely ADDITIVE row key. `gate_results` is one
@@ -729,22 +614,6 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["rs_spy_level"] = rs_spy["level"]
     row["rs_spy_slope"] = rs_spy["slope"]
 
-    # Composite SCORE (0–10) SHADOW — a pure rank over the already-computed row
-    # inputs. ZERO authority: not read by the verdict, gate, /api/scan/ready, sizing,
-    # or recommendations (see scan_score.py). sector_rs1m is the sector ETF's own
-    # strength vs SPY (one cheap arithmetic call over the already-cached frames).
-    sector_rs1m = (indicators.rs1m(sector_df, spy_df)
-                   if (sector_df is not None and spy_df is not None) else None)
-    scored = scan_score.compute_score(
-        inst_flow=cls["inst_flow"], base_stage=cls["base_stage"],
-        base_count=cls["signals"].get("base_count"),
-        sector_rs1m=sector_rs1m, atr_momentum=row.get("atr_momentum"),
-        pct_above_ma21=row.get("pct_above_ma21"),
-        net_juice_weekly_pct=row.get("net_juice_weekly_pct"))
-    row["score"] = scored["score"]
-    row["score_parts"] = scored["parts"]
-    row["sector_rs1m"] = None if sector_rs1m is None else round(sector_rs1m, 2)
-
     # ---- Level-4 CHART STRUCTURE (SHADOW) + the volume phase flag -------------
     # TRAVIS_EXTENSION. Purely ADDITIVE row keys. Level 4 measures quietness but
     # not structure, so these four metrics measure the structure it misses:
@@ -774,16 +643,60 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # re-derivation. `gate is None` (the many score_ticker callers that pass no
     # gate) yields False, i.e. exactly today's volume behavior.
     row["consolidation_phase"] = chart_structure.consolidation_phase(
-        (_gate_level_detail(gate, 4) or {}).get("right_spot"))
+        ((gate or {}).get("ranking") or {}).get("right_spot"))
 
     # `suitability` = the CFM-suitability lens (stock-level gate short-circuit, else
     # the GO/CAUTION/AVOID metric rules). Not the headline verdict — a demoted signal.
-    failed = _failed_stock_gate_level(gate)
-    if failed is not None:
-        name = _GATE_LEVEL_NAMES.get(failed, "")
+    # Placed HERE, after every ranking input is on the row. The ranker consumes
+    # chart structure and juice capacity, both attached above — computing the rank
+    # before them would silently score every name against a missing input (the
+    # neutral 0.5), which reads as "measured and average" rather than "not
+    # measured yet". Ordering is load-bearing, not incidental.
+    # ---- THE RANK. Carries ranking authority; never veto authority. ----------
+    # Every input the old Levels 2/3/3.5/4 vetoed on arrives here as a VALUE, plus
+    # the shadow features. `scan_score` normalizes each to 0..1 before weighting
+    # (raw units are not comparable across names) and returns per-input
+    # contributions, so a rank is explainable without re-running anything.
+    #
+    # Nothing below is ever appended to `blocks` above — a rank orders the
+    # eligible, it cannot make a name ineligible. A row scoring 0.0 is ELIGIBLE
+    # with a rank of 0.0, never BLOCKED. That invariant is the whole safety
+    # property of this layer and is asserted directly by test_scan_score /
+    # test_juice_capacity.
+    sector_rs1m = (indicators.rs1m(sector_df, spy_df)
+                   if (sector_df is not None and spy_df is not None) else None)
+    rk = (gate or {}).get("ranking") or {}
+    scored = scan_score.compute_score(
+        inst_flow=cls["inst_flow"], base_stage=cls["base_stage"],
+        base_count=cls["signals"].get("base_count"),
+        entrability=entrability,
+        extension_atr=row.get("atr_extension"),
+        stock_greens=row.get("stock_greens"),
+        rs3m_vs_spy=row.get("rs3m_vs_spy"),
+        sector_rs1m=sector_rs1m,
+        sector_breadth=rk.get("sector_breadth"),
+        sector_atr_expanding=rk.get("sector_atr_expanding"),
+        atr_momentum=row.get("atr_momentum"),
+        structure_score=row.get("structure_score"),
+        structure_score_of=row.get("structure_score_of"),
+        capacity_pct=(row.get("juice_capacity") or {}).get("capacity_pct"),
+        shadow_floor_pct=(row.get("shadow_floor") or {}).get("floor_pct"),
+        net_juice_weekly_pct=row.get("net_juice_weekly_pct"))
+    row["score"] = scored["score"]
+    row["score_quality"] = scored["score_quality"]
+    row["score_parts"] = scored["parts"]
+    row["score_contributions"] = scored["contributions"]
+    row["sector_rs1m"] = None if sector_rs1m is None else round(sector_rs1m, 2)
+
+    # `suitability` is the OLDER GO/CAUTION/AVOID CFM-suitability lens, retained
+    # deliberately: it is a different measurement from the scan verdict (stock
+    # momentum suitability, not entry eligibility) and it is what the internal
+    # queue / recommendation / refresh pipeline reads. Rewiring those is out of
+    # scope for this change. A BLOCKED row short-circuits it, exactly as a failed
+    # gate level used to.
+    if row["verdict"] == scan_verdict.BLOCKED:
         row["suitability"] = "AVOID"
-        row["suitability_reasons"] = [f"fails entry gate level {failed}"
-                                      + (f" ({name})" if name else "")]
+        row["suitability_reasons"] = [f"blocked: {b}" for b in row["blocked_by"]]
         row["suitability_notes"] = []
         return row
 
