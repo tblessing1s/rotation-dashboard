@@ -206,6 +206,88 @@ def maintenance_due(now: datetime, last: date | None) -> bool:
     return now.strftime("%H:%M") >= config.MAINTENANCE_ET and last != now.date()
 
 
+# ---------------------------------------------------------------------------
+# Mandatory DATE-SPECIFIC checks (schema v22, CSP Stage 2 §2.2)
+#
+# Every other check in this daemon is RECURRING: a slot fires once per day, every
+# day, and the conditions decide whether anything is wrong. That model cannot
+# express "this must run on THIS date, before the close, and its absence is
+# itself a failure" — which is exactly what a put's expiry day is. A put left
+# unattended through expiry is assigned, and an assignment nobody evaluated is
+# the silent-drift failure this whole feature exists to prevent.
+#
+# So the daemon is EXTENDED rather than duplicated: one date-keyed registry
+# alongside `_last_run`, evaluated in the SAME tick loop, covered by the SAME
+# dead-man's-switch ping. There is no second thread and no second schedule.
+# ---------------------------------------------------------------------------
+# "YYYY-MM-DD:check" -> the date it ran. In-memory like _last_run; a restart may
+# re-run a check, which alert dedup makes a no-op.
+_mandatory_run: dict[str, date] = {}
+
+# PROPOSED_DEFAULT — how long before the close the expiry-day check must have run.
+# 15:30 ET is the existing pre-close alert slot, so the mandatory check rides a
+# time the daemon already wakes for rather than introducing a new one.
+EXPIRY_CHECK_ET = "15:30"
+
+
+def mandatory_expiry_checks(state: dict, now: datetime,
+                            last: dict | None = None) -> list[str]:
+    """Keys for every put expiring TODAY whose mandatory pre-close check is due.
+
+    PURE given ``now`` and the run registry, so the whole scheduling rule is
+    testable with a mocked clock and no daemon. A put expiring today is due once
+    the clock passes ``EXPIRY_CHECK_ET`` and the check has not already run today.
+    """
+    last = _mandatory_run if last is None else last
+    today = now.date()
+    if now.strftime("%H:%M") < EXPIRY_CHECK_ET:
+        return []
+    due = []
+    for p in (state or {}).get("positions", []):
+        if p.get("status") == "closed":
+            continue
+        for leg in p.get("short_puts") or []:
+            if str(leg.get("expiration") or "")[:10] != today.isoformat():
+                continue
+            key = f"{today.isoformat()}:expiry:{p.get('ticker')}:{leg.get('strike')}"
+            if last.get(key) != today:
+                due.append(key)
+    return due
+
+
+def _maybe_expiry_check(now: datetime) -> None:
+    """Run the mandatory expiry-day re-gate for any put expiring today.
+
+    A FAILURE HERE PAGES. Every other evaluator in this daemon swallows its own
+    exception so a broken condition cannot kill the thread — correct, because a
+    missed recurring check runs again in an hour. This one does not get another
+    chance: the put expires today, and a missed evaluation is a silent assignment
+    with real money attached. So a failure pings the dead-man's switch's /fail
+    endpoint immediately, exactly as a failed alert run does.
+    """
+    import alerts
+    import heartbeat
+    import logging_handler as log
+    try:
+        state = log.load_state()
+    except Exception as e:  # noqa: BLE001
+        logger.error("expiry-day check could not load state: %s", e)
+        heartbeat.ping("/fail", force=True)
+        return
+    due = mandatory_expiry_checks(state, now)
+    if not due:
+        return
+    try:
+        alerts.run()
+        for key in due:
+            _mandatory_run[key] = now.date()
+        logger.info("mandatory expiry-day put check ran for %d leg(s)", len(due))
+    except Exception as e:  # noqa: BLE001 — the thread survives, but this PAGES
+        heartbeat.ping("/fail", force=True)
+        logger.error("MANDATORY expiry-day put check FAILED (%s): %s",
+                     ", ".join(due), e)
+
+
 def _tick() -> None:
     import alerts  # local import: keep module import side-effect free
     import heartbeat
@@ -233,6 +315,10 @@ def _tick() -> None:
     _maybe_tier_poll(now)
     _maybe_interval_reconcile(now)
     _maybe_warm_scan(now)  # keep the full-universe scan cache warm between slots
+    # Mandatory date-specific put expiry check. Runs every tick (its own date gate
+    # decides), so it must sit BEFORE the slot-based early return below — a put
+    # expiring today must be evaluated even on a day no recurring slot is due.
+    _maybe_expiry_check(now)
 
     due = due_slots(now)
     if not due:

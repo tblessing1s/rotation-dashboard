@@ -437,3 +437,263 @@ def test_the_put_events_never_reach_the_juice_ledger(store):
     assert state["theta_ledger"]["weeks"] == []
     assert state["theta_ledger"]["totals"]["ytd"] == 0
     assert state["put_ledger"]["realized_premium"] == 60.0
+
+
+# ===========================================================================
+# STAGE 2 — MONITOR
+#
+# The load-bearing test in this section is the NEGATIVE one:
+# `test_a_close_below_ma21_alone_does_not_advise_close`. Everything else proves
+# a signal fires; that one proves the system does NOT act on the signal most
+# likely to look like a reason and not be one. Quality names in intact uptrends
+# dip below MA21 routinely, and a put struck at the MA21 zone is SUPPOSED to be
+# approached — closing on that would systematically abandon positions doing
+# exactly what they were sold to do.
+# ===========================================================================
+import alert_scheduler  # noqa: E402
+import alerts  # noqa: E402
+
+
+def _regate(**kw):
+    return sv.put_close_advice(blocks=sv.put_close_triggers(**kw))
+
+
+# ---------------------------------------------------------------------------
+# §2.4 — the daily re-gate
+# ---------------------------------------------------------------------------
+def test_a_name_breaking_the_50_day_advises_close():
+    """Three consecutive closes below the 50-day — the circuit breaker's own bar,
+    NOT the entry veto's single close. The two rules share a name and differ:
+    entry asks 'is this a good place to start' (waiting costs nothing); closing
+    asks 'is the thesis broken' (acting costs a realized loss)."""
+    advice = _regate(ma_fast_breached=True)
+    assert advice["action"] == "close"
+    assert advice["blocked_by"] == ["close_below_ma50"]
+    assert advice["assignment_is_a_good_entry"] is False
+
+
+def test_an_intact_name_holds_and_assignment_is_a_good_entry():
+    advice = _regate(ma_fast_breached=False, ma_slow_breached=False,
+                     rs3m_vs_spy=4.0, line_breached=False)
+    assert advice["action"] == "hold"
+    assert advice["assignment_is_a_good_entry"] is True
+
+
+@pytest.mark.parametrize("kwargs,expected", [
+    ({"ma_fast_breached": True}, "close_below_ma50"),
+    ({"ma_slow_breached": True}, "close_below_ma200"),
+    ({"rs3m_vs_spy": -0.01}, "rs3m_vs_spy"),
+    ({"line_breached": True}, "line_in_the_sand"),
+])
+def test_each_structural_signal_closes_the_put(kwargs, expected):
+    """§2.1 enumerates exactly four. Each asserted individually."""
+    assert _regate(**kwargs)["blocked_by"] == [expected]
+
+
+def test_the_close_trigger_set_is_exactly_the_four_structural_signals():
+    assert set(sv.PUT_CLOSE_TRIGGERS) == {
+        "close_below_ma50", "close_below_ma200", "rs3m_vs_spy", "line_in_the_sand"}
+    # A STRICT SUBSET of the entry veto set: closing is narrower than refusing to
+    # enter, deliberately.
+    assert set(sv.PUT_CLOSE_TRIGGERS) < set(sv.VETO_IDS)
+
+
+def test_the_regate_reads_the_rule_owners_and_does_not_fork_them(store):
+    """Rule reuse, never a fork: the MA legs and the line come from
+    circuit_breaker, RS from kill_switch. One definition each."""
+    import inspect
+    src = inspect.getsource(pm.put_regate)
+    assert "circuit_breaker.evaluate" in src and "kill_switch.evaluate" in src
+    # And drawdown is deliberately excluded — see the docstring.
+    assert "drawdown" in src
+
+
+# ---------------------------------------------------------------------------
+# §2.4 — THE NEGATIVE TEST. MA21 must not close a put.
+# ---------------------------------------------------------------------------
+def test_a_close_below_ma21_alone_does_not_advise_close():
+    """THE LOAD-BEARING NEGATIVE TEST.
+
+    MA21 is a TIMING reference — it is what put the name on the put route in the
+    first place. Structural, not remembered: there is no parameter through which
+    it could reach the decision and no id for it in the trigger set."""
+    advice = _regate(ma_fast_breached=False, ma_slow_breached=False,
+                     rs3m_vs_spy=3.0, line_breached=False)
+    assert advice["action"] == "hold"          # THE POSITION STAYS OPEN
+    for name in ("ma21", "below_ma21", "extension_atr", "pct_above_ma21"):
+        with pytest.raises(TypeError):
+            sv.put_close_triggers(**{name: True})
+    assert not any("ma21" in t for t in sv.PUT_CLOSE_TRIGGERS)
+
+
+def test_the_account_and_tradeability_vetoes_do_not_close_an_open_put():
+    """The entry veto set is WIDER than the close set. Acting on any of these
+    would realize a loss to satisfy a bookkeeping cap, cross the exact spread that
+    made the name untradeable, or trade on the absence of a signal."""
+    entry_blocks = sv.evaluate(regime_color="red", has_weeklies=False,
+                               stale=True, spread_pct=99.0)
+    assert sv.compose(entry_blocks)["verdict"] == sv.BLOCKED     # would not ENTER
+    assert sv.put_close_advice(blocks=entry_blocks)["action"] == "hold"  # but HOLDS
+
+
+# ---------------------------------------------------------------------------
+# §2.4 — the 8/21 cross is tempo only
+# ---------------------------------------------------------------------------
+def test_the_8_21_cross_produces_a_flag_and_no_transition():
+    down = sv.tempo_signal(9.0, 11.0)
+    up = sv.tempo_signal(11.0, 9.0)
+    assert down["signal"] == sv.TEMPO_DOWN and up["signal"] == sv.TEMPO_UP
+    # Literal disclaimers, not config reads — no switch can grant tempo authority.
+    for sig in (down, up):
+        assert sig["tempo_only"] is True and sig["closes_nothing"] is True
+    # A DOWN cross closes nothing: the decision takes no tempo argument.
+    for name in ("tempo", "ema_fast", "ema_slow", "cross"):
+        with pytest.raises(TypeError):
+            sv.put_close_triggers(**{name: "TEMPO_DOWN"})
+    assert _regate(rs3m_vs_spy=3.0)["action"] == "hold"
+
+
+def test_an_unreadable_tempo_is_none_not_a_direction():
+    assert sv.tempo_signal(None, 11.0)["signal"] is None
+
+
+# ---------------------------------------------------------------------------
+# §2.4 — the mandatory expiry-day check
+# ---------------------------------------------------------------------------
+def _state_with_put_expiring(day: str):
+    return {"positions": [{"ticker": "AAA", "status": "active",
+                           "position_type": "CASH_SECURED_PUT",
+                           "short_puts": [{"strike": 50.0, "expiration": day,
+                                           "contracts": 1}]}]}
+
+
+def _at(hour, minute=45, day=None):
+    from datetime import datetime as _dt
+    d = day or _date.today()
+    return _dt.combine(d, _dt.min.time()).replace(hour=hour, minute=minute)
+
+
+def test_the_expiry_day_check_fires_on_the_correct_date():
+    today = _date.today()
+    due = alert_scheduler.mandatory_expiry_checks(
+        _state_with_put_expiring(today.isoformat()), _at(15), last={})
+    assert len(due) == 1 and due[0].startswith(today.isoformat())
+
+
+def test_the_expiry_day_check_does_not_fire_before_the_pre_close_window():
+    today = _date.today()
+    assert alert_scheduler.mandatory_expiry_checks(
+        _state_with_put_expiring(today.isoformat()), _at(9), last={}) == []
+
+
+def test_the_expiry_day_check_does_not_fire_for_a_put_expiring_later():
+    from datetime import timedelta as _td
+    later = (_date.today() + _td(days=7)).isoformat()
+    assert alert_scheduler.mandatory_expiry_checks(
+        _state_with_put_expiring(later), _at(15), last={}) == []
+
+
+def test_the_expiry_day_check_runs_once_per_day():
+    today = _date.today()
+    state = _state_with_put_expiring(today.isoformat())
+    ran = {k: today for k in alert_scheduler.mandatory_expiry_checks(state, _at(15), last={})}
+    assert alert_scheduler.mandatory_expiry_checks(state, _at(15), last=ran) == []
+
+
+def test_the_expiry_day_check_is_covered_by_the_dead_mans_switch():
+    """A missed expiry-day evaluation is a silent failure with real money attached.
+    Unlike every other evaluator this one PAGES on failure rather than merely
+    logging — it does not get another chance in an hour."""
+    import inspect
+    src = inspect.getsource(alert_scheduler._maybe_expiry_check)
+    assert 'heartbeat.ping("/fail", force=True)' in src
+    # And it runs on EVERY tick, BEFORE the slot-based early return — so a put
+    # expiring on a day with no due slot is still evaluated.
+    tick = inspect.getsource(alert_scheduler._tick)
+    assert tick.index("_maybe_expiry_check(now)") < tick.index("due = due_slots(now)")
+
+
+def test_the_expiry_check_extends_the_existing_daemon_not_a_second_one():
+    """§2.2: extend it, do not build a second daemon."""
+    import inspect
+    src = inspect.getsource(alert_scheduler)
+    assert src.count("def _tick(") == 1
+    # One SCHEDULER thread. (The module also spawns a detached scan-warmup
+    # thread, which is not a scheduler and does not evaluate anything.)
+    assert src.count('name="cfm-alerts"') + src.count("name=\"alert-scheduler\"") <= 1
+    assert "_maybe_expiry_check(now)" in inspect.getsource(alert_scheduler._tick)
+
+
+# ---------------------------------------------------------------------------
+# §2.4 — no roll path exists for a short put. Assert by absence.
+# ---------------------------------------------------------------------------
+def test_no_roll_path_exists_for_a_short_put():
+    """§2.3: a put roll is a DEBIT and a Martingale structure — it converts a
+    bounded mistake into an unbounded one. Not implemented, and not to be
+    implemented "for completeness"."""
+    assert "roll_put" not in executor.VALID_ACTIONS
+    assert "put_roll" not in executor.VALID_ACTIONS
+    for name in dir(executor):
+        low = name.lower()
+        assert not ("roll" in low and "put" in low), name
+    # The close-reason enum offers no way to even SPELL a roll.
+    assert set(executor._PUT_CLOSE_REASONS) == {
+        "expired_worthless", "closed_gate_failure", "closed_structural",
+        "closed_manual"}
+
+
+def test_the_close_advice_never_offers_a_roll():
+    import inspect
+    src = inspect.getsource(alerts.check_put_regate)
+    assert "do NOT roll" in src or "never roll" in src
+
+
+# ---------------------------------------------------------------------------
+# The alert wiring
+# ---------------------------------------------------------------------------
+def test_the_put_alerts_are_registered_with_severities():
+    for t in ("PUT_GATE_FAILURE", "PUT_EXPIRY_ACTION", "PUT_ASSIGNED",
+              "PUT_ACTIVITY_UNRECOGNIZED", "PUT_COLLATERAL_BREACH"):
+        assert t in alerts.ALERT_TYPES, t
+    # The undetected-assignment case is the expensive one and is CRITICAL.
+    assert alerts.ALERT_TYPES["PUT_ACTIVITY_UNRECOGNIZED"][0] == "CRITICAL"
+
+
+def test_unrecognized_broker_activity_raises_a_critical_alert():
+    state = {"positions": [], "ingestion": {"last": {
+        "unrecognized_put_activity": [
+            {"transaction_id": "T9", "ticker": "AAA", "type": "MYSTERY",
+             "summary": "unrecognized"}]}}}
+    fired = alerts.check_put_assignment_detected(state)
+    assert [a["type"] for a in fired] == ["PUT_ACTIVITY_UNRECOGNIZED"]
+    assert "not assume it is benign" in fired[0]["action"].lower()
+
+
+def test_a_detected_assignment_raises_an_alert_to_book_it():
+    state = {"positions": [], "ingestion": {"last": {
+        "assignment_proposals": [
+            {"transaction_id": "T1", "ticker": "AAA", "shares": 100,
+             "strike": 50.0}]}}}
+    assert [a["type"] for a in alerts.check_put_assignment_detected(state)] == ["PUT_ASSIGNED"]
+
+
+def test_the_expiry_alert_says_let_it_assign_when_the_name_still_passes(store, monkeypatch):
+    _open_put()
+    monkeypatch.setattr(pm, "put_regate",
+                        lambda p, df=None: {"action": "hold",
+                                            "assignment_is_a_good_entry": True})
+    st = log.load_state()
+    st["positions"][0]["short_puts"][0]["expiration"] = _date.today().isoformat()
+    fired = alerts.check_put_expiry_day(st)
+    assert len(fired) == 1 and "assign" in fired[0]["action"].lower()
+
+
+def test_the_expiry_alert_says_close_when_the_name_would_be_refused(store, monkeypatch):
+    _open_put()
+    monkeypatch.setattr(pm, "put_regate",
+                        lambda p, df=None: {"action": "close",
+                                            "blocked_by": ["close_below_ma200"],
+                                            "assignment_is_a_good_entry": False})
+    st = log.load_state()
+    st["positions"][0]["short_puts"][0]["expiration"] = _date.today().isoformat()
+    assert "CLOSE" in alerts.check_put_expiry_day(st)[0]["action"]

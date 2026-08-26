@@ -870,6 +870,8 @@ function SharesBaseMath({ p }) {
 function PutBase({ p }) {
   const legs = p.short_puts || [];
   const collateral = p.put_collateral || 0;
+  const rg = p.put_regate;
+  const tempo = p.tempo;
   return (
     <div>
       <div className="mb-2 flex items-baseline gap-2">
@@ -906,6 +908,36 @@ function PutBase({ p }) {
           </div>
         );
       })}
+      {/* The daily re-gate: would this name be admitted today? A HOLD means
+          assignment is a good entry and should be allowed to happen. A CLOSE
+          means the thesis broke — and the only remedy offered is closing, never
+          rolling: a put roll is a debit and a Martingale structure. */}
+      {rg && (
+        <div className={`mt-3 rounded-lg px-3 py-2 text-xs ${
+          rg.action === "close"
+            ? "bg-rose-500/10 text-rose-200"
+            : "bg-emerald-500/10 text-emerald-200"}`}>
+          {rg.action === "close" ? (
+            <>
+              <span className="font-semibold">Close the put</span> — the entry rules would
+              refuse this name today ({(rg.blocked_by || []).join(", ")}). Do not accept
+              assignment, and do not roll it.
+            </>
+          ) : (
+            <>
+              <span className="font-semibold">Hold</span> — the name still passes the entry
+              rules, so assignment is a good entry. Let it happen.
+            </>
+          )}
+        </div>
+      )}
+      {/* Tempo only. Shown, never acted on — an 8/21 cross closes nothing. */}
+      {tempo?.signal && (
+        <div className="mt-1 text-[11px] text-slate-500">
+          Tempo {tempo.signal === "TEMPO_UP" ? "↑" : "↓"} (8/21 EMA) —
+          <span className="text-slate-600"> a pace read, not a close signal.</span>
+        </div>
+      )}
       <div className="mt-2 text-xs text-slate-500">
         Collateral <span className="tabular-nums">{money(collateral)}</span> counts against the
         deployed-capital cap and does not draw the ATR reserve. Coverage, cap progress and

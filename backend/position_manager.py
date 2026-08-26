@@ -544,6 +544,9 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
     out["short_puts"] = open_puts
     out["put_collateral"] = round(sum(float(l.get("collateral") or 0)
                                       for l in open_puts), 2) if open_puts else 0.0
+    if open_puts:
+        out["put_regate"] = put_regate(position)
+        out["tempo"] = _tempo(ticker)
 
     shares = dict(position.get("shares") or {})
     count = int(shares.get("count") or 0)
@@ -604,6 +607,80 @@ def positions_view(state: dict) -> list[dict]:
         p["wash_sale_flag"] = (flagged.get(p.get("ticker", ""))
                                if p.get("status") != "closed" else None)
     return out
+
+
+def put_regate(position: dict, df=None) -> dict:
+    """THE DAILY RE-GATE (§2.1): would this name be admitted today?
+
+    If yes, assignment is a GOOD ENTRY and the recommendation is to let it happen —
+    the put was written at a price you wanted to pay and the thesis is intact. If
+    no, the recommendation is to CLOSE the put rather than accept delivery of
+    shares the entry rules would refuse.
+
+    RULE REUSE, NEVER A FORK. The four structural signals are read from the modules
+    that own them — ``circuit_breaker.evaluate`` for the two MA legs and the
+    operator's line, ``kill_switch.classify`` for RS3M-vs-SPY — and handed to
+    ``scan_verdict.put_close_advice``, which is pure. There is exactly one
+    definition of each rule in the codebase and this reads all four.
+
+    WHAT IS DELIBERATELY NOT HERE:
+
+      * MA21, in any form. It is a timing reference, not a thesis signal, and
+        quality names in intact uptrends dip below it routinely.
+      * The 8/21 EMA cross. Tempo only — surfaced beside this, never inside it.
+      * ``circuit_breaker``'s DRAWDOWN condition. §2.1 enumerates the close
+        triggers and drawdown-from-entry is not among them. That is a real
+        narrowing relative to a shares position, and it is deliberate: a put's
+        "entry price" is the spot when it was written, which is not the price you
+        agreed to pay — the STRIKE is. Judging a 15% drawdown against the wrong
+        reference would close puts that are doing exactly what they were sold to do.
+      * The account, tradeability and staleness vetoes. See
+        ``scan_verdict.PUT_CLOSE_TRIGGERS`` for why each is nonsense as a close
+        reason.
+    """
+    import circuit_breaker
+    import data_handler
+    import kill_switch
+    import scan_verdict
+    ticker = position.get("ticker", "")
+    if df is None:
+        df = data_handler.get_daily(ticker)
+    cb = circuit_breaker.evaluate(position, df)
+    by_id = {c["id"]: c for c in cb.get("conditions") or []}
+    rs = None
+    try:
+        rs = kill_switch.evaluate(ticker).get("rs3m_vs_spy")
+    except Exception:  # noqa: BLE001 — an RS miss reads as unknown, never as a break
+        rs = None
+    blocks = scan_verdict.put_close_triggers(
+        ma_fast_breached=bool((by_id.get("ma_fast") or {}).get("tripped")),
+        ma_slow_breached=bool((by_id.get("ma_slow") or {}).get("tripped")),
+        rs3m_vs_spy=rs,
+        line_breached=bool((by_id.get("manual_line") or {}).get("tripped")))
+    advice = scan_verdict.put_close_advice(blocks=blocks)
+    return {**advice, "as_of": _today_iso(), "rs3m_vs_spy": rs,
+            "conditions": {k: bool((v or {}).get("tripped"))
+                           for k, v in by_id.items() if k != "drawdown"}}
+
+
+def _today_iso() -> str:
+    from datetime import date as _date
+    return _date.today().isoformat()
+
+
+def _tempo(ticker: str) -> dict:
+    """The 8/21 EMA cross for the position card. A FLAG AND NOTHING ELSE.
+
+    Surfaced next to the re-gate and structurally unable to reach it: ``put_regate``
+    above never reads this, and ``scan_verdict.put_close_triggers`` accepts no tempo
+    argument. See ``scan_verdict.tempo_signal``."""
+    import data_handler
+    import indicators
+    import scan_verdict
+    df = data_handler.get_daily(ticker)
+    if df is None:
+        return scan_verdict.tempo_signal(None, None)
+    return scan_verdict.tempo_signal(indicators.ema(df, 8), indicators.ema(df, 21))
 
 
 def scan_verdict_put_collateral(strike, contracts):
