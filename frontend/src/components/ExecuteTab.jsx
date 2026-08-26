@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import { Card, Pill, Light, Loading, GENIUS_LIGHT_ORDER, GENIUS_LIGHT_LABELS, fmt } from "./ui.jsx";
 import OptionChainModal from "./OptionChainModal.jsx";
+import PutTicket from "./PutTicket.jsx";
 import { useToast } from "./Toast.jsx";
 import { submitOrder } from "../orderFlow.js";
 import { useTradeMode, TradeModeBadge } from "../tradeMode.jsx";
@@ -84,41 +85,49 @@ function RightSpotCard({ spot }) {
   );
 }
 
-function GateLevel({ lv }) {
-  const d = lv.detail || {};
-  const isStockLights = lv.level === 3;
-  const isRightSpot = lv.level === 4;
-  return (
-    <div className="flex items-start gap-3 border-t border-slate-800 py-2">
-      <Light status={lv.pass ? "green" : "red"} />
-      <div className="flex-1">
-        <div className="text-sm font-medium text-slate-200">
-          Level {lv.level}: {lv.name}
+// The VETO SET — what the entry gate is since the scan redesign. The old
+// four-level, stop-on-first-fail renderer read `gate.levels` and
+// `gate.cleared_level`; `screening.entry_gate` stopped returning either, so this
+// panel silently rendered nothing and reported "not cleared" for every name.
+//
+// The shape it renders now mirrors the decision: an ELIGIBLE name has an EMPTY
+// list, because only a veto blocks. Everything else ranks, and ranking is not
+// shown here — the Scan tab ranks; this tab asks one question about one name.
+function VetoSet({ gate }) {
+  const blocks = gate?.blocks || [];
+  if (!blocks.length) {
+    return (
+      <div className="flex items-start gap-3 border-t border-slate-800 py-2">
+        <Light status="green" />
+        <div className="flex-1 text-sm text-slate-300">
+          No vetoes. Nothing in the hard floor refuses this name.
         </div>
-        {/* Per-condition sub-checks: each leg is flagged on its own so a level
-            FAIL is never ambiguous about which condition missed. */}
-        {lv.checks?.length ? (
-          <div className="mt-1 space-y-0.5">
-            {lv.checks.map((c, i) => (
-              <div key={i} className="flex items-center gap-2 text-xs">
-                <span className={c.pass ? "text-emerald-400" : "text-rose-400"}>{c.pass ? "✓" : "✗"}</span>
-                <span className="text-slate-400">{c.label}</span>
-                <span className="text-slate-500">({checkValue(c.value)})</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
-        {/* Level 3 = the per-name Genius lights + verdict pill + veto banners. */}
-        {isStockLights && (
-          <>
-            <StockFourLights lights={d.lights} greens={d.greens} verdict={d.verdict} />
-            <VetoBanners vetoes={d.vetoes} />
-          </>
-        )}
-        {/* Level 4 = the separate Right Spot gate card. */}
-        {isRightSpot && <RightSpotCard spot={d.right_spot} />}
+        <Pill status="ready">CLEAR</Pill>
       </div>
-      <Pill status={lv.pass ? "ready" : "no"}>{lv.pass ? "PASS" : "FAIL"}</Pill>
+    );
+  }
+  return (
+    <div className="border-t border-slate-800 py-2">
+      {blocks.map((b) => (
+        <div key={b.id} className="flex items-start gap-3 py-1">
+          <Light status="red" />
+          <div className="flex-1">
+            <div className="text-sm font-medium text-slate-200">{b.label || b.id}</div>
+            {/* Every veto carries WHY it has authority — the exit trigger or
+                hard account constraint it MIRRORS. Nothing else may block. */}
+            {b.mirrors && <div className="text-xs text-slate-500">mirrors: {b.mirrors}</div>}
+            {/* …and what was actually observed, so a veto is never a bare verdict. */}
+            {b.observed && (
+              <div className="text-xs text-slate-600">
+                {Object.entries(b.observed)
+                  .map(([k, v]) => `${k}=${checkValue(v)}`)
+                  .join(", ")}
+              </div>
+            )}
+          </div>
+          <Pill status="no">VETO</Pill>
+        </div>
+      ))}
     </div>
   );
 }
@@ -207,11 +216,11 @@ export default function ExecuteTab({ initialTicker, onExecuted, onBack }) {
 
   React.useEffect(() => { if (ticker) loadGate(ticker); }, [ticker, loadGate]);
 
-  const ready = gate?.verdict === "READY TO ENTER";
+  const ready = gate?.verdict === "ELIGIBLE";
   // Show the chain button once the gate has run. The modal enforces the regime:
   // GREEN 1.5× / YELLOW 2.0× for entries; RED blocks new entries but still opens
   // in management-only mode so an existing position can be closed/rolled to exit.
-  const regimeStatus = gate?.levels?.[0]?.detail?.status;
+  const regimeStatus = gate?.regime_color;
   const canViewChain = !!gate;
   const chainBtnLabel = regimeStatus === "red" ? "Manage Positions (market RED)" : "View Option Chain";
 
@@ -251,17 +260,34 @@ export default function ExecuteTab({ initialTicker, onExecuted, onBack }) {
         </div>
         {error && <p className="text-sm text-rose-400">{error}</p>}
         {gateLoading && <Loading label="Running gate…" />}
-        {gate?.levels?.map((lv) => <GateLevel key={lv.level} lv={lv} />)}
+        {gate && (
+          <>
+            <VetoSet gate={gate} />
+            <StockFourLights
+              lights={gate.lights}
+              greens={gate.stock_detail?.greens}
+              verdict={gate.stock_verdict}
+            />
+            <VetoBanners vetoes={gate.stock_vetoes} />
+            <RightSpotCard spot={gate.stock_detail?.right_spot} />
+          </>
+        )}
         {gate && <AccountGate gate={acctGate} />}
         {gate && (
           <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3 text-sm">
-            Cleared <span className="font-semibold text-emerald-300">{gate.cleared_level}/4</span> levels
+            {ready ? (
+              <span className="font-semibold text-emerald-300">ELIGIBLE</span>
+            ) : (
+              <>
+                <span className="font-semibold text-rose-300">BLOCKED</span>
+                <span className="text-slate-400"> by {(gate.blocked_by || []).join(", ")}</span>
+              </>
+            )}
             {acctGate ? (
               acctGate.pass
-                ? <> · Level 5 <span className="font-semibold text-emerald-300">PASS</span></>
-                : <> · Level 5 <span className="font-semibold text-rose-300">BLOCKED</span></>
+                ? <> · account gate <span className="font-semibold text-emerald-300">PASS</span></>
+                : <> · account gate <span className="font-semibold text-rose-300">BLOCKED</span></>
             ) : null}
-            . {ready ? "READY TO ENTER." : "Gate not cleared — wait."}
           </div>
         )}
       </Card>
@@ -301,6 +327,8 @@ export default function ExecuteTab({ initialTicker, onExecuted, onBack }) {
           </div>
         )}
       </Card>
+
+      <PutTicket ticker={ticker} onExecuted={onExecuted} />
 
       {chainOpen && (
         <OptionChainModal

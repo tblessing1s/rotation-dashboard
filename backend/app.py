@@ -428,6 +428,29 @@ def api_option_chain(ticker: str):
         return _err(e)
 
 
+@app.route("/api/put-chain/<ticker>")
+def api_put_chain(ticker: str):
+    """Weekly short-put candidates for the CSP ticket (schema v22).
+
+    Separate from /api/option-chain because it answers a different question — the
+    call route asks "what do I sell against shares I hold", this one asks "where
+    would I be happy to be assigned". Same underlying fetch and cache, though: one
+    Schwab payload carries both sides.
+    """
+    refresh = request.args.get("refresh", "").strip() in ("1", "true", "yes")
+    try:
+        return jsonify(option_chain.put_chain(ticker, refresh=refresh))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/put-placement-status")
+def api_put_placement_status():
+    """Which of the three placement switches are on, and which are not. Lets the
+    ticket say WHY it can only record rather than greying a button out."""
+    return jsonify(option_chain.placement_status())
+
+
 @app.route("/api/defend")
 def api_defend():
     """Defensive roll-down recommendation for a position whose short strike has

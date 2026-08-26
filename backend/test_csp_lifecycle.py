@@ -952,3 +952,131 @@ def test_an_assignment_is_never_placed(store, monkeypatch):
     executor.execute({"action": "put_assigned", "ticker": "AAA", "strike": STRIKE,
                       "contracts": 1, "expiration": EXPIRY, "stock_price": 47.0})
     assert _position()["shares"]["count"] == 100
+
+
+# ===========================================================================
+# The put TICKET — the surface that was missing (schema v22)
+# ===========================================================================
+def scan_verdict_juice(premium, strike):
+    import scan_verdict
+    return scan_verdict.put_juice_pct(premium, strike)
+
+
+def _chain_payload(underlying=100.0, exp="2026-09-04", dte=7, strikes=None):
+    """A Schwab chain payload carrying BOTH sides, as the real one does."""
+    strikes = strikes or {95.0: (1.00, 1.10), 96.0: (1.40, 1.55), 97.0: (1.90, 2.10)}
+    put_map = {}
+    for k, (bid, ask) in strikes.items():
+        put_map[str(k)] = [{"strikePrice": k, "bid": bid, "ask": ask,
+                            "daysToExpiration": dte, "delta": -0.25,
+                            "symbol": f"X{k}P"}]
+    return {"underlyingPrice": underlying,
+            "callExpDateMap": {f"{exp}:{dte}": {}},
+            "putExpDateMap": {f"{exp}:{dte}": put_map}}
+
+
+def test_put_intrinsic_points_the_other_way():
+    """The silent-failure case. Hard-coding the CALL form (underlying - strike)
+    for a put does not raise — it reports zero intrinsic and books the whole
+    premium as time value, which would let intrinsic masquerade as juice."""
+    import indicators
+    assert indicators.intrinsic_value(105, 100, put=True) == 5      # ITM put
+    assert indicators.intrinsic_value(95, 100, put=True) == 0       # OTM put
+    assert indicators.intrinsic_value(95, 100) == 5                 # ITM call
+    assert indicators.intrinsic_value(105, 100) == 0                # OTM call
+
+
+def test_spread_pct_is_unknown_not_zero_when_unmeasurable():
+    """0.0 reads as 'perfectly tight' and would wave a name through the very
+    tradeability gate this figure feeds."""
+    import indicators
+    assert indicators.spread_pct(1.00, 1.10) == 9.52
+    assert indicators.spread_pct(None, 1.10) is None
+    assert indicators.spread_pct(0, 0) is None
+
+
+def test_both_chain_sides_share_one_parser():
+    """One flattener, so a field the call side normalizes cannot quietly differ
+    on the put side."""
+    import schwab_api
+    payload = _chain_payload()
+    _, puts = schwab_api.parse_put_chain(payload)
+    assert puts and all(p["expiration"] == "2026-09-04" for p in puts)
+    assert {p["strike"] for p in puts} == {95.0, 96.0, 97.0}
+    assert sorted(puts[0].keys()) == sorted(
+        schwab_api.parse_call_chain(
+            {"callExpDateMap": payload["putExpDateMap"]})[1][0].keys())
+
+
+def test_ticket_offers_only_what_the_executor_will_accept(monkeypatch):
+    """Offering a monthly here and refusing it at the ticket would train the
+    operator to read a rejection as a bug rather than as the rule working."""
+    import option_chain
+    long_dated = _chain_payload(dte=45, exp="2026-10-16")
+    monkeypatch.setattr(option_chain, "_fetch_chain", lambda t, refresh=False: long_dated)
+    monkeypatch.setattr(option_chain.screening, "entry_gate",
+                        lambda t: {"verdict": "ELIGIBLE", "blocked_by": [], "route": {}})
+    monkeypatch.setattr(option_chain.data_handler, "get_daily", lambda s, force=False: None)
+    monkeypatch.setattr(option_chain.data_handler, "latest_quote",
+                        lambda s: {"price": 100.0})
+    out = option_chain.put_chain("AAA")
+    assert out["expirations"] == [], f"45 DTE is past PUT_MAX_DTE={config.PUT_MAX_DTE}"
+    assert out["max_dte"] == config.PUT_MAX_DTE
+
+
+def test_ticket_quotes_the_bid_not_the_midpoint(monkeypatch):
+    """Selling to open hits the BID. Quoting a midpoint the operator will not get
+    is how a juice floor clears on paper and misses in the account."""
+    import option_chain
+    monkeypatch.setattr(option_chain, "_fetch_chain",
+                        lambda t, refresh=False: _chain_payload())
+    monkeypatch.setattr(option_chain.screening, "entry_gate",
+                        lambda t: {"verdict": "ELIGIBLE", "blocked_by": [], "route": {}})
+    monkeypatch.setattr(option_chain.data_handler, "get_daily", lambda s, force=False: None)
+    monkeypatch.setattr(option_chain.data_handler, "latest_quote", lambda s: {"price": 100.0})
+    rows = option_chain.put_chain("AAA")["expirations"][0]["strikes"]
+    row = next(r for r in rows if r["strike"] == 95.0)
+    assert row["premium_per_share"] == 1.00           # the bid, not 1.05
+    assert row["collateral"] == 95.0 * config.SHARES_PER_LOT
+    assert row["juice_pct"] == scan_verdict_juice(1.00, 95.0)
+    assert row["delta_abs"] == 0.25                   # magnitude, not -0.25
+
+
+def test_ticket_collateral_and_juice_come_from_the_shared_helpers():
+    """A second formula in the ticket is how it ends up disagreeing with the
+    position it creates."""
+    import option_chain
+    import scan_verdict
+    row = option_chain._put_strike_view(
+        {"strike": 50.0, "bid": 1.0, "ask": 1.1, "delta": -0.3})
+    assert row["collateral"] == scan_verdict.put_collateral(50.0, 1)
+    assert row["juice_pct"] == scan_verdict.put_juice_pct(1.0, 50.0)
+
+
+def test_placement_status_names_every_switch_that_is_off():
+    """Greying a button out leaves the operator guessing WHICH switch is off."""
+    import option_chain
+    st = option_chain.placement_status()
+    assert st["can_place"] is False
+    assert not config.CSP_ORDER_PLACEMENT_ENABLED
+    assert any("CSP_ORDER_PLACEMENT_ENABLED" in r for r in st["reasons"])
+    assert set(st) == {"enabled", "live", "configured", "can_place", "reasons"}
+
+
+def test_placement_status_can_place_only_when_all_three_are_on(monkeypatch):
+    import option_chain
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(option_chain.executor, "live_transmit", lambda: True)
+    monkeypatch.setattr(option_chain.schwab_api, "configured", lambda: True)
+    st = option_chain.placement_status()
+    assert st["can_place"] is True and st["reasons"] == []
+
+
+def test_recording_a_fill_works_with_placement_off(store):
+    """Stage 1 is the fallback the ticket always has: with every switch off it
+    still books a put sold at the broker. THIS is what was missing from the UI."""
+    assert not config.CSP_ORDER_PLACEMENT_ENABLED
+    _open_put("AAA")
+    pos = _position("AAA")
+    assert pos["position_type"] == "CASH_SECURED_PUT"
+    assert len(pos["short_puts"]) == 1

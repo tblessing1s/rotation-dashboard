@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 import config
 import data_handler
 import dividends
+import executor
 import indicators
 import iv_history
 import logging_handler as log
@@ -716,4 +717,127 @@ def option_chain(ticker: str, strategy: str = "atr", refresh: bool = False) -> d
         "leap": leap,
         "weekly": weekly,
         "payoff": payoff,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cash-secured put ticket (schema v22)
+# ---------------------------------------------------------------------------
+def put_chain(ticker: str, refresh: bool = False) -> dict:
+    """Weekly short-put candidates for the CSP ticket.
+
+    Reuses the CALL path's machinery wholesale — `_fetch_chain` (Schwab returns
+    both sides in one payload, so this costs no extra request and shares the
+    5-minute cache), `_weekly_expirations`, `indicators.get_nearby_strikes`. The
+    only put-specific parts are which map is read and which way intrinsic points.
+
+    THE CANDIDATE LIST IS FILTERED TO WHAT THE EXECUTOR WILL ACCEPT. Weekly
+    expiries only, capped at `config.PUT_MAX_DTE`, exactly as
+    `executor._enforce_put_ticket_gates` enforces. Offering a monthly here and
+    refusing it at the ticket would train the operator to read a rejection as a
+    bug rather than as the rule working.
+
+    The verdict is ADVISORY, as everywhere else in the scan layer: it is shown so
+    the operator knows what the executor will say, not so the UI can decide.
+    `executor.execute` re-evaluates the full veto set against fresh values and
+    remains the sole enforcement point.
+    """
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        raise ValueError("ticker is required")
+
+    payload = _fetch_chain(ticker, refresh=refresh)
+    underlying, contracts = schwab_api.parse_put_chain(payload)
+    if not contracts:
+        raise schwab_api.SchwabError(f"no put contracts returned for {ticker}")
+
+    if underlying is None:
+        quote = data_handler.latest_quote(ticker)
+        underlying = quote["price"] if quote else None
+
+    # The MA21 zone is the target: the route exists to say "you are extended, so
+    # sell a put down at the price you actually want and be paid to wait". The
+    # strike is anchored to that zone rather than to spot.
+    df = data_handler.get_daily(ticker)
+    ma21 = indicators.sma(df, config.MA_WINDOW)
+    price = underlying if underlying is not None else indicators.last(df)
+    target = ma21 if ma21 is not None else price
+
+    weekly_only = [c for c in contracts
+                   if c.get("dte") is not None and 0 < c["dte"] <= config.PUT_MAX_DTE]
+    exp_groups = []
+    for exp in _weekly_expirations(weekly_only, count=2):
+        exp_contracts = [c for c in weekly_only if c["expiration"] == exp]
+        strikes = indicators.get_nearby_strikes(exp_contracts, target, underlying,
+                                                count=5, put=True)
+        exp_groups.append({
+            "expiration": exp,
+            "dte": exp_contracts[0]["dte"] if exp_contracts else None,
+            "strikes": [_put_strike_view(s) for s in strikes],
+        })
+
+    gate = screening.entry_gate(ticker)
+    return {
+        "ticker": ticker,
+        "underlying": underlying,
+        "ma21": ma21,
+        "target_strike": target,
+        # Advisory: SHARES when the price is available today, CASH_SECURED_PUT
+        # when the name is extended above the MA21 zone.
+        "route": gate.get("route"),
+        "verdict": gate.get("verdict"),
+        "blocked_by": gate.get("blocked_by") or [],
+        "expirations": exp_groups,
+        "shares_per_lot": config.SHARES_PER_LOT,
+        "max_dte": config.PUT_MAX_DTE,
+        "placement": placement_status(),
+    }
+
+
+def _put_strike_view(row: dict) -> dict:
+    """One candidate strike, with the three numbers the decision actually needs.
+
+    Collateral and juice come from `scan_verdict`, the same helpers the position
+    ledger and the gate use — a second formula here is how a ticket ends up
+    disagreeing with the position it creates. Premium is the BID: selling to open
+    hits the bid, and quoting the operator a midpoint they will not get is how a
+    juice floor gets cleared on paper and missed in the account.
+    """
+    import scan_verdict
+    premium = row.get("bid")
+    strike = row.get("strike")
+    return {
+        **row,
+        "premium_per_share": premium,
+        "collateral": scan_verdict.put_collateral(strike, 1),
+        "juice_pct": scan_verdict.put_juice_pct(premium, strike),
+        "spread_pct": indicators.spread_pct(row.get("bid"), row.get("ask")),
+        # Schwab returns put deltas NEGATIVE; the magnitude is the readable
+        # "chance of being assigned" figure the operator wants.
+        "delta_abs": abs(row["delta"]) if row.get("delta") is not None else None,
+    }
+
+
+def placement_status() -> dict:
+    """Whether the app may PLACE a put, and if not, precisely why.
+
+    Three independent switches gate placement (see `executor.execute`), and a UI
+    that just greys a button out leaves the operator guessing which one is off.
+    Each is reported separately so the answer is actionable rather than a shrug.
+    """
+    reasons = []
+    if not config.CSP_ORDER_PLACEMENT_ENABLED:
+        reasons.append("CSP_ORDER_PLACEMENT_ENABLED is off")
+    if not executor.live_transmit():
+        reasons.append("live trading is off")
+    if not schwab_api.configured():
+        reasons.append("Schwab is not connected")
+    return {
+        "enabled": config.CSP_ORDER_PLACEMENT_ENABLED,
+        "live": executor.live_transmit(),
+        "configured": schwab_api.configured(),
+        "can_place": not reasons,
+        # With any switch off the ticket still books a fill you made at the
+        # broker — that is Stage 1, and it is the whole point of the record path.
+        "reasons": reasons,
     }
