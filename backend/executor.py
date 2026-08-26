@@ -13,6 +13,7 @@ import time
 from datetime import datetime, timezone
 
 import config
+import fetch_budget
 import data_handler
 import execution_gate
 import income_profile
@@ -486,6 +487,20 @@ def _ensure_position(state: dict, ticker: str) -> dict:
 
 
 def execute(payload: dict, now: datetime | None = None) -> dict:
+    """Order flow keeps the FULL retry budget, even though a human is waiting.
+
+    Every other HTTP request runs under the bounded interactive budget (see
+    fetch_budget.py) so a dead provider degrades to cached data instead of
+    hanging the dashboard. Execution is the one place that trade is wrong: the
+    reads here price and verify an order that moves money, and a quote quietly
+    served from this morning's cache is worse than an operator waiting. So this
+    whole path opts back into patience, deliberately.
+    """
+    with fetch_budget.patient():
+        return _execute(payload, now)
+
+
+def _execute(payload: dict, now: datetime | None = None) -> dict:
     action = (payload.get("action") or "").strip()
     ticker = (payload.get("ticker") or "").strip().upper()
     if action not in VALID_ACTIONS:
