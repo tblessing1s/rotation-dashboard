@@ -44,6 +44,11 @@ ALERT_TYPES = {
     "EARNINGS_WINDOW": ("MEDIUM", "HARD_CFM_RULE: roll deep-ITM or exit before the report"),
     "EARNINGS_DATE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: a held name's earnings date hasn't refreshed recently (or providers disagree) -> the guardrail may be running blind"),
     "EXPIRY_FRIDAY": ("MEDIUM", "HARD_CFM_RULE: weekly shorts are rolled, never left to expire unmanaged"),
+    "PUT_GATE_FAILURE": ("HIGH", "HARD_CFM_RULE: a structural exit signal fired on a name holding an open put -> close the put, never roll it (a put roll is a debit and a Martingale structure)"),
+    "PUT_EXPIRY_ACTION": ("HIGH", "HARD_CFM_RULE: a put expires today -> decide before the close; 'nobody looked' is itself the failure, so a mandatory date-specific check backs this up"),
+    "PUT_ASSIGNED": ("HIGH", "HARD_CFM_RULE: a put assignment was detected -> book it so the collateral becomes shares and the covered-call machinery engages"),
+    "PUT_ACTIVITY_UNRECOGNIZED": ("CRITICAL", "HARD_CFM_RULE: unrecognized broker activity on a put-holding symbol -> could be an undetected assignment leaving shares uncovered and invisible; classify by hand"),
+    "PUT_COLLATERAL_BREACH": ("HIGH", "PROPOSED_DEFAULT: put collateral pushed deployed capital past the cap"),
     "DATA_STALE": ("MEDIUM", "PROPOSED_DEFAULT: cached OHLCV older than expected on a market day"),
     "LEAP_ROLL_DUE": ("HIGH", "PROPOSED_DEFAULT: LEAP DTE below the floor or extrinsic runway too short -> roll the long leg"),
     "CAPITAL_BURN": ("HIGH", "PROPOSED_DEFAULT: weekly juice not covering LEAP decay -> the flywheel is running backwards"),
@@ -1089,9 +1094,127 @@ def check_lot_add_ready(state: dict) -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Cash-secured put monitoring (CSP Stage 2 §2.2)
+# ---------------------------------------------------------------------------
+def check_put_regate(state: dict) -> list[dict]:
+    """A STRUCTURAL break on a name holding an open put -> close the put.
+
+    The daily re-gate. ``position_manager.put_regate`` owns the decision and reads
+    the four structural signals from the modules that own THEM (circuit_breaker,
+    kill_switch); this turns a close recommendation into the alert.
+
+    A close below MA21 cannot reach this, and neither can the 8/21 cross — see
+    ``scan_verdict.PUT_CLOSE_TRIGGERS``. The alert fires on a broken thesis, not on
+    a name trading where the put wanted it to trade."""
+    import position_manager
+    out = []
+    for p in _open_positions(state):
+        if not (p.get("short_puts") or []):
+            continue
+        t = p.get("ticker", "")
+        try:
+            advice = position_manager.put_regate(p)
+        except Exception:  # noqa: BLE001 — a re-gate miss never kills the pass
+            continue
+        if advice.get("action") != "close":
+            continue
+        why = ", ".join(advice.get("blocked_by") or [])
+        out.append(_alert(
+            "PUT_GATE_FAILURE", t,
+            f"{t} — the entry rules would refuse this name today ({why}).",
+            (f"CLOSE the {t} put. Do NOT accept assignment, and do NOT roll it — "
+             f"a put roll is a debit and a Martingale structure; close instead."),
+            advice, key=f"regate:{why}"))
+    return out
+
+
+def check_put_expiry_day(state: dict) -> list[dict]:
+    """A put expiring TODAY needs a decision before the close.
+
+    Unlike every other condition here this one is also driven by a MANDATORY
+    date-specific check in the scheduler (``alert_scheduler._maybe_expiry_check``),
+    because "nobody looked" is itself the failure on expiry day."""
+    import position_manager
+    today = date.today().isoformat()
+    out = []
+    for p in _open_positions(state):
+        t = p.get("ticker", "")
+        for leg in p.get("short_puts") or []:
+            if str(leg.get("expiration") or "")[:10] != today:
+                continue
+            try:
+                advice = position_manager.put_regate(p)
+            except Exception:  # noqa: BLE001
+                advice = {"action": "unknown"}
+            close_it = advice.get("action") == "close"
+            action = (f"CLOSE the {t} put before the bell — the entry rules would "
+                      f"refuse this name today." if close_it else
+                      f"Let the {t} put assign if it finishes ITM — the name still "
+                      f"passes the entry rules, so assignment is a good entry.")
+            out.append(_alert(
+                "PUT_EXPIRY_ACTION", t,
+                f"{t} {leg.get('strike')}P expires TODAY — decision required before the close.",
+                action,
+                {"strike": leg.get("strike"), "expiration": leg.get("expiration"),
+                 "contracts": leg.get("contracts"), "regate": advice},
+                key=f"expiry:{today}:{leg.get('strike')}"))
+    return out
+
+
+def check_put_assignment_detected(state: dict) -> list[dict]:
+    """An assignment (or an UNRECOGNIZED transaction) on a put-holding symbol.
+
+    The unrecognized case is the one that matters. If an assignment is not
+    detected, the application believes it holds cash and collateral while the
+    account holds 100 shares and no put — the covered-call machinery never engages
+    and the shares sit uncovered with nothing on screen saying so."""
+    report = (state.get("ingestion") or {}).get("last") or {}
+    out = []
+    for prop in report.get("assignment_proposals") or []:
+        t = prop.get("ticker", "")
+        out.append(_alert(
+            "PUT_ASSIGNED", t,
+            f"{t} — a put assignment was detected at the broker.",
+            (f"Book it: the collateral becomes {prop.get('shares') or 100} shares at "
+             f"the strike, and the covered-call machinery takes over from there."),
+            prop, key=f"assign:{prop.get('transaction_id')}"))
+    for row in report.get("unrecognized_put_activity") or []:
+        t = row.get("ticker", "")
+        out.append(_alert(
+            "PUT_ACTIVITY_UNRECOGNIZED", t,
+            f"{t} — unrecognized '{row.get('type')}' broker activity on a symbol holding an open put.",
+            ("Classify it by hand. It may be an assignment the recognizer did not "
+             "know the type string for; do NOT assume it is benign."),
+            row, key=f"unrecognized:{row.get('transaction_id')}"))
+    return out
+
+
+def check_put_collateral_breach(state: dict) -> list[dict]:
+    """Open put collateral has pushed deployed capital past the cap."""
+    import position_manager
+    deployed = position_manager.deployed_capital(state)
+    if deployed <= config.MAX_DEPLOYED_CAPITAL:
+        return []
+    collateral = (state.get("put_ledger") or {}).get("open_collateral") or 0
+    if not collateral:
+        return []
+    return [_alert(
+        "PUT_COLLATERAL_BREACH", None,
+        (f"Deployed capital {deployed:,.0f} is over the {config.MAX_DEPLOYED_CAPITAL:,.0f} "
+         f"cap, with {collateral:,.0f} of it put collateral."),
+        "Do not open another position. Reduce collateral or wait for a put to resolve.",
+        {"deployed": deployed, "cap": config.MAX_DEPLOYED_CAPITAL,
+         "put_collateral": collateral})]
+
+
 EVALUATORS = [
     check_kill_switch,
     check_circuit_breaker,
+    check_put_regate,
+    check_put_expiry_day,
+    check_put_assignment_detected,
+    check_put_collateral_breach,
     check_whipsaw_exit,
     check_delta_uncovered,
     check_defend_position,

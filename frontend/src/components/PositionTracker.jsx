@@ -862,6 +862,91 @@ function SharesBaseMath({ p }) {
 // basis vs market value, unrealized) sits beside the covered-lot count, which is
 // the hard guardrail — short contracts may never exceed floor(shares/100). Renders
 // a prompt instead when the position holds no shares yet (a freshly opened row).
+// A cash-secured put holds NO base leg. It is rendered in this same card — there
+// is no separate put screen — but the share readouts are UNDEFINED for it, not
+// zero: a 0% cap meter and a satisfied-looking coverage line would both be
+// answers to questions that do not apply until assignment. The server marks them
+// `not_applicable` and this renders "n/a", never a number.
+function PutBase({ p }) {
+  const legs = p.short_puts || [];
+  const collateral = p.put_collateral || 0;
+  const rg = p.put_regate;
+  const tempo = p.tempo;
+  return (
+    <div>
+      <div className="mb-2 flex items-baseline gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-violet-300">
+          Cash-secured put
+        </span>
+        <span className="text-xs text-slate-500">no shares held until assignment</span>
+      </div>
+      {legs.map((l, i) => {
+        const itm = l.itm === true;
+        return (
+          <div key={i} className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+            <span className="font-semibold text-slate-100">
+              {l.contracts}× {fmt(l.strike, 2)}P {String(l.expiration || "").slice(5)}
+            </span>
+            <span className="text-slate-400">
+              collateral <span className="tabular-nums text-slate-200">{money(l.collateral)}</span>
+            </span>
+            <span className="text-slate-400">
+              premium <span className="tabular-nums text-emerald-300">{money(l.premium_per_share * 100 * l.contracts)}</span>
+            </span>
+            {/* Only the EXTRINSIC half is income. Intrinsic is a share-purchase
+                obligation and is shown separately so the two never blur. */}
+            <span className="text-slate-400">
+              extrinsic <span className="tabular-nums text-slate-200">
+                {l.extrinsic_per_share == null ? "—" : money(l.extrinsic_per_share * 100 * l.contracts)}
+              </span>
+            </span>
+            {itm && (
+              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-300">
+                ITM — assignment likely
+              </span>
+            )}
+          </div>
+        );
+      })}
+      {/* The daily re-gate: would this name be admitted today? A HOLD means
+          assignment is a good entry and should be allowed to happen. A CLOSE
+          means the thesis broke — and the only remedy offered is closing, never
+          rolling: a put roll is a debit and a Martingale structure. */}
+      {rg && (
+        <div className={`mt-3 rounded-lg px-3 py-2 text-xs ${
+          rg.action === "close"
+            ? "bg-rose-500/10 text-rose-200"
+            : "bg-emerald-500/10 text-emerald-200"}`}>
+          {rg.action === "close" ? (
+            <>
+              <span className="font-semibold">Close the put</span> — the entry rules would
+              refuse this name today ({(rg.blocked_by || []).join(", ")}). Do not accept
+              assignment, and do not roll it.
+            </>
+          ) : (
+            <>
+              <span className="font-semibold">Hold</span> — the name still passes the entry
+              rules, so assignment is a good entry. Let it happen.
+            </>
+          )}
+        </div>
+      )}
+      {/* Tempo only. Shown, never acted on — an 8/21 cross closes nothing. */}
+      {tempo?.signal && (
+        <div className="mt-1 text-[11px] text-slate-500">
+          Tempo {tempo.signal === "TEMPO_UP" ? "↑" : "↓"} (8/21 EMA) —
+          <span className="text-slate-600"> a pace read, not a close signal.</span>
+        </div>
+      )}
+      <div className="mt-2 text-xs text-slate-500">
+        Collateral <span className="tabular-nums">{money(collateral)}</span> counts against the
+        deployed-capital cap and does not draw the ATR reserve. Coverage, cap progress and
+        roll drag are <span className="text-slate-400">n/a</span> — this position holds no shares.
+      </div>
+    </div>
+  );
+}
+
 function SharesBase({ p }) {
   const sh = p.shares || {};
   const cov = p.coverage || {};
@@ -1112,9 +1197,11 @@ function PositionRow({ p, diffs, recs, onRecsChanged, focusCard, focused, setRol
             </div>
           )}
 
-          {/* (1) the share base the engine sits on */}
+          {/* (1) the base the engine sits on — shares, or a put's collateral */}
           <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
-            <SharesBase p={p} />
+            {p.position_type === "CASH_SECURED_PUT"
+              ? <PutBase p={p} />
+              : <SharesBase p={p} />}
           </div>
 
           {/* (2) weekly covered-call capture */}

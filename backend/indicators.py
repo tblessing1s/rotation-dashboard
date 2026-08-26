@@ -25,7 +25,17 @@ def last(df: pd.DataFrame | None) -> float | None:
     return float(df["Close"].iloc[-1])
 
 
-def sma(df: pd.DataFrame, window: int = config.MA_WINDOW) -> float | None:
+def sma(df: pd.DataFrame | None, window: int = config.MA_WINDOW) -> float | None:
+    """Simple moving average of the close, or None on insufficient history.
+
+    None-SAFE on the frame itself, like every neighbour here (`last`, `atr_pct`,
+    `atr_momentum`, `atr_extension`, `consecutive_closes_below_sma`). It was the
+    one exception, and callers that promise to be best-effort on missing data —
+    `circuit_breaker.evaluate` says so in its docstring — raised instead of
+    degrading. A name with no cached frame must read as UNMEASURED, never crash
+    the caller."""
+    if df is None or df.empty:
+        return None
     c = _close(df)
     if len(c) < window:
         return None

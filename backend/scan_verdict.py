@@ -293,27 +293,137 @@ def put_juice_pct(premium_per_share: float | None, strike: float | None) -> floa
     return round(premium_per_share * config.SHARES_PER_LOT / collateral * 100, 4)
 
 
-def put_close_advice(*, blocks: list[dict] | None) -> dict:
-    """Whether a notionally-open put should be CLOSED rather than assigned.
+# The STRUCTURAL close triggers — a strict SUBSET of the veto set (§2.1).
+#
+# This is the most important distinction in the whole put lifecycle, so it is a
+# named constant rather than a filter written at a call site. The ENTRY veto set
+# is "the exit trigger set PLUS hard account constraints"; the CLOSE trigger set
+# is the exit mirrors ONLY. The account and tradeability vetoes are entry
+# constraints and are nonsense as close reasons:
+#
+#   * ``account`` — being at the position limit is not a reason to close a put you
+#     already hold; closing it would not free a slot you were about to use, and it
+#     would realize a loss to satisfy a bookkeeping cap.
+#   * ``no_weeklies`` / ``untradeable_spread`` — a name that became untradeable is
+#     a name you CANNOT close cheaply. Treating that as a close signal would
+#     mandate crossing the exact spread that made it untradeable.
+#   * ``stale_inputs`` — unknown data is a reason to withhold a GO, never a reason
+#     to act. Closing on stale inputs would be trading on the absence of a signal.
+#   * ``earnings_in_cycle`` — earnings inside the cycle blocks a NEW entry. On an
+#     open put it is already priced in, and closing into the event realizes the
+#     premium crush you were paid to accept.
+#   * ``regime_red`` — a red tape blocks new entries [HARD_CFM_RULE]; it is not one
+#     of the exit rules, and the exit rules are what this mirrors.
+#
+# What remains is exactly the four signals §2.1 enumerates. MA21 appears nowhere,
+# which is what makes the "a close below MA21 must never close a put" guarantee
+# structural rather than a matter of remembering.
+PUT_CLOSE_TRIGGERS = ("close_below_ma50", "close_below_ma200",
+                      "rs3m_vs_spy", "line_in_the_sand")
 
-    Re-gate before assignment: the veto set is re-evaluated daily while a put is
-    notionally open and mandatorily on expiry day. If the name would be BLOCKED
-    today, the recommendation is **close the put**, not accept assignment — you are
-    about to be handed shares in a name the entry rules would refuse.
+
+def put_close_triggers(*, ma_fast_breached: bool | None = None,
+                       ma_slow_breached: bool | None = None,
+                       rs3m_vs_spy: float | None = None,
+                       line_breached: bool | None = None) -> list[dict]:
+    """The structural signals that close an open put, as blocks. PURE.
+
+    Note the 50-day leg: it is **three consecutive closes** below the 50-day
+    (``circuit_breaker``'s ma_fast condition), NOT the single close the ENTRY veto
+    uses. That asymmetry is deliberate and worth stating, because the two rules
+    share a name and differ:
+
+      * ENTRY asks "is this a good place to start" — one close below the 50-day is
+        enough to wait, and waiting costs nothing.
+      * CLOSING asks "is the thesis broken" — one close below the 50-day is noise
+        that quality names in intact uptrends produce routinely, and acting on it
+        would realize a loss on a position that recovers. Three consecutive closes
+        is the circuit breaker's own bar, and the circuit breaker is what this
+        mirrors.
+
+    The caller supplies the already-evaluated conditions (``circuit_breaker
+    .evaluate`` for the MA legs and the line, ``kill_switch.classify`` for RS), so
+    there is exactly one definition of each rule in the codebase and this reads it.
+    """
+    blocks: list[dict] = []
+    if ma_fast_breached:
+        blocks.append(_block("close_below_ma50", {"consecutive_closes": True}))
+    if ma_slow_breached:
+        blocks.append(_block("close_below_ma200", {"below_ma200": True}))
+    if rs3m_vs_spy is not None and rs3m_vs_spy < 0:
+        blocks.append(_block("rs3m_vs_spy", {"rs3m_vs_spy": rs3m_vs_spy}))
+    if line_breached:
+        blocks.append(_block("line_in_the_sand", {"line_breached": True}))
+    return blocks
+
+
+# ---------------------------------------------------------------------------
+# Tempo signal — 8/21 EMA cross. A FLAG AND NOTHING ELSE.
+# ---------------------------------------------------------------------------
+TEMPO_UP = "TEMPO_UP"
+TEMPO_DOWN = "TEMPO_DOWN"
+
+
+def tempo_signal(ema_fast: float | None, ema_slow: float | None) -> dict:
+    """The 8/21 EMA relationship, as a DISPLAY flag. PURE.
+
+    **This must never close a put and must never transition anything** (§2.1). It
+    is a tempo read — how fast the name is moving relative to itself — and tempo is
+    not thesis. The guarantee is structural rather than remembered: this function's
+    output has no path into :func:`put_close_triggers` (which accepts no tempo
+    argument) or into :data:`PUT_CLOSE_TRIGGERS` (which contains no tempo id), so
+    there is no parameter through which a cross could become a close.
+
+    Returned for the position card and the alert payload, read by nothing that
+    decides anything.
+    """
+    if ema_fast is None or ema_slow is None:
+        return {"signal": None, "ema_fast": ema_fast, "ema_slow": ema_slow,
+                "tempo_only": True, "closes_nothing": True}
+    return {
+        "signal": TEMPO_UP if ema_fast > ema_slow else TEMPO_DOWN,
+        "ema_fast": round(float(ema_fast), 4),
+        "ema_slow": round(float(ema_slow), 4),
+        # Both flags are literals, not config reads: there is no switch that can
+        # give a tempo signal authority, and a reader can rely on that.
+        "tempo_only": True,
+        "closes_nothing": True,
+    }
+
+
+def put_close_advice(*, blocks: list[dict] | None) -> dict:
+    """Whether an open put should be CLOSED rather than allowed to assign. PURE.
+
+    Re-gate before assignment: the structural signals are re-evaluated DAILY while
+    a put is open and MANDATORILY on expiry day before the close. The question is
+    "would this name be admitted today?" — if yes, assignment is a good entry and
+    the recommendation is to let it happen; if no, close the put rather than accept
+    delivery of shares the entry rules would refuse.
+
+    ``blocks`` must come from :func:`put_close_triggers`, NOT from :func:`evaluate`.
+    The entry veto set is deliberately wider — see :data:`PUT_CLOSE_TRIGGERS` for
+    why each account/tradeability/staleness veto is nonsense as a close reason.
+    Any block whose id is outside the close-trigger set is IGNORED here rather than
+    trusted, so passing the wrong list produces a hold, never a spurious close.
 
     **A close below MA21 is NOT a reversal and is NOT a close trigger.** MA21 is a
-    timing reference — it is what put you on this route in the first place, and a
-    put struck at the MA21 zone is SUPPOSED to be approached. Only the structural
-    vetoes close a put, and they are exactly the ones in :data:`VETOES`; because
-    MA21 appears nowhere in that registry, this function cannot fire on it even by
-    accident. That is the point of routing this through the same blocks list rather
-    than a bespoke predicate.
+    timing reference — it is what put the name on this route in the first place,
+    and a put struck at the MA21 zone is SUPPOSED to be approached. Quality names
+    in intact uptrends dip below it routinely. MA21 appears nowhere in
+    :data:`PUT_CLOSE_TRIGGERS`, so this cannot fire on it even by accident.
 
-    Rolling a short put down or out is deliberately NOT offered: it is a debit and a
-    Martingale structure. Close instead.
+    Rolling a short put down or out is deliberately NOT offered anywhere in this
+    codebase. A put roll is a DEBIT and a Martingale structure: it converts a
+    bounded mistake into an unbounded one by paying to take on more downside in the
+    same name. If the position needs defending, CLOSE it.
     """
-    composed = compose(blocks)
-    if is_eligible(composed):
-        return {"action": "hold", "reason": "still_eligible", "blocked_by": []}
-    return {"action": "close", "reason": "would_be_blocked",
-            "blocked_by": composed["blocked_by"]}
+    structural = [b for b in (blocks or [])
+                  if b.get("veto") in PUT_CLOSE_TRIGGERS]
+    if not structural:
+        return {"action": "hold", "reason": "still_eligible", "blocked_by": [],
+                "assignment_is_a_good_entry": True}
+    order = {vid: i for i, vid in enumerate(PUT_CLOSE_TRIGGERS)}
+    structural.sort(key=lambda b: order.get(b.get("veto"), 99))
+    return {"action": "close", "reason": "structural_break",
+            "blocked_by": [b["id"] for b in structural],
+            "assignment_is_a_good_entry": False}

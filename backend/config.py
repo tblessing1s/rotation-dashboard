@@ -510,6 +510,31 @@ TRADEABILITY_MAX_SPREAD_PCT = 15.0
 # carries NO veto authority, and no switch exists to give it any.
 PUT_JUICE_FLOOR_PCT = 0.50
 
+# ---- Cash-secured put ORDER PLACEMENT (CSP Stage 3) ------------------------
+# DEFAULT FALSE, and the default is the point.
+#
+# Stages 1 and 2 make the application able to TRACK and MONITOR a put opened by
+# hand at the broker. This flag is the only thing that lets it PLACE one, and it
+# is not to be turned on until Stage 2 has run against a real position for at
+# least 14 days and a human has reviewed what it did. That review is not a
+# formality: Stage 2's re-gate and mandatory expiry-day check are the safety
+# machinery the placement path relies on, and machinery that has never been
+# watched working is not machinery you should let open positions.
+#
+# When FALSE (the default) the put actions behave EXACTLY as they did in Stage 1:
+# a `put_opened` books a fill that already happened at the broker, and nothing is
+# ever constructed or transmitted. Flipping it changes one branch and nothing
+# else — there is no parallel path.
+CSP_ORDER_PLACEMENT_ENABLED = (
+    os.environ.get("CSP_ORDER_PLACEMENT_ENABLED", "0").strip().lower()
+    in ("1", "true", "yes"))
+
+# PROPOSED_DEFAULT — the maximum DTE a placed put may carry. WEEKLY EXPIRIES
+# ONLY: 10 days admits the standard weekly (and a Monday ticket on a Friday two
+# weeks out) while refusing a monthly, which is a different trade wearing this
+# one's clothes — lower premium per week, across a window you cannot re-check.
+PUT_MAX_DTE = 10
+
 # ---- Dividend income profile (schema v21) ---------------------------------
 # TRAVIS_EXTENSION — NOT a CFM rule. The CFM source prefers volatile names for
 # their juice and warns against "safe" low-vol stocks; the dividend sleeve is an
