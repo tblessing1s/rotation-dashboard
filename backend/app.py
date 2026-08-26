@@ -11,7 +11,7 @@ import logging
 import os
 import secrets
 
-from flask import Flask, jsonify, redirect, request, send_from_directory
+from flask import Flask, g, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
 
 import alert_scheduler
@@ -21,6 +21,7 @@ import config
 import data_handler
 import earnings
 import executor
+import fetch_budget
 import kill_switch
 import logging_handler as log
 import option_chain
@@ -41,6 +42,27 @@ auth.init_app(app)
 @app.before_request
 def _auth_gate():
     return auth.gate()
+
+
+@app.before_request
+def _bound_fetch_budget():
+    """Every HTTP request has a human waiting, so bound what its provider fetches
+    may spend. See fetch_budget.py — the background budget is ~87s for a single
+    symbol, which cannot fit inside the 60s the frontend waits before aborting.
+
+    Set here and reset in teardown because gunicorn REUSES threads: a context
+    variable left set would hand the next request this one's already-expired
+    deadline, and every fetch would short-circuit to cache for the life of the
+    worker. `executor.execute` opts back into the patient budget for order flow.
+    """
+    g._fetch_budget_token = fetch_budget.set_current(fetch_budget.interactive_budget())
+
+
+@app.teardown_request
+def _release_fetch_budget(exc=None):
+    token = g.pop("_fetch_budget_token", None)
+    if token is not None:
+        fetch_budget.reset(token)
 
 
 def _err(e: Exception, code: int = 500):

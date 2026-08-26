@@ -454,6 +454,34 @@ SCHWAB_BACKOFF_BASE_SECONDS = 1.0
 SCHWAB_BACKOFF_MAX_SECONDS = 16.0
 SCHWAB_MAX_RETRIES = 4
 
+# ---- INTERACTIVE fetch budget (a human is waiting) -------------------------
+# The knobs above are the BACKGROUND budget: 4 attempts x a 20s call timeout plus
+# 1+2+4s of backoff is ~87 SECONDS for a single symbol. That is correct for the
+# warm sweep and the alert scheduler, which nobody is waiting on.
+#
+# It is wrong for an HTTP request. The frontend aborts at 60s
+# (frontend/src/api.js TIMEOUT_MS), so the background budget for ONE symbol does
+# not fit inside the window it is spent in — and a route like /api/entry-gate
+# fans out to ~13 symbols. See fetch_budget.py. PROPOSED_DEFAULT throughout;
+# each is env-overridable so a slow provider can be accommodated without a deploy.
+#
+# Worst case per symbol: 10 + 0.5 + 10 = ~21s (was ~87s). Two attempts rather
+# than one deliberately: a single dropped connection should not cost the operator
+# a stale read, and the deadline below is what bounds the fan-out anyway.
+INTERACTIVE_MAX_RETRIES = int(os.environ.get("INTERACTIVE_MAX_RETRIES") or 2)
+INTERACTIVE_TIMEOUT_SECONDS = float(os.environ.get("INTERACTIVE_TIMEOUT_SECONDS") or 10.0)
+INTERACTIVE_BACKOFF_BASE_SECONDS = float(
+    os.environ.get("INTERACTIVE_BACKOFF_BASE_SECONDS") or 0.5)
+INTERACTIVE_BACKOFF_MAX_SECONDS = float(
+    os.environ.get("INTERACTIVE_BACKOFF_MAX_SECONDS") or 2.0)
+
+# The whole-request deadline. Past this instant a request stops calling providers
+# and serves cached frames instead. 45s sits under the frontend's 60s abort with
+# room for the response itself, so the SERVER decides the outcome rather than the
+# browser: a degraded-but-labelled answer beats a spinner that never resolves.
+INTERACTIVE_DEADLINE_SECONDS = float(
+    os.environ.get("INTERACTIVE_DEADLINE_SECONDS") or 45.0)
+
 # ---- CFM mechanics ---------------------------------------------------------
 # Default LEAP position size (deep-ITM calls per stock). Pre-fills the entry
 # ticket's quantity and sizes the capital/reserve gate when no quantity is
