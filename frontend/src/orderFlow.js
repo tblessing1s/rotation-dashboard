@@ -1,6 +1,6 @@
 // Shared order-submission flow: one moving toast tracks an order from submit to
-// its terminal state. The paper/logged path commits immediately and reports
-// status "filled". A live order comes back "working" with an order_id — we then
+// its terminal state. The paper/logged path commits to the LEDGER immediately and
+// sends nothing to the broker — it is reported as RECORDED, never as filled. A live order comes back "working" with an order_id — we then
 // poll the fill for up to 3 seconds and, if it still hasn't filled, auto-cancel
 // it. Because Schwab cancels asynchronously, the backend confirms the order
 // actually went terminal before we claim it cancelled; an unconfirmed cancel
@@ -15,6 +15,11 @@ const ACTION_VERB = {
   sell_short: "Sell covered call",
   close_short: "Close covered call",
   roll_short: "Roll covered call",
+  // Cash-secured put (schema v22). Without these the label fell back to the raw
+  // action string, so the operator read "put_opened MRNA filled & logged".
+  put_opened: "Sell put",
+  put_closed: "Close put",
+  put_assigned: "Put assignment",
 };
 
 const FILL_TIMEOUT_MS = 3000;
@@ -100,10 +105,31 @@ export async function submitOrder(api, toast, payload) {
     return confirmByRef(api, toast, id, label, ref || res.client_order_ref);
   }
 
-  // Immediate fill (paper/logged path, or a live order that filled on placement).
+  // Immediate outcome — either a LIVE order that filled on placement, or the
+  // LOGGED path, which sends nothing to the broker at all.
   if (res.status !== "working") {
-    const paper = res.mode === "logged";
-    toast.update(id, `${label} filled & logged${paper ? " (paper)" : ""}.`, { type: "success" });
+    // THE LOGGED PATH DID NOT PLACE AN ORDER, AND MUST NOT SAY IT DID.
+    //
+    // This used to read "filled & logged (paper)" in green with a ✓ — the word
+    // "filled" claims a broker fill, and the entire disclaimer was one
+    // parenthetical at the end of a success toast that auto-dismissed in four
+    // seconds. An operator who read it as "the order went through" then found
+    // nothing in Thinkorswim was reading it exactly as written.
+    //
+    // Nothing reached Schwab on this path, so it is not a success and it does not
+    // auto-dismiss. The ledger now holds a position the broker does not; say so,
+    // and say what to do about it.
+    if (res.mode === "logged") {
+      toast.update(
+        id,
+        `${label} RECORDED to your ledger — NO order was sent to Schwab. ` +
+          `Place it at the broker yourself, or void this entry from History if ` +
+          `you did not.`,
+        { type: "warning", duration: 0 },
+      );
+      return res;
+    }
+    toast.update(id, `${label} filled & logged.`, { type: "success" });
     return res;
   }
 

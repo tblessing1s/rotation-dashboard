@@ -11,10 +11,17 @@ export default function LiveTradingSwitch() {
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
   const [confirming, setConfirming] = React.useState(false);
+  // Puts carry a FOURTH switch of their own. Without it this card says "orders
+  // are transmitted to your real Schwab account" while a put ticket still only
+  // records — the exact gap that sends an operator to Thinkorswim looking for a
+  // transaction that was never sent.
+  const [put, setPut] = React.useState(null);
 
   const load = React.useCallback(async () => {
     try { setSt(await api.liveTrading()); setErr(null); }
     catch (e) { setErr(e.message); }
+    try { setPut(await api.putPlacementStatus()); }
+    catch { setPut(null); }   // older backend — just omit the put line
   }, []);
   React.useEffect(() => { load(); }, [load]);
 
@@ -39,7 +46,9 @@ export default function LiveTradingSwitch() {
     >
       <p className="text-sm text-slate-300">
         {transmit
-          ? "Executed orders are transmitted to your real Schwab account."
+          ? (put && !put.enabled
+              ? "Share and covered-call orders are transmitted to your real Schwab account. Cash-secured PUTS are not — see below."
+              : "Executed orders are transmitted to your real Schwab account.")
           : enabled
             ? "Live is ON, but you're in Demo data — orders stay paper until you switch to Live data."
             : "Paper mode — trades are logged to your ledger at live prices; no order is sent to Schwab."}
@@ -58,6 +67,14 @@ export default function LiveTradingSwitch() {
                 : "✓ Schwab connected.")
             : "✗ Schwab not connected — live orders will fail until you re-authorize."}
         </li>
+        {put && (
+          <li className={put.enabled ? "text-slate-500" : "text-amber-300"}>
+            {put.enabled
+              ? "✓ Cash-secured put placement is on."
+              : "⚠ Cash-secured put placement is OFF — a put ticket RECORDS only, " +
+                "no order is sent. Set CSP_ORDER_PLACEMENT_ENABLED at the deploy level."}
+          </li>
+        )}
       </ul>
 
       <div className="mt-3 flex items-center gap-3">

@@ -897,7 +897,9 @@ def test_placement_reuses_the_existing_lifecycle_machinery():
     """§Stage 3: 'Put orders go through the existing executor, order state
     machine, resubmission lock, and reconciliation.' Asserted at the dispatch."""
     import inspect
-    src = inspect.getsource(executor.execute)
+    # `execute` is the thin wrapper that re-enters the patient fetch budget for
+    # order flow; the dispatch itself lives in `_execute`.
+    src = inspect.getsource(executor._execute)
     branch = src[src.index("if action in PUT_ACTIONS:"):]
     for shared in ("_enforce_execution_window", "_enforce_spread_quality",
                    "_place_live"):
@@ -1060,13 +1062,15 @@ def test_placement_status_names_every_switch_that_is_off():
     assert st["can_place"] is False
     assert not config.CSP_ORDER_PLACEMENT_ENABLED
     assert any("CSP_ORDER_PLACEMENT_ENABLED" in r for r in st["reasons"])
-    assert set(st) == {"enabled", "live", "configured", "can_place", "reasons"}
+    assert set(st) == {"enabled", "live", "configured", "demo_data",
+                       "live_trading_toggle", "can_place", "reasons"}
 
 
-def test_placement_status_can_place_only_when_all_three_are_on(monkeypatch):
+def test_placement_status_can_place_only_when_every_switch_is_on(monkeypatch):
     import option_chain
     monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
-    monkeypatch.setattr(option_chain.executor, "live_transmit", lambda: True)
+    monkeypatch.setattr(option_chain.executor, "live_enabled", lambda: True)
+    monkeypatch.setattr(option_chain.config, "demo_enabled", lambda: False)
     monkeypatch.setattr(option_chain.schwab_api, "configured", lambda: True)
     st = option_chain.placement_status()
     assert st["can_place"] is True and st["reasons"] == []
@@ -1080,3 +1084,119 @@ def test_recording_a_fill_works_with_placement_off(store):
     pos = _position("AAA")
     assert pos["position_type"] == "CASH_SECURED_PUT"
     assert len(pos["short_puts"]) == 1
+
+
+def test_a_recorded_put_is_marked_logged_not_live(store):
+    """The field the UI keys on to tell the truth about what happened.
+
+    With placement off, `put_opened` books to the ledger and sends NOTHING to
+    Schwab. `mode == "logged"` is the ONLY signal distinguishing that from a real
+    broker fill, and `orderFlow.js` reads it to decide between "RECORDED to your
+    ledger — NO order was sent" and "filled & logged". If this field ever went
+    missing the UI would silently claim every recorded entry was a broker fill —
+    which is exactly the confusion that motivated this test.
+    """
+    assert not config.CSP_ORDER_PLACEMENT_ENABLED
+    res = _open_put("AAA")
+    assert res["mode"] == "logged"
+    assert res.get("status") != "working"
+
+
+def test_a_recorded_put_is_EXCLUDED_from_reconciliation(store):
+    """The safety net does NOT cover this, and that is deliberate — which is
+    exactly why the UI has to tell the truth at the moment of recording.
+
+    `expected_view_from_state` runs `live_only=True` in production: a position
+    established by a logged (paper) execution is excluded, because reconciling
+    paper positions would mass-flag every one of them. Correct in general, but it
+    means a put RECORDED and never actually sold at the broker is invisible to
+    reconciliation — the app holds it, Schwab does not, and nothing complains.
+
+    So there is no downstream backstop for a mistaken record. The only defence is
+    at entry: the confirm dialog and the "NO order was sent to Schwab" toast.
+    """
+    import reconcile
+    _open_put("AAA")
+    instruments, excluded = reconcile.expected_view_from_state(log.load_state())
+    assert not [i for i in instruments if i.get("instrument_type") == "OPTION"], (
+        "a logged put must not be reconciled — paper positions would mass-flag")
+    assert excluded, "and it must be recorded as excluded, with a reason"
+
+
+def test_a_LIVE_put_is_committed_as_live_and_IS_reconciled(store):
+    """The other half, and a bug this pinned: all three put committers used to
+    hard-code mode="logged", including the path that commits a genuinely PLACED
+    and FILLED order (`_commit_from_pending`). So a real live put was booked as
+    paper — excluded from reconciliation, and reported to the operator as "no
+    order was sent" for an order that was. Mode is a parameter now."""
+    import reconcile
+    executor._put_opened(
+        {"expiration": _next_weekly(), "premium_per_share": PREMIUM},
+        "AAA", STRIKE, 1, 53.0, mode="live")
+    ex = [e for e in log.load_state()["executions"] if e["action"] == "put_opened"]
+    assert ex and ex[-1]["mode"] == "live"
+    instruments, _excluded = reconcile.expected_view_from_state(log.load_state())
+    assert [i for i in instruments if i.get("instrument_type") == "OPTION"]
+
+
+def test_reconciliation_covers_a_shares_position(store):
+    """A PRE-EXISTING bug this work surfaced. `_ticker_liveness` inspected only
+    `buy_leap` executions, so once the shares-primary migration (v20) made
+    `buy_shares` the base leg, a real live-transmitted position returned None and
+    was excluded as "unknown_live_status". Reconciliation — the thing that
+    catches a position the app holds and the broker does not — was off for every
+    position of the shares era."""
+    import reconcile
+    state = {"positions": [{"ticker": "AAA", "status": "active",
+                            "shares": {"count": 100, "cost_basis_per_share": 50.0},
+                            "short_calls": [], "short_puts": []}],
+             "executions": [{"ticker": "AAA", "action": "buy_shares",
+                             "mode": "live", "live_transmitted": True}]}
+    assert reconcile._ticker_liveness(state, "AAA") is True
+    instruments, excluded = reconcile.expected_view_from_state(state)
+    assert instruments and not excluded
+
+    # …and the exclusion still works, or this is just "reconcile everything".
+    state["executions"][0]["live_transmitted"] = False
+    _inst, excluded = reconcile.expected_view_from_state(state)
+    assert excluded and excluded[0]["reason"] == "paper"
+
+
+def test_placement_reasons_never_point_at_the_wrong_switch(monkeypatch):
+    """FOUR switches gate a real put order and their names are close enough to be
+    mistaken for each other. "Live data" in Settings is the DATA SOURCE toggle —
+    it decides whether the app reads real state or a seeded demo store, and has
+    nothing to do with whether an order reaches Schwab.
+
+    `executor.live_transmit()` is itself the AND of two switches, so reporting it
+    alone says "live trading is off" when the real cause is demo mode, pointing
+    the operator at a control that is already set correctly."""
+    import option_chain
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(option_chain.schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(option_chain.executor, "live_enabled", lambda: True)
+    # Live trading ON, Schwab connected, put placement ON — but DEMO data.
+    monkeypatch.setattr(option_chain.config, "demo_enabled", lambda: True)
+
+    st = option_chain.placement_status()
+    assert st["can_place"] is False
+    assert st["demo_data"] is True and st["live_trading_toggle"] is True
+    joined = " ".join(st["reasons"])
+    assert "Demo" in joined, joined
+    assert "Live trading switch is off" not in joined, (
+        "must not blame the live-trading toggle when it is ON")
+
+
+def test_placement_status_separates_the_data_toggle_from_the_trading_toggle(monkeypatch):
+    """The inverse: Live DATA on, live TRADING off. The reason must name the
+    trading switch and say nothing about demo."""
+    import option_chain
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(option_chain.schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(option_chain.config, "demo_enabled", lambda: False)
+    monkeypatch.setattr(option_chain.executor, "live_enabled", lambda: False)
+
+    st = option_chain.placement_status()
+    joined = " ".join(st["reasons"])
+    assert "Live trading switch is off" in joined, joined
+    assert "Demo" not in joined, joined

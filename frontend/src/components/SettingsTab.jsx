@@ -49,7 +49,7 @@ export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, pos
           />
           <ToggleRow
             title="Data source"
-            desc="Demo mode points every tab at a seeded demo store; live mode reads your real state. Switching reloads the app."
+            desc="Demo mode points every tab at a seeded demo store; live mode reads your real state. Switching reloads the app. This is the DATA source only — it does not send orders to Schwab; that is the Live trading switch below."
             on={demo}
             busy={modeBusy}
             onToggle={onToggleDemo}

@@ -18,9 +18,12 @@ const TONE = {
   success: "border-emerald-500/40 bg-emerald-500/15 text-emerald-200",
   error: "border-rose-500/40 bg-rose-500/15 text-rose-200",
   pending: "border-sky-500/40 bg-sky-500/15 text-sky-200",
+  // A truthful NOT-an-error, NOT-a-success outcome — e.g. an execution
+  // recorded to the ledger with no order sent to the broker.
+  warning: "border-amber-500/40 bg-amber-500/15 text-amber-200",
   info: "border-slate-600/40 bg-slate-700/30 text-slate-200",
 };
-const ICON = { success: "✓", error: "✕", info: "•" };
+const ICON = { success: "✓", error: "✕", warning: "!", info: "•" };
 
 let _seq = 0;
 

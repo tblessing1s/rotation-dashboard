@@ -819,23 +819,43 @@ def _put_strike_view(row: dict) -> dict:
 
 
 def placement_status() -> dict:
-    """Whether the app may PLACE a put, and if not, precisely why.
+    """Whether the app may PLACE a put, and if not, precisely WHICH switch is off.
 
-    Three independent switches gate placement (see `executor.execute`), and a UI
-    that just greys a button out leaves the operator guessing which one is off.
-    Each is reported separately so the answer is actionable rather than a shrug.
+    FOUR separate switches gate a real put order, and their names are close enough
+    to be mistaken for each other. "Live data" in Settings is the DATA SOURCE
+    toggle — it decides whether the app reads your real state or a seeded demo
+    store, and it has nothing to do with whether an order reaches Schwab. An
+    operator reading "Live data" and expecting orders to transmit is reading a
+    reasonable thing into the wrong switch.
+
+    So each is reported separately, named where the operator will find it, rather
+    than collapsed into one "live" flag. In particular `executor.live_transmit()`
+    is itself the AND of two switches (the live-trading toggle and not-demo), so
+    reporting it alone would say "live trading is off" when the real cause is demo
+    mode — pointing at the wrong control.
     """
+    demo = config.demo_enabled()
+    live_toggle = executor.live_enabled()
+    configured = schwab_api.configured()
+
     reasons = []
     if not config.CSP_ORDER_PLACEMENT_ENABLED:
-        reasons.append("CSP_ORDER_PLACEMENT_ENABLED is off")
-    if not executor.live_transmit():
-        reasons.append("live trading is off")
-    if not schwab_api.configured():
-        reasons.append("Schwab is not connected")
+        reasons.append("put placement is off (server setting "
+                       "CSP_ORDER_PLACEMENT_ENABLED)")
+    if demo:
+        reasons.append("the app is in Demo data mode (Settings) — a demo session "
+                       "never transmits an order")
+    if not live_toggle:
+        reasons.append("the Live trading switch is off (Settings)")
+    if not configured:
+        reasons.append("Schwab is not connected (Settings)")
     return {
         "enabled": config.CSP_ORDER_PLACEMENT_ENABLED,
         "live": executor.live_transmit(),
-        "configured": schwab_api.configured(),
+        "configured": configured,
+        # Reported separately so the UI never points at the wrong control.
+        "demo_data": demo,
+        "live_trading_toggle": live_toggle,
         "can_place": not reasons,
         # With any switch off the ticket still books a fill you made at the
         # broker — that is Stage 1, and it is the whole point of the record path.

@@ -2280,7 +2280,7 @@ def _put_leg(position: dict, strike, expiration=None) -> dict | None:
     return None
 
 
-def _put_opened(payload, ticker, strike, contracts, stock_price):
+def _put_opened(payload, ticker, strike, contracts, stock_price, mode="logged"):
     """Book a short put opened at the broker. Collateral is committed; no shares.
 
     PREMIUM IS NOT NETTED INTO ANYTHING [HARD_CFM_RULE]. It is recorded as its own
@@ -2350,12 +2350,18 @@ def _put_opened(payload, ticker, strike, contracts, stock_price):
             "source": payload.get("source") or "manual",
         })
 
-    stored = _commit_one(execution, apply, ticker, "logged", "operator")
+    # MODE IS NOT A CONSTANT. It decides whether reconciliation checks this leg
+    # against the broker (`reconcile._ticker_liveness`) and what the UI tells the
+    # operator happened. Hard-coding "logged" meant a put that really WAS placed
+    # and filled got booked as paper: excluded from reconciliation, and reported
+    # as "no order was sent" for an order that was.
+    stored = _commit_one(execution, apply, ticker, mode,
+                         "schwab" if mode == "live" else "operator")
     return {"success": True, "status": "filled", "execution_id": stored["id"],
             "mode": "logged", "captured_price": stock_price, "execution": stored}
 
 
-def _put_closed(payload, ticker, strike, contracts, stock_price):
+def _put_closed(payload, ticker, strike, contracts, stock_price, mode="logged"):
     """Book a short put closed or expired. Releases the collateral.
 
     ``reason`` is a closed enum, validated here at the operator-facing boundary so
@@ -2409,12 +2415,18 @@ def _put_closed(payload, ticker, strike, contracts, stock_price):
                 break
         _close_if_empty(pos)
 
-    stored = _commit_one(execution, apply, ticker, "logged", "operator")
+    # MODE IS NOT A CONSTANT. It decides whether reconciliation checks this leg
+    # against the broker (`reconcile._ticker_liveness`) and what the UI tells the
+    # operator happened. Hard-coding "logged" meant a put that really WAS placed
+    # and filled got booked as paper: excluded from reconciliation, and reported
+    # as "no order was sent" for an order that was.
+    stored = _commit_one(execution, apply, ticker, mode,
+                         "schwab" if mode == "live" else "operator")
     return {"success": True, "status": "filled", "execution_id": stored["id"],
             "mode": "logged", "captured_price": stock_price, "execution": stored}
 
 
-def _put_assigned(payload, ticker, strike, contracts, stock_price):
+def _put_assigned(payload, ticker, strike, contracts, stock_price, mode="logged"):
     """Book a short put assignment: collateral converts into shares AT THE STRIKE.
 
     EARLY AND EXPIRY ASSIGNMENT ARE THE SAME EVENT here, deliberately. Early
@@ -2495,7 +2507,13 @@ def _put_assigned(payload, ticker, strike, contracts, stock_price):
         pos["position_type"] = position_types.SHARES
         pos["status"] = "active"
 
-    stored = _commit_one(execution, apply, ticker, "logged", "operator")
+    # MODE IS NOT A CONSTANT. It decides whether reconciliation checks this leg
+    # against the broker (`reconcile._ticker_liveness`) and what the UI tells the
+    # operator happened. Hard-coding "logged" meant a put that really WAS placed
+    # and filled got booked as paper: excluded from reconciliation, and reported
+    # as "no order was sent" for an order that was.
+    stored = _commit_one(execution, apply, ticker, mode,
+                         "schwab" if mode == "live" else "operator")
     return {"success": True, "status": "filled", "execution_id": stored["id"],
             "mode": "logged", "captured_price": stock_price,
             "shares_received": shares_received, "execution": stored}
@@ -2675,7 +2693,7 @@ def _commit_from_pending(rec: dict, fill_price):
         stock_price, _src = _capture_price(rec["ticker"], rec.get("stock_price"))
         fn = _put_opened if action == "put_opened" else _put_closed
         return fn(payload, rec["ticker"], rec["strike"], int(rec["contracts"]),
-                  stock_price)
+                  stock_price, mode="live")
     return _commit(payload, rec["ticker"], action, int(rec["contracts"]),
                    rec["strike"], rec["stock_price"], rec.get("price_source", "schwab"), "live")
 
