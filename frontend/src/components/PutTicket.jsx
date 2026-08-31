@@ -91,6 +91,22 @@ export default function PutTicket({ ticker, onExecuted }) {
 
   async function send() {
     if (!pick || !group) return;
+    // RECORDING IS NOT PLACING, and the difference is worth one click. With any of
+    // the three switches off this books a position into the ledger and sends
+    // nothing to Schwab — a phantom position if the operator did not sell it at
+    // the broker themselves. The button label says so; this makes it impossible
+    // to skip past on muscle memory.
+    if (!canPlace) {
+      const ok = window.confirm(
+        `NO ORDER WILL BE SENT TO SCHWAB.\n\n` +
+          `This records a put you have ALREADY SOLD at the broker:\n` +
+          `  Sell ${contracts} ${chain.ticker} ${group.expiration} ${pick.strike}P ` +
+          `@ $${pick.premium_per_share}\n\n` +
+          `${placement?.reasons?.length ? `Placement is off: ${placement.reasons.join("; ")}.\n\n` : ""}` +
+          `Have you already sold this put at Schwab?`,
+      );
+      if (!ok) return;
+    }
     setBusy(true);
     try {
       await submitOrder(api, toast, {

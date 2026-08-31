@@ -200,16 +200,30 @@ def parse_broker_positions(accounts_response: list) -> list[dict]:
 # ---------------------------------------------------------------------------
 # Expected view — build from state.json open positions (live-transmitted only)
 # ---------------------------------------------------------------------------
+# The actions that ESTABLISH a base position. Liveness is read off the most recent
+# one, because that is the order that either did or did not reach the broker.
+#
+# `buy_leap` alone was the original list, and it silently stopped covering
+# anything once the shares-primary migration (v20) made `buy_shares` the base leg:
+# a real, live-transmitted shares position has no `buy_leap`, so liveness came
+# back None and EVERY position was excluded from reconciliation as
+# "unknown_live_status". The safety net was off for the whole shares era.
+# `put_opened` joins them at v22 — a put booked at the broker is a real holding
+# and must be checked against it.
+_ESTABLISHING_ACTIONS = ("buy_leap", "buy_shares", "put_opened")
+
+
 def _ticker_liveness(state: dict, ticker: str) -> bool | None:
     """Was this ticker's position established by LIVE-transmitted orders?
 
-    True  -> its most recent buy_leap was live_transmitted (reconcile it).
+    True  -> its most recent establishing order was live_transmitted (reconcile it).
     False -> paper/logged (exclude from reconciliation; report-only).
     None  -> can't tell (pre-flag execution with unknown mode) -> exclude + log.
     """
     last = None
     for e in state.get("executions", []):
-        if e.get("ticker", "").upper() == ticker.upper() and e.get("action") == "buy_leap":
+        if (e.get("ticker", "").upper() == ticker.upper()
+                and e.get("action") in _ESTABLISHING_ACTIONS):
             last = e
     if last is None:
         return None
