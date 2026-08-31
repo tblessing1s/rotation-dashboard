@@ -1060,13 +1060,15 @@ def test_placement_status_names_every_switch_that_is_off():
     assert st["can_place"] is False
     assert not config.CSP_ORDER_PLACEMENT_ENABLED
     assert any("CSP_ORDER_PLACEMENT_ENABLED" in r for r in st["reasons"])
-    assert set(st) == {"enabled", "live", "configured", "can_place", "reasons"}
+    assert set(st) == {"enabled", "live", "configured", "demo_data",
+                       "live_trading_toggle", "can_place", "reasons"}
 
 
-def test_placement_status_can_place_only_when_all_three_are_on(monkeypatch):
+def test_placement_status_can_place_only_when_every_switch_is_on(monkeypatch):
     import option_chain
     monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
-    monkeypatch.setattr(option_chain.executor, "live_transmit", lambda: True)
+    monkeypatch.setattr(option_chain.executor, "live_enabled", lambda: True)
+    monkeypatch.setattr(option_chain.config, "demo_enabled", lambda: False)
     monkeypatch.setattr(option_chain.schwab_api, "configured", lambda: True)
     st = option_chain.placement_status()
     assert st["can_place"] is True and st["reasons"] == []
@@ -1156,3 +1158,43 @@ def test_reconciliation_covers_a_shares_position(store):
     state["executions"][0]["live_transmitted"] = False
     _inst, excluded = reconcile.expected_view_from_state(state)
     assert excluded and excluded[0]["reason"] == "paper"
+
+
+def test_placement_reasons_never_point_at_the_wrong_switch(monkeypatch):
+    """FOUR switches gate a real put order and their names are close enough to be
+    mistaken for each other. "Live data" in Settings is the DATA SOURCE toggle —
+    it decides whether the app reads real state or a seeded demo store, and has
+    nothing to do with whether an order reaches Schwab.
+
+    `executor.live_transmit()` is itself the AND of two switches, so reporting it
+    alone says "live trading is off" when the real cause is demo mode, pointing
+    the operator at a control that is already set correctly."""
+    import option_chain
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(option_chain.schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(option_chain.executor, "live_enabled", lambda: True)
+    # Live trading ON, Schwab connected, put placement ON — but DEMO data.
+    monkeypatch.setattr(option_chain.config, "demo_enabled", lambda: True)
+
+    st = option_chain.placement_status()
+    assert st["can_place"] is False
+    assert st["demo_data"] is True and st["live_trading_toggle"] is True
+    joined = " ".join(st["reasons"])
+    assert "Demo" in joined, joined
+    assert "Live trading switch is off" not in joined, (
+        "must not blame the live-trading toggle when it is ON")
+
+
+def test_placement_status_separates_the_data_toggle_from_the_trading_toggle(monkeypatch):
+    """The inverse: Live DATA on, live TRADING off. The reason must name the
+    trading switch and say nothing about demo."""
+    import option_chain
+    monkeypatch.setattr(config, "CSP_ORDER_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(option_chain.schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(option_chain.config, "demo_enabled", lambda: False)
+    monkeypatch.setattr(option_chain.executor, "live_enabled", lambda: False)
+
+    st = option_chain.placement_status()
+    joined = " ".join(st["reasons"])
+    assert "Live trading switch is off" in joined, joined
+    assert "Demo" not in joined, joined
