@@ -897,7 +897,9 @@ def test_placement_reuses_the_existing_lifecycle_machinery():
     """§Stage 3: 'Put orders go through the existing executor, order state
     machine, resubmission lock, and reconciliation.' Asserted at the dispatch."""
     import inspect
-    src = inspect.getsource(executor.execute)
+    # `execute` is the thin wrapper that re-enters the patient fetch budget for
+    # order flow; the dispatch itself lives in `_execute`.
+    src = inspect.getsource(executor._execute)
     branch = src[src.index("if action in PUT_ACTIONS:"):]
     for shared in ("_enforce_execution_window", "_enforce_spread_quality",
                    "_place_live"):
