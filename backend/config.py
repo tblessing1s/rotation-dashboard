@@ -557,6 +557,26 @@ CSP_ORDER_PLACEMENT_ENABLED = (
     os.environ.get("CSP_ORDER_PLACEMENT_ENABLED", "0").strip().lower()
     in ("1", "true", "yes"))
 
+# ---- EQUITY (shares) ORDER PLACEMENT --------------------------------------
+# DEFAULT FALSE, same as the put flag and for a sharper reason.
+#
+# The app had NEVER transmitted an equity order. `schwab_api.build_equity_order`
+# is marked LIVE_VERIFY throughout: the equity instruction verbs ("BUY"/"SELL"
+# rather than the option BUY_TO_OPEN family), `assetType: "EQUITY"` as an ORDER
+# field (it appears only in READ parsing elsewhere), and the share-count quantity
+# semantics were all BELIEVED but unconfirmed. The Phase-0 audit's requirement
+# (§7) was to capture an accepted previewOrder and reconcile before enabling a
+# place path.
+#
+# That requirement is met in the strongest available form rather than by a
+# one-time manual capture: `_place_equity_live` runs a live previewOrder and
+# REFUSES TO PLACE unless Schwab accepts it. Schwab's own validator confirms the
+# payload on every single order, so the fields cannot be wrong-but-unnoticed and
+# the verification cannot go stale. See executor._place_equity_live.
+EQUITY_ORDER_PLACEMENT_ENABLED = (
+    os.environ.get("EQUITY_ORDER_PLACEMENT_ENABLED", "0").strip().lower()
+    in ("1", "true", "yes"))
+
 # PROPOSED_DEFAULT — the maximum DTE a placed put may carry. WEEKLY EXPIRIES
 # ONLY: 10 days admits the standard weekly (and a Monday ticket on a Friday two
 # weeks out) while refusing a monthly, which is a different trade wearing this

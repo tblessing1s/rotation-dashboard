@@ -1210,10 +1210,11 @@ def test_buy_shares_never_transmits_whatever_the_switches_say(store, monkeypatch
     equity path is construct-and-preview only. That decision is sound; the
     failure was that the confirmation dialog still said "This transmits a real
     order to your Schwab account" and offered "Transmit live order"."""
-    assert "buy_shares" in executor.NON_TRANSMITTING_ACTIONS
-    assert "sell_shares" in executor.NON_TRANSMITTING_ACTIONS
+    assert not config.EQUITY_ORDER_PLACEMENT_ENABLED      # the default
+    assert "buy_shares" in executor.non_transmitting_actions()
+    assert "sell_shares" in executor.non_transmitting_actions()
     # No put or option action may creep in — those DO transmit when enabled.
-    assert not (executor.NON_TRANSMITTING_ACTIONS & executor.PUT_ACTIONS)
+    assert not (executor.non_transmitting_actions() & executor.PUT_ACTIONS)
 
     placed = []
     monkeypatch.setattr(executor, "_place_live",
@@ -1256,4 +1257,4 @@ def test_the_non_transmitting_set_is_served_to_the_ui(monkeypatch):
     can never drift from the dispatch that enforces it."""
     import app as app_module
     st = app_module._live_trading_status()
-    assert st["non_transmitting_actions"] == sorted(executor.NON_TRANSMITTING_ACTIONS)
+    assert st["non_transmitting_actions"] == sorted(executor.non_transmitting_actions())

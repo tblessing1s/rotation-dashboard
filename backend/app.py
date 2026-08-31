@@ -1664,7 +1664,8 @@ def _live_trading_status() -> dict:
         # confirmation dialog cannot promise a transmit the executor will not
         # perform. Served rather than duplicated in the frontend: one source of
         # truth, and it can never drift from the dispatch that enforces it.
-        "non_transmitting_actions": sorted(executor.NON_TRANSMITTING_ACTIONS),
+        "non_transmitting_actions": sorted(executor.non_transmitting_actions()),
+        "equity_placement": config.EQUITY_ORDER_PLACEMENT_ENABLED,
     }
 
 

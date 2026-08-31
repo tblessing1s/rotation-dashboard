@@ -181,14 +181,21 @@ INSTRUCTION = {
 PUT_ACTIONS = frozenset({"put_opened", "put_closed", "put_assigned"})
 
 
-# Actions that CANNOT reach the broker under this migration, whatever the
-# live-trading switch says. `schwab_api.build_equity_order`'s field names are
-# LIVE_VERIFY — unverified guesses at Schwab's equity schema — so the equity path
-# is deliberately construct-and-preview only until a real accepted payload
-# confirms them. That decision is sound; the failure was that nothing told the
-# OPERATOR. The UI reads this set (served by /api/live-trading) so a confirmation
-# dialog cannot promise a transmit that this dispatch will never perform.
-NON_TRANSMITTING_ACTIONS = frozenset({"buy_shares", "sell_shares"})
+# The shares base actions. Whether they can reach the broker is now a FLAG, not a
+# permanent property — see `non_transmitting_actions()`.
+EQUITY_ACTIONS = frozenset({"buy_shares", "sell_shares"})
+
+
+def non_transmitting_actions() -> frozenset:
+    """Actions that CANNOT reach the broker right now, whatever the live-trading
+    switch says. Computed, not constant: equity placement is gated on
+    `config.EQUITY_ORDER_PLACEMENT_ENABLED`, so this shrinks to empty when that is
+    on and the dispatch below will transmit.
+
+    The UI reads this (served by /api/live-trading) rather than duplicating the
+    rule, so a confirmation dialog can never promise a transmit the dispatch will
+    not perform — nor refuse to promise one it will."""
+    return frozenset() if config.EQUITY_ORDER_PLACEMENT_ENABLED else EQUITY_ACTIONS
 
 
 def live_enabled() -> bool:
@@ -673,10 +680,14 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     if action == "close_shares_assigned":
         return _commit_assignment(payload, ticker, strike, contracts, stock_price, mode, price_source)
 
-    # Shares base actions never transmit a live order under this migration — the
-    # equity order path is constructed + previewed only (see _commit_shares). They
-    # book as the logged path regardless of the live/Schwab-configured branch below.
-    if action in NON_TRANSMITTING_ACTIONS:
+    # Shares base actions. Placement is gated on EQUITY_ORDER_PLACEMENT_ENABLED
+    # (default false); with the flag off they book as the logged path exactly as
+    # before, previewing the order for inspection but transmitting nothing.
+    if action in EQUITY_ACTIONS:
+        if (config.EQUITY_ORDER_PLACEMENT_ENABLED and mode == "live"
+                and schwab_api.configured()):
+            return _place_equity_live(payload, ticker, action, contracts,
+                                      stock_price, price_source)
         return _commit_shares(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
 
     # Live single-leg orders go to the broker and resolve asynchronously (place ->
@@ -2665,6 +2676,106 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
     }
 
 
+def _equity_limit_price(client, ticker: str) -> float:
+    """Price the equity LIMIT off a FRESH quote at send time, never the operator's
+    snapshot — the same discipline `_live_limit_price` applies to an option leg,
+    for the same reason: a ticket left open while the market moved must transmit
+    at the current market or not at all.
+
+    Refuses on a missing, one-sided or crossed quote rather than sending a bad
+    limit. A MARKET order is deliberately not the fallback: an unpriced market
+    order on a wide or fast tape is exactly the fill an operator cannot review.
+    """
+    quote = data_handler.latest_quote(ticker)
+    price = (quote or {}).get("price")
+    bid, ask = (quote or {}).get("bid"), (quote or {}).get("ask")
+    if bid is not None and ask is not None:
+        if bid <= 0 or ask <= 0 or ask < bid:
+            raise schwab_api.SchwabError(
+                f"Refusing to place {ticker}: quote is missing/crossed "
+                f"(bid {bid}, ask {ask}). Re-open the ticket for a fresh quote.")
+        return round((float(bid) + float(ask)) / 2, 2)
+    if price is None or float(price) <= 0:
+        raise schwab_api.SchwabError(
+            f"Refusing to place {ticker}: no fresh quote to price the limit "
+            "against. Re-open the ticket for a fresh quote.")
+    return round(float(price), 2)
+
+
+def _place_equity_live(payload, ticker, action, contracts, stock_price, price_source):
+    """Transmit a real EQUITY order, but only after Schwab accepts a preview of it.
+
+    THE PREVIEW IS THE VERIFICATION, AND IT IS MANDATORY. `build_equity_order` is
+    marked LIVE_VERIFY: the instruction verbs, `assetType: "EQUITY"` as an order
+    field, and the share-count quantity semantics were believed but never
+    confirmed against a live account, and the Phase-0 audit (§7) required an
+    accepted previewOrder before any place path was enabled.
+
+    Rather than satisfy that with a one-time manual capture, every order previews
+    first and PLACEMENT IS SKIPPED IF THE PREVIEW FAILS. Schwab's own validator
+    confirms the payload on each order, so a wrong field is a refusal with the
+    broker's reason attached instead of a malformed live order — and the
+    verification cannot go stale the way a captured JSON would.
+
+    Everything after that is the machinery the option path already uses: the same
+    demo backstop, resubmission lock, pending record, and place -> poll -> fill
+    -> commit lifecycle.
+    """
+    _assert_transmit_allowed(action)
+    _guard_resubmit(ticker, action)
+    client = data_handler.client()
+    account_hash = client.primary_account_hash()
+
+    # Quantity is a SHARE COUNT for an equity order, not option contracts. The
+    # 100-share lot rule is enforced upstream (`_shares_lots`); this converts once,
+    # here, so the x100 cannot drift into the order payload.
+    qty = int(payload.get("qty") or payload.get("shares")
+              or (int(contracts or 0) * config.SHARES_PER_LOT))
+    if qty <= 0:
+        raise ValueError(f"{action} live order needs a positive share quantity")
+
+    staged = payload.get("limit_price") or payload.get("price_per_share")
+    limit = _equity_limit_price(client, ticker)
+    order = schwab_api.build_equity_order(INSTRUCTION[action], qty, ticker, limit)
+
+    # MANDATORY pre-flight. A preview failure is a hard stop, never a warning:
+    # the whole reason this path was gated is that the payload shape was unproven.
+    try:
+        preview = client.preview_order(account_hash, order)
+    except Exception as exc:  # noqa: BLE001 — surface Schwab's own words
+        raise schwab_api.SchwabError(
+            f"Schwab rejected the {action} preview for {ticker} — NOT placing. "
+            f"{exc}") from exc
+
+    placed = client.place_order(account_hash, order)
+    order_id = placed.get("orderId")
+    if not order_id:
+        raise schwab_api.SchwabError("Schwab accepted the order but returned no order id")
+
+    pending = {
+        "payload": payload, "ticker": ticker, "action": action,
+        "contracts": contracts, "strike": None, "qty": qty,
+        "stock_price": stock_price, "price_source": price_source,
+        "account_hash": account_hash, "limit_price": limit,
+        "staged_limit_price": staged, "placed_at": log.utcnow(),
+        "equity_order_preview": {"order": order, "preview": preview,
+                                 "transmitted": True},
+    }
+    log.save_pending_order(order_id, pending)
+    _record_placement(ticker, action, order_id, limit_price=limit)
+    return {
+        "success": True,
+        "status": "working",
+        "order_id": str(order_id),
+        "mode": "live",
+        "shares": qty,
+        "limit_price": limit,
+        "staged_limit_price": staged,
+        "repriced": bool(staged is not None
+                         and abs(limit - float(staged)) > 1e-9),
+    }
+
+
 def _fill_price(order: dict):
     """Best-effort average fill price from a Schwab order's activity legs."""
     try:
@@ -2712,6 +2823,17 @@ def _commit_from_pending(rec: dict, fill_price):
         fn = _put_opened if action == "put_opened" else _put_closed
         return fn(payload, rec["ticker"], rec["strike"], int(rec["contracts"]),
                   stock_price, mode="live")
+    # A FILLED equity order really did reach the broker, so it commits as "live" —
+    # unlike the flag-off path, which previews and books as "logged". Mode has to
+    # describe what happened: the UI's "no order was sent" message and
+    # `reconcile._ticker_liveness` both key off it, and these shares DO exist at
+    # the broker and must be reconciled against it.
+    if action in EQUITY_ACTIONS:
+        if fill_price is not None:
+            payload["price_per_share"] = fill_price
+        return _commit(payload, rec["ticker"], action, int(rec["contracts"] or 0),
+                       None, rec["stock_price"],
+                       rec.get("price_source", "schwab"), "live")
     return _commit(payload, rec["ticker"], action, int(rec["contracts"]),
                    rec["strike"], rec["stock_price"], rec.get("price_source", "schwab"), "live")
 
