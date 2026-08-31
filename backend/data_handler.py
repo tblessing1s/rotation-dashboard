@@ -17,6 +17,7 @@ import pandas as pd
 
 import alpha_vantage
 import config
+import fetch_budget
 import schwab_api
 
 _client: schwab_api.SchwabClient | None = None
@@ -183,6 +184,14 @@ def get_daily(symbol: str, force: bool = False) -> pd.DataFrame | None:
         cached = _cached_frame(symbol)
         if cached is not None and not cached.empty:
             return cached
+    # Out of time already: serve whatever is cached rather than queueing on the
+    # lock below. This is the ONE check that fixes the observed hang — three
+    # requests for the same ticker used to pile up on `_symbol_lock` behind a
+    # single long provider fetch, so the second and third paid the first one's
+    # full retry budget before even starting their own.
+    if fetch_budget.current().expired():
+        _last_error[symbol] = "request deadline reached; served cached data"
+        return _fallback(symbol)
     # Serialize fetches per symbol so concurrent requests don't all hit the
     # provider for the same name; the loser re-reads the freshly written cache.
     with _symbol_lock(symbol):
@@ -207,7 +216,12 @@ def get_many(symbols, force: bool = False) -> dict[str, pd.DataFrame | None]:
     syms = list(dict.fromkeys(s.upper() for s in symbols))
     if not syms:
         return {}
-    results = _executor.map(lambda s: (s, get_daily(s, force=force)), syms)
+    # `propagate` carries the caller's budget into the pool threads. A worker
+    # thread starts with an EMPTY context, so without it every batch read would
+    # silently revert to the patient budget and an interactive request would hang
+    # in the batch path exactly as it used to in the single path.
+    results = _executor.map(
+        fetch_budget.propagate(lambda s: (s, get_daily(s, force=force))), syms)
     return dict(results)
 
 

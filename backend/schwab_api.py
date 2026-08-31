@@ -22,6 +22,7 @@ import pandas as pd
 import requests
 
 import config
+import fetch_budget
 import order_pricing
 from decimal import Decimal as _Decimal
 
@@ -80,11 +81,17 @@ def _request(method: str, url: str, *, sleep=time.sleep, **kwargs):
     """Issue an HTTP request with bounded exponential backoff on TRANSIENT
     failures — connection resets / read timeouts (which ``requests`` raises) and
     the retryable HTTP statuses above (429 + 5xx). Honors a ``Retry-After`` header
-    when the server sends one, else backs off ``SCHWAB_BACKOFF_BASE_SECONDS``
-    doubling to ``SCHWAB_BACKOFF_MAX_SECONDS`` for at most ``SCHWAB_MAX_RETRIES``
-    attempts. Reuses the scheduler path's knobs (``data_transport`` already backs
-    off with the same three) so on-demand and background fetches behave alike.
-    ``sleep`` is injectable for tests.
+    when the server sends one, else backs off exponentially for a bounded number
+    of attempts. ``sleep`` is injectable for tests.
+
+    HOW LONG IT MAY TRY IS THE CALLER'S TO DECIDE, not this function's. The
+    budget comes from ``fetch_budget.current()``: the background default is the
+    ``SCHWAB_*`` knobs unchanged (~87s for one symbol, correct when nobody is
+    waiting), while an HTTP request runs under the interactive budget — fewer
+    attempts, a capped timeout, and a whole-request deadline past which no
+    further attempt is made at all. These used to be one set of knobs
+    deliberately, "so on-demand and background fetches behave alike"; that is
+    exactly what hung the dashboard behind a dead provider. See fetch_budget.py.
 
     Read/idempotent calls only. Order *submission* (``place_order`` /
     ``submit_order``) is deliberately NOT routed through here: a retried POST could
@@ -96,21 +103,38 @@ def _request(method: str, url: str, *, sleep=time.sleep, **kwargs):
     error messages and parsing stay exactly as before.
     """
     http_fn = getattr(requests, method.lower())
-    delay = config.SCHWAB_BACKOFF_BASE_SECONDS
-    attempts = max(1, int(config.SCHWAB_MAX_RETRIES))
+    budget = fetch_budget.current()
+    delay = budget.base_seconds
+    attempts = budget.attempts
+    # Narrow (never widen) the call site's own timeout to fit the budget, so a
+    # single attempt cannot outlive the request that is waiting on it.
+    if "timeout" in kwargs or budget.timeout is not None:
+        kwargs["timeout"] = budget.cap_timeout(kwargs.get("timeout"))
     for attempt in range(attempts):
         last_attempt = attempt >= attempts - 1
+        # Out of time: stop retrying and let the caller degrade to cache. Only an
+        # interactive budget carries a deadline, so this never fires in the
+        # background.
+        if attempt and budget.expired():
+            # Raise rather than return: every caller does `resp.status_code`, so
+            # a None here would surface as an AttributeError instead of the
+            # thing that actually happened. As a SchwabError it lands in
+            # `data_handler._fetch`'s except, which degrades to the cached frame
+            # and records the reason for /api/data-health.
+            raise SchwabError(
+                f"request deadline reached after {attempt} attempt(s) "
+                f"({method.upper()} {url}) — serving cached data instead")
         try:
             resp = http_fn(url, **kwargs)
         except requests.exceptions.RequestException as e:
             if last_attempt:
                 raise
-            wait = min(delay, config.SCHWAB_BACKOFF_MAX_SECONDS)
+            wait = budget.sleep_for(min(delay, budget.max_seconds))
             logger.warning("schwab %s %s failed (%s); retrying in %.1fs (attempt %d/%d)",
                            method.upper(), url, e.__class__.__name__, wait,
                            attempt + 1, attempts)
             sleep(wait)
-            delay = min(delay * 2, config.SCHWAB_BACKOFF_MAX_SECONDS)
+            delay = min(delay * 2, budget.max_seconds)
             continue
         if resp.status_code in _RETRYABLE_STATUS and not last_attempt:
             retry_after = getattr(resp, "headers", {}).get("Retry-After")
@@ -118,14 +142,19 @@ def _request(method: str, url: str, *, sleep=time.sleep, **kwargs):
                 ra = float(retry_after) if retry_after else None
             except (TypeError, ValueError):
                 ra = None
-            wait = min(ra if ra is not None else delay, config.SCHWAB_BACKOFF_MAX_SECONDS)
+            wait = budget.sleep_for(
+                min(ra if ra is not None else delay, budget.max_seconds))
             logger.warning("schwab %s %s HTTP %s; backing off %.1fs (attempt %d/%d)",
                            method.upper(), url, resp.status_code, wait,
                            attempt + 1, attempts)
             sleep(wait)
-            delay = min(delay * 2, config.SCHWAB_BACKOFF_MAX_SECONDS)
+            delay = min(delay * 2, budget.max_seconds)
             continue
         return resp
+    # Unreachable: the loop runs at least once and every path through it either
+    # returns, raises, or continues. Kept explicit so a future edit that adds a
+    # `break` fails loudly here rather than returning None into `.status_code`.
+    raise SchwabError(f"no attempt was made ({method.upper()} {url})")
 
 
 # ---------------------------------------------------------------------------
