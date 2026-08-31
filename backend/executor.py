@@ -181,6 +181,16 @@ INSTRUCTION = {
 PUT_ACTIONS = frozenset({"put_opened", "put_closed", "put_assigned"})
 
 
+# Actions that CANNOT reach the broker under this migration, whatever the
+# live-trading switch says. `schwab_api.build_equity_order`'s field names are
+# LIVE_VERIFY — unverified guesses at Schwab's equity schema — so the equity path
+# is deliberately construct-and-preview only until a real accepted payload
+# confirms them. That decision is sound; the failure was that nothing told the
+# OPERATOR. The UI reads this set (served by /api/live-trading) so a confirmation
+# dialog cannot promise a transmit that this dispatch will never perform.
+NON_TRANSMITTING_ACTIONS = frozenset({"buy_shares", "sell_shares"})
+
+
 def live_enabled() -> bool:
     """Whether live trading is switched on — via the CFM_LIVE_TRADING env override
     or the persisted UI toggle (config.live_trading_enabled). This alone does NOT
@@ -666,7 +676,7 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     # Shares base actions never transmit a live order under this migration — the
     # equity order path is constructed + previewed only (see _commit_shares). They
     # book as the logged path regardless of the live/Schwab-configured branch below.
-    if action in ("buy_shares", "sell_shares"):
+    if action in NON_TRANSMITTING_ACTIONS:
         return _commit_shares(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
 
     # Live single-leg orders go to the broker and resolve asynchronously (place ->
@@ -2109,7 +2119,15 @@ def _commit_shares(payload, ticker, action, contracts, strike, stock_price, pric
             preview = _preview_equity_order(payload, ticker, action, contracts, stock_price)
         except Exception as exc:  # noqa: BLE001 — a preview must never block booking
             preview = {"error": str(exc)}
-    result = _commit(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
+    # MODE DESCRIBES WHAT HAPPENED, NOT WHAT THE SESSION WAS CONFIGURED FOR.
+    # Nothing was transmitted here — a live session previewed the order and booked
+    # it. Recording "live" would claim a broker fill that never occurred: the UI
+    # keys its "RECORDED, no order sent" message off this field, and
+    # `reconcile._ticker_liveness` keys reconciliation off it, so a wrong value
+    # both misleads the operator and tells reconciliation to expect shares the
+    # broker does not hold.
+    result = _commit(payload, ticker, action, contracts, strike, stock_price,
+                     price_source, "logged")
     if preview is not None:
         result["equity_order_preview"] = preview
     return result

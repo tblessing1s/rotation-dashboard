@@ -1660,6 +1660,11 @@ def _live_trading_status() -> dict:
         "demo": config.demo_enabled(),
         "schwab_configured": schwab_api.configured(),
         "schwab": schwab_api.token_status(),
+        # Actions that never reach the broker whatever the switches say, so the
+        # confirmation dialog cannot promise a transmit the executor will not
+        # perform. Served rather than duplicated in the frontend: one source of
+        # truth, and it can never drift from the dispatch that enforces it.
+        "non_transmitting_actions": sorted(executor.NON_TRANSMITTING_ACTIONS),
     }
 
 

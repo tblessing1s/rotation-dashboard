@@ -30,6 +30,22 @@ export function useTradeMode() {
   return mode;
 }
 
+// The actions the executor will NEVER transmit, whatever the live switch says.
+// Served by /api/live-trading so the list cannot drift from the dispatch that
+// enforces it. Empty while resolving and on error — the dialog then behaves as it
+// always did rather than wrongly promising a record-only outcome.
+export function useNonTransmittingActions() {
+  const [actions, setActions] = React.useState([]);
+  React.useEffect(() => {
+    let stop = false;
+    api.liveTrading()
+      .then((st) => { if (!stop) setActions(st?.non_transmitting_actions || []); })
+      .catch(() => {});
+    return () => { stop = true; };
+  }, []);
+  return actions;
+}
+
 // PAPER vs LIVE indicator for the order tickets. Paper (the default) captures the
 // trade to the local ledger but sends NO order to Schwab; live transmits a real
 // order. `mode` is "paper" | "live" | null (renders nothing while resolving).
@@ -65,8 +81,22 @@ export function describeOrder(payload = {}) {
     roll_short: "Roll covered call (buy-to-close + sell-to-open)",
   }[payload.action] || payload.action;
 
-  const rows = [["Order", verb], ["Ticker", payload.ticker || "—"],
-               ["Contracts", String(payload.contracts ?? "—")]];
+  const equity = payload.action === "buy_shares" || payload.action === "sell_shares";
+  const rows = [["Order", verb], ["Ticker", payload.ticker || "—"]];
+  if (equity) {
+    // An equity order is denominated in SHARES. Showing "Contracts: 1" for 100
+    // shares gives the operator no way to verify quantity on the one screen that
+    // exists to verify it — and no strike to show, so that row is dropped.
+    const lots = Number(payload.contracts ?? 0);
+    const shares = payload.qty ?? payload.shares ?? lots * 100;
+    rows.push(["Shares", shares ? String(shares) : "—"]);
+    const px = payload.limit_price ?? payload.price_per_share ?? payload.stock_price;
+    rows.push(["Price / share", money(px)]);
+    // The number that actually matters before committing capital.
+    rows.push(["Approx. cost", px && shares ? money(Number(px) * Number(shares)) : "—"]);
+    return rows;
+  }
+  rows.push(["Contracts", String(payload.contracts ?? "—")]);
   if (payload.action === "roll_short") {
     rows.push(["From strike", `${payload.from_strike ?? "—"}C`]);
     rows.push(["To strike", `${payload.to_strike ?? "—"}C · exp ${payload.to_expiration || "—"}`]);
@@ -74,9 +104,15 @@ export function describeOrder(payload = {}) {
       ? payload.premium_per_share - payload.close_price_per_share : null;
     rows.push(["Net limit / share", net == null ? "—" : `${net >= 0 ? "+" : ""}${money(net)}`]);
   } else {
-    rows.push(["Strike", payload.strike != null ? `${payload.strike}C` : "—"]);
+    // The side suffix is DERIVED. It was hardcoded "C", so a put strike rendered
+    // as a call on the confirmation screen — the same class of mistake as
+    // `occ_option_symbol`'s call=True default.
+    const side = String(payload.action || "").startsWith("put_") ? "P" : "C";
+    rows.push(["Strike", payload.strike != null ? `${payload.strike}${side}` : "—"]);
     if (payload.expiration) rows.push(["Expiration", payload.expiration]);
-    const limit = payload.action === "sell_short" ? payload.premium_per_share
+    const limit = payload.action === "sell_short" || payload.action === "put_opened"
+      ? payload.premium_per_share
+      : payload.action === "put_closed" ? payload.debit_per_share
       : payload.close_price_per_share;
     rows.push(["Limit / share", money(limit)]);
   }
@@ -87,20 +123,38 @@ export function describeOrder(payload = {}) {
 // Live-order confirmation gate: an explicit "yes, transmit" step shown ONLY in
 // live mode, so a real Schwab order can't go out on a stray click. Lists the
 // symbol/qty/limit from describeOrder.
-export function LiveOrderConfirm({ payload, busy = false, onConfirm, onCancel }) {
+export function LiveOrderConfirm({ payload, busy = false, onConfirm, onCancel,
+                                  nonTransmitting = [] }) {
   const rows = describeOrder(payload || {});
+  // Some actions CANNOT reach the broker whatever the live switch says — the
+  // equity path is construct-and-preview only until Schwab's equity order fields
+  // are verified. The set is served by /api/live-trading rather than duplicated
+  // here, so this dialog can never promise a transmit the executor won't perform.
+  const transmits = !nonTransmitting.includes(payload?.action);
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
          role="dialog" aria-modal="true" onClick={onCancel}>
-      <div className="w-full max-w-md rounded-xl border border-emerald-700 bg-slate-900 p-5 shadow-2xl"
+      <div className={`w-full max-w-md rounded-xl border bg-slate-900 p-5 shadow-2xl ${
+             transmits ? "border-emerald-700" : "border-amber-600"}`}
            onClick={(e) => e.stopPropagation()}>
         <div className="mb-3 flex items-center gap-2">
-          <TradeModeBadge mode="live" />
-          <h2 className="text-base font-semibold text-slate-100">Confirm live order</h2>
+          <TradeModeBadge mode={transmits ? "live" : "paper"} />
+          <h2 className="text-base font-semibold text-slate-100">
+            {transmits ? "Confirm live order" : "Confirm — records only"}
+          </h2>
         </div>
-        <p className="mb-3 text-sm text-emerald-200">
-          This transmits a <span className="font-semibold">real order to your Schwab account</span>.
-        </p>
+        {transmits ? (
+          <p className="mb-3 text-sm text-emerald-200">
+            This transmits a <span className="font-semibold">real order to your Schwab account</span>.
+          </p>
+        ) : (
+          <p className="mb-3 text-sm text-amber-200">
+            <span className="font-semibold">NO order will be sent to Schwab.</span> Share
+            orders are built and previewed only — live equity submission is not
+            wired yet. This records the fill in your ledger, so buy the shares at
+            your broker yourself or the position will not exist there.
+          </p>
+        )}
         <dl className="mb-4 divide-y divide-slate-800 rounded-lg border border-slate-800 bg-slate-950 text-sm">
           {rows.map(([k, v]) => (
             <div key={k} className="flex items-center justify-between gap-3 px-3 py-1.5">
@@ -115,8 +169,12 @@ export function LiveOrderConfirm({ payload, busy = false, onConfirm, onCancel })
             Cancel
           </button>
           <button onClick={onConfirm} disabled={busy}
-                  className="rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-40">
-            {busy ? "Transmitting…" : "Transmit live order"}
+                  className={`rounded-lg px-4 py-2 text-sm font-semibold disabled:opacity-40 ${
+                    transmits
+                      ? "bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30"
+                      : "bg-amber-500/20 text-amber-200 hover:bg-amber-500/30"}`}>
+            {busy ? (transmits ? "Transmitting…" : "Recording…")
+                  : (transmits ? "Transmit live order" : "Record in ledger only")}
           </button>
         </div>
       </div>
