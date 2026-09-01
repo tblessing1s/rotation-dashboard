@@ -36,18 +36,33 @@ export default function LiveTradingSwitch() {
     return <Card title="Live trading"><p className="text-sm text-slate-500">Loading…</p></Card>;
   }
 
-  const { enabled, transmit, env_locked, demo, schwab_configured, schwab } = st;
+  const { enabled, transmit, env_locked, demo, schwab_configured, schwab,
+          equity_placement } = st;
   const tokenWarn = schwab_configured && schwab && schwab.status !== "ok";
+
+  // Live trading is necessary but NOT sufficient: shares and puts each carry
+  // their own deploy-level placement flag, and with one off that order type
+  // RECORDS ONLY. Naming them here is the whole point of this card — a blanket
+  // "executed orders are transmitted" while a share ticket only books is what
+  // sends an operator to Schwab looking for a fill that was never sent.
+  // `equity_placement` is undefined on an older backend, which is why the test
+  // is `=== false` rather than a falsy check: unknown must not read as OFF.
+  const recordsOnly = [];
+  if (equity_placement === false) recordsOnly.push("Share");
+  if (put && !put.enabled) recordsOnly.push("Cash-secured put");
+  const recordsOnlyText = recordsOnly.join(" and ") + " orders";
 
   return (
     <Card
       title="Live trading"
-      right={<Pill status={transmit ? "green" : "yellow"}>{transmit ? "LIVE" : "PAPER"}</Pill>}
+      right={<Pill status={transmit ? (recordsOnly.length ? "yellow" : "green") : "yellow"}>
+               {transmit ? (recordsOnly.length ? "PARTIAL" : "LIVE") : "PAPER"}
+             </Pill>}
     >
       <p className="text-sm text-slate-300">
         {transmit
-          ? (put && !put.enabled
-              ? "Share and covered-call orders are transmitted to your real Schwab account. Cash-secured PUTS are not — see below."
+          ? (recordsOnly.length
+              ? `${recordsOnlyText} are RECORDED ONLY — no order is sent to Schwab for them. Every other order transmits to your real Schwab account.`
               : "Executed orders are transmitted to your real Schwab account.")
           : enabled
             ? "Live is ON, but you're in Demo data — orders stay paper until you switch to Live data."
@@ -67,6 +82,15 @@ export default function LiveTradingSwitch() {
                 : "✓ Schwab connected.")
             : "✗ Schwab not connected — live orders will fail until you re-authorize."}
         </li>
+        {equity_placement !== undefined && (
+          <li className={equity_placement ? "text-slate-500" : "text-amber-300"}>
+            {equity_placement
+              ? "✓ Share (equity) order placement is on."
+              : "⚠ Share (equity) order placement is OFF — a buy/sell shares ticket " +
+                "RECORDS only, no order is sent. Set EQUITY_ORDER_PLACEMENT_ENABLED " +
+                "at the deploy level."}
+          </li>
+        )}
         {put && (
           <li className={put.enabled ? "text-slate-500" : "text-amber-300"}>
             {put.enabled
@@ -122,6 +146,12 @@ export default function LiveTradingSwitch() {
             {!schwab_configured && (
               <p className="mt-2 rounded-lg border border-rose-800 bg-rose-500/10 px-3 py-2 text-xs text-rose-300">
                 Schwab isn't connected — live orders will fail until you re-authorize.
+              </p>
+            )}
+            {recordsOnly.length > 0 && (
+              <p className="mt-2 rounded-lg border border-amber-700 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+                {recordsOnlyText} will still be RECORDED ONLY — their placement flag is
+                off at the deploy level, so this switch does not send them.
               </p>
             )}
             <div className="mt-4 flex items-center justify-end gap-2">
