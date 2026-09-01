@@ -22,11 +22,28 @@ logger = logging.getLogger("cfm.alerts")
 SEVERITY_ORDER = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
 
+def account_label() -> str:
+    """The active book's label, but ONLY when more than one book exists.
+
+    Alerts are evaluated per account, so a batch that says "roll NVDA" is
+    meaningless to an operator running two books unless it says which one. On a
+    single-account install this is empty and every message is unchanged."""
+    try:
+        import accounts
+        if len(accounts.list_accounts(include_archived=True)) <= 1:
+            return ""
+        return accounts.active().get("label") or accounts.active_id()
+    except Exception:  # noqa: BLE001 — a registry hiccup must not break delivery
+        return ""
+
+
 def format_subject(alerts: list[dict]) -> str:
     worst = min(alerts, key=lambda a: SEVERITY_ORDER.get(a.get("severity"), 9))
     tickers = sorted({a["ticker"] for a in alerts if a.get("ticker")})
     scope = ", ".join(tickers[:4]) or "portfolio"
-    return f"[CFM {worst.get('severity', 'ALERT')}] {len(alerts)} alert(s) — {scope}"
+    account = account_label()
+    tag = f"CFM {worst.get('severity', 'ALERT')}" + (f" · {account}" if account else "")
+    return f"[{tag}] {len(alerts)} alert(s) — {scope}"
 
 
 def format_body(alerts: list[dict]) -> str:
@@ -41,7 +58,8 @@ def format_body(alerts: list[dict]) -> str:
         if a.get("action"):
             lines.append(f"  ACTION: {a['action']}")
         lines.append("")
-    lines.append("— CFM dashboard alert engine")
+    account = account_label()
+    lines.append("— CFM dashboard alert engine" + (f" · {account} account" if account else ""))
     return "\n".join(lines)
 
 

@@ -72,6 +72,54 @@ def recommendations_enabled() -> bool:
     return os.environ.get("CFM_RECOMMENDATIONS", "1").strip() not in ("0", "false", "no")
 
 
+# ---------------------------------------------------------------------------
+# Multi-account fan-out
+#
+# The daemon evaluates BOOKS, and there is now one book per account. Anything
+# that reads or writes state (alerts, recommendations, reconciliation, ingestion,
+# expiry checks, nightly maintenance, backups, the hot/tier refreshes whose sets
+# come from open positions) therefore runs once per non-archived account, each
+# inside ``accounts.use`` so every state read underneath resolves to that book.
+# Market-wide work (the full-universe scan sweep) stays a single pass — it is the
+# same universe whichever account is looking at it.
+#
+# Cadence gates stay GLOBAL: "every N minutes, reconcile the books" is one clock
+# for all of them, not N drifting clocks. Registries keyed per position (the
+# mandatory expiry checks) are per account, since two books can hold the same
+# ticker and strike.
+# ---------------------------------------------------------------------------
+def account_ids() -> list[str | None]:
+    """Accounts this tick should evaluate. ``[None]`` means "just the active
+    book" — the degraded path when the registry can't be read, which must never
+    stop the daemon from monitoring the book it can see."""
+    try:
+        import accounts
+        return list(accounts.scheduled_ids()) or [None]
+    except Exception as e:  # noqa: BLE001 — a registry problem must not kill the tick
+        logger.error("could not enumerate accounts (%s); evaluating the active book only", e)
+        return [None]
+
+
+def for_each_account(what: str, fn) -> None:
+    """Run ``fn(account_id)`` against every scheduled account in turn.
+
+    ``fn`` owns its own error handling (several of these page the dead-man's
+    switch on failure); the guard here only stops one account's unexpected
+    explosion from skipping the accounts after it.
+    """
+    import accounts
+    for account_id in account_ids():
+        try:
+            with accounts.use(account_id):
+                fn(account_id)
+        except Exception as e:  # noqa: BLE001 — one book must not sink the others
+            logger.error("%s failed for account %s: %s", what, account_id or "active", e)
+
+
+def _account_label(account_id: str | None) -> str:
+    return account_id or "active"
+
+
 def _warm_scan() -> None:
     """Run the day's full-universe sweep so the operator's Scan loads warm.
 
@@ -150,13 +198,19 @@ def _maybe_hot_refresh(now: datetime) -> None:
     import refresh_policy
     if not refresh_policy.enabled() or not _market_hours(now):
         return
-    try:
-        result = refresh_policy.maybe_refresh_hot(now)
-        if result and result["count"]:
-            logger.info("hot refresh: %d tickers (%s)", result["count"],
-                        ", ".join(result["tickers"][:8]))
-    except Exception as e:  # noqa: BLE001 — a refresh must never break the tick
-        logger.warning("hot refresh failed: %s", e)
+
+    def run(account_id):
+        try:
+            result = refresh_policy.maybe_refresh_hot(now)
+            if result and result["count"]:
+                logger.info("hot refresh (%s): %d tickers (%s)", _account_label(account_id),
+                            result["count"], ", ".join(result["tickers"][:8]))
+        except Exception as e:  # noqa: BLE001 — a refresh must never break the tick
+            logger.warning("hot refresh failed for account %s: %s", _account_label(account_id), e)
+
+    # Per account: the hot set is "this book's open positions + candidates". A
+    # second book's names are a different set, and its live risk is no less live.
+    for_each_account("hot refresh", run)
 
 
 def tier_poll_enabled() -> bool:
@@ -172,20 +226,27 @@ def _maybe_tier_poll(now: datetime) -> None:
     tick during market hours. Best-effort: logged, never fatal to the tick."""
     if not tier_poll_enabled() or not _market_hours(now):
         return
-    try:
-        import tier_poll
-        result = tier_poll.run_cycle(now)
-        if result and result.get("due"):
-            logger.info("tier poll: %d quotes (%s)%s", len(result["due"]),
-                        ", ".join(result["due"][:8]),
-                        f", {len(result['degraded'])} degraded" if result.get("degraded") else "")
-        if result and result.get("escalations"):
-            for detail in result["escalations"]:
-                logger.warning("defense escalation: %s", detail)
-        if result and result.get("market_escalation"):
-            logger.warning("%s", result["market_escalation"])
-    except Exception as e:  # noqa: BLE001 — a poll must never break the tick
-        logger.warning("tier poll failed: %s", e)
+
+    def run(account_id):
+        try:
+            import tier_poll
+            result = tier_poll.run_cycle(now)
+            if result and result.get("due"):
+                logger.info("tier poll (%s): %d quotes (%s)%s", _account_label(account_id),
+                            len(result["due"]), ", ".join(result["due"][:8]),
+                            f", {len(result['degraded'])} degraded" if result.get("degraded") else "")
+            if result and result.get("escalations"):
+                for detail in result["escalations"]:
+                    logger.warning("defense escalation (%s): %s", _account_label(account_id), detail)
+            if result and result.get("market_escalation"):
+                logger.warning("%s", result["market_escalation"])
+        except Exception as e:  # noqa: BLE001 — a poll must never break the tick
+            logger.warning("tier poll failed for account %s: %s", _account_label(account_id), e)
+
+    # Per account: tiering, defense escalation and the kill-switch refresh all key
+    # off the book's own positions. The per-symbol quote cadence inside tier_poll
+    # is shared, so two books holding the same name still cost one quote.
+    for_each_account("tier poll", run)
 
 
 def due_slots(now: datetime, last_run: dict[str, date] | None = None) -> list[str]:
@@ -223,6 +284,24 @@ def maintenance_due(now: datetime, last: date | None) -> bool:
 # "YYYY-MM-DD:check" -> the date it ran. In-memory like _last_run; a restart may
 # re-run a check, which alert dedup makes a no-op.
 _mandatory_run: dict[str, date] = {}
+# Per-account view of the registry above. Two books can hold the same ticker and
+# strike expiring the same day, so the run keys have to be scoped by account or
+# one book's completed check would mark the other's as done. The primary account
+# keeps the shared registry object so the single-account behaviour (and the
+# module-level default in mandatory_expiry_checks) is exactly unchanged.
+_mandatory_run_by_account: dict[str, dict[str, date]] = {}
+
+
+def mandatory_registry(account_id: str | None) -> dict:
+    """The expiry-check run registry for one account."""
+    try:
+        import accounts
+        default = accounts.DEFAULT_ID
+    except Exception:  # noqa: BLE001
+        default = "primary"
+    if account_id in (None, default):
+        return _mandatory_run
+    return _mandatory_run_by_account.setdefault(account_id, {})
 
 # PROPOSED_DEFAULT — how long before the close the expiry-day check must have run.
 # 15:30 ET is the existing pre-close alert slot, so the mandatory check rides a
@@ -268,24 +347,33 @@ def _maybe_expiry_check(now: datetime) -> None:
     import alerts
     import heartbeat
     import logging_handler as log
-    try:
-        state = log.load_state()
-    except Exception as e:  # noqa: BLE001
-        logger.error("expiry-day check could not load state: %s", e)
-        heartbeat.ping("/fail", force=True)
-        return
-    due = mandatory_expiry_checks(state, now)
-    if not due:
-        return
-    try:
-        alerts.run()
-        for key in due:
-            _mandatory_run[key] = now.date()
-        logger.info("mandatory expiry-day put check ran for %d leg(s)", len(due))
-    except Exception as e:  # noqa: BLE001 — the thread survives, but this PAGES
-        heartbeat.ping("/fail", force=True)
-        logger.error("MANDATORY expiry-day put check FAILED (%s): %s",
-                     ", ".join(due), e)
+
+    def run(account_id):
+        registry = mandatory_registry(account_id)
+        try:
+            state = log.load_state()
+        except Exception as e:  # noqa: BLE001
+            logger.error("expiry-day check could not load state for account %s: %s",
+                         _account_label(account_id), e)
+            heartbeat.ping("/fail", force=True)
+            return
+        due = mandatory_expiry_checks(state, now, registry)
+        if not due:
+            return
+        try:
+            alerts.run()
+            for key in due:
+                registry[key] = now.date()
+            logger.info("mandatory expiry-day put check ran for %d leg(s) on account %s",
+                        len(due), _account_label(account_id))
+        except Exception as e:  # noqa: BLE001 — the thread survives, but this PAGES
+            heartbeat.ping("/fail", force=True)
+            logger.error("MANDATORY expiry-day put check FAILED on account %s (%s): %s",
+                         _account_label(account_id), ", ".join(due), e)
+
+    # Every book gets the check: a put expiring today in the second account is
+    # exactly as unattended as one in the first.
+    for_each_account("expiry-day put check", run)
 
 
 def _tick() -> None:
@@ -301,11 +389,19 @@ def _tick() -> None:
 
     if maintenance_due(now, _last_maintenance):
         _last_maintenance = now.date()
-        try:
-            import maintenance
-            maintenance.nightly_refresh()
-        except Exception as e:  # noqa: BLE001 — a failed refresh must not kill the thread
-            logger.error("nightly maintenance failed: %s", e)
+
+        def _nightly(account_id):
+            try:
+                import maintenance
+                maintenance.nightly_refresh()
+            except Exception as e:  # noqa: BLE001 — a failed refresh must not kill the thread
+                logger.error("nightly maintenance failed for account %s: %s",
+                             _account_label(account_id), e)
+
+        # Per account: the refresh syncs each book's held names and takes that
+        # book's nightly backup (backups.py keeps them in per-account directories,
+        # so one book's rotation can't age out another's).
+        for_each_account("nightly maintenance", _nightly)
 
     # Keep the live-risk names fresh intraday. Runs every tick (its own cadence
     # gate rate-limits the actual refresh), so it must sit BEFORE the slot-based
@@ -334,17 +430,21 @@ def _tick() -> None:
     # covers them all (the conditions are the same state either way).
     for slot in due:
         _last_run[slot] = now.date()
-    try:
-        result = alerts.run()
-        logger.info("scheduled alert run (%s ET): %d fired, %d resolved, %d active",
-                    "+".join(due), len(result["fired"]), len(result["resolved"]),
-                    result["active_count"])
-    except Exception as e:  # noqa: BLE001 — a failed run must not kill the thread
-        # The thread is alive but the evaluation itself broke — page immediately
-        # (a persistently failing run is as dangerous as a dead thread).
-        import heartbeat
-        heartbeat.ping("/fail", force=True)
-        logger.error("scheduled alert run (%s ET) failed: %s", "+".join(due), e)
+    def _alert_pass(account_id):
+        try:
+            result = alerts.run()
+            logger.info("scheduled alert run (%s ET, account %s): %d fired, %d resolved, %d active",
+                        "+".join(due), _account_label(account_id), len(result["fired"]),
+                        len(result["resolved"]), result["active_count"])
+        except Exception as e:  # noqa: BLE001 — a failed run must not kill the thread
+            # The thread is alive but the evaluation itself broke — page immediately
+            # (a persistently failing run is as dangerous as a dead thread).
+            import heartbeat
+            heartbeat.ping("/fail", force=True)
+            logger.error("scheduled alert run (%s ET) failed for account %s: %s",
+                         "+".join(due), _account_label(account_id), e)
+
+    for_each_account("scheduled alert run", _alert_pass)
     # Recommendation pass — the SAME slots as the alert pass (incl. 16:15 for
     # the confirmed-close kill switch), after it: the alert engine pages on raw
     # conditions first; the engine then commits to the explicit recommendation
@@ -352,16 +452,19 @@ def _tick() -> None:
     # alert run — an engine that silently stops emitting voids the coverage
     # evidence, which is exactly the failure the scoreboard exists to catch.
     if recommendations_enabled():
-        try:
-            import recommendation_runner
-            summary = recommendation_runner.run()
-            logger.info("scheduled recommendation pass (%s ET): %d emitted",
-                        "+".join(due), summary.get("emitted", 0))
-        except Exception as e:  # noqa: BLE001
-            import heartbeat
-            heartbeat.ping("/fail", force=True)
-            logger.error("scheduled recommendation pass (%s ET) failed: %s",
-                         "+".join(due), e)
+        def _recommendation_pass(account_id):
+            try:
+                import recommendation_runner
+                summary = recommendation_runner.run()
+                logger.info("scheduled recommendation pass (%s ET, account %s): %d emitted",
+                            "+".join(due), _account_label(account_id), summary.get("emitted", 0))
+            except Exception as e:  # noqa: BLE001
+                import heartbeat
+                heartbeat.ping("/fail", force=True)
+                logger.error("scheduled recommendation pass (%s ET) failed for account %s: %s",
+                             "+".join(due), _account_label(account_id), e)
+
+        for_each_account("scheduled recommendation pass", _recommendation_pass)
     # Warm the full-universe scan cache after the alert pass (which is what pages
     # the operator, so it runs first). At the pre-open 08:30 slot this primes the
     # morning's first Scan; later slots keep the daily-bar cache from ageing out.
@@ -378,13 +481,17 @@ def _maybe_post_close_refresh(now: datetime, due: list[str]) -> None:
     import refresh_policy
     if not refresh_policy.enabled():
         return
-    try:
-        result = refresh_policy.maybe_refresh_hot(now, force=True)
-        if result and result.get("count"):
-            logger.info("post-close refresh: %d tickers before EOD alert pass",
-                        result["count"])
-    except Exception as e:  # noqa: BLE001 — a refresh must never break the tick
-        logger.warning("post-close refresh failed: %s", e)
+    def run(account_id):
+        try:
+            result = refresh_policy.maybe_refresh_hot(now, force=True)
+            if result and result.get("count"):
+                logger.info("post-close refresh (%s): %d tickers before EOD alert pass",
+                            _account_label(account_id), result["count"])
+        except Exception as e:  # noqa: BLE001 — a refresh must never break the tick
+            logger.warning("post-close refresh failed for account %s: %s",
+                           _account_label(account_id), e)
+
+    for_each_account("post-close refresh", run)
 
 
 def _maybe_morning_reconcile(now: datetime, due: list[str]) -> None:
@@ -401,13 +508,20 @@ def _maybe_morning_reconcile(now: datetime, due: list[str]) -> None:
     if not (schwab_api.configured() or config.demo_enabled()):
         return
     _last_reconcile = now.date()
-    try:
-        import reconcile
-        report = reconcile.run_reconciliation()
-        logger.info("pre-market reconciliation: status=%s diffs=%d",
-                    report.get("status"), len(report.get("diffs", [])))
-    except Exception as e:  # noqa: BLE001 — a failed reconcile must not kill the thread
-        logger.error("pre-market reconciliation failed: %s", e)
+
+    def run(account_id):
+        try:
+            import reconcile
+            report = reconcile.run_reconciliation()
+            logger.info("pre-market reconciliation (%s): status=%s diffs=%d",
+                        _account_label(account_id), report.get("status"),
+                        len(report.get("diffs", [])))
+        except Exception as e:  # noqa: BLE001 — a failed reconcile must not kill the thread
+            logger.error("pre-market reconciliation failed for account %s: %s",
+                         _account_label(account_id), e)
+
+    # One clock (above), every book reconciled against ITS OWN brokerage account.
+    for_each_account("pre-market reconciliation", run)
 
 
 def reconcile_interval_enabled() -> bool:
@@ -442,21 +556,27 @@ def _maybe_interval_reconcile(now: datetime) -> None:
             config.RECONCILE_INTERVAL_MINUTES):
         return
     _last_interval_reconcile = now
-    try:
-        import reconcile
-        report = reconcile.run_reconciliation()
-        logger.info("interval reconciliation: status=%s diffs=%d",
-                    report.get("status"), len(report.get("diffs", [])))
-    except Exception as e:  # noqa: BLE001 — a failed reconcile must not kill the thread
-        logger.error("interval reconciliation failed: %s", e)
-    try:
-        import transaction_ingest
-        ing = transaction_ingest.run_ingestion()
-        if ing.get("proposals") or ing.get("matched"):
-            logger.info("interval ingestion: %d matched, %d out-of-band proposal(s)",
-                        len(ing.get("matched") or []), len(ing.get("proposals") or []))
-    except Exception as e:  # noqa: BLE001 — a failed ingestion must not kill the thread
-        logger.error("interval transaction ingestion failed: %s", e)
+
+    def run(account_id):
+        label = _account_label(account_id)
+        try:
+            import reconcile
+            report = reconcile.run_reconciliation()
+            logger.info("interval reconciliation (%s): status=%s diffs=%d",
+                        label, report.get("status"), len(report.get("diffs", [])))
+        except Exception as e:  # noqa: BLE001 — a failed reconcile must not kill the thread
+            logger.error("interval reconciliation failed for account %s: %s", label, e)
+        try:
+            import transaction_ingest
+            ing = transaction_ingest.run_ingestion()
+            if ing.get("proposals") or ing.get("matched"):
+                logger.info("interval ingestion (%s): %d matched, %d out-of-band proposal(s)",
+                            label, len(ing.get("matched") or []),
+                            len(ing.get("proposals") or []))
+        except Exception as e:  # noqa: BLE001 — a failed ingestion must not kill the thread
+            logger.error("interval transaction ingestion failed for account %s: %s", label, e)
+
+    for_each_account("interval reconciliation", run)
 
 
 def _loop() -> None:

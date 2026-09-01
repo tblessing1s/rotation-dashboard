@@ -6,6 +6,20 @@ const BASE = "";
 // timeout the caller (useApi) can retry, instead of an indefinite spinner.
 const TIMEOUT_MS = 60000;
 
+// The account (book) every request is answered from. The server also persists an
+// active account for background work; sending it explicitly is what lets two
+// browser tabs watch two accounts at once, and stops a tab from silently
+// switching books because something else moved the persisted selection.
+let activeAccount = null;
+
+export function setActiveAccount(id) {
+  activeAccount = id || null;
+}
+
+export function getActiveAccount() {
+  return activeAccount;
+}
+
 async function request(path, opts = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), opts.timeoutMs || TIMEOUT_MS);
@@ -13,7 +27,10 @@ async function request(path, opts = {}) {
   try {
     res = await fetch(BASE + path, {
       credentials: "same-origin", // send/receive the session cookie
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        ...(activeAccount ? { "X-CFM-Account": activeAccount } : {}),
+      },
       signal: controller.signal,
       ...opts,
     });
@@ -249,6 +266,20 @@ export const api = {
   setLiveTrading: (enabled) =>
     request("/api/live-trading", { method: "POST", body: JSON.stringify({ enabled }) }),
   accountStatus: () => request("/api/account/status"),
+  // Accounts (one book per brokerage account; see backend/accounts.py).
+  accounts: () => request("/api/accounts"),
+  accountsSummary: (includeArchived = false) =>
+    request(`/api/accounts/summary${includeArchived ? "?include_archived=1" : ""}`),
+  createAccount: (body) =>
+    request("/api/accounts", { method: "POST", body: JSON.stringify(body) }),
+  updateAccount: (id, patch) =>
+    request(`/api/accounts/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }),
+  deleteAccount: (id, purge = false) =>
+    request(`/api/accounts/${encodeURIComponent(id)}${purge ? "?purge=1" : ""}`, { method: "DELETE" }),
+  setActiveAccountOnServer: (id) =>
+    request("/api/accounts/active", { method: "POST", body: JSON.stringify({ id }) }),
+  // The brokerage accounts this Schwab login can reach, for the binding picker.
+  brokerAccounts: () => request("/api/accounts/broker-accounts"),
   schwabAuth: () => request("/auth/schwab"),
   authStatus: () => request("/api/auth/status"),
   login: (password) => request("/api/login", { method: "POST", body: JSON.stringify({ password }) }),

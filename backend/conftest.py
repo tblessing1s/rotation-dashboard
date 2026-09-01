@@ -121,7 +121,22 @@ def _pytest_fixtures():
         finally:
             config.LEGACY_LEAP_READONLY = prev
 
-    return mock_schwab, _legacy_leap_open_in_tests
+    @pytest.fixture(autouse=True)
+    def _isolated_account_registry(tmp_path_factory, monkeypatch):
+        """Every test runs against its own EMPTY account registry.
+
+        The registry decides which state file a book resolves to, so a stray
+        DATA_DIR/accounts.json (a developer's real one, or another test's) could
+        silently point a test at a different store. An empty registry is the
+        single-account default: the primary account on config.STATE_PATH, exactly
+        what the suite assumed before accounts existed. Tests that exercise the
+        registry itself repoint this at their own tmp path."""
+        import accounts
+        directory = tmp_path_factory.mktemp("accounts-registry")
+        monkeypatch.setattr(accounts, "registry_path",
+                            lambda: str(directory / "accounts.json"))
+
+    return mock_schwab, _legacy_leap_open_in_tests, _isolated_account_registry
 
 
-mock_schwab, _legacy_leap_open_in_tests = _pytest_fixtures()
+mock_schwab, _legacy_leap_open_in_tests, _isolated_account_registry = _pytest_fixtures()

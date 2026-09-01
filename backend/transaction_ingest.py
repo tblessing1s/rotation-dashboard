@@ -726,9 +726,12 @@ def _start_end_window() -> tuple[str, str]:
 
 def fetch_transactions() -> list:
     """Live Schwab transactions call, isolated so tests monkeypatch it."""
+    import accounts
     import data_handler
     client = data_handler.client()
-    account_hash = client.primary_account_hash()
+    # Ingest the transactions of THIS book's brokerage account only — pulling a
+    # sibling account's fills would propose them for adoption into the wrong book.
+    account_hash = accounts.broker_hash(client)
     start, end = _start_end_window()
     return client.get_transactions(account_hash, start_date=start, end_date=end)
 

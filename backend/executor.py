@@ -241,6 +241,20 @@ def live_transmit() -> bool:
     return live_enabled() and not config.demo_enabled()
 
 
+def _order_account_hash(client) -> str:
+    """The Schwab account hash every order/preview/cancel for THIS book goes to.
+
+    One Schwab login can reach several linked accounts, and the dashboard runs one
+    book per account (accounts.py), so the destination must come from the ACTIVE
+    account's binding — not from "whichever account happens to be first". An
+    unbound account keeps the historical first-linked-account behaviour, so a
+    single-account install is unchanged; a bound one that isn't linked raises
+    rather than routing the order to the wrong account.
+    """
+    import accounts
+    return accounts.broker_hash(client)
+
+
 def _assert_transmit_allowed(action: str) -> None:
     """Defense-in-depth broker-boundary guard: refuse to place a real order from a
     demo/paper session even if a caller reached here without the mode check.
@@ -2133,7 +2147,7 @@ def _preview_equity_order(payload, ticker, action, contracts, stock_price):
     if schwab_api.configured():
         try:
             client = data_handler.client()
-            result["preview"] = client.preview_order(client.primary_account_hash(), order)
+            result["preview"] = client.preview_order(_order_account_hash(client), order)
         except Exception as exc:  # noqa: BLE001 — preview is advisory, never blocks
             result["preview_error"] = str(exc)
     return result
@@ -2752,7 +2766,7 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
     _assert_transmit_allowed(action)
     _guard_resubmit(ticker, action)
     client = data_handler.client()
-    account_hash = client.primary_account_hash()
+    account_hash = _order_account_hash(client)
 
     option_symbol = payload.get("option_symbol")
     if not option_symbol:
@@ -2847,7 +2861,7 @@ def _place_equity_live(payload, ticker, action, contracts, stock_price, price_so
     _assert_transmit_allowed(action)
     _guard_resubmit(ticker, action)
     client = data_handler.client()
-    account_hash = client.primary_account_hash()
+    account_hash = _order_account_hash(client)
 
     # Quantity is a SHARE COUNT for an equity order, not option contracts. The
     # 100-share lot rule is enforced upstream (`_shares_lots`); this converts once,
@@ -4011,7 +4025,7 @@ def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
         return _submission_response(existing, idempotent=True)
 
     client = data_handler.client()
-    account_hash = client.primary_account_hash()
+    account_hash = _order_account_hash(client)
     close_symbol = _roll_symbol(payload, ticker, "from")
     open_symbol = _roll_symbol(payload, ticker, "to")
 
@@ -4537,7 +4551,7 @@ def _place_live_open(payload, ticker, contracts, stock_price, price_source):
     leap_strike = payload.get("strike")
     short_strike = payload.get("short_strike")
     client = data_handler.client()
-    account_hash = client.primary_account_hash()
+    account_hash = _order_account_hash(client)
 
     leap_symbol = payload.get("option_symbol") or (
         schwab_api.occ_option_symbol(ticker, payload.get("expiration"), leap_strike, call=True)
@@ -4735,7 +4749,7 @@ def _place_live_exit(payload, ticker, stock_price, price_source):
     _le, _la, _shorts, net_ps = _build_exit_legs(position, payload, stock_price)
 
     client = data_handler.client()
-    account_hash = client.primary_account_hash()
+    account_hash = _order_account_hash(client)
 
     def _sym(prefix, strike, default_exp_key):
         sym = payload.get(f"{prefix}_option_symbol")
@@ -4913,7 +4927,7 @@ def _place_live_leap_roll(payload, ticker, position, stock_price, price_source, 
     n = int(leap.get("contracts") or 0)
     new_strike = payload.get("to_strike", (est.get("new_leap") or {}).get("strike"))
     client = data_handler.client()
-    account_hash = client.primary_account_hash()
+    account_hash = _order_account_hash(client)
 
     close_symbol = payload.get("from_option_symbol") or (
         schwab_api.occ_option_symbol(ticker, payload.get("from_expiration"), leap.get("strike"), call=True)

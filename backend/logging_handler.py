@@ -220,13 +220,27 @@ def _write(state: dict) -> None:
     _atomic_write(config.active_state_path(), _serialize(state))
 
 
+def _store_paths() -> list[str]:
+    """Every store this process may write: the live + demo file of every
+    registered account. A single-account install resolves to the same two paths
+    the sweep used before accounts existed; a broken registry degrades to those
+    two rather than skipping the sweep (the sweep only deletes temp files)."""
+    try:
+        import accounts
+        return accounts.all_state_paths()
+    except Exception as e:  # noqa: BLE001 — never let the registry block startup cleanup
+        logger.warning("could not enumerate account stores (%s); sweeping the "
+                       "primary store only", e)
+        return [config.STATE_PATH, config.DEMO_STATE_PATH]
+
+
 def cleanup_orphan_temp_files() -> list[str]:
     """Remove ``*.tmp.*`` temp files left by a write that crashed between
     mkstemp and os.replace. Safe: a live temp file only exists for microseconds
     inside a held lock, so anything on disk at startup is orphaned. Returns the
     paths removed (logged by the caller)."""
     removed: list[str] = []
-    for base in (config.STATE_PATH, config.DEMO_STATE_PATH):
+    for base in _store_paths():
         directory = os.path.dirname(base) or "."
         pattern = os.path.join(directory, os.path.basename(base) + ".tmp.*")
         for orphan in glob.glob(pattern):

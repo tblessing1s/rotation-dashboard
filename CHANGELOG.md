@@ -1,5 +1,54 @@
 # Changelog
 
+## v2.14.0 — Multiple accounts
+
+One Schwab login usually reaches several brokerage accounts. The dashboard now
+runs **one book per account** — its own positions, execution log, ledgers, alerts
+and orders — with a switcher in the navbar and an "All accounts" monitor on
+Overview. An existing single-account deployment is already a valid one-account
+registry: same paths, no migration, and nothing in the UI changes until a second
+account is added. See `docs/accounts.md`.
+
+- **New** `backend/accounts.py` — the registry (`DATA_DIR/accounts.json`):
+  accounts, the persisted active one, each one's optional Schwab account number,
+  per-account state paths, and the cross-account roll-up. The `primary` account
+  keeps the un-suffixed `state.json` / `state.demo.json`; others are siblings
+  (`state.<id>.json`). Books are never blended into one log — every derived
+  ledger is recomputed from the execution log wholesale, so the split is at the
+  store.
+- **Scoping** `config.active_state_path()` delegates to the registry, so every
+  state read follows the active account with no per-call-site plumbing. A request
+  names its book with the `X-CFM-Account` header or `?account=` (a contextvar,
+  reset in teardown — gunicorn reuses threads), letting two tabs watch two books;
+  anything unnamed uses the persisted choice. An unknown id is refused, never
+  silently served from the primary book.
+- **Brokerage binding** orders, previews, cancels, transaction ingestion, cash
+  reads and reconciliation resolve the Schwab account from the active account's
+  binding (`accounts.broker_hash`, `schwab_api.select_account_node`,
+  `reconcile.parse_broker_positions`). Unbound keeps the historical
+  first-linked-account behaviour; a bound number that isn't linked RAISES rather
+  than routing an order elsewhere.
+- **Scheduled work runs for every account** — alerts, recommendation passes,
+  pre-market/interval reconciliation, ingestion, the mandatory expiry-day put
+  check, hot/tier refreshes, nightly maintenance and backups, each inside
+  `accounts.use(...)`. Cadence gates stay global; the expiry-check registry is
+  per account. The full-universe scan sweep stays a single market-wide pass.
+- **Backups per account** — `backups/` for the primary, `backups/<id>/` for the
+  rest, so one book's rotation can't age out another's; off-machine copies carry
+  the account in their name.
+- **Alerts name the book** — `[CFM HIGH · IRA] …`, deep links carry
+  `&account=<id>` so a tapped push opens the account the alert is about, and push
+  devices are shared across books (a phone is registered once).
+- **UI** navbar account switcher, Settings → Accounts (add/rename/link/archive/
+  remove, with the linked-Schwab-account picker), and an "All accounts" table on
+  Overview — positions, deployed capital, week/month theta, live alerts, working
+  orders and un-adopted broker fills per book, served from the state files with
+  no provider calls. Switching remounts the tabs so every panel refetches.
+- **Removal is safe by construction** — the primary account can't be archived or
+  removed; another book with executions is refused unless purged, and a purge
+  renames its state file aside (`state.<id>.json.deleted-<ts>`) rather than
+  unlinking a trading record.
+
 ## v2.13.0 — Trailing juice CAPACITY (shadow, zero authority)
 
 The scan's weekly juice is a SPOT reading, so it cannot tell two kinds of weak
