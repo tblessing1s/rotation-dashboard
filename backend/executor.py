@@ -181,6 +181,46 @@ INSTRUCTION = {
 PUT_ACTIONS = frozenset({"put_opened", "put_closed", "put_assigned"})
 
 
+# The shares base actions. Whether they can reach the broker is now a FLAG, not a
+# permanent property — see `non_transmitting_actions()`.
+EQUITY_ACTIONS = frozenset({"buy_shares", "sell_shares"})
+
+
+def _transmits(action: str) -> bool:
+    """Will THIS call actually send an order to the broker?
+
+    Decides whether the spot is re-quoted at order time or the operator's supplied
+    number is kept (see `_capture_price`). It mirrors the dispatch's own branches
+    rather than approximating them: a booking that never leaves the app must keep
+    the operator's price, and an order that does must not book a stale one.
+
+    It derives live-ness itself rather than taking `mode`, because the price is
+    captured EARLIER in `execute` than `mode` is assigned — and a predicate that
+    silently read an undefined name would be a worse bug than the one it fixes.
+    """
+    if not live_transmit() or not schwab_api.configured():
+        return False
+    if action in EQUITY_ACTIONS:
+        return config.EQUITY_ORDER_PLACEMENT_ENABLED
+    if action in PUT_ACTIONS:
+        # An assignment is an EVENT, not an order — nothing is transmitted, and
+        # the operator's price for a fill that already happened is the right one.
+        return (action != "put_assigned") and config.CSP_ORDER_PLACEMENT_ENABLED
+    return True
+
+
+def non_transmitting_actions() -> frozenset:
+    """Actions that CANNOT reach the broker right now, whatever the live-trading
+    switch says. Computed, not constant: equity placement is gated on
+    `config.EQUITY_ORDER_PLACEMENT_ENABLED`, so this shrinks to empty when that is
+    on and the dispatch below will transmit.
+
+    The UI reads this (served by /api/live-trading) rather than duplicating the
+    rule, so a confirmation dialog can never promise a transmit the dispatch will
+    not perform — nor refuse to promise one it will."""
+    return frozenset() if config.EQUITY_ORDER_PLACEMENT_ENABLED else EQUITY_ACTIONS
+
+
 def live_enabled() -> bool:
     """Whether live trading is switched on — via the CFM_LIVE_TRADING env override
     or the persisted UI toggle (config.live_trading_enabled). This alone does NOT
@@ -350,7 +390,19 @@ class ResubmitLockedError(RuntimeError):
 
 # The per-position resubmission gate covers ENTRY intents (this task's scope). The
 # roll/exit paths have their own freeze/leg-imbalance lifecycle and are untouched.
-_LOCKED_INTENTS = {"buy_leap", "sell_short", "open_position_atomic"}
+# The ENTRY intents guarded by the resubmission lock: no second live order for the
+# same position-intent until the first is confirmed terminal at the broker, capped
+# at MAX_RESUBMIT_ATTEMPTS.
+#
+# `buy_shares` and `put_opened` were missing. Both are entry intents — `buy_shares`
+# is the shares-primary REPLACEMENT for the locked `buy_leap` — and for a
+# non-locked action `_guard_resubmit` returns before even the belt-and-suspenders
+# "is an order still pending?" check. So a retry after an unfilled order could
+# place a SECOND live order while the first was still working, and both could
+# fill. That is the exact hazard the gate exists to prevent, and it was open on
+# the two newest order paths.
+_LOCKED_INTENTS = {"buy_leap", "sell_short", "open_position_atomic",
+                   "buy_shares", "put_opened"}
 
 
 def _num(v) -> float:
@@ -465,7 +517,42 @@ def _order_filled_qty(order: dict) -> tuple[float, float]:
     return total, ordered
 
 
-def _capture_price(ticker: str, supplied: float | None) -> tuple[float | None, str]:
+def _capture_price(ticker: str, supplied: float | None,
+                   *, at_order_time: bool = False) -> tuple[float | None, str]:
+    """The underlying spot to stamp on an execution, and where it came from.
+
+    THIS NUMBER IS THE JUICE LEDGER. A short leg's entry extrinsic is
+    `premium - max(spot - strike, 0)` (`_short_extrinsic`), and CFM's covered call
+    is deliberately ITM, so intrinsic is almost always positive and the spot goes
+    into the juice figure DOLLAR FOR DOLLAR. A spot that is $0.50 stale makes the
+    recorded extrinsic $0.50/share wrong — $50 on one contract — and that error
+    lands in the theta ledger and the payback maths permanently, because the
+    execution log is append-only.
+
+    `supplied` is normally the UI's chain snapshot, and `option_chain._CHAIN_TTL`
+    is 300 seconds. Trusting it unconditionally (as this did) meant a real order
+    could book its extrinsic against a FIVE-MINUTE-OLD spot.
+
+    So the two callers are separated:
+
+      * ``at_order_time=True`` — a real order is being placed or has just filled.
+        The spot is re-quoted NOW and the snapshot is only a fallback. Executing
+        from the app instead of the broker exists precisely to capture this
+        instant; taking the operator's stale number would throw away the reason
+        the order was routed through here at all.
+      * default — a manual booking of a fill that already happened. The operator's
+        number is the better one; a live quote would be a DIFFERENT moment than
+        the fill being recorded, and would corrupt what it was meant to preserve.
+    """
+    if at_order_time:
+        q = data_handler.latest_quote(ticker)
+        if q and q.get("price") is not None:
+            return q["price"], q.get("source") or "schwab"
+        if supplied is not None:
+            # Say so in the record rather than silently passing it off as fresh:
+            # `price_source` is what makes a suspect extrinsic auditable later.
+            return float(supplied), "supplied_stale_quote_unavailable"
+        return None, "unavailable"
     if supplied is not None:
         return float(supplied), "supplied"
     q = data_handler.latest_quote(ticker)
@@ -564,7 +651,9 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     if action in PUT_ACTIONS:
         strike = payload.get("strike")
         contracts = int(payload.get("contracts") or 0)
-        stock_price, price_source = _capture_price(ticker, payload.get("stock_price"))
+        stock_price, price_source = _capture_price(
+            ticker, payload.get("stock_price"),
+            at_order_time=_transmits(action))
         # An ASSIGNMENT is never placed — it is an event the operator did not
         # choose. It books directly whatever the flag says.
         if action == "put_assigned":
@@ -600,7 +689,12 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
 
     contracts = int(payload.get("contracts") or 0)
     strike = payload.get("strike")
-    stock_price, price_source = _capture_price(ticker, payload.get("stock_price"))
+    # A transmitting session re-quotes the spot NOW rather than trusting the UI's
+    # chain snapshot (up to 5 minutes old) — see _capture_price. This is the whole
+    # reason for executing from the app instead of the broker: the extrinsic split
+    # is only as good as the spot captured at the moment of the order.
+    stock_price, price_source = _capture_price(
+        ticker, payload.get("stock_price"), at_order_time=_transmits(action))
 
     # Level 5 gate (Account & Juice) — entry only. A blocking failure stops the
     # entry unless the payload carries an explicit override_reason, which is
@@ -663,10 +757,14 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     if action == "close_shares_assigned":
         return _commit_assignment(payload, ticker, strike, contracts, stock_price, mode, price_source)
 
-    # Shares base actions never transmit a live order under this migration — the
-    # equity order path is constructed + previewed only (see _commit_shares). They
-    # book as the logged path regardless of the live/Schwab-configured branch below.
-    if action in ("buy_shares", "sell_shares"):
+    # Shares base actions. Placement is gated on EQUITY_ORDER_PLACEMENT_ENABLED
+    # (default false); with the flag off they book as the logged path exactly as
+    # before, previewing the order for inspection but transmitting nothing.
+    if action in EQUITY_ACTIONS:
+        if (config.EQUITY_ORDER_PLACEMENT_ENABLED and mode == "live"
+                and schwab_api.configured()):
+            return _place_equity_live(payload, ticker, action, contracts,
+                                      stock_price, price_source)
         return _commit_shares(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
 
     # Live single-leg orders go to the broker and resolve asynchronously (place ->
@@ -2109,7 +2207,15 @@ def _commit_shares(payload, ticker, action, contracts, strike, stock_price, pric
             preview = _preview_equity_order(payload, ticker, action, contracts, stock_price)
         except Exception as exc:  # noqa: BLE001 — a preview must never block booking
             preview = {"error": str(exc)}
-    result = _commit(payload, ticker, action, contracts, strike, stock_price, price_source, mode)
+    # MODE DESCRIBES WHAT HAPPENED, NOT WHAT THE SESSION WAS CONFIGURED FOR.
+    # Nothing was transmitted here — a live session previewed the order and booked
+    # it. Recording "live" would claim a broker fill that never occurred: the UI
+    # keys its "RECORDED, no order sent" message off this field, and
+    # `reconcile._ticker_liveness` keys reconciliation off it, so a wrong value
+    # both misleads the operator and tells reconciliation to expect shares the
+    # broker does not hold.
+    result = _commit(payload, ticker, action, contracts, strike, stock_price,
+                     price_source, "logged")
     if preview is not None:
         result["equity_order_preview"] = preview
     return result
@@ -2644,6 +2750,110 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
         "limit_price": limit,
         "staged_limit_price": staged,
         "repriced": bool(staged is not None and abs(limit - staged) > 1e-9),
+        # The fill window this order was placed under, so the client polls to the
+        # SAME deadline the operator configured rather than its own constant.
+        "fill_wait_ms": int(config.ORDER_FILL_WAIT_SECONDS * 1000),
+    }
+
+
+def _equity_limit_price(client, ticker: str) -> float:
+    """Price the equity LIMIT off a FRESH quote at send time, never the operator's
+    snapshot — the same discipline `_live_limit_price` applies to an option leg,
+    for the same reason: a ticket left open while the market moved must transmit
+    at the current market or not at all.
+
+    Refuses on a missing, one-sided or crossed quote rather than sending a bad
+    limit. A MARKET order is deliberately not the fallback: an unpriced market
+    order on a wide or fast tape is exactly the fill an operator cannot review.
+    """
+    quote = data_handler.latest_quote(ticker)
+    price = (quote or {}).get("price")
+    bid, ask = (quote or {}).get("bid"), (quote or {}).get("ask")
+    if bid is not None and ask is not None:
+        if bid <= 0 or ask <= 0 or ask < bid:
+            raise schwab_api.SchwabError(
+                f"Refusing to place {ticker}: quote is missing/crossed "
+                f"(bid {bid}, ask {ask}). Re-open the ticket for a fresh quote.")
+        return round((float(bid) + float(ask)) / 2, 2)
+    if price is None or float(price) <= 0:
+        raise schwab_api.SchwabError(
+            f"Refusing to place {ticker}: no fresh quote to price the limit "
+            "against. Re-open the ticket for a fresh quote.")
+    return round(float(price), 2)
+
+
+def _place_equity_live(payload, ticker, action, contracts, stock_price, price_source):
+    """Transmit a real EQUITY order, but only after Schwab accepts a preview of it.
+
+    THE PREVIEW IS THE VERIFICATION, AND IT IS MANDATORY. `build_equity_order` is
+    marked LIVE_VERIFY: the instruction verbs, `assetType: "EQUITY"` as an order
+    field, and the share-count quantity semantics were believed but never
+    confirmed against a live account, and the Phase-0 audit (§7) required an
+    accepted previewOrder before any place path was enabled.
+
+    Rather than satisfy that with a one-time manual capture, every order previews
+    first and PLACEMENT IS SKIPPED IF THE PREVIEW FAILS. Schwab's own validator
+    confirms the payload on each order, so a wrong field is a refusal with the
+    broker's reason attached instead of a malformed live order — and the
+    verification cannot go stale the way a captured JSON would.
+
+    Everything after that is the machinery the option path already uses: the same
+    demo backstop, resubmission lock, pending record, and place -> poll -> fill
+    -> commit lifecycle.
+    """
+    _assert_transmit_allowed(action)
+    _guard_resubmit(ticker, action)
+    client = data_handler.client()
+    account_hash = client.primary_account_hash()
+
+    # Quantity is a SHARE COUNT for an equity order, not option contracts. The
+    # 100-share lot rule is enforced upstream (`_shares_lots`); this converts once,
+    # here, so the x100 cannot drift into the order payload.
+    qty = int(payload.get("qty") or payload.get("shares")
+              or (int(contracts or 0) * config.SHARES_PER_LOT))
+    if qty <= 0:
+        raise ValueError(f"{action} live order needs a positive share quantity")
+
+    staged = payload.get("limit_price") or payload.get("price_per_share")
+    limit = _equity_limit_price(client, ticker)
+    order = schwab_api.build_equity_order(INSTRUCTION[action], qty, ticker, limit)
+
+    # MANDATORY pre-flight. A preview failure is a hard stop, never a warning:
+    # the whole reason this path was gated is that the payload shape was unproven.
+    try:
+        preview = client.preview_order(account_hash, order)
+    except Exception as exc:  # noqa: BLE001 — surface Schwab's own words
+        raise schwab_api.SchwabError(
+            f"Schwab rejected the {action} preview for {ticker} — NOT placing. "
+            f"{exc}") from exc
+
+    placed = client.place_order(account_hash, order)
+    order_id = placed.get("orderId")
+    if not order_id:
+        raise schwab_api.SchwabError("Schwab accepted the order but returned no order id")
+
+    pending = {
+        "payload": payload, "ticker": ticker, "action": action,
+        "contracts": contracts, "strike": None, "qty": qty,
+        "stock_price": stock_price, "price_source": price_source,
+        "account_hash": account_hash, "limit_price": limit,
+        "staged_limit_price": staged, "placed_at": log.utcnow(),
+        "equity_order_preview": {"order": order, "preview": preview,
+                                 "transmitted": True},
+    }
+    log.save_pending_order(order_id, pending)
+    _record_placement(ticker, action, order_id, limit_price=limit)
+    return {
+        "success": True,
+        "status": "working",
+        "order_id": str(order_id),
+        "mode": "live",
+        "shares": qty,
+        "limit_price": limit,
+        "staged_limit_price": staged,
+        "repriced": bool(staged is not None
+                         and abs(limit - float(staged)) > 1e-9),
+        "fill_wait_ms": int(config.ORDER_FILL_WAIT_SECONDS * 1000),
     }
 
 
@@ -2673,6 +2883,14 @@ def _commit_from_pending(rec: dict, fill_price):
     # carried onto the execution so realized slippage = broker fill vs this mid.
     if rec.get("limit_price") is not None:
         payload["quoted_mid_per_share"] = round(float(rec["limit_price"]), 4)
+    # THE SPOT AT THE FILL, not at placement. The order was working for seconds to
+    # minutes; the extrinsic split belongs to the instant the contract actually
+    # traded, so re-quote here and fall back to the placement-time capture. This is
+    # the moment the whole execute-from-the-app design exists to capture.
+    fill_spot, fill_spot_source = _capture_price(
+        rec["ticker"], rec.get("stock_price"), at_order_time=True)
+    payload["stock_price"] = fill_spot
+    payload["stock_price_at_placement"] = rec.get("stock_price")
     if fill_price is not None:
         if action == "buy_leap":
             payload["execution_price"] = fill_price * 100
@@ -2690,12 +2908,22 @@ def _commit_from_pending(rec: dict, fill_price):
     # ways in — a second one would be the first place a placed put and a booked put
     # could diverge.
     if action in PUT_ACTIONS:
-        stock_price, _src = _capture_price(rec["ticker"], rec.get("stock_price"))
+        stock_price = fill_spot
         fn = _put_opened if action == "put_opened" else _put_closed
         return fn(payload, rec["ticker"], rec["strike"], int(rec["contracts"]),
                   stock_price, mode="live")
+    # A FILLED equity order really did reach the broker, so it commits as "live" —
+    # unlike the flag-off path, which previews and books as "logged". Mode has to
+    # describe what happened: the UI's "no order was sent" message and
+    # `reconcile._ticker_liveness` both key off it, and these shares DO exist at
+    # the broker and must be reconciled against it.
+    if action in EQUITY_ACTIONS:
+        if fill_price is not None:
+            payload["price_per_share"] = fill_price
+        return _commit(payload, rec["ticker"], action, int(rec["contracts"] or 0),
+                       None, fill_spot, fill_spot_source, "live")
     return _commit(payload, rec["ticker"], action, int(rec["contracts"]),
-                   rec["strike"], rec["stock_price"], rec.get("price_source", "schwab"), "live")
+                   rec["strike"], fill_spot, fill_spot_source, "live")
 
 
 def _commit_roll_from_pending(rec: dict, order: dict, units: int | None = None):

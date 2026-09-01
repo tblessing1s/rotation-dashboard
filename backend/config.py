@@ -557,6 +557,26 @@ CSP_ORDER_PLACEMENT_ENABLED = (
     os.environ.get("CSP_ORDER_PLACEMENT_ENABLED", "0").strip().lower()
     in ("1", "true", "yes"))
 
+# ---- EQUITY (shares) ORDER PLACEMENT --------------------------------------
+# DEFAULT FALSE, same as the put flag and for a sharper reason.
+#
+# The app had NEVER transmitted an equity order. `schwab_api.build_equity_order`
+# is marked LIVE_VERIFY throughout: the equity instruction verbs ("BUY"/"SELL"
+# rather than the option BUY_TO_OPEN family), `assetType: "EQUITY"` as an ORDER
+# field (it appears only in READ parsing elsewhere), and the share-count quantity
+# semantics were all BELIEVED but unconfirmed. The Phase-0 audit's requirement
+# (§7) was to capture an accepted previewOrder and reconcile before enabling a
+# place path.
+#
+# That requirement is met in the strongest available form rather than by a
+# one-time manual capture: `_place_equity_live` runs a live previewOrder and
+# REFUSES TO PLACE unless Schwab accepts it. Schwab's own validator confirms the
+# payload on every single order, so the fields cannot be wrong-but-unnoticed and
+# the verification cannot go stale. See executor._place_equity_live.
+EQUITY_ORDER_PLACEMENT_ENABLED = (
+    os.environ.get("EQUITY_ORDER_PLACEMENT_ENABLED", "0").strip().lower()
+    in ("1", "true", "yes"))
+
 # PROPOSED_DEFAULT — the maximum DTE a placed put may carry. WEEKLY EXPIRIES
 # ONLY: 10 days admits the standard weekly (and a Monday ticket on a Friday two
 # weeks out) while refusing a monthly, which is a different trade wearing this
@@ -980,6 +1000,20 @@ CANCEL_POLL_MAX_ATTEMPTS = 6
 # repeated no-fills mean the price or the thesis is wrong, not that we should keep
 # crossing the spread. Enforced in order_lifecycle.check_resubmit.
 MAX_RESUBMIT_ATTEMPTS = 3
+
+# How long a WORKING order is given to fill before the app cancels it, so the
+# operator can reprice and try again rather than leaving a stale limit resting at
+# the broker. PROPOSED_DEFAULT, env-overridable.
+#
+# This was hard-coded at 3 SECONDS in the frontend. A limit priced at the mid
+# frequently does not fill that fast — on anything but a tight, liquid book it
+# essentially never does — so nearly every order would be cancelled before it had
+# a chance, and the operator would conclude live trading does not work.
+#
+# 15s is a compromise, not a fact: long enough for a mid-priced limit on a normal
+# book, short enough that the operator is not staring at a spinner. Raise it for
+# illiquid names, lower it to get back to the old behaviour.
+ORDER_FILL_WAIT_SECONDS = float(os.environ.get("ORDER_FILL_WAIT_SECONDS") or 15.0)
 
 # PROPOSED_DEFAULT — how a resubmitted order adjusts its limit toward the ask.
 # "none" (the default) re-sends at the SAME mid-seeded limit: honest, never chases

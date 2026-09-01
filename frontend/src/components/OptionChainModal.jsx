@@ -1,7 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { Pill, Loading, fmt } from "./ui.jsx";
-import { useTradeMode, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
+import { useTradeMode, useNonTransmittingActions, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
 import { totalDollars } from "../units.js";
 
 // Dollar formatter that tolerates nulls (—) for thin/closed quotes.
@@ -47,6 +47,9 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   const [cbPrice, setCbPrice] = React.useState("");
   const [overrideReason, setOverrideReason] = React.useState("");
   const tradeMode = useTradeMode(); // "paper" | "live" | null — is this ticket routed to Schwab?
+  // Some actions never transmit even in live mode (the equity path is
+  // preview-only). The confirm dialog must say so rather than promise a send.
+  const nonTransmitting = useNonTransmittingActions();
   const [pendingLive, setPendingLive] = React.useState(null); // live order awaiting explicit confirm
   // Live bid/ask freshness: the chain is re-pulled every QUOTE_POLL_MS while the
   // modal is open, so the operator prices off current quotes. lastUpdated/nowTs
@@ -513,6 +516,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       <LiveOrderConfirm
         payload={pendingLive}
         busy={busy}
+        nonTransmitting={nonTransmitting}
         onConfirm={() => doExecute(pendingLive)}
         onCancel={() => setPendingLive(null)}
       />

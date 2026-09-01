@@ -1200,3 +1200,61 @@ def test_placement_status_separates_the_data_toggle_from_the_trading_toggle(monk
     joined = " ".join(st["reasons"])
     assert "Live trading switch is off" in joined, joined
     assert "Demo" not in joined, joined
+
+
+# ===========================================================================
+# Shares base actions never transmit — and must never claim they did
+# ===========================================================================
+def test_buy_shares_never_transmits_whatever_the_switches_say(store, monkeypatch):
+    """`schwab_api.build_equity_order`'s field names are LIVE_VERIFY, so the
+    equity path is construct-and-preview only. That decision is sound; the
+    failure was that the confirmation dialog still said "This transmits a real
+    order to your Schwab account" and offered "Transmit live order"."""
+    assert not config.EQUITY_ORDER_PLACEMENT_ENABLED      # the default
+    assert "buy_shares" in executor.non_transmitting_actions()
+    assert "sell_shares" in executor.non_transmitting_actions()
+    # No put or option action may creep in — those DO transmit when enabled.
+    assert not (executor.non_transmitting_actions() & executor.PUT_ACTIONS)
+
+    placed = []
+    monkeypatch.setattr(executor, "_place_live",
+                        lambda *a, **kw: placed.append(a) or {})
+    monkeypatch.setattr(executor, "live_enabled", lambda: True)
+    monkeypatch.setattr(config, "_demo_mode", False)
+    monkeypatch.setattr(executor.schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(executor, "_preview_equity_order",
+                        lambda *a, **kw: {"order": {}, "transmitted": False})
+
+    executor.execute({"action": "buy_shares", "ticker": "AAA", "qty": 100,
+                      "stock_price": 50.0, "price_per_share": 50.0,
+                      "line_in_the_sand": 45.0})
+    assert placed == [], "a shares order must never reach the live placement path"
+
+
+def test_a_shares_booking_records_logged_not_live(store, monkeypatch):
+    """Mode describes what HAPPENED, not what the session was configured for.
+
+    It used to pass the session's mode straight through, so a live session
+    recorded mode="live" for an order that was never transmitted. Two things key
+    off that field: the UI's "RECORDED — no order was sent" message, and
+    `reconcile._ticker_liveness`. A wrong value both misleads the operator and
+    tells reconciliation to expect shares the broker does not hold."""
+    monkeypatch.setattr(executor, "live_enabled", lambda: True)
+    monkeypatch.setattr(config, "_demo_mode", False)
+    monkeypatch.setattr(executor.schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(executor, "_preview_equity_order",
+                        lambda *a, **kw: {"order": {}, "transmitted": False})
+
+    res = executor.execute({"action": "buy_shares", "ticker": "AAA",
+                            "qty": 100, "stock_price": 50.0,
+                            "price_per_share": 50.0, "line_in_the_sand": 45.0})
+    assert res["mode"] == "logged", "nothing was transmitted; do not claim live"
+    assert res["equity_order_preview"]["transmitted"] is False
+
+
+def test_the_non_transmitting_set_is_served_to_the_ui(monkeypatch):
+    """Served rather than duplicated in the frontend, so the confirmation dialog
+    can never drift from the dispatch that enforces it."""
+    import app as app_module
+    st = app_module._live_trading_status()
+    assert st["non_transmitting_actions"] == sorted(executor.non_transmitting_actions())

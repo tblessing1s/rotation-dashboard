@@ -1660,6 +1660,16 @@ def _live_trading_status() -> dict:
         "demo": config.demo_enabled(),
         "schwab_configured": schwab_api.configured(),
         "schwab": schwab_api.token_status(),
+        # Actions that never reach the broker whatever the switches say, so the
+        # confirmation dialog cannot promise a transmit the executor will not
+        # perform. Served rather than duplicated in the frontend: one source of
+        # truth, and it can never drift from the dispatch that enforces it.
+        "non_transmitting_actions": sorted(executor.non_transmitting_actions()),
+        # How long the UI should let a working order try to fill before cancelling
+        # it. Served so the window is ONE number the operator can tune, not a
+        # constant compiled into the bundle.
+        "order_fill_wait_seconds": config.ORDER_FILL_WAIT_SECONDS,
+        "equity_placement": config.EQUITY_ORDER_PLACEMENT_ENABLED,
     }
 
 
