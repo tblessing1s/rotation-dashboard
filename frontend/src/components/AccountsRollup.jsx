@@ -107,7 +107,18 @@ export default function AccountsRollup({ activeId, refreshKey, onSelect }) {
                             tone="bg-amber-500/15 text-amber-300" />
                       <Flag count={r.open_proposals} label="to adopt"
                             tone="bg-sky-500/15 text-sky-300" />
-                      {!r.active_alerts && !r.pending_orders && !r.open_proposals && (
+                      {r.connection?.mode === "own" && !r.connection?.connected && (
+                        <span className="rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-300">
+                          Schwab login not connected
+                        </span>
+                      )}
+                      {r.connection?.status === "expired" && (
+                        <span className="rounded-full bg-rose-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-rose-300">
+                          Schwab grant expired
+                        </span>
+                      )}
+                      {!r.active_alerts && !r.pending_orders && !r.open_proposals &&
+                       !(r.connection?.mode === "own" && !r.connection?.connected) && (
                         <span className="text-xs text-slate-600">—</span>
                       )}
                       {r.error && <span className="text-xs text-rose-300">{r.error}</span>}

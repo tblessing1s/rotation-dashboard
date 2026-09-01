@@ -263,20 +263,196 @@ def test_reconcile_reads_only_the_bound_accounts_positions(store):
 
 
 # ---------------------------------------------------------------------------
+# 4b. Its own Schwab login — when the account is under a different credential
+# ---------------------------------------------------------------------------
+@pytest.fixture()
+def app_creds(monkeypatch):
+    monkeypatch.setenv("SCHWAB_APP_KEY", "key")
+    monkeypatch.setenv("SCHWAB_APP_SECRET", "secret")
+    monkeypatch.delenv("SCHWAB_REFRESH_TOKEN", raising=False)
+
+
+def test_every_book_shares_one_grant_by_default(store, app_creds):
+    import schwab_api
+    accounts.create("IRA")
+    assert accounts.connection_id() == accounts.SHARED_CONNECTION
+    with accounts.use("ira"):
+        assert accounts.connection_id() == accounts.SHARED_CONNECTION
+    # …and that grant keeps the original token path, so an existing deployment's
+    # token IS the shared connection with nothing to move.
+    assert schwab_api.token_path(accounts.SHARED_CONNECTION) == \
+        os.path.join(str(store), "schwab_token.json")
+
+
+def test_an_own_connection_has_its_own_token_file(store, app_creds):
+    import schwab_api
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+    schwab_api.store_refresh_token("SHARED-TOKEN")             # deployment login
+    with accounts.use("spouse"):
+        assert accounts.connection_id() == "account-spouse"
+        assert schwab_api.token_path() == os.path.join(str(store),
+                                                       "schwab_token.account-spouse.json")
+        assert schwab_api.current_refresh_token() is None      # not connected yet
+        assert schwab_api.configured() is False
+        schwab_api.store_refresh_token("SPOUSE-TOKEN")
+        assert schwab_api.current_refresh_token() == "SPOUSE-TOKEN"
+        assert schwab_api.configured() is True
+    # The shared grant is untouched by the second login's consent.
+    assert schwab_api.current_refresh_token() == "SHARED-TOKEN"
+
+
+def test_an_own_connection_never_borrows_the_env_refresh_token(store, app_creds, monkeypatch):
+    """SCHWAB_REFRESH_TOKEN is the deployment's own credential. Handing it to a
+    book that authenticates separately would trade the wrong login's accounts —
+    the precise failure a separate connection exists to prevent."""
+    import schwab_api
+    monkeypatch.setenv("SCHWAB_REFRESH_TOKEN", "ENV-TOKEN")
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+    assert schwab_api.current_refresh_token() == "ENV-TOKEN"    # shared: yes
+    with accounts.use("spouse"):
+        assert schwab_api.current_refresh_token() is None       # own: never
+
+
+def test_the_primary_account_cannot_hold_a_second_connection(store):
+    with pytest.raises(ValueError):
+        accounts.update(accounts.DEFAULT_ID, own_connection=True)
+
+
+def test_broker_calls_refuse_an_unconnected_book_but_market_data_falls_back(store, app_creds):
+    """Prices are the same whichever login asks; an account is not. So a book
+    still waiting on its own consent keeps its charts and loses its broker."""
+    import data_handler
+    import schwab_api
+    schwab_api.store_refresh_token("SHARED-TOKEN")
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+
+    with accounts.use("spouse"):
+        assert schwab_api.market_configured() is True
+        assert schwab_api.market_connection() == accounts.SHARED_CONNECTION
+        assert data_handler.client().connection == accounts.SHARED_CONNECTION
+        with pytest.raises(schwab_api.SchwabError):
+            data_handler.broker_client()
+
+        schwab_api.store_refresh_token("SPOUSE-TOKEN")
+        assert data_handler.broker_client().connection == "account-spouse"
+
+
+def test_each_connection_keeps_its_own_client_and_access_token(store, app_creds):
+    import data_handler
+    import schwab_api
+    schwab_api.store_refresh_token("SHARED-TOKEN")
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+    with accounts.use("spouse"):
+        schwab_api.store_refresh_token("SPOUSE-TOKEN")
+        spouse_client = data_handler.broker_client()
+    shared_client = data_handler.broker_client()
+    assert spouse_client is not shared_client
+    assert (spouse_client.connection, shared_client.connection) == \
+        ("account-spouse", accounts.SHARED_CONNECTION)
+
+
+def test_disconnect_removes_the_grant_and_returns_the_book_to_shared(store, app_creds):
+    import schwab_api
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+    with accounts.use("spouse"):
+        schwab_api.store_refresh_token("SPOUSE-TOKEN")
+        path = schwab_api.token_path()
+    assert os.path.exists(path)
+
+    report = accounts.disconnect("spouse")
+    assert report["token_removed"] is True and not os.path.exists(path)
+    assert accounts.get("spouse")["own_connection"] is False
+    assert accounts.connection_id("spouse") == accounts.SHARED_CONNECTION
+
+
+def test_deleting_a_book_takes_its_credential_with_it(store, app_creds):
+    import schwab_api
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+    with accounts.use("spouse"):
+        schwab_api.store_refresh_token("SPOUSE-TOKEN")
+        path = schwab_api.token_path()
+    accounts.delete("spouse", purge=True)
+    assert not os.path.exists(path), "a credential for a deleted book is pure liability"
+
+
+def test_oauth_state_routes_the_grant_to_the_book_that_started_it(client, store, app_creds,
+                                                                 monkeypatch):
+    """The operator may switch books while Schwab's consent screen is open, so
+    the callback must follow the state it issued, not whatever is active now."""
+    import app as app_module
+    import schwab_api
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+
+    started = client.get("/auth/schwab", headers={"X-CFM-Account": "spouse"}).get_json()
+    assert started["connection"] == "account-spouse"
+    state = started["authorize_url"].rsplit("state=", 1)[-1]
+    assert app_module._connection_from_state(state) == "account-spouse"
+
+    monkeypatch.setattr(schwab_api, "exchange_code",
+                        lambda code, uri: {"refresh_token": "SPOUSE-TOKEN"})
+    resp = client.get(f"/auth/schwab/callback?code=abc&state={state}")
+    assert resp.status_code == 302 and "account=spouse" in resp.headers["Location"]
+    with accounts.use("spouse"):
+        assert schwab_api.current_refresh_token() == "SPOUSE-TOKEN"
+    assert schwab_api.current_refresh_token() is None  # the shared grant is untouched
+
+
+def test_a_state_naming_an_unknown_connection_falls_back_to_shared(store):
+    import app as app_module
+    assert app_module._connection_from_state("rand.account-ghost") == accounts.SHARED_CONNECTION
+    assert app_module._connection_from_state(None) == accounts.SHARED_CONNECTION
+    assert app_module._connection_from_state("rand") == accounts.SHARED_CONNECTION
+
+
+def test_connections_endpoint_lists_every_grant(client, store, app_creds):
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+    rows = client.get("/api/accounts/connections").get_json()["connections"]
+    assert [r["connection"] for r in rows] == [accounts.SHARED_CONNECTION, "account-spouse"]
+    assert [r["mode"] for r in rows] == ["shared", "own"]
+    assert rows[1]["account"] == "spouse" and rows[1]["configured"] is False
+
+
+# ---------------------------------------------------------------------------
 # 5. The roll-up
 # ---------------------------------------------------------------------------
+def _shares_position(ticker: str, count: int, cost_per_share: float) -> dict:
+    return {"ticker": ticker, "status": "open",
+            "shares": {"count": count, "cost_basis_per_share": cost_per_share}}
+
+
+def test_deployed_capital_is_derived_not_read_from_stale_metadata(store):
+    """metadata.capital_deployed is a legacy field nothing maintains — every view
+    derives deployed capital from the open positions. A roll-up that trusted the
+    field showed a live book as $0 deployed."""
+    import position_manager
+    state = log.load_state()
+    state["positions"] = [_shares_position("AAPL", 100, 180.0)]
+    state["metadata"]["capital_deployed"] = 0      # stale, as a real book's is
+    log.save_state(state)
+
+    row = {r["id"]: r for r in accounts.summary()["accounts"]}[accounts.DEFAULT_ID]
+    assert row["capital_deployed"] == 18000.0
+    assert row["capital_deployed"] == position_manager.deployed_capital(log.load_state())
+
+
 def test_summary_rolls_every_book_up_without_provider_calls(store):
     accounts.create("IRA")
     state = log.load_state()
-    state["positions"] = [{"ticker": "AAPL", "status": "open"}]
-    state["metadata"]["capital_deployed"] = 20000
+    state["positions"] = [_shares_position("AAPL", 100, 200.0)]
     state["theta_ledger"]["totals"] = {"this_week": 300, "this_month": 900, "ytd": 5000}
     log.save_state(state)
     with accounts.use("ira"):
         ira = log.load_state()
-        ira["positions"] = [{"ticker": "MSFT", "status": "open"},
+        ira["positions"] = [_shares_position("MSFT", 100, 100.0),
                             {"ticker": "NVDA", "status": "closed"}]
-        ira["metadata"]["capital_deployed"] = 10000
         ira["theta_ledger"]["totals"] = {"this_week": 100, "this_month": 250, "ytd": 1200}
         ira["alerts"]["active"] = {"fp1": {"type": "ROLL_DUE"}}
         log.save_state(ira)
@@ -284,7 +460,9 @@ def test_summary_rolls_every_book_up_without_provider_calls(store):
     summary = accounts.summary()
     rows = {r["id"]: r for r in summary["accounts"]}
     assert rows[accounts.DEFAULT_ID]["open_positions"] == 1
+    assert rows[accounts.DEFAULT_ID]["capital_deployed"] == 20000.0
     assert rows["ira"]["open_positions"] == 1 and rows["ira"]["tickers"] == ["MSFT"]
+    assert rows["ira"]["capital_deployed"] == 10000.0
     assert rows["ira"]["active_alerts"] == 1
     assert summary["totals"] == {
         "accounts": 2, "open_positions": 2, "capital_deployed": 30000.0,
@@ -355,6 +533,49 @@ def test_unknown_account_header_is_refused_but_the_accounts_api_still_answers(cl
     assert refused.status_code == 404 and refused.get_json()["unknown_account"] is True
     # …so a UI holding a stale id can still list accounts and recover.
     assert client.get("/api/accounts", headers={"X-CFM-Account": "ghost"}).status_code == 200
+
+
+def test_broker_account_picker_reports_why_it_is_empty(client, store, monkeypatch):
+    """An empty picker has several causes and the operator has to be able to tell
+    them apart — so this endpoint answers 200 with the reason, never an opaque
+    error the panel can only render as a blank dropdown."""
+    import schwab_api
+    monkeypatch.setattr(schwab_api, "configured", lambda: False)
+    body = client.get("/api/accounts/broker-accounts").get_json()
+    assert body["count"] == 0 and body["accounts"] == []
+    assert "isn't connected" in body["error"]
+
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    import data_handler
+
+    class _NoAccounts:
+        def account_numbers(self):
+            return []
+
+    monkeypatch.setattr(data_handler, "client", lambda: _NoAccounts())
+    body = client.get("/api/accounts/broker-accounts").get_json()
+    assert body["count"] == 0 and "consent screen" in body["error"]
+
+    class _Broken:
+        def account_numbers(self):
+            raise RuntimeError("HTTP 401 token expired")
+
+    monkeypatch.setattr(data_handler, "client", lambda: _Broken())
+    body = client.get("/api/accounts/broker-accounts").get_json()
+    assert body["error"] == "HTTP 401 token expired"
+
+
+def test_broker_account_picker_lists_every_linked_account_and_its_binding(client, store, monkeypatch):
+    import data_handler
+    import schwab_api
+    accounts.create("IRA", broker_account_number="33334444")
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: _Client())
+
+    body = client.get("/api/accounts/broker-accounts").get_json()
+    assert body["error"] is None and body["count"] == 2
+    assert [r["masked"] for r in body["accounts"]] == ["…2222", "…4444"]
+    assert [r["bound_to"] for r in body["accounts"]] == [None, "ira"]
 
 
 def test_deleting_a_book_with_executions_is_refused_over_http(client, store):

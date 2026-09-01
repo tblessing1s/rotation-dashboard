@@ -230,7 +230,7 @@ def resolve_operating_cash(state: dict) -> dict:
     if config.demo_enabled() or not schwab_api.configured():
         return {"amount": manual, "source": "manual", "error": None}
     try:
-        live = round(float(data_handler.client().cash_balance()), 2)
+        live = round(float(data_handler.broker_client().cash_balance()), 2)
     except Exception as e:  # noqa: BLE001 — degrade to the manual fallback
         return {"amount": manual, "source": "manual", "error": str(e)}
     if live != manual:

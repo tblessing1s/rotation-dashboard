@@ -54,7 +54,11 @@ Match the surrounding style; don't introduce a linter unless asked.
   background work in `accounts.use(id)`. Orders/transactions/cash/reconciliation
   resolve the brokerage account through the account's binding
   (`accounts.broker_hash`, `schwab_api.select_account_node`) — never
-  `primary_account_hash()` at a new call site. See `docs/accounts.md`.
+  `primary_account_hash()` at a new call site. A book whose brokerage account is
+  under a DIFFERENT Schwab login holds its own OAuth grant
+  (`accounts.connection_id`, `schwab_token.account-<id>.json`); market data may
+  fall back to the shared grant (`data_handler.client`), broker calls never do
+  (`data_handler.broker_client`). See `docs/accounts.md`.
 - **Units:** short premiums/extrinsic are per-share; one contract = 100 shares.
   The ×100 factor lives in one place per side — `backend/units.py` (which still
   carries the per-contract LEAP conversions for historical records) and

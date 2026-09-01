@@ -101,7 +101,7 @@ def _override(ticker: str, state: dict | None = None) -> float | None:
 
 def _fetch_yield(ticker: str) -> float | None:
     """Provider dividend yield as a decimal, or None if unavailable."""
-    if schwab_api.configured():
+    if schwab_api.market_configured():
         try:
             import data_handler
             fund = data_handler.client().get_instrument_fundamental(ticker)
@@ -233,7 +233,7 @@ def _fetch_event(ticker: str) -> dict:
     """Best-effort {ex_date, amount} from Schwab fundamentals, then Alpha
     Vantage OVERVIEW. Field names vary by provider vintage, so several
     candidates are tried; amount falls back to annual/frequency."""
-    if schwab_api.configured():
+    if schwab_api.market_configured():
         try:
             import data_handler
             fund = data_handler.client().get_instrument_fundamental(ticker)

@@ -1688,13 +1688,29 @@ def api_state():
 # ---------------------------------------------------------------------------
 @app.route("/api/accounts")
 def api_accounts():
-    """The registry: every account, which is active, and this request's binding."""
+    """The registry: every account, its Schwab connection, which is active, and
+    this request's binding.
+
+    The connection block is what makes "why can't this book see its account"
+    answerable in the UI: it says whether the book authenticates with the shared
+    grant or its own, and whether that grant is actually good right now."""
     try:
+        rows = []
+        for acct in accounts.list_accounts(include_archived=True):
+            connection = accounts.connection_id(acct["id"])
+            status = schwab_api.token_status(connection)
+            rows.append({**acct, "connection": {
+                "id": connection,
+                "mode": "own" if acct.get("own_connection") else "shared",
+                "connected": bool(status.get("present")),
+                "status": status.get("status"),
+                "days_left": status.get("daysLeft"),
+            }})
         return jsonify({
             "active": accounts.active_id(),
             "persisted_active": accounts.load_registry()["active"],
             "demo": config.demo_enabled(),
-            "accounts": accounts.list_accounts(include_archived=True),
+            "accounts": rows,
             "max_accounts": accounts.MAX_ACCOUNTS,
         })
     except Exception as e:  # noqa: BLE001
@@ -1729,7 +1745,8 @@ def api_accounts_update(account_id: str):
             label=payload.get("label"),
             broker_account_number=payload.get("broker_account_number"),
             archived=payload.get("archived"),
-            note=payload.get("note")))
+            note=payload.get("note"),
+            own_connection=payload.get("own_connection")))
     except accounts.UnknownAccount as e:
         return _err(e, 404)
     except ValueError as e:
@@ -1750,6 +1767,22 @@ def api_accounts_delete(account_id: str):
         return _err(e, 404)
     except accounts.AccountInUse as e:
         return _err(e, 409)
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/accounts/<account_id>/connection", methods=["DELETE"])
+def api_accounts_disconnect(account_id: str):
+    """Discard this book's own Schwab grant and put it back on the shared one.
+
+    The refresh token is deleted rather than set aside — it is a credential, not
+    a record, and reconnecting re-mints it in one click."""
+    try:
+        return jsonify(accounts.disconnect(account_id))
+    except accounts.UnknownAccount as e:
+        return _err(e, 404)
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001
@@ -1794,24 +1827,80 @@ def api_broker_accounts():
 
     One login commonly reaches several accounts; binding a book to one is what
     keeps its orders, transactions, cash and reconciliation on that account. Only
-    account numbers are returned — the trading hashes stay server-side."""
+    account numbers are returned — the trading hashes stay server-side.
+
+    ALWAYS 200, carrying the reason when the list is short or empty. Schwab
+    returns only the accounts the app authorization covers, so "my other account
+    isn't in the picker" has several different causes (not connected, token
+    expired, the account wasn't ticked at consent) and an opaque 400 hides which
+    one it is. The UI shows the count and the reason verbatim, and lets the
+    operator type a number the enumeration can't see."""
+    connection = accounts.connection_id()
+    own = connection != accounts.SHARED_CONNECTION
+    out = {
+        "accounts": [],
+        "count": 0,
+        "connection": connection,
+        "connection_mode": "own" if own else "shared",
+        "schwab_configured": schwab_api.configured(),
+        "token": schwab_api.token_status(),
+        "demo": config.demo_enabled(),
+        "error": None,
+    }
+    if not out["schwab_configured"]:
+        out["error"] = (
+            "This book authenticates with its own Schwab login, which isn't "
+            "connected yet — use Connect below." if own else
+            "Schwab isn't connected on this deployment, so the account list can't "
+            "be read. Connect it from the Schwab card above.")
+        return jsonify(out)
     try:
-        client = data_handler.client()
-        numbers = client.account_numbers() or []
-        bound = {a["broker_account_number"]: a["id"]
-                 for a in accounts.list_accounts(include_archived=True)
-                 if a["broker_account_number"]}
+        numbers = data_handler.broker_client().account_numbers() or []
+    except Exception as e:  # noqa: BLE001 — report the reason, don't hide it
+        out["error"] = str(e)
+        return jsonify(out)
+    bound = {a["broker_account_number"]: a["id"]
+             for a in accounts.list_accounts(include_archived=True)
+             if a["broker_account_number"]}
+    for entry in numbers:
+        number = str(entry.get("accountNumber") or "").strip()
+        if not number:
+            continue
+        out["accounts"].append({
+            "account_number": number,
+            "masked": f"…{number[-4:]}" if len(number) > 4 else number,
+            "bound_to": bound.get(number),
+        })
+    out["count"] = len(out["accounts"])
+    if not out["count"]:
+        out["error"] = ("Schwab returned no accounts for this login. That usually "
+                        "means the app authorization covers no account yet — "
+                        "reconnect Schwab and tick every account on the consent screen.")
+    return jsonify(out)
+
+
+@app.route("/api/accounts/connections")
+def api_account_connections():
+    """Every Schwab grant this deployment holds, and how each one is doing.
+
+    One expired grant is a silent outage for the books behind it — the shared
+    token's expiry is already surfaced, and a second login's must be too."""
+    try:
         rows = []
-        for entry in numbers:
-            number = str(entry.get("accountNumber") or "").strip()
-            if not number:
-                continue
-            rows.append({"account_number": number,
-                         "masked": f"…{number[-4:]}" if len(number) > 4 else number,
-                         "bound_to": bound.get(number)})
-        return jsonify({"accounts": rows})
+        for connection in accounts.connections():
+            owner = accounts.connection_owner(connection)
+            acct = accounts.get(owner) if owner else None
+            rows.append({
+                "connection": connection,
+                "mode": "own" if owner else "shared",
+                "account": owner,
+                "label": (acct or {}).get("label") if acct else "Shared login",
+                "token": schwab_api.token_status(connection),
+                "configured": schwab_api.configured(connection),
+            })
+        return jsonify({"connections": rows})
     except Exception as e:  # noqa: BLE001
-        return _err(e, 400)
+        return _err(e)
 
 
 @app.route("/api/mode", methods=["GET", "POST"])
@@ -2215,11 +2304,48 @@ def _callback_uri() -> str:
     return root + "/auth/schwab/callback"
 
 
+def _state_for(connection: str) -> str:
+    """OAuth state carrying the CONNECTION the grant is for.
+
+    Schwab echoes ``state`` back verbatim, and the callback URL itself is fixed
+    (it must match the one registered with the app), so state is the only channel
+    that can tell the callback which book's login just consented. The random half
+    is kept in front of it.
+    """
+    return f"{secrets.token_urlsafe(16)}.{connection}"
+
+
+def _connection_from_state(state: str | None) -> str:
+    """The connection a callback's state names, validated against the registry.
+
+    An unknown or missing connection falls back to the SHARED grant — the only
+    safe default, since it is the one every deployment already has; storing a
+    stranger's consent into a book's slot is what must not happen.
+    """
+    tail = (state or "").rsplit(".", 1)[-1].strip()
+    if not tail or tail == accounts.SHARED_CONNECTION:
+        return accounts.SHARED_CONNECTION
+    owner = accounts.connection_owner(tail)
+    if owner and accounts.exists(owner):
+        return tail
+    return accounts.SHARED_CONNECTION
+
+
 @app.route("/auth/schwab")
 def auth_schwab():
+    """Start the Schwab consent flow for ONE connection.
+
+    Which one comes from the account this request is bound to (the
+    ``?account=``/header binding): a book on its own connection re-consents its
+    own login, every other book re-consents the shared one."""
     try:
-        state = secrets.token_urlsafe(16)
-        return jsonify({"authorize_url": schwab_api.authorize_url(_callback_uri(), state)})
+        connection = accounts.connection_id()
+        return jsonify({
+            "authorize_url": schwab_api.authorize_url(_callback_uri(),
+                                                      _state_for(connection)),
+            "connection": connection,
+            "account": accounts.active_id(),
+        })
     except Exception as e:  # noqa: BLE001
         return _err(e, 400)
 
@@ -2229,10 +2355,15 @@ def auth_schwab_callback():
     code = request.args.get("code")
     if not code:
         return redirect("/?schwab=error&msg=missing+authorization+code")
+    connection = _connection_from_state(request.args.get("state"))
     try:
         tokens = schwab_api.exchange_code(code, _callback_uri())
-        schwab_api.store_refresh_token(tokens["refresh_token"])
-        return redirect("/?schwab=connected")
+        # Store against the connection that STARTED the flow, never the currently
+        # active account: the operator may well have switched books in another tab
+        # while Schwab's consent screen was open.
+        schwab_api.store_refresh_token(tokens["refresh_token"], connection)
+        owner = accounts.connection_owner(connection)
+        return redirect(f"/?schwab=connected&account={owner}" if owner else "/?schwab=connected")
     except Exception as e:  # noqa: BLE001
         from urllib.parse import quote
         return redirect(f"/?schwab=error&msg={quote(str(e)[:200])}")

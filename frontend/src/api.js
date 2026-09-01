@@ -29,7 +29,11 @@ async function request(path, opts = {}) {
       credentials: "same-origin", // send/receive the session cookie
       headers: {
         "Content-Type": "application/json",
-        ...(activeAccount ? { "X-CFM-Account": activeAccount } : {}),
+        // opts.account addresses ONE call at a specific book (connecting another
+        // account's Schwab login, say) without moving the tab's own selection.
+        ...(opts.account || activeAccount
+          ? { "X-CFM-Account": opts.account || activeAccount }
+          : {}),
       },
       signal: controller.signal,
       ...opts,
@@ -280,7 +284,13 @@ export const api = {
     request("/api/accounts/active", { method: "POST", body: JSON.stringify({ id }) }),
   // The brokerage accounts this Schwab login can reach, for the binding picker.
   brokerAccounts: () => request("/api/accounts/broker-accounts"),
-  schwabAuth: () => request("/auth/schwab"),
+  // Start the Schwab consent flow. With an account id it re-consents THAT book's
+  // own login (see backend/accounts.py — connections); without one, the shared
+  // deployment login.
+  schwabAuth: (accountId) => request("/auth/schwab", accountId ? { account: accountId } : {}),
+  accountConnections: () => request("/api/accounts/connections"),
+  disconnectAccount: (id) =>
+    request(`/api/accounts/${encodeURIComponent(id)}/connection`, { method: "DELETE" }),
   authStatus: () => request("/api/auth/status"),
   login: (password) => request("/api/login", { method: "POST", body: JSON.stringify({ password }) }),
   logout: () => request("/api/logout", { method: "POST" }),

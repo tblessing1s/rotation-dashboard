@@ -86,9 +86,18 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+# The Schwab connection a book trades through. "shared" is the deployment-wide
+# OAuth grant (DATA_DIR/schwab_token.json) every account uses by default; an
+# account can instead hold its OWN grant when its brokerage account sits under a
+# different Schwab login, which the shared token can never reach however the
+# consent screen is answered.
+SHARED_CONNECTION = "shared"
+
+
 def _default_account() -> dict:
     return {"id": DEFAULT_ID, "label": DEFAULT_LABEL, "broker_account_number": None,
-            "archived": False, "created_at": _utcnow(), "note": ""}
+            "own_connection": False, "archived": False, "created_at": _utcnow(),
+            "note": ""}
 
 
 def _default_registry() -> dict:
@@ -113,6 +122,7 @@ def _normalize(registry: dict) -> dict:
             "id": acct_id,
             "label": (str(raw.get("label") or acct_id).strip() or acct_id)[:LABEL_MAX],
             "broker_account_number": str(number).strip() if number else None,
+            "own_connection": bool(raw.get("own_connection")),
             "archived": bool(raw.get("archived")),
             "created_at": raw.get("created_at") or _utcnow(),
             "note": str(raw.get("note") or "")[:200],
@@ -318,6 +328,7 @@ def create(label: str, broker_account_number: str | None = None,
         "label": label,
         "broker_account_number": (str(broker_account_number).strip()
                                   if broker_account_number else None),
+        "own_connection": False,
         "archived": False,
         "created_at": _utcnow(),
         "note": str(note or "")[:200],
@@ -330,11 +341,20 @@ def create(label: str, broker_account_number: str | None = None,
 
 def update(account_id: str, label: str | None = None,
            broker_account_number: str | None = None,
-           archived: bool | None = None, note: str | None = None) -> dict:
-    """Rename an account, (re)bind its brokerage account number, archive it.
+           archived: bool | None = None, note: str | None = None,
+           own_connection: bool | None = None) -> dict:
+    """Rename an account, (re)bind its brokerage account number, archive it, or
+    switch it between the shared Schwab connection and its own.
 
     ``broker_account_number=""`` clears the binding (back to the first linked
     Schwab account); ``None`` leaves it as it is.
+
+    Switching a book ONTO its own connection does not itself connect anything —
+    it declares that this book authenticates separately, and until that grant is
+    completed (``/auth/schwab?account=<id>``) the book reads as not connected
+    rather than silently borrowing the shared token. Switching it back OFF leaves
+    the stored grant in place, so a book can be moved back and forth without a
+    re-consent; ``disconnect()`` is what discards it.
     """
     registry = load_registry()
     target = None
@@ -351,6 +371,12 @@ def update(account_id: str, label: str | None = None,
         target["broker_account_number"] = number or None
     if note is not None:
         target["note"] = str(note)[:200]
+    if own_connection is not None:
+        if bool(own_connection) and target["id"] == DEFAULT_ID:
+            raise ValueError(
+                "the primary account uses the deployment's own Schwab connection "
+                "— that connection IS the shared one")
+        target["own_connection"] = bool(own_connection)
     if archived is not None:
         if bool(archived) and target["id"] == DEFAULT_ID:
             raise ValueError("the primary account cannot be archived")
@@ -398,6 +424,13 @@ def delete(account_id: str, purge: bool = False) -> dict:
             aside = f"{path}.deleted-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
             os.replace(path, aside)
             moved.append(aside)
+    # A deleted book's own Schwab grant goes with it — a credential for an
+    # account nothing points at any more is pure liability.
+    try:
+        import schwab_api
+        os.remove(schwab_api.token_path(f"account-{account_id}"))
+    except Exception:  # noqa: BLE001 — a stuck token file must never block the delete
+        pass
     registry = load_registry()
     registry["accounts"] = [a for a in registry["accounts"] if a["id"] != account_id]
     if registry["active"] == account_id:
@@ -405,6 +438,71 @@ def delete(account_id: str, purge: bool = False) -> dict:
     _write_registry(registry)
     logger.info("account deleted: %s (books set aside: %s)", account_id, moved or "none")
     return {"id": account_id, "removed": True, "books_set_aside": moved}
+
+
+# ---------------------------------------------------------------------------
+# Schwab connection
+#
+# The default is one grant for the whole deployment: every book authenticates as
+# the same Schwab login, and the per-account BINDING (below) says which of that
+# login's accounts it trades. That covers the common case — several accounts
+# under one login.
+#
+# It cannot cover an account under a DIFFERENT login (a spouse's account, a
+# second credential, an account linked on schwab.com for viewing only): the
+# Trader API only ever returns the accounts the grant itself covers, so no
+# consent-screen answer makes that account visible to this token. Such a book
+# holds its own grant instead — its own refresh token, its own access token, its
+# own /accounts enumeration — and everything downstream (orders, transactions,
+# cash, reconciliation) follows it because the client is resolved per connection.
+# ---------------------------------------------------------------------------
+def connection_id(account_id: str | None = None) -> str:
+    """Which Schwab grant this book authenticates with: ``SHARED_CONNECTION`` for
+    the deployment-wide one, or ``account-<id>`` for a book with its own."""
+    acct = get(account_id or active_id())
+    if acct and acct.get("own_connection"):
+        return f"account-{acct['id']}"
+    return SHARED_CONNECTION
+
+
+def connection_owner(connection: str) -> str | None:
+    """The account id behind an ``account-<id>`` connection (None for shared)."""
+    if not connection or connection == SHARED_CONNECTION:
+        return None
+    return connection[len("account-"):] if connection.startswith("account-") else None
+
+
+def connections() -> list[str]:
+    """Every distinct grant this deployment holds — the shared one plus one per
+    account that authenticates separately. What a token-expiry sweep iterates."""
+    out = [SHARED_CONNECTION]
+    for acct in list_accounts(include_archived=True):
+        if acct.get("own_connection"):
+            out.append(f"account-{acct['id']}")
+    return out
+
+
+def disconnect(account_id: str) -> dict:
+    """Discard a book's own Schwab grant and put it back on the shared one.
+
+    The refresh token file is DELETED rather than set aside: unlike an execution
+    log it is a credential, not a record, and a stale one on the volume is a
+    liability with no recovery value (reconnecting re-mints it in a click).
+    """
+    import schwab_api
+
+    acct = require(account_id)
+    path = schwab_api.token_path(f"account-{acct['id']}")
+    removed = False
+    try:
+        os.remove(path)
+        removed = True
+    except FileNotFoundError:
+        pass
+    update(acct["id"], own_connection=False)
+    logger.info("account %s disconnected from its own Schwab grant (token removed: %s)",
+                acct["id"], removed)
+    return {"id": acct["id"], "token_removed": removed, "own_connection": False}
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +559,17 @@ def _execution_count(path: str) -> int:
     return len(book.get("executions") or []) if book else 0
 
 
+def _deployed_capital(book: dict) -> float:
+    """Capital deployed in one book, through the same helper the Positions and
+    Overview tabs use — a pure function over the state dict, no provider calls."""
+    try:
+        import position_manager
+        return position_manager.deployed_capital(book)
+    except Exception as e:  # noqa: BLE001 — one odd book must not sink the roll-up
+        logger.warning("could not derive deployed capital: %s", e)
+        return 0.0
+
+
 def _account_summary(acct: dict) -> dict:
     """One account's monitoring line, read STRAIGHT off its state file.
 
@@ -470,10 +579,23 @@ def _account_summary(acct: dict) -> dict:
     the account's own tabs.
     """
     path = state_path(acct["id"])
+    connection = connection_id(acct["id"])
+    try:
+        import schwab_api
+        token = schwab_api.token_status(connection)
+    except Exception:  # noqa: BLE001 — a token read must never sink the roll-up
+        token = {}
     row = {
         "id": acct["id"],
         "label": acct["label"],
         "archived": acct["archived"],
+        # A book whose own Schwab login isn't connected can't trade or reconcile,
+        # which belongs on the monitor next to its positions, not two tabs away.
+        "connection": {
+            "mode": "own" if acct.get("own_connection") else "shared",
+            "connected": bool(token.get("present")),
+            "status": token.get("status"),
+        },
         "broker_account_number": _mask(acct["broker_account_number"]) or None,
         "broker_bound": bool(acct["broker_account_number"]),
         "state_path": path,
@@ -504,7 +626,11 @@ def _account_summary(acct: dict) -> dict:
     row.update({
         "open_positions": len(open_positions),
         "tickers": sorted({p.get("ticker") for p in open_positions if p.get("ticker")}),
-        "capital_deployed": round(float(metadata.get("capital_deployed") or 0), 2),
+        # DERIVED from the open positions, exactly as every other view derives it
+        # (position_manager.deployed_capital — shares, LEAP cost bases and put
+        # collateral). metadata.capital_deployed is a legacy field nothing keeps
+        # current: reading it showed a live book as $0 deployed.
+        "capital_deployed": _deployed_capital(book),
         "operating_cash": round(float(metadata.get("operating_cash") or 0), 2),
         "theta": ledger.get("totals") or {},
         "active_alerts": len((book.get("alerts") or {}).get("active") or {}),

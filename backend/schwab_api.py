@@ -55,6 +55,13 @@ USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 _TOKEN_FILE = os.path.join(config.DATA_DIR, "schwab_token.json")
 _token_lock = threading.Lock()
 
+# A CONNECTION is one OAuth grant. The deployment has one by default (the shared
+# grant in schwab_token.json) and every book authenticates with it; a book whose
+# brokerage account lives under a different Schwab login holds its own instead,
+# in schwab_token.account-<id>.json. Which one a call uses follows the ACTIVE
+# ACCOUNT, exactly as the state file does — see accounts.connection_id().
+SHARED_CONNECTION = "shared"
+
 # Short in-process cache for the accounts call (cash balance) — the Level 5
 # gate can re-evaluate several times a minute while the operator tweaks a
 # ticket, and this endpoint isn't part of the market-data rate-limit budget
@@ -164,30 +171,96 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _read_token_file() -> dict:
+def active_connection() -> str:
+    """The grant this call authenticates with — the active account's.
+
+    Resolved through the registry (never cached) so it follows the request/job
+    account binding, like config.active_state_path(). Degrades to the shared
+    grant if the registry can't be read: one login still beats no login.
+    """
     try:
-        with open(_TOKEN_FILE, encoding="utf-8") as fh:
+        import accounts
+        return accounts.connection_id()
+    except Exception as e:  # noqa: BLE001 — a registry problem must not lock us out
+        logger.warning("could not resolve the Schwab connection (%s); using the "
+                       "shared one", e)
+        return SHARED_CONNECTION
+
+
+def market_connection() -> str:
+    """The grant to use for MARKET DATA — bars, quotes, chains, fundamentals.
+
+    Prices are the same whichever login asks, so a book whose own grant isn't
+    connected (or has expired) still gets market data through the shared one
+    rather than blanking its charts. This fallback is deliberately NOT available
+    to account calls: an order, a cash read or a reconciliation answered by the
+    wrong login is a correctness failure, a chart answered by either login is not.
+    """
+    connection = active_connection()
+    if connection != SHARED_CONNECTION and not _grant_present(connection):
+        return SHARED_CONNECTION
+    return connection
+
+
+def market_configured() -> bool:
+    """Whether market data can be fetched from Schwab at all (see above).
+
+    Asks ``configured()`` with no argument first — the active book's own grant,
+    and the one call the suite stubs — then falls back to the shared login, so a
+    book waiting on its own consent still draws charts.
+    """
+    if configured():
+        return True
+    return _grant_present(SHARED_CONNECTION)
+
+
+def token_path(connection: str | None = None) -> str:
+    """Where one connection's refresh token lives. The shared grant keeps the
+    original ``schwab_token.json`` path, so an existing deployment's token is
+    already the shared connection — nothing to move."""
+    connection = connection or active_connection()
+    base = os.path.join(config.DATA_DIR, "schwab_token.json")
+    if connection == SHARED_CONNECTION:
+        return base
+    root, ext = os.path.splitext(base)
+    return f"{root}.{connection}{ext}"
+
+
+def _read_token_file(connection: str | None = None) -> dict:
+    try:
+        with open(token_path(connection), encoding="utf-8") as fh:
             return json.load(fh) or {}
     except (FileNotFoundError, ValueError):
         return {}
 
 
-def _write_token_file(data: dict) -> None:
+def _write_token_file(data: dict, connection: str | None = None) -> None:
     os.makedirs(config.DATA_DIR, exist_ok=True)
-    with open(_TOKEN_FILE, "w", encoding="utf-8") as fh:
+    with open(token_path(connection), "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=2)
 
 
-def store_refresh_token(refresh_token: str) -> None:
+def store_refresh_token(refresh_token: str, connection: str | None = None) -> None:
     with _token_lock:
-        rec = _read_token_file()
+        rec = _read_token_file(connection)
         rec.update({"refresh_token": refresh_token, "minted_at": _utcnow(), "auth_error": None})
-        _write_token_file(rec)
+        _write_token_file(rec, connection)
 
 
-def current_refresh_token() -> str | None:
-    rec = _read_token_file()
-    return rec.get("refresh_token") or os.environ.get("SCHWAB_REFRESH_TOKEN")
+def current_refresh_token(connection: str | None = None) -> str | None:
+    """This connection's refresh token.
+
+    The SCHWAB_REFRESH_TOKEN env fallback belongs to the shared grant only: it is
+    a deployment-level credential for the deployment's own login, and handing it
+    to a book that authenticates separately would silently trade the wrong login's
+    accounts — the exact failure a separate connection exists to prevent.
+    """
+    connection = connection or active_connection()
+    rec = _read_token_file(connection)
+    token = rec.get("refresh_token")
+    if token:
+        return token
+    return os.environ.get("SCHWAB_REFRESH_TOKEN") if connection == SHARED_CONNECTION else None
 
 
 def app_credentials() -> tuple[str, str]:
@@ -198,20 +271,32 @@ def app_credentials() -> tuple[str, str]:
     return key, secret
 
 
-def configured() -> bool:
+def _grant_present(connection: str | None = None) -> bool:
+    """The raw check behind ``configured`` — app credentials plus a refresh token
+    for this connection. Kept separate because ``configured`` is a seam the suite
+    substitutes wholesale; internal resolution must not depend on the stub."""
     return bool(
         os.environ.get("SCHWAB_APP_KEY")
         and os.environ.get("SCHWAB_APP_SECRET")
-        and current_refresh_token()
+        and current_refresh_token(connection)
     )
 
 
-def token_status() -> dict:
-    rec = _read_token_file()
-    refresh = rec.get("refresh_token") or os.environ.get("SCHWAB_REFRESH_TOKEN")
+def configured(connection: str | None = None) -> bool:
+    """Whether THIS book can reach Schwab: app credentials (deployment-wide, one
+    app) plus a grant for its connection."""
+    return _grant_present(connection)
+
+
+def token_status(connection: str | None = None) -> dict:
+    connection = connection or active_connection()
+    rec = _read_token_file(connection)
+    refresh = rec.get("refresh_token") or (
+        os.environ.get("SCHWAB_REFRESH_TOKEN") if connection == SHARED_CONNECTION else None)
     if not refresh:
-        return {"present": False, "status": "missing"}
-    out: dict = {"present": True, "source": "file" if rec.get("refresh_token") else "env"}
+        return {"present": False, "status": "missing", "connection": connection}
+    out: dict = {"present": True, "source": "file" if rec.get("refresh_token") else "env",
+                 "connection": connection}
     minted_at = rec.get("minted_at")
     out["mintedAt"] = minted_at
     if not minted_at:
@@ -285,9 +370,18 @@ def _parse_quote_node(symbol: str, node: dict) -> dict:
 
 
 class SchwabClient:
-    """Live Schwab client. One instance is shared process-wide (see app.py)."""
+    """Live Schwab client, PINNED to one OAuth connection.
 
-    def __init__(self):
+    One instance per connection is cached process-wide (data_handler.client()).
+    The pin matters: the access token cached on the instance belongs to one grant,
+    so a client that resolved its connection lazily could hand book B a token
+    minted for book A's login — and Schwab would happily answer with A's accounts.
+    """
+
+    def __init__(self, connection: str | None = None):
+        # None means "the shared grant" for a directly-constructed client; the
+        # cached-per-connection factory always passes one explicitly.
+        self.connection = connection or SHARED_CONNECTION
         self._access_token: str | None = None
         self._expires_at: float = 0.0
 
@@ -296,9 +390,17 @@ class SchwabClient:
         if self._access_token and time.time() < self._expires_at - 60:
             return self._access_token
         client_id, client_secret = app_credentials()
-        refresh = current_refresh_token()
+        refresh = current_refresh_token(self.connection)
         if not refresh:
-            raise SchwabError("no schwab refresh token — re-authorize at /auth/schwab")
+            owner = None
+            try:
+                import accounts
+                owner = accounts.connection_owner(self.connection)
+            except Exception:  # noqa: BLE001
+                owner = None
+            where = f"/auth/schwab?account={owner}" if owner else "/auth/schwab"
+            raise SchwabError(
+                f"no schwab refresh token for this account — connect it at {where}")
         basic = base64.b64encode(f"{client_id}:{client_secret}".encode()).decode()
         resp = _request(
             "post", TOKEN_URL,
@@ -310,9 +412,9 @@ class SchwabClient:
         )
         if resp.status_code != 200:
             with _token_lock:
-                rec = _read_token_file()
+                rec = _read_token_file(self.connection)
                 rec["auth_error"] = {"at": _utcnow(), "status": resp.status_code, "body": resp.text[:300]}
-                _write_token_file(rec)
+                _write_token_file(rec, self.connection)
             raise SchwabError(
                 f"schwab token refresh failed (HTTP {resp.status_code}) — "
                 "refresh token likely expired; re-authorize at /auth/schwab"

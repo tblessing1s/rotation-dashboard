@@ -728,7 +728,7 @@ def fetch_transactions() -> list:
     """Live Schwab transactions call, isolated so tests monkeypatch it."""
     import accounts
     import data_handler
-    client = data_handler.client()
+    client = data_handler.broker_client()
     # Ingest the transactions of THIS book's brokerage account only — pulling a
     # sibling account's fills would propose them for adoption into the wrong book.
     account_hash = accounts.broker_hash(client)
