@@ -11,6 +11,50 @@ import { Card, ErrorState, Loading, money } from "./ui.jsx";
 // a single-account install and wrong the moment there are two, so a second
 // account without a binding is called out below.
 
+// Account-number control. A picker alone is a dead end when Schwab's enumeration
+// comes back short — the operator can SEE the account in Schwab and still have no
+// way to bind it here. So this is a typed field with the enumerated numbers as
+// suggestions: pick one when the list has it, type one when it doesn't.
+//
+// Typing a number Schwab doesn't return is allowed but flagged: the order path
+// resolves the number through /accounts/accountNumbers and refuses when it isn't
+// there (accounts.broker_hash), so a wrong number fails loudly at the ticket
+// rather than routing a trade to the wrong account.
+function AccountNumberField({ value, onChange, brokerAccounts, listId, ownId }) {
+  const known = (brokerAccounts || []).some((b) => b.account_number === value);
+  const takenBy = (brokerAccounts || []).find(
+    (b) => b.account_number === value && b.bound_to && b.bound_to !== ownId)?.bound_to;
+  return (
+    <label className="text-xs text-slate-400">
+      Schwab account
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value.trim())}
+        list={listId}
+        placeholder="Leave blank to use the first account on this login"
+        className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100"
+      />
+      <datalist id={listId}>
+        {(brokerAccounts || []).map((b) => (
+          <option key={b.account_number} value={b.account_number}>
+            {b.masked}{b.bound_to ? ` — used by ${b.bound_to}` : ""}
+          </option>
+        ))}
+      </datalist>
+      {value && !known && (
+        <span className="mt-1 block text-amber-300">
+          Schwab didn't list this number for your login. You can save it, but orders
+          from this book will be refused until Schwab returns it — reconnect and tick
+          the account on the consent screen.
+        </span>
+      )}
+      {takenBy && (
+        <span className="mt-1 block text-amber-300">Already used by “{takenBy}”.</span>
+      )}
+    </label>
+  );
+}
+
 function AccountRow({ account, summary, brokerAccounts, isActive, onPatch, onDelete, onSelect }) {
   const [editing, setEditing] = React.useState(false);
   const [label, setLabel] = React.useState(account.label);
@@ -110,21 +154,9 @@ function AccountRow({ account, summary, brokerAccounts, isActive, onPatch, onDel
             <input value={label} onChange={(e) => setLabel(e.target.value)}
                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100" />
           </label>
-          <label className="text-xs text-slate-400">
-            Schwab account
-            <select value={number} onChange={(e) => setNumber(e.target.value)}
-                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100">
-              <option value="">First account on this login (default)</option>
-              {(brokerAccounts || []).map((b) => (
-                <option key={b.account_number} value={b.account_number}>
-                  {b.masked}{b.bound_to && b.bound_to !== account.id ? ` — used by ${b.bound_to}` : ""}
-                </option>
-              ))}
-              {number && !(brokerAccounts || []).some((b) => b.account_number === number) && (
-                <option value={number}>…{String(number).slice(-4)} (not linked right now)</option>
-              )}
-            </select>
-          </label>
+          <AccountNumberField value={number} onChange={setNumber}
+                              brokerAccounts={brokerAccounts}
+                              listId={`broker-accounts-${account.id}`} ownId={account.id} />
           <div className="sm:col-span-2">
             <button onClick={save} disabled={busy}
                     className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50">
@@ -164,19 +196,24 @@ function AccountRow({ account, summary, brokerAccounts, isActive, onPatch, onDel
 }
 
 export default function AccountsPanel({ registry, summary, activeId, onSelect, onChanged }) {
-  const [brokerAccounts, setBrokerAccounts] = React.useState(null);
-  const [brokerError, setBrokerError] = React.useState(null);
+  const [broker, setBroker] = React.useState(null);
+  const [brokerBusy, setBrokerBusy] = React.useState(false);
   const [adding, setAdding] = React.useState(false);
   const [label, setLabel] = React.useState("");
   const [number, setNumber] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
 
-  React.useEffect(() => {
-    api.brokerAccounts()
-      .then((r) => { setBrokerAccounts(r.accounts || []); setBrokerError(null); })
-      .catch((e) => { setBrokerAccounts([]); setBrokerError(e.message); });
-  }, [registry]);
+  const loadBroker = React.useCallback(() => {
+    setBrokerBusy(true);
+    return api.brokerAccounts()
+      .then((r) => setBroker(r))
+      .catch((e) => setBroker({ accounts: [], count: 0, error: e.message }))
+      .finally(() => setBrokerBusy(false));
+  }, []);
+
+  React.useEffect(() => { loadBroker(); }, [loadBroker, registry]);
+  const brokerAccounts = broker?.accounts || [];
 
   async function create() {
     setBusy(true); setErr(null);
@@ -213,10 +250,31 @@ export default function AccountsPanel({ registry, summary, activeId, onSelect, o
         login reaches. Switching accounts switches every tab at once.
       </p>
 
-      {brokerError && (
-        <p className="mt-2 text-xs text-amber-300">
-          Couldn't read your linked Schwab accounts ({brokerError}). You can still add
-          accounts and link them later.
+      {/* What Schwab actually returns for this login. Shown always, not only on
+          failure: "the picker is empty" and "Schwab reports one account" are
+          different problems, and only this line tells them apart. */}
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+        <span className="text-slate-500">
+          {broker
+            ? `Schwab lists ${brokerAccounts.length} account${brokerAccounts.length === 1 ? "" : "s"} for this login`
+            : "Reading your Schwab accounts…"}
+        </span>
+        <button onClick={loadBroker} disabled={brokerBusy}
+                className="rounded-full border border-slate-700 bg-slate-800/60 px-2 py-0.5 font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          {brokerBusy ? "Checking…" : "Recheck"}
+        </button>
+      </div>
+      {broker?.error && (
+        <p className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-200">
+          {broker.error}
+        </p>
+      )}
+      {broker && !broker.error && brokerAccounts.length < 2 && (
+        <p className="mt-2 text-xs text-slate-500">
+          Expecting another account here? Schwab only returns the accounts your app
+          authorization covers — reconnect Schwab and tick every account on the
+          consent screen. You can also type an account number by hand below; orders
+          are refused until Schwab returns it, so a typo can't misroute a trade.
         </p>
       )}
 
@@ -236,18 +294,9 @@ export default function AccountsPanel({ registry, summary, activeId, onSelect, o
                    placeholder="e.g. Roth IRA"
                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100" />
           </label>
-          <label className="text-xs text-slate-400">
-            Schwab account
-            <select value={number} onChange={(e) => setNumber(e.target.value)}
-                    className="mt-1 w-full rounded-md border border-slate-700 bg-slate-950 px-2 py-1.5 text-sm text-slate-100">
-              <option value="">Link later</option>
-              {(brokerAccounts || []).map((b) => (
-                <option key={b.account_number} value={b.account_number}>
-                  {b.masked}{b.bound_to ? ` — used by ${b.bound_to}` : ""}
-                </option>
-              ))}
-            </select>
-          </label>
+          <AccountNumberField value={number} onChange={setNumber}
+                              brokerAccounts={brokerAccounts}
+                              listId="broker-accounts-new" ownId={null} />
           <div className="flex gap-2 sm:col-span-2">
             <button onClick={create} disabled={busy || !label.trim()}
                     className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50">

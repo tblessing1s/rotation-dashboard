@@ -1794,24 +1794,49 @@ def api_broker_accounts():
 
     One login commonly reaches several accounts; binding a book to one is what
     keeps its orders, transactions, cash and reconciliation on that account. Only
-    account numbers are returned — the trading hashes stay server-side."""
+    account numbers are returned — the trading hashes stay server-side.
+
+    ALWAYS 200, carrying the reason when the list is short or empty. Schwab
+    returns only the accounts the app authorization covers, so "my other account
+    isn't in the picker" has several different causes (not connected, token
+    expired, the account wasn't ticked at consent) and an opaque 400 hides which
+    one it is. The UI shows the count and the reason verbatim, and lets the
+    operator type a number the enumeration can't see."""
+    out = {
+        "accounts": [],
+        "count": 0,
+        "schwab_configured": schwab_api.configured(),
+        "token": schwab_api.token_status(),
+        "demo": config.demo_enabled(),
+        "error": None,
+    }
+    if not out["schwab_configured"]:
+        out["error"] = ("Schwab isn't connected on this deployment, so the account "
+                        "list can't be read. Connect it from the Schwab card above.")
+        return jsonify(out)
     try:
-        client = data_handler.client()
-        numbers = client.account_numbers() or []
-        bound = {a["broker_account_number"]: a["id"]
-                 for a in accounts.list_accounts(include_archived=True)
-                 if a["broker_account_number"]}
-        rows = []
-        for entry in numbers:
-            number = str(entry.get("accountNumber") or "").strip()
-            if not number:
-                continue
-            rows.append({"account_number": number,
-                         "masked": f"…{number[-4:]}" if len(number) > 4 else number,
-                         "bound_to": bound.get(number)})
-        return jsonify({"accounts": rows})
-    except Exception as e:  # noqa: BLE001
-        return _err(e, 400)
+        numbers = data_handler.client().account_numbers() or []
+    except Exception as e:  # noqa: BLE001 — report the reason, don't hide it
+        out["error"] = str(e)
+        return jsonify(out)
+    bound = {a["broker_account_number"]: a["id"]
+             for a in accounts.list_accounts(include_archived=True)
+             if a["broker_account_number"]}
+    for entry in numbers:
+        number = str(entry.get("accountNumber") or "").strip()
+        if not number:
+            continue
+        out["accounts"].append({
+            "account_number": number,
+            "masked": f"…{number[-4:]}" if len(number) > 4 else number,
+            "bound_to": bound.get(number),
+        })
+    out["count"] = len(out["accounts"])
+    if not out["count"]:
+        out["error"] = ("Schwab returned no accounts for this login. That usually "
+                        "means the app authorization covers no account yet — "
+                        "reconnect Schwab and tick every account on the consent screen.")
+    return jsonify(out)
 
 
 @app.route("/api/mode", methods=["GET", "POST"])

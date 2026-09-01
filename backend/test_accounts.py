@@ -357,6 +357,49 @@ def test_unknown_account_header_is_refused_but_the_accounts_api_still_answers(cl
     assert client.get("/api/accounts", headers={"X-CFM-Account": "ghost"}).status_code == 200
 
 
+def test_broker_account_picker_reports_why_it_is_empty(client, store, monkeypatch):
+    """An empty picker has several causes and the operator has to be able to tell
+    them apart — so this endpoint answers 200 with the reason, never an opaque
+    error the panel can only render as a blank dropdown."""
+    import schwab_api
+    monkeypatch.setattr(schwab_api, "configured", lambda: False)
+    body = client.get("/api/accounts/broker-accounts").get_json()
+    assert body["count"] == 0 and body["accounts"] == []
+    assert "isn't connected" in body["error"]
+
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    import data_handler
+
+    class _NoAccounts:
+        def account_numbers(self):
+            return []
+
+    monkeypatch.setattr(data_handler, "client", lambda: _NoAccounts())
+    body = client.get("/api/accounts/broker-accounts").get_json()
+    assert body["count"] == 0 and "consent screen" in body["error"]
+
+    class _Broken:
+        def account_numbers(self):
+            raise RuntimeError("HTTP 401 token expired")
+
+    monkeypatch.setattr(data_handler, "client", lambda: _Broken())
+    body = client.get("/api/accounts/broker-accounts").get_json()
+    assert body["error"] == "HTTP 401 token expired"
+
+
+def test_broker_account_picker_lists_every_linked_account_and_its_binding(client, store, monkeypatch):
+    import data_handler
+    import schwab_api
+    accounts.create("IRA", broker_account_number="33334444")
+    monkeypatch.setattr(schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(data_handler, "client", lambda: _Client())
+
+    body = client.get("/api/accounts/broker-accounts").get_json()
+    assert body["error"] is None and body["count"] == 2
+    assert [r["masked"] for r in body["accounts"]] == ["…2222", "…4444"]
+    assert [r["bound_to"] for r in body["accounts"]] == [None, "ira"]
+
+
 def test_deleting_a_book_with_executions_is_refused_over_http(client, store):
     accounts.create("IRA")
     with accounts.use("ira"):
