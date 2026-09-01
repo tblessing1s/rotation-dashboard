@@ -32,6 +32,10 @@ ET = ZoneInfo("America/New_York")
 
 # type -> (severity, rule provenance)
 ALERT_TYPES = {
+    # The one INFORMATIONAL alert. Everything else here is a condition that became
+    # true and wants an action; this is a scheduled read of the book, fired once a
+    # day. LOW so it sorts under every real alert in a batched notification.
+    "DAILY_OUTLOOK": ("LOW", "Operator digest — the daily read of regime, price, strike distance and DTE. Carries NO rule and demands no action."),
     "KILL_SWITCH_SPY": ("CRITICAL", "HARD_CFM_RULE: RS3M vs SPY negative on confirmed close -> exit within 1-2 days"),
     "CIRCUIT_BREAKER": ("CRITICAL", "HARD_CFM_RULE: line-in-the-sand exit price stored at entry"),
     "DELTA_UNCOVERED": ("HIGH", "HARD_CFM_RULE: more calls sold than owned 100-share lots (or, on a legacy diagonal, a LEAP that no longer covers the short)"),
@@ -1225,7 +1229,98 @@ def check_put_collateral_breach(state: dict) -> list[dict]:
          "put_collateral": collateral})]
 
 
+def _leg_outlook(ticker: str, leg: dict, spot: float | None, kind: str,
+                 today) -> str:
+    """One short leg as a phone-readable line: strike, which side of it we are,
+    and how long is left.
+
+    The sign convention is the same for both sides but means opposite things, so
+    the wording differs rather than the arithmetic. A covered call is sold ITM ON
+    PURPOSE — spot ABOVE the strike is the design, and spot falling THROUGH it is
+    the defend trigger. A cash-secured put is the mirror: spot BELOW the strike is
+    assignment territory.
+    """
+    strike = leg.get("strike")
+    exp = str(leg.get("expiration") or "")[:10]
+    dte = leg.get("dte")
+    if dte is None and exp:
+        try:
+            dte = (datetime.strptime(exp, "%Y-%m-%d").date() - today).days
+        except (TypeError, ValueError):
+            dte = None
+
+    if strike is None or spot is None:
+        gap = "distance unknown"
+    else:
+        diff = float(spot) - float(strike)
+        pct = abs(diff) / float(spot) * 100 if spot else None
+        pct_txt = f"{pct:.1f}%" if pct is not None else "?"
+        if kind == "call":
+            gap = (f"{pct_txt} ITM cushion" if diff > 0
+                   else f"{pct_txt} BELOW strike — defend zone" if diff < 0
+                   else "AT the strike")
+        else:
+            gap = (f"{pct_txt} clear of assignment" if diff > 0
+                   else f"{pct_txt} through the strike — assignment likely" if diff < 0
+                   else "AT the strike")
+
+    dte_txt = "expires TODAY" if dte == 0 else (f"{dte}d left" if dte is not None else "DTE unknown")
+    label = "call" if kind == "call" else "put"
+    return f"{label} {strike} · {gap} · {dte_txt}"
+
+
+def check_daily_outlook(state: dict) -> list[dict]:
+    """The once-a-day read of the book: regime, spot, distance to strike, DTE.
+
+    NOT a condition — a scheduled digest. It rides the existing dedup rather than
+    growing a second delivery path: the fingerprint carries TODAY'S DATE, so the
+    alert is new once per day (fires, and pushes, at the first slot of the day),
+    stays active all day refreshing its numbers, and resolves when the date rolls.
+    No new scheduler, no new channel, no new notifier.
+
+    It carries severity LOW and no rule, because it demands nothing. Every other
+    evaluator here fires because something needs doing; this one fires because the
+    operator asked to be told where things stand.
+    """
+    import screening
+    today = date.today()
+    try:
+        reg = screening.regime()
+    except Exception:  # noqa: BLE001 — a digest must never break the alert run
+        reg = {}
+    color = (reg.get("published_regime") or reg.get("status") or "unknown").upper()
+    lights = reg.get("lights") or {}
+    greens = sum(1 for v in lights.values()
+                 if isinstance(v, dict) and v.get("signal") == "green")
+    head = f"Regime {color}" + (f" ({greens}/4 lights)" if lights else "")
+
+    lines = []
+    for p in _open_positions(state):
+        t = p.get("ticker", "")
+        spot = _last_close(t)
+        legs = [(leg, "call") for leg in (p.get("short_calls") or [])]
+        legs += [(leg, "put") for leg in (p.get("short_puts") or [])]
+        spot_txt = f"${spot:.2f}" if spot is not None else "price unavailable"
+        if not legs:
+            lines.append(f"{t} {spot_txt} · no open short")
+            continue
+        for leg, kind in legs:
+            lines.append(f"{t} {spot_txt} · " + _leg_outlook(t, leg, spot, kind, today))
+
+    body = head + (" — " + " | ".join(lines) if lines else " — no open positions.")
+    return [_alert(
+        "DAILY_OUTLOOK", None, body,
+        "Nothing required — this is the daily read, not a trigger.",
+        {"regime": color, "lights_green": greens, "positions": len(lines),
+         "date": today.isoformat()},
+        # THE DATE IS THE KEY. Without it the digest fires once, ever, and then
+        # only refreshes last_seen — the dedup would silently turn a daily report
+        # into a one-off.
+        key=today.isoformat())]
+
+
 EVALUATORS = [
+    check_daily_outlook,
     check_kill_switch,
     check_circuit_breaker,
     check_put_regate,

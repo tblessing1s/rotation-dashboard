@@ -277,3 +277,26 @@ def test_the_placement_carries_the_fill_window_it_was_placed_under(store, live, 
     res = _buy()
     assert res["fill_wait_ms"] == int(config.ORDER_FILL_WAIT_SECONDS * 1000)
     assert config.ORDER_FILL_WAIT_SECONDS >= 10, "3s cannot fill a mid-priced limit"
+
+
+def test_the_equity_flag_is_served_to_the_settings_card(monkeypatch):
+    """The Live-trading card reads `equity_placement` to say whether a share
+    ticket will actually be sent.
+
+    Without it the card said "Executed orders are transmitted to your real Schwab
+    account" — with a green LIVE pill and every precondition ticked — while a
+    buy_shares ticket still opened the amber "records only" dialog. The operator
+    is then debugging a settings screen that is not the cause. The card must be
+    able to name THIS flag, so it has to be in the payload."""
+    import app as app_module
+
+    monkeypatch.setattr(config, "EQUITY_ORDER_PLACEMENT_ENABLED", False)
+    st = app_module._live_trading_status()
+    assert st["equity_placement"] is False
+    # And the two are the same fact, so they can never disagree on the card.
+    assert "buy_shares" in st["non_transmitting_actions"]
+
+    monkeypatch.setattr(config, "EQUITY_ORDER_PLACEMENT_ENABLED", True)
+    st = app_module._live_trading_status()
+    assert st["equity_placement"] is True
+    assert st["non_transmitting_actions"] == []
