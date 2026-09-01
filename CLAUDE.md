@@ -13,7 +13,7 @@ A full-stack "CFM" options-strategy dashboard (scan → gate → execute → tra
 - **`scripts/`**, root `*.py` — operational helpers (calibration, VAPID keys, etc.).
 
 `state.json` (on the Fly volume at `$DATA_DIR/state.json`, `backend/` locally) is
-the **single source of truth**. The execution log is append-only and immutable;
+the **single source of truth** — per account (see below). The execution log is append-only and immutable;
 positions and the theta/payback ledgers are **derived** from it by
 `logging_handler.recompute_derived()`. Prefer fixing derivation over editing state.
 
@@ -44,6 +44,17 @@ Match the surrounding style; don't introduce a linter unless asked.
   (recompute, migrations, `close_leap`, repair, `backend/units.py`) — the
   execution log is append-only, so old fills must keep pricing forever. The UI is
   shares-only; there is no LEAP surface left in `frontend/`.
+- **One book per account:** the dashboard holds several accounts
+  (`backend/accounts.py`, registry at `DATA_DIR/accounts.json`), each with its own
+  state file — `state.json` for the `primary` account, `state.<id>.json` for the
+  rest (and `state.demo[.<id>].json` in demo mode). `config.active_state_path()`
+  delegates to the registry, so route new state access through it rather than
+  touching `config.STATE_PATH` directly. The active account comes from the
+  request (`X-CFM-Account` header / `?account=`) or the persisted choice; wrap
+  background work in `accounts.use(id)`. Orders/transactions/cash/reconciliation
+  resolve the brokerage account through the account's binding
+  (`accounts.broker_hash`, `schwab_api.select_account_node`) — never
+  `primary_account_hash()` at a new call site. See `docs/accounts.md`.
 - **Units:** short premiums/extrinsic are per-share; one contract = 100 shares.
   The ×100 factor lives in one place per side — `backend/units.py` (which still
   carries the per-contract LEAP conversions for historical records) and

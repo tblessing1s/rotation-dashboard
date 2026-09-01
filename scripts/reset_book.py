@@ -98,7 +98,23 @@ def main(argv: list[str] | None = None) -> int:
                         help="confirm the reset (required to actually write)")
     parser.add_argument("--wipe-all", action="store_true",
                         help="also clear push subscriptions and account cash settings")
+    parser.add_argument("--account", metavar="ID",
+                        help="which account's book to reset (default: the active "
+                             "one). Each account has its own state file — see "
+                             "docs/accounts.md")
     args = parser.parse_args(argv)
+
+    if args.account:
+        import accounts
+        try:
+            accounts.require(args.account)
+        except accounts.UnknownAccount as e:
+            known = ", ".join(a["id"] for a in accounts.list_accounts(include_archived=True))
+            print(f"{e} (known accounts: {known})", file=sys.stderr)
+            return 2
+        # Bind for the rest of the run — every state/backup call below resolves
+        # through the active account.
+        accounts.set_override(args.account)
 
     target = config.active_state_path()
     if not os.path.exists(target):

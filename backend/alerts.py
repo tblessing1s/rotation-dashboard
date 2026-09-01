@@ -111,24 +111,41 @@ _FOCUS_ACTIONS = {
 }
 
 
+def _account_param() -> str:
+    """``&account=<id>`` for a deep link, once the dashboard holds more than one
+    book. An alert is raised against ONE account's positions, so the tap has to
+    land on that account — otherwise a push about the IRA opens whichever book
+    the phone last had active and prefills a ticket on the wrong one. Omitted on
+    a single-account install so links stay exactly as they were."""
+    try:
+        import accounts
+        if len(accounts.list_accounts(include_archived=True)) <= 1:
+            return ""
+        from urllib.parse import quote
+        return f"&account={quote(accounts.active_id())}"
+    except Exception:  # noqa: BLE001 — a registry hiccup must not break alerting
+        return ""
+
+
 def _action_url(type_: str, ticker: str | None) -> str | None:
     if not ticker:
         return None
     from urllib.parse import quote
     t = quote(ticker)
+    acct = _account_param()
     if type_ in _ROLL_ACTIONS:
-        return f"/?action=roll&ticker={t}&reason={quote(_ROLL_ACTIONS[type_])}"
+        return f"/?action=roll&ticker={t}&reason={quote(_ROLL_ACTIONS[type_])}{acct}"
     if type_ in _FOCUS_ACTIONS:
-        return f"/?action=focus&ticker={t}"
+        return f"/?action=focus&ticker={t}{acct}"
     if type_ in _SCAN_ACTIONS:
-        return f"/?tab=Scan&ticker={t}"
+        return f"/?tab=Scan&ticker={t}{acct}"
     return None
 
 
 def _payout_action_url() -> str:
     """Payout alerts carry no ticker — they deep-link to the Payouts page so the
     tap lands on the finalize/mark-paid card, not the app root."""
-    return "/?tab=Payouts"
+    return f"/?tab=Payouts{_account_param()}"
 
 
 def _alert(type_: str, ticker: str | None, message: str, action: str,

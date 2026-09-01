@@ -14,6 +14,7 @@ import secrets
 from flask import Flask, g, jsonify, redirect, request, send_from_directory
 from flask_cors import CORS
 
+import accounts
 import alert_scheduler
 import alerts
 import auth
@@ -56,6 +57,46 @@ def _bound_fetch_budget():
     worker. `executor.execute` opts back into the patient budget for order flow.
     """
     g._fetch_budget_token = fetch_budget.set_current(fetch_budget.interactive_budget())
+
+
+ACCOUNT_HEADER = "X-CFM-Account"
+
+
+@app.before_request
+def _bind_account():
+    """Bind this request to ONE book.
+
+    The dashboard can hold several accounts (accounts.py). A request names the one
+    it means with the ``X-CFM-Account`` header (or ``?account=``) — so two browser
+    tabs can watch two accounts at once — and anything that doesn't name one gets
+    the persisted active account, which is also what the background scheduler and
+    CLI tools read. The binding is a contextvar reset in teardown: gunicorn reuses
+    threads, and a leaked selection would hand the next request another book.
+
+    An unknown id is refused rather than silently served from the primary book —
+    except on the /api/accounts endpoints themselves, which are how a UI holding a
+    stale id recovers.
+    """
+    requested = request.headers.get(ACCOUNT_HEADER) or request.args.get("account")
+    if not requested:
+        return None
+    try:
+        g._account_token = accounts.set_override(requested)
+    except accounts.UnknownAccount:
+        if request.path.startswith("/api/accounts"):
+            return None
+        return jsonify({"error": f"unknown account '{requested}'",
+                        "unknown_account": True}), 404
+    except accounts.RegistryCorrupt as e:
+        return jsonify({"error": str(e)}), 500
+    return None
+
+
+@app.teardown_request
+def _release_account(exc=None):
+    token = g.pop("_account_token", None)
+    if token is not None:
+        accounts.reset_override(token)
 
 
 @app.teardown_request
@@ -1642,6 +1683,137 @@ def api_state():
     return jsonify(log.load_state())
 
 
+# ---------------------------------------------------------------------------
+# Accounts (one book per brokerage account; see accounts.py)
+# ---------------------------------------------------------------------------
+@app.route("/api/accounts")
+def api_accounts():
+    """The registry: every account, which is active, and this request's binding."""
+    try:
+        return jsonify({
+            "active": accounts.active_id(),
+            "persisted_active": accounts.load_registry()["active"],
+            "demo": config.demo_enabled(),
+            "accounts": accounts.list_accounts(include_archived=True),
+            "max_accounts": accounts.MAX_ACCOUNTS,
+        })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/accounts", methods=["POST"])
+def api_accounts_create():
+    """Register another book. Its state file is created lazily on first use, so a
+    new account starts as an empty book at the current schema version."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        acct = accounts.create(
+            payload.get("label") or "",
+            broker_account_number=payload.get("broker_account_number"),
+            account_id=payload.get("id"),
+            note=payload.get("note") or "")
+        return jsonify(acct)
+    except (ValueError, accounts.RegistryCorrupt) as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/accounts/<account_id>", methods=["PATCH"])
+def api_accounts_update(account_id: str):
+    """Rename, (re)bind to a brokerage account number, archive/unarchive."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(accounts.update(
+            account_id,
+            label=payload.get("label"),
+            broker_account_number=payload.get("broker_account_number"),
+            archived=payload.get("archived"),
+            note=payload.get("note")))
+    except accounts.UnknownAccount as e:
+        return _err(e, 404)
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/accounts/<account_id>", methods=["DELETE"])
+def api_accounts_delete(account_id: str):
+    """Remove an account. Refused while its book still holds executions unless
+    ``?purge=1``, and even then the book is only set aside on the volume — an
+    execution log is a trading record, not a UI-deletable object."""
+    purge = request.args.get("purge", "").strip().lower() in ("1", "true", "yes")
+    try:
+        return jsonify(accounts.delete(account_id, purge=purge))
+    except accounts.UnknownAccount as e:
+        return _err(e, 404)
+    except accounts.AccountInUse as e:
+        return _err(e, 409)
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/accounts/active", methods=["POST"])
+def api_accounts_set_active():
+    """Persist the operator's account choice. Clears the in-memory scan/data
+    caches for the same reason the demo switch does: they memoize per store."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        acct = accounts.set_active(payload.get("id") or payload.get("account") or "")
+        screening.clear_cache()
+        data_handler.reset_caches()
+        return jsonify({"active": acct["id"], "account": acct})
+    except accounts.UnknownAccount as e:
+        return _err(e, 404)
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/accounts/summary")
+def api_accounts_summary():
+    """Every book on one screen — open positions, deployed capital, week/month
+    theta, live alerts, working orders and un-adopted broker fills per account.
+
+    Read straight off the state files (no provider calls), so the multi-account
+    monitor stays a single cheap request however many books there are."""
+    include_archived = request.args.get("include_archived", "").strip().lower() in ("1", "true", "yes")
+    try:
+        return jsonify(accounts.summary(include_archived=include_archived))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/accounts/broker-accounts")
+def api_broker_accounts():
+    """The brokerage accounts this Schwab login can reach, for the binding picker.
+
+    One login commonly reaches several accounts; binding a book to one is what
+    keeps its orders, transactions, cash and reconciliation on that account. Only
+    account numbers are returned — the trading hashes stay server-side."""
+    try:
+        client = data_handler.client()
+        numbers = client.account_numbers() or []
+        bound = {a["broker_account_number"]: a["id"]
+                 for a in accounts.list_accounts(include_archived=True)
+                 if a["broker_account_number"]}
+        rows = []
+        for entry in numbers:
+            number = str(entry.get("accountNumber") or "").strip()
+            if not number:
+                continue
+            rows.append({"account_number": number,
+                         "masked": f"…{number[-4:]}" if len(number) > 4 else number,
+                         "bound_to": bound.get(number)})
+        return jsonify({"accounts": rows})
+    except Exception as e:  # noqa: BLE001
+        return _err(e, 400)
+
+
 @app.route("/api/mode", methods=["GET", "POST"])
 def api_mode():
     """Read or set the demo/live data switch. Setting it points the app at the
@@ -2090,10 +2262,16 @@ if os.environ.get("CFM_SKIP_STARTUP_CHECK", "").strip() not in ("1", "true", "ye
     # re-polled against the broker before new order activity is allowed for its
     # position (a crash mid-cancel must not orphan a working broker order). No-op
     # when no live broker is configured (paper/tests); never blocks serving.
-    try:
-        executor.reconcile_pending_orders_on_startup()
-    except Exception as e:  # noqa: BLE001 — reconciliation must never block startup
-        log.logger.error("startup order reconciliation failed: %s", e)
+    # Every account: a working order left behind by a crash is just as dangerous
+    # in the second book as in the first, and each book's pending orders live in
+    # its own store.
+    for _account_id in accounts.scheduled_ids():
+        try:
+            with accounts.use(_account_id):
+                executor.reconcile_pending_orders_on_startup()
+        except Exception as e:  # noqa: BLE001 — reconciliation must never block startup
+            log.logger.error("startup order reconciliation failed for account %s: %s",
+                             _account_id, e)
 
 # Start the in-process alert scheduler (gunicorn imports this module; the CLI
 # path below reaches it too). start_once() is idempotent and a no-op when

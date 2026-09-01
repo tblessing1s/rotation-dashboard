@@ -1,5 +1,5 @@
 import React from "react";
-import { api } from "./api.js";
+import { api, setActiveAccount } from "./api.js";
 import { ErrorBoundary } from "./components/ui.jsx";
 import Navbar from "./components/Navbar.jsx";
 import GateTelemetry from "./components/GateTelemetry.jsx";
@@ -30,6 +30,15 @@ export default function App() {
   const [execNonce, setExecNonce] = React.useState(0);
   const [demo, setDemo] = React.useState(false);
   const [modeBusy, setModeBusy] = React.useState(false);
+  // Accounts (books). `accountRegistry` is the list + the server's persisted
+  // choice; `accountId` is the book THIS tab reads, sent as a header on every
+  // request (see api.js) so two tabs can watch two accounts at once.
+  const [accountRegistry, setAccountRegistry] = React.useState(null);
+  const [accountId, setAccountId] = React.useState(null);
+  const [accountBusy, setAccountBusy] = React.useState(false);
+  // Bumped on every account switch: the tab panels are keyed on it, so switching
+  // books remounts them and every panel refetches against the new store.
+  const [accountNonce, setAccountNonce] = React.useState(0);
   const [posture, setPosture] = React.useState(null);
   const [postureBusy, setPostureBusy] = React.useState(false);
   // null = still checking, true = signed in (or auth disabled), false = show login.
@@ -65,7 +74,7 @@ export default function App() {
     poll();
     const id = setInterval(poll, 60000);
     return () => { stop = true; clearInterval(id); };
-  }, [authed, execNonce]);
+  }, [authed, execNonce, accountNonce]);
 
   React.useEffect(() => {
     api.version().then(setVersion).catch(() => {});
@@ -144,10 +153,57 @@ export default function App() {
     api.mode().then((m) => setDemo(!!m.demo)).catch(() => {});
   }, [authed]);
 
+  // Load the account registry once signed in. A ?account=… deep link (an alert
+  // push is raised against ONE book) wins over the server's persisted choice, so
+  // a tapped notification lands on the account the alert is about.
+  const loadAccounts = React.useCallback(async () => {
+    const registry = await api.accounts();
+    setAccountRegistry(registry);
+    return registry;
+  }, []);
+
+  React.useEffect(() => {
+    if (authed !== true) return;
+    loadAccounts()
+      .then((registry) => {
+        const params = new URLSearchParams(window.location.search);
+        const requested = params.get("account");
+        const known = (registry.accounts || []).some((a) => a.id === requested);
+        const id = known ? requested : registry.active;
+        setActiveAccount(id);
+        setAccountId(id);
+        if (known) {
+          params.delete("account");
+          const qs = params.toString();
+          window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
+        }
+      })
+      .catch(() => {}); // an older backend has no accounts endpoint — stay single-book
+  }, [authed, loadAccounts]);
+
+  // Switch the book this tab reads. The server's persisted choice moves too, so
+  // background alerting/reconciliation reporting and the next session agree with
+  // what's on screen.
+  const switchAccount = React.useCallback(async (id) => {
+    if (!id || id === accountId) return;
+    setAccountBusy(true);
+    try {
+      setActiveAccount(id);          // every subsequent request carries the header
+      setAccountId(id);
+      await api.setActiveAccountOnServer(id).catch(() => {});
+      await loadAccounts().catch(() => {});
+      setExecute(null);              // an order ticket belongs to the book it was opened in
+      setPositionIntent(null);
+      setAccountNonce((n) => n + 1); // remount the tabs -> every panel refetches
+    } finally {
+      setAccountBusy(false);
+    }
+  }, [accountId, loadAccounts]);
+
   React.useEffect(() => {
     if (authed !== true) return;
     api.strikePosture().then((p) => setPosture(p.posture)).catch(() => {});
-  }, [authed, demo]); // re-read on demo/live switch — posture is per-store
+  }, [authed, demo, accountNonce]); // re-read on demo/live/account switch — posture is per-store
 
   async function logout() {
     try {
@@ -199,7 +255,11 @@ export default function App() {
     <div className="min-h-full bg-slate-950 text-slate-100">
       <Navbar tabs={TABS} active={tab} onChange={goToTab} regimeStatus={regimeStatus}
               onLogout={logout} alertCount={alertCount}
-              onAlertsClick={() => goToTab("Settings")} />
+              onAlertsClick={() => goToTab("Settings")}
+              accounts={accountRegistry?.accounts}
+              accountId={accountId} accountBusy={accountBusy}
+              onSelectAccount={switchAccount}
+              onManageAccounts={() => goToTab("Settings")} />
       <main className="mx-auto max-w-7xl px-3 py-4 sm:px-4 sm:py-6">
         <SchwabStatus demo={demo} />
         {/* One boundary around the tab content, keyed on the view: a render throw
@@ -219,10 +279,14 @@ export default function App() {
           <>
             {tab === "Overview" && (
               <Overview
+                key={`overview:${accountNonce}`}
                 onNavigate={goToTab}
                 onSelectStock={openTicket}
                 onAction={goToAction}
                 onRegimeStatus={setRegimeStatus}
+                accountId={accountId}
+                accountNonce={accountNonce}
+                onSelectAccount={switchAccount}
               />
             )}
             {tab === "Scan" && (
@@ -255,17 +319,20 @@ export default function App() {
               </div>
             )}
             {tab === "Positions" && (
-              <PositionTracker key={execNonce} intent={positionIntent}
+              <PositionTracker key={`${accountNonce}:${execNonce}`} intent={positionIntent}
                                onIntentHandled={() => setPositionIntent(null)}
                                onOpenTicket={openTicket} />
             )}
-            {tab === "History" && <HistoryTab key={execNonce} />}
-            {tab === "Payouts" && <PayoutsTab key={execNonce} />}
+            {tab === "History" && <HistoryTab key={`${accountNonce}:${execNonce}`} />}
+            {tab === "Payouts" && <PayoutsTab key={`${accountNonce}:${execNonce}`} />}
             {tab === "Calibration" && <GateTelemetry />}
             {tab === "Settings" && (
               <SettingsTab demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo}
                            posture={posture} postureBusy={postureBusy}
-                           onTogglePosture={togglePosture} />
+                           onTogglePosture={togglePosture}
+                           accountRegistry={accountRegistry} accountId={accountId}
+                           onSelectAccount={switchAccount}
+                           onAccountsChanged={loadAccounts} />
             )}
           </>
         )}

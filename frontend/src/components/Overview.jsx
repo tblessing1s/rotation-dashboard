@@ -1,6 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import { Card, Stat, Light, Pill, Meter, Modal, Loading, ErrorState, money, fmt, pct, useApi } from "./ui.jsx";
+import AccountsRollup from "./AccountsRollup.jsx";
 import ProcessRibbon from "./ProcessRibbon.jsx";
 import ReadyToEnter from "./ReadyToEnter.jsx";
 
@@ -434,7 +435,8 @@ function PayoutGlance({ payouts, onOpen }) {
   );
 }
 
-export default function Overview({ onNavigate, onSelectStock, onAction, onRegimeStatus }) {
+export default function Overview({ onNavigate, onSelectStock, onAction, onRegimeStatus,
+                                  accountId, accountNonce, onSelectAccount }) {
   // One aggregate call (see /api/overview) instead of stitching regime +
   // positions + theta + kill-switch client-side. Sections are best-effort on
   // the server: a failed one carries {error} without blanking the rest.
@@ -530,6 +532,11 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
 
   return (
     <div className="grid gap-4">
+      {/* Multi-account monitor: where every book stands, and which one needs you
+          next. Renders nothing on a single-account install. */}
+      <AccountsRollup activeId={accountId} refreshKey={accountNonce}
+                      onSelect={onSelectAccount} />
+
       {/* The illustrated CFM process ribbon carries the high-level read; each
           stage opens its detailed card in a modal (weather → regime, barrel →
           capital, grove → juice stand, glass → income). */}

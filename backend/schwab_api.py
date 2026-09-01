@@ -456,22 +456,30 @@ class SchwabClient:
         params = {"fields": "positions"} if positions else None
         return self._get_json(f"{ACCOUNTS_BASE}/accounts", params=params) or []
 
-    def cash_balance(self, force: bool = False) -> float:
-        """Tradable cash balance of the primary linked account (the same
-        account order placement uses), briefly cached so repeated Level 5 gate
-        checks don't hammer the endpoint. Raises SchwabError on failure —
-        callers degrade to the stored manual value rather than block on this."""
+    def cash_balance(self, force: bool = False, account_number: str | None = None) -> float:
+        """Tradable cash of the account this book trades — the SAME account order
+        placement uses, so the Level 5 dry-powder check can't read one account's
+        cash while the order goes to another.
+
+        Which account that is: ``account_number`` when given, else the active
+        dashboard account's binding (accounts.py), else the first linked account
+        (the historical single-account behaviour). The /accounts response is
+        briefly cached whole, so per-account selection costs no extra round-trip.
+        Raises SchwabError on failure — callers degrade to the stored manual value
+        rather than block on this.
+        """
         global _accounts_cache
         with _accounts_lock:
             now = time.time()
             if not force and _accounts_cache and now - _accounts_cache[0] < _ACCOUNTS_TTL:
-                accounts = _accounts_cache[1]
+                nodes = _accounts_cache[1]
             else:
-                accounts = self.get_accounts(positions=False)
-                _accounts_cache = (now, accounts)
-        if not accounts:
+                nodes = self.get_accounts(positions=False)
+                _accounts_cache = (now, nodes)
+        if not nodes:
             raise SchwabError("schwab: no linked accounts")
-        cash = _account_cash(accounts[0])
+        cash = _account_cash(select_account_node(
+            nodes, account_number if account_number is not None else bound_account_number()))
         if cash is None:
             raise SchwabError("schwab: account response had no recognizable cash balance field")
         return cash
@@ -612,6 +620,41 @@ class SchwabClient:
 # ---------------------------------------------------------------------------
 # Account parsing (module-level)
 # ---------------------------------------------------------------------------
+def account_node_number(node: dict) -> str:
+    """The plain account number on one /accounts response node."""
+    return str(((node or {}).get("securitiesAccount") or {}).get("accountNumber") or "").strip()
+
+
+def bound_account_number() -> str | None:
+    """The brokerage account number the ACTIVE dashboard account trades, or None
+    when it isn't bound to one (single-account installs, and any account the
+    operator hasn't pointed at a specific Schwab account yet)."""
+    try:
+        import accounts as account_registry
+        return account_registry.broker_account_number()
+    except Exception as e:  # noqa: BLE001 — a registry problem must not break reads
+        logger.warning("could not read the account binding: %s", e)
+        return None
+
+
+def select_account_node(nodes: list[dict], account_number: str | None) -> dict:
+    """Pick the /accounts node for one brokerage account.
+
+    ``account_number`` selects it; ``None`` reads the first linked account (the
+    historical single-account behaviour). A bound number that isn't in the
+    response RAISES rather than silently falling back: the whole point of binding
+    is that this book's numbers come from that account and no other.
+    """
+    if not account_number:
+        return nodes[0]
+    for node in nodes:
+        if account_node_number(node) == str(account_number).strip():
+            return node
+    raise SchwabError(
+        f"schwab: account {str(account_number)[-4:]} is bound to this book but is not "
+        "linked to this login — re-link it or clear the binding in Settings → Accounts")
+
+
 def _account_cash(node: dict) -> float | None:
     """Tradable cash from one /accounts response node. Tries the fields in
     order of how directly they represent 'money available to deploy right

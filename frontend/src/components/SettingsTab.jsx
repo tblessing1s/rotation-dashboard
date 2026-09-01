@@ -1,9 +1,11 @@
 import React from "react";
+import { api } from "../api.js";
 import { Card } from "./ui.jsx";
 import LiveTradingSwitch from "./LiveTradingSwitch.jsx";
 import AlertsPanel from "./AlertsPanel.jsx";
 import TrustScoreboard from "./TrustScoreboard.jsx";
 import DataHealth from "./DataHealth.jsx";
+import AccountsPanel from "./AccountsPanel.jsx";
 
 // Low-frequency controls and admin surfaces, gathered off the trading tabs:
 // data source (demo/live), strike posture, live-trading switch, alert config,
@@ -30,9 +32,18 @@ function ToggleRow({ title, desc, on, busy, onToggle, onLabel, offLabel, onTone,
   );
 }
 
-export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, postureBusy, onTogglePosture }) {
+export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, postureBusy,
+                                     onTogglePosture, accountRegistry, accountId,
+                                     onSelectAccount, onAccountsChanged }) {
+  const [summary, setSummary] = React.useState(null);
+  React.useEffect(() => {
+    api.accountsSummary(true).then(setSummary).catch(() => setSummary(null));
+  }, [accountRegistry, accountId]);
+
   return (
     <div className="grid gap-4">
+      <AccountsPanel registry={accountRegistry} summary={summary} activeId={accountId}
+                     onSelect={onSelectAccount} onChanged={onAccountsChanged} />
       <Card title="Trading preferences">
         <div className="divide-y divide-slate-800">
           <ToggleRow

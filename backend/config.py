@@ -122,8 +122,16 @@ def market_settle_gate_enabled() -> bool:
 
 
 def active_state_path() -> str:
-    """state.json path for the current mode (demo store stays separate)."""
-    return DEMO_STATE_PATH if demo_enabled() else STATE_PATH
+    """state.json path for the ACTIVE ACCOUNT in the current mode.
+
+    Two orthogonal switches select the store: the demo/live mode above, and the
+    active account (accounts.py). The primary account keeps the un-suffixed
+    paths, so a single-account deployment resolves exactly as it always did;
+    every other account gets a sibling file. Imported lazily — accounts.py reads
+    this module, and this is the one call that has to see it.
+    """
+    import accounts
+    return accounts.active_state_path()
 
 
 def active_cache_dir() -> str:

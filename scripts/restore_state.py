@@ -27,6 +27,8 @@ mistaken restore is itself recoverable.
 
 DATA_DIR controls which store is touched (defaults to the backend dir locally,
 /data on Fly). Set CFM demo mode via mode.json as usual to target the demo store.
+With more than one account (docs/accounts.md), --account picks the book; each has
+its own state file and its own backups directory.
 """
 from __future__ import annotations
 
@@ -39,6 +41,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."
 # Never let importing the app machinery start the scheduler or the startup check.
 os.environ.setdefault("CFM_ALERTS_SCHEDULER", "0")
 
+import accounts         # noqa: E402
 import backups          # noqa: E402
 import config           # noqa: E402
 import logging_handler as log  # noqa: E402
@@ -99,7 +102,23 @@ def main(argv: list[str] | None = None) -> int:
     g.add_argument("--latest", action="store_true", help="restore the most recent backup")
     parser.add_argument("--yes", action="store_true",
                         help="confirm the overwrite (required to actually restore)")
+    parser.add_argument("--account", metavar="ID",
+                        help="which account's book to list/restore (default: the "
+                             "active one). Each account has its own state file and "
+                             "its own backups directory — see docs/accounts.md")
     args = parser.parse_args(argv)
+
+    if args.account:
+        try:
+            accounts.require(args.account)
+        except accounts.UnknownAccount as e:
+            known = ", ".join(a["id"] for a in accounts.list_accounts(include_archived=True))
+            print(f"{e} (known accounts: {known})", file=sys.stderr)
+            return 2
+        # Bind for the rest of the run: backups.* and log.* both resolve through
+        # the active account, so nothing below needs an account argument.
+        accounts.set_override(args.account)
+        print(f"Account: {args.account}\n")
 
     if args.list:
         return cmd_list()

@@ -138,8 +138,40 @@ def list_subscriptions(state: dict | None = None) -> list[dict]:
     return list(_subs_container(state))
 
 
+def all_subscriptions() -> list[dict]:
+    """Every device registered on ANY book, deduped by endpoint.
+
+    A phone is registered once, by whichever account happened to be on screen —
+    but it is the operator's phone, not that account's, and an alert raised on a
+    second book is exactly as urgent. So DELIVERY reads the union while the
+    subscription record itself stays in the book it was made from (state.json is
+    the only store there is). Degrades to the active book if the registry can't
+    be read: fewer devices is recoverable, a crashed alert run is not.
+    """
+    try:
+        import accounts
+    except Exception:  # noqa: BLE001
+        return list_subscriptions()
+    seen: set[str] = set()
+    out: list[dict] = []
+    for acct in accounts.list_accounts(include_archived=True):
+        try:
+            with accounts.use(acct["id"]):
+                subs = list_subscriptions()
+        except Exception as e:  # noqa: BLE001 — one unreadable book must not mute the rest
+            logger.warning("could not read push subscriptions for account %s: %s",
+                           acct["id"], e)
+            continue
+        for sub in subs:
+            endpoint = sub.get("endpoint")
+            if endpoint and endpoint not in seen:
+                seen.add(endpoint)
+                out.append(sub)
+    return out
+
+
 def subscription_count() -> int:
-    return len(list_subscriptions())
+    return len(all_subscriptions())
 
 
 def add_subscription(sub: dict) -> dict:
@@ -162,23 +194,52 @@ def add_subscription(sub: dict) -> dict:
     return {"ok": True, "updated": False, "count": len(subs)}
 
 
+def _drop_endpoints(endpoints: set[str]) -> int:
+    """Remove these endpoints from EVERY book.
+
+    Unsubscribing a device (or pruning one the push service says is gone) has to
+    reach every account, or the phone keeps getting alerts from the books the
+    removal didn't touch."""
+    removed = 0
+    try:
+        import accounts
+        account_ids = [a["id"] for a in accounts.list_accounts(include_archived=True)]
+    except Exception:  # noqa: BLE001 — degrade to the active book
+        account_ids = [None]
+
+    def drop_here() -> int:
+        state = log.load_state()
+        subs = _subs_container(state)
+        before = len(subs)
+        subs[:] = [s for s in subs if s.get("endpoint") not in endpoints]
+        if len(subs) != before:
+            log.save_state(state)
+        return before - len(subs)
+
+    for account_id in account_ids:
+        try:
+            if account_id is None:
+                removed += drop_here()
+            else:
+                import accounts
+                with accounts.use(account_id):
+                    removed += drop_here()
+        except Exception as e:  # noqa: BLE001 — one book must not block the others
+            logger.warning("could not drop push subscription(s) from account %s: %s",
+                           account_id, e)
+    return removed
+
+
 def remove_subscription(endpoint: str) -> dict:
-    state = log.load_state()
-    subs = _subs_container(state)
-    before = len(subs)
-    subs[:] = [s for s in subs if s.get("endpoint") != endpoint]
-    log.save_state(state)
-    return {"ok": True, "removed": before - len(subs), "count": len(subs)}
+    removed = _drop_endpoints({endpoint})
+    return {"ok": True, "removed": removed, "count": subscription_count()}
 
 
 def _prune(endpoints: set[str]) -> None:
-    """Drop endpoints the push service has permanently rejected."""
+    """Drop endpoints the push service has permanently rejected, from every book."""
     if not endpoints:
         return
-    state = log.load_state()
-    subs = _subs_container(state)
-    subs[:] = [s for s in subs if s.get("endpoint") not in endpoints]
-    log.save_state(state)
+    _drop_endpoints(endpoints)
 
 
 def configured() -> bool:
@@ -220,7 +281,9 @@ def send(subject: str, body: str, alerts: list[dict]) -> None:
     except ImportError as e:  # pragma: no cover - dep missing in a stripped env
         raise RuntimeError("pywebpush not installed") from e
 
-    subs = list_subscriptions()
+    # Every registered device, whichever book it was registered from — see
+    # all_subscriptions().
+    subs = all_subscriptions()
     if not subs:
         return
     data = _payload(subject, body, alerts)

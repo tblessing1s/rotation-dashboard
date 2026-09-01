@@ -1,5 +1,6 @@
 import React from "react";
 import { Light } from "./ui.jsx";
+import AccountSwitcher from "./AccountSwitcher.jsx";
 
 function AlertBell({ count, onClick }) {
   const hot = count > 0;
@@ -37,11 +38,17 @@ function TabButton({ label, active, onClick }) {
   );
 }
 
-// Chrome kept deliberately thin: tabs, the regime light, the alert bell, and
-// sign-out. Low-frequency controls (demo data, strike posture, live trading)
-// live on the Settings tab.
+// Chrome kept deliberately thin: tabs, the account switcher, the regime light,
+// the alert bell, and sign-out. Low-frequency controls (demo data, strike
+// posture, live trading, account management) live on the Settings tab.
+//
+// The account switcher earns its place in the chrome because every tab under it
+// reads ONE book: which book that is has to be visible while trading, not two
+// clicks away. It renders nothing until a second account exists.
 export default function Navbar({ tabs, active, onChange, regimeStatus, onLogout,
-                                alertCount = 0, onAlertsClick }) {
+                                alertCount = 0, onAlertsClick, accounts,
+                                accountId, accountBusy, onSelectAccount,
+                                onManageAccounts }) {
   return (
     <nav
       className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/90 backdrop-blur"
@@ -64,6 +71,8 @@ export default function Navbar({ tabs, active, onChange, regimeStatus, onLogout,
 
           {/* Right-side controls */}
           <div className="ml-auto flex items-center gap-2 sm:gap-3">
+            <AccountSwitcher accounts={accounts} activeId={accountId} busy={accountBusy}
+                             onSelect={onSelectAccount} onManage={onManageAccounts} />
             <div className="flex items-center gap-2 text-xs text-slate-400" title="Market regime">
               <Light status={regimeStatus} />
               <span className="hidden sm:inline">Regime</span>

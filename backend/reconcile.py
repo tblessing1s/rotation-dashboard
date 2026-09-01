@@ -181,19 +181,30 @@ def normalize_broker_position(node: dict) -> dict | None:
     return None
 
 
-def parse_broker_positions(accounts_response: list) -> list[dict]:
+def parse_broker_positions(accounts_response: list,
+                           account_number: str | None = None) -> list[dict]:
     """Flatten a Schwab /accounts?fields=positions response into normalized
-    instruments. Reads the primary account (first node). Positions we can parse
-    are returned; OptionSymbolParseError propagates so a malformed broker symbol
-    is a loud failure at the fetch layer, not a silent gap."""
-    accounts = accounts_response or []
+    instruments for ONE brokerage account.
+
+    ``account_number`` names it — this book's bound account, the same one its
+    orders go to; ``None`` reads the first node (single-account behaviour).
+    Selecting the right node is load-bearing here: reconciling a book against the
+    union of a login's accounts would report every sibling account's position as
+    an unexpected broker holding. Positions we can parse are returned;
+    OptionSymbolParseError propagates so a malformed broker symbol is a loud
+    failure at the fetch layer, not a silent gap."""
+    import schwab_api
+
+    nodes = accounts_response or []
+    if not nodes:
+        return []
     out: list[dict] = []
-    for acct in accounts[:1]:  # primary account only (same one orders use)
-        positions = ((acct or {}).get("securitiesAccount") or {}).get("positions") or []
-        for node in positions:
-            norm = normalize_broker_position(node)
-            if norm is not None:
-                out.append(norm)
+    positions = ((schwab_api.select_account_node(nodes, account_number) or {})
+                 .get("securitiesAccount") or {}).get("positions") or []
+    for node in positions:
+        norm = normalize_broker_position(node)
+        if norm is not None:
+            out.append(norm)
     return out
 
 
@@ -679,7 +690,10 @@ def run_reconciliation(state: dict | None = None, persist: bool = True) -> dict:
         return report
 
     try:
-        broker_view = parse_broker_positions(accounts)
+        # Demo fixtures carry no account numbers, so the demo book always reads the
+        # single fixture node; live reconciliation reads this book's own account.
+        broker_view = parse_broker_positions(
+            accounts, None if demo else schwab_api.bound_account_number())
     except OptionSymbolParseError as e:
         report = failure_report(as_of, f"unparseable broker option symbol: {e}")
         if persist:

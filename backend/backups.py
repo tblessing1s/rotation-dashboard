@@ -34,13 +34,22 @@ BACKUP_PREFIX = "state-"                 # rotating nightly copies
 PREMIGRATION_PREFIX = "pre-migration-"   # kept forever, exempt from rotation
 
 
-def backups_dir() -> str:
-    """DATA_DIR/backups — the Fly persistent volume (/data) in production."""
-    return os.path.join(config.DATA_DIR, "backups")
+def backups_dir(account_id: str | None = None) -> str:
+    """Where one account's backups live.
+
+    The primary account keeps ``DATA_DIR/backups`` exactly as before; every other
+    account gets its own subdirectory. Per-account directories (rather than a
+    per-account filename prefix) mean rotation is still "keep the newest N in
+    this directory" — one book's nightly copies can never rotate away another's.
+    """
+    import accounts
+    base = os.path.join(config.DATA_DIR, "backups")
+    account_id = account_id or accounts.active_id()
+    return base if account_id == accounts.DEFAULT_ID else os.path.join(base, account_id)
 
 
-def _ensure_dir() -> str:
-    d = backups_dir()
+def _ensure_dir(account_id: str | None = None) -> str:
+    d = backups_dir(account_id)
     os.makedirs(d, exist_ok=True)
     return d
 
@@ -69,9 +78,11 @@ def _schema_version(path: str) -> int | None:
         return None
 
 
-def list_backups(include_premigration: bool = True) -> list[dict]:
-    """Newest-first list of backups with timestamp + schema version."""
-    d = backups_dir()
+def list_backups(include_premigration: bool = True,
+                 account_id: str | None = None) -> list[dict]:
+    """Newest-first list of one account's backups with timestamp + schema
+    version (the active account by default)."""
+    d = backups_dir(account_id)
     if not os.path.isdir(d):
         return []
     out: list[dict] = []
@@ -91,29 +102,44 @@ def list_backups(include_premigration: bool = True) -> list[dict]:
     return out
 
 
-def latest_backup() -> str | None:
-    """Path of the most recent backup of any kind, or None."""
-    backups = list_backups()
+def latest_backup(account_id: str | None = None) -> str | None:
+    """Path of the most recent backup of any kind for this account, or None."""
+    backups = list_backups(account_id=account_id)
     return backups[0]["path"] if backups else None
 
 
 # ---------------------------------------------------------------------------
 # Nightly rotating backups
 # ---------------------------------------------------------------------------
-def make_nightly_backup(state_path: str | None = None) -> str:
+def account_for_path(state_path: str) -> str:
+    """Which account's book a state file belongs to — so a snapshot always lands
+    in that account's backup directory even when the caller passes an explicit
+    path (migrations do)."""
+    import accounts
+    state_path = os.path.abspath(state_path)
+    for acct in accounts.list_accounts(include_archived=True):
+        for demo in (False, True):
+            if os.path.abspath(accounts.state_path(acct["id"], demo=demo)) == state_path:
+                return acct["id"]
+    return accounts.active_id()
+
+
+def make_nightly_backup(state_path: str | None = None,
+                        account_id: str | None = None) -> str:
     src = state_path or config.active_state_path()
-    dst = os.path.join(_ensure_dir(), f"{BACKUP_PREFIX}{_timestamp()}.json")
+    account_id = account_id or (account_for_path(src) if state_path else None)
+    dst = os.path.join(_ensure_dir(account_id), f"{BACKUP_PREFIX}{_timestamp()}.json")
     _copy_locked(src, dst)
     return dst
 
 
-def rotate(keep: int | None = None) -> int:
+def rotate(keep: int | None = None, account_id: str | None = None) -> int:
     """Keep the newest ``keep`` rotating backups (config.BACKUP_RETENTION by
-    default); delete older ones. Pre-migration snapshots are EXEMPT — they're
-    rare, small, and each pins a distinct migration rollback point. Returns the
-    number of files deleted."""
+    default) for one account; delete older ones. Pre-migration snapshots are
+    EXEMPT — they're rare, small, and each pins a distinct migration rollback
+    point. Returns the number of files deleted."""
     keep = config.BACKUP_RETENTION if keep is None else keep
-    d = backups_dir()
+    d = backups_dir(account_id)
     if not os.path.isdir(d):
         return 0
     rotating = sorted(glob.glob(os.path.join(d, f"{BACKUP_PREFIX}*.json")),
@@ -138,7 +164,7 @@ def snapshot_before_migration(state_path: str, from_v: int, to_v: int,
     serializing ``state`` if the file isn't on disk. Raises on failure so the
     caller can ABORT the migration — a migration without a rollback point on
     live data is not acceptable."""
-    dst = os.path.join(_ensure_dir(),
+    dst = os.path.join(_ensure_dir(account_for_path(state_path)),
                        f"{PREMIGRATION_PREFIX}v{from_v}-to-v{to_v}-{_timestamp()}.json")
     if os.path.exists(state_path):
         _copy_locked(state_path, dst)
@@ -154,6 +180,22 @@ def snapshot_before_migration(state_path: str, from_v: int, to_v: int,
 # ---------------------------------------------------------------------------
 # Off-machine copy (email attachment or optional S3)
 # ---------------------------------------------------------------------------
+def offmachine_name(backup_path: str) -> str:
+    """The off-machine name for a backup, account-qualified.
+
+    Non-primary accounts back up into ``backups/<account>/``, where every file is
+    named ``state-<ts>.json`` like the primary's — so shipping the bare basename
+    would land two books under one name in the bucket (or the inbox). Keep the
+    account directory as a leading segment when there is one.
+    """
+    path = os.path.abspath(backup_path)
+    parent = os.path.basename(os.path.dirname(path))
+    grandparent = os.path.basename(os.path.dirname(os.path.dirname(path)))
+    if grandparent == "backups" and parent != "backups":
+        return f"{parent}/{os.path.basename(path)}"
+    return os.path.basename(path)
+
+
 def _email_backup(backup_path: str) -> dict | None:
     """Attach the state file to a nightly 'CFM backup' email. If the file
     exceeds config.BACKUP_EMAIL_MAX_BYTES, email a warning INSTEAD of the
@@ -162,7 +204,7 @@ def _email_backup(backup_path: str) -> dict | None:
     if not (os.environ.get("SMTP_HOST") and os.environ.get("ALERT_EMAIL_TO")):
         return None
     size = os.path.getsize(backup_path)
-    name = os.path.basename(backup_path)
+    name = offmachine_name(backup_path).replace("/", "-")
     msg = EmailMessage()
     msg["From"] = os.environ.get("ALERT_EMAIL_FROM") or os.environ.get("SMTP_USER", "")
     msg["To"] = os.environ["ALERT_EMAIL_TO"]
@@ -211,7 +253,7 @@ def _s3_upload(backup_path: str) -> dict:
             "CFM_BACKUP_S3 is on but no bucket is set (BACKUP_S3_BUCKET or BUCKET_NAME).")
     endpoint = os.environ.get("BACKUP_S3_ENDPOINT")  # e.g. https://fly.storage.tigris.dev
     prefix = os.environ.get("BACKUP_S3_KEY_PREFIX", "cfm-backups")
-    key = f"{prefix.rstrip('/')}/{os.path.basename(backup_path)}"
+    key = f"{prefix.rstrip('/')}/{offmachine_name(backup_path)}"
     client = boto3.client("s3", endpoint_url=endpoint or None)
     client.upload_file(backup_path, bucket, key)
     return {"method": "s3", "ok": True, "bucket": bucket, "key": key,
@@ -257,7 +299,9 @@ def _notify_failure(message: str) -> None:
 def nightly_backup() -> dict:
     """Local rotating backup + off-machine copy. Returns a report; on a hard
     failure (local backup or off-machine) also fires an ops alert. Never raises."""
-    report: dict = {"local": None, "rotated": 0, "offmachine": None, "errors": []}
+    import accounts
+    report: dict = {"local": None, "rotated": 0, "offmachine": None, "errors": [],
+                    "account": accounts.active_id()}
     try:
         report["local"] = make_nightly_backup()
         logger.info("nightly backup written: %s", report["local"])
