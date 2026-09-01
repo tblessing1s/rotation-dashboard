@@ -204,6 +204,22 @@ export default function AccountsPanel({ registry, summary, activeId, onSelect, o
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
 
+  const [reconnecting, setReconnecting] = React.useState(false);
+
+  // Re-run the Schwab consent flow from HERE, where the missing account is
+  // noticed — the account selection happens on Schwab's screen, so a reconnect
+  // is the only way to widen what the API can see.
+  async function reconnect() {
+    setReconnecting(true);
+    try {
+      const { authorize_url } = await api.schwabAuth();
+      window.location.href = authorize_url;
+    } catch (e) {
+      setErr(e.message);
+      setReconnecting(false);
+    }
+  }
+
   const loadBroker = React.useCallback(() => {
     setBrokerBusy(true);
     return api.brokerAccounts()
@@ -269,13 +285,25 @@ export default function AccountsPanel({ registry, summary, activeId, onSelect, o
           {broker.error}
         </p>
       )}
-      {broker && !broker.error && brokerAccounts.length < 2 && (
-        <p className="mt-2 text-xs text-slate-500">
-          Expecting another account here? Schwab only returns the accounts your app
-          authorization covers — reconnect Schwab and tick every account on the
-          consent screen. You can also type an account number by hand below; orders
-          are refused until Schwab returns it, so a typo can't misroute a trade.
-        </p>
+      {broker && brokerAccounts.length < 2 && (
+        <div className="mt-2 text-xs text-slate-500">
+          <p>
+            Expecting another account here? Schwab's API returns only the accounts
+            your app authorization covers — which is chosen on the consent screen,
+            not by what your login can see on schwab.com. Reconnect and tick EVERY
+            account you want to trade from here, then Recheck.
+          </p>
+          <p className="mt-1">
+            If the other account sits under a different Schwab login (linked only
+            for viewing), this token can't reach it at all — that needs its own
+            connection. You can still type its number below; orders are refused
+            until Schwab returns it, so a typo can't misroute a trade.
+          </p>
+          <button onClick={reconnect} disabled={reconnecting}
+                  className="mt-2 rounded-full border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 font-semibold text-sky-300 hover:bg-sky-500/20 disabled:opacity-50">
+            {reconnecting ? "Opening Schwab…" : "Reconnect Schwab"}
+          </button>
+        </div>
       )}
 
       <div className="mt-2 divide-y divide-slate-800">
