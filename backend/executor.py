@@ -186,6 +186,29 @@ PUT_ACTIONS = frozenset({"put_opened", "put_closed", "put_assigned"})
 EQUITY_ACTIONS = frozenset({"buy_shares", "sell_shares"})
 
 
+def _transmits(action: str) -> bool:
+    """Will THIS call actually send an order to the broker?
+
+    Decides whether the spot is re-quoted at order time or the operator's supplied
+    number is kept (see `_capture_price`). It mirrors the dispatch's own branches
+    rather than approximating them: a booking that never leaves the app must keep
+    the operator's price, and an order that does must not book a stale one.
+
+    It derives live-ness itself rather than taking `mode`, because the price is
+    captured EARLIER in `execute` than `mode` is assigned — and a predicate that
+    silently read an undefined name would be a worse bug than the one it fixes.
+    """
+    if not live_transmit() or not schwab_api.configured():
+        return False
+    if action in EQUITY_ACTIONS:
+        return config.EQUITY_ORDER_PLACEMENT_ENABLED
+    if action in PUT_ACTIONS:
+        # An assignment is an EVENT, not an order — nothing is transmitted, and
+        # the operator's price for a fill that already happened is the right one.
+        return (action != "put_assigned") and config.CSP_ORDER_PLACEMENT_ENABLED
+    return True
+
+
 def non_transmitting_actions() -> frozenset:
     """Actions that CANNOT reach the broker right now, whatever the live-trading
     switch says. Computed, not constant: equity placement is gated on
@@ -482,7 +505,42 @@ def _order_filled_qty(order: dict) -> tuple[float, float]:
     return total, ordered
 
 
-def _capture_price(ticker: str, supplied: float | None) -> tuple[float | None, str]:
+def _capture_price(ticker: str, supplied: float | None,
+                   *, at_order_time: bool = False) -> tuple[float | None, str]:
+    """The underlying spot to stamp on an execution, and where it came from.
+
+    THIS NUMBER IS THE JUICE LEDGER. A short leg's entry extrinsic is
+    `premium - max(spot - strike, 0)` (`_short_extrinsic`), and CFM's covered call
+    is deliberately ITM, so intrinsic is almost always positive and the spot goes
+    into the juice figure DOLLAR FOR DOLLAR. A spot that is $0.50 stale makes the
+    recorded extrinsic $0.50/share wrong — $50 on one contract — and that error
+    lands in the theta ledger and the payback maths permanently, because the
+    execution log is append-only.
+
+    `supplied` is normally the UI's chain snapshot, and `option_chain._CHAIN_TTL`
+    is 300 seconds. Trusting it unconditionally (as this did) meant a real order
+    could book its extrinsic against a FIVE-MINUTE-OLD spot.
+
+    So the two callers are separated:
+
+      * ``at_order_time=True`` — a real order is being placed or has just filled.
+        The spot is re-quoted NOW and the snapshot is only a fallback. Executing
+        from the app instead of the broker exists precisely to capture this
+        instant; taking the operator's stale number would throw away the reason
+        the order was routed through here at all.
+      * default — a manual booking of a fill that already happened. The operator's
+        number is the better one; a live quote would be a DIFFERENT moment than
+        the fill being recorded, and would corrupt what it was meant to preserve.
+    """
+    if at_order_time:
+        q = data_handler.latest_quote(ticker)
+        if q and q.get("price") is not None:
+            return q["price"], q.get("source") or "schwab"
+        if supplied is not None:
+            # Say so in the record rather than silently passing it off as fresh:
+            # `price_source` is what makes a suspect extrinsic auditable later.
+            return float(supplied), "supplied_stale_quote_unavailable"
+        return None, "unavailable"
     if supplied is not None:
         return float(supplied), "supplied"
     q = data_handler.latest_quote(ticker)
@@ -581,7 +639,9 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     if action in PUT_ACTIONS:
         strike = payload.get("strike")
         contracts = int(payload.get("contracts") or 0)
-        stock_price, price_source = _capture_price(ticker, payload.get("stock_price"))
+        stock_price, price_source = _capture_price(
+            ticker, payload.get("stock_price"),
+            at_order_time=_transmits(action))
         # An ASSIGNMENT is never placed — it is an event the operator did not
         # choose. It books directly whatever the flag says.
         if action == "put_assigned":
@@ -617,7 +677,12 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
 
     contracts = int(payload.get("contracts") or 0)
     strike = payload.get("strike")
-    stock_price, price_source = _capture_price(ticker, payload.get("stock_price"))
+    # A transmitting session re-quotes the spot NOW rather than trusting the UI's
+    # chain snapshot (up to 5 minutes old) — see _capture_price. This is the whole
+    # reason for executing from the app instead of the broker: the extrinsic split
+    # is only as good as the spot captured at the moment of the order.
+    stock_price, price_source = _capture_price(
+        ticker, payload.get("stock_price"), at_order_time=_transmits(action))
 
     # Level 5 gate (Account & Juice) — entry only. A blocking failure stops the
     # entry unless the payload carries an explicit override_reason, which is
@@ -2802,6 +2867,14 @@ def _commit_from_pending(rec: dict, fill_price):
     # carried onto the execution so realized slippage = broker fill vs this mid.
     if rec.get("limit_price") is not None:
         payload["quoted_mid_per_share"] = round(float(rec["limit_price"]), 4)
+    # THE SPOT AT THE FILL, not at placement. The order was working for seconds to
+    # minutes; the extrinsic split belongs to the instant the contract actually
+    # traded, so re-quote here and fall back to the placement-time capture. This is
+    # the moment the whole execute-from-the-app design exists to capture.
+    fill_spot, fill_spot_source = _capture_price(
+        rec["ticker"], rec.get("stock_price"), at_order_time=True)
+    payload["stock_price"] = fill_spot
+    payload["stock_price_at_placement"] = rec.get("stock_price")
     if fill_price is not None:
         if action == "buy_leap":
             payload["execution_price"] = fill_price * 100
@@ -2819,7 +2892,7 @@ def _commit_from_pending(rec: dict, fill_price):
     # ways in — a second one would be the first place a placed put and a booked put
     # could diverge.
     if action in PUT_ACTIONS:
-        stock_price, _src = _capture_price(rec["ticker"], rec.get("stock_price"))
+        stock_price = fill_spot
         fn = _put_opened if action == "put_opened" else _put_closed
         return fn(payload, rec["ticker"], rec["strike"], int(rec["contracts"]),
                   stock_price, mode="live")
@@ -2832,10 +2905,9 @@ def _commit_from_pending(rec: dict, fill_price):
         if fill_price is not None:
             payload["price_per_share"] = fill_price
         return _commit(payload, rec["ticker"], action, int(rec["contracts"] or 0),
-                       None, rec["stock_price"],
-                       rec.get("price_source", "schwab"), "live")
+                       None, fill_spot, fill_spot_source, "live")
     return _commit(payload, rec["ticker"], action, int(rec["contracts"]),
-                   rec["strike"], rec["stock_price"], rec.get("price_source", "schwab"), "live")
+                   rec["strike"], fill_spot, fill_spot_source, "live")
 
 
 def _commit_roll_from_pending(rec: dict, order: dict, units: int | None = None):
