@@ -58,7 +58,7 @@ def _cached_close(symbol: str) -> float | None:
 
 def _schwab_configured() -> bool:
     import schwab_api
-    return schwab_api.configured()
+    return schwab_api.market_configured()
 
 
 def _av_configured() -> bool:

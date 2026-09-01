@@ -55,7 +55,57 @@ function AccountNumberField({ value, onChange, brokerAccounts, listId, ownId }) 
   );
 }
 
-function AccountRow({ account, summary, brokerAccounts, isActive, onPatch, onDelete, onSelect }) {
+// Which Schwab login a book authenticates as.
+//
+// The default — every book on the deployment's one grant — is right when the
+// accounts share a login, and impossible when they don't: the Trader API returns
+// only the accounts a grant covers, so an account under a different login is
+// invisible to this token no matter what the consent screen is told. Such a book
+// holds its own grant, and everything it does at the broker goes through it.
+function ConnectionBlock({ account, isPrimary, onPatch, onConnect, onDisconnect, busy }) {
+  const conn = account.connection || {};
+  const own = conn.mode === "own";
+  const connected = !!conn.connected;
+  const expired = conn.status === "expired";
+  const tone = !own
+    ? "text-slate-500"
+    : expired ? "text-rose-300" : connected ? "text-emerald-300" : "text-amber-300";
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+      <span className={tone}>
+        {!own
+          ? "Schwab login: shared with the main account"
+          : connected
+            ? `Own Schwab login · ${expired ? "grant EXPIRED — reconnect" : "connected"}` +
+              (conn.days_left != null && !expired ? ` (${Math.round(conn.days_left)}d left)` : "")
+            : "Own Schwab login · not connected yet"}
+      </span>
+      {own && (
+        <button onClick={() => onConnect(account.id)} disabled={busy}
+                className="rounded-full border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 font-semibold text-sky-300 hover:bg-sky-500/20 disabled:opacity-50">
+          {connected ? "Reconnect" : "Connect"}
+        </button>
+      )}
+      {!isPrimary && !own && (
+        <button onClick={() => onPatch(account.id, { own_connection: true })} disabled={busy}
+                className="rounded-full border border-slate-700 bg-slate-800/60 px-2 py-0.5 font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                title="Use when this account sits under a different Schwab login">
+          Use its own login
+        </button>
+      )}
+      {own && (
+        <button onClick={() => onDisconnect(account.id)} disabled={busy}
+                className="rounded-full border border-slate-700 bg-slate-800/60 px-2 py-0.5 font-semibold text-slate-400 hover:bg-slate-800 disabled:opacity-50">
+          Back to shared
+        </button>
+      )}
+    </div>
+  );
+}
+
+function AccountRow({ account, summary, brokerAccounts, isActive, onPatch, onDelete,
+                     onSelect, onConnect, onDisconnect }) {
   const [editing, setEditing] = React.useState(false);
   const [label, setLabel] = React.useState(account.label);
   const [number, setNumber] = React.useState(account.broker_account_number || "");
@@ -139,7 +189,10 @@ function AccountRow({ account, summary, brokerAccounts, isActive, onPatch, onDel
         </div>
       </div>
 
-      {!isPrimary && unbound && !account.archived && (
+      <ConnectionBlock account={account} isPrimary={isPrimary} onPatch={onPatch}
+                       onConnect={onConnect} onDisconnect={onDisconnect} busy={busy} />
+
+      {!isPrimary && unbound && !account.archived && account.connection?.mode !== "own" && (
         <p className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-200">
           This book has no brokerage account linked, so its orders would go to the
           first account on your Schwab login — the same one as your main book. Link
@@ -250,6 +303,26 @@ export default function AccountsPanel({ registry, summary, activeId, onSelect, o
     await onChanged();
   }
 
+  // Consent for ONE book's own login. The account travels with the request (and
+  // in the OAuth state), so the grant lands on that book's connection even if the
+  // operator switches tabs while Schwab's screen is open.
+  async function connectAccount(id) {
+    setErr(null);
+    try {
+      const { authorize_url } = await api.schwabAuth(id);
+      window.location.href = authorize_url;
+    } catch (e) { setErr(e.message); }
+  }
+
+  async function disconnectAccount(id) {
+    setErr(null);
+    try {
+      await api.disconnectAccount(id);
+      await onChanged();
+      await loadBroker();
+    } catch (e) { setErr(e.message); }
+  }
+
   if (!registry) return <Card title="Accounts"><Loading /></Card>;
 
   const rows = registry.accounts || [];
@@ -295,9 +368,10 @@ export default function AccountsPanel({ registry, summary, activeId, onSelect, o
           </p>
           <p className="mt-1">
             If the other account sits under a different Schwab login (linked only
-            for viewing), this token can't reach it at all — that needs its own
-            connection. You can still type its number below; orders are refused
-            until Schwab returns it, so a typo can't misroute a trade.
+            for viewing), no consent screen on this login can expose it. Give that
+            book its own login instead — “Use its own login” on its row, then
+            Connect — and it authenticates separately for orders, transactions,
+            cash and reconciliation.
           </p>
           <button onClick={reconnect} disabled={reconnecting}
                   className="mt-2 rounded-full border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 font-semibold text-sky-300 hover:bg-sky-500/20 disabled:opacity-50">
@@ -310,7 +384,8 @@ export default function AccountsPanel({ registry, summary, activeId, onSelect, o
         {rows.map((a) => (
           <AccountRow key={a.id} account={a} summary={summaryById[a.id]}
                       brokerAccounts={brokerAccounts} isActive={a.id === activeId}
-                      onPatch={patch} onDelete={remove} onSelect={onSelect} />
+                      onPatch={patch} onDelete={remove} onSelect={onSelect}
+                      onConnect={connectAccount} onDisconnect={disconnectAccount} />
         ))}
       </div>
 

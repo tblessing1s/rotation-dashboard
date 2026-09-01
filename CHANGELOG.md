@@ -1,10 +1,12 @@
 # Changelog
 
-## v2.14.0 — Multiple accounts
+## v2.15.0 — Multiple accounts
 
-One Schwab login usually reaches several brokerage accounts. The dashboard now
-runs **one book per account** — its own positions, execution log, ledgers, alerts
-and orders — with a switcher in the navbar and an "All accounts" monitor on
+One Schwab login usually reaches several brokerage accounts — and sometimes the
+account you want is under a second login entirely. The dashboard now runs **one
+book per account** — its own positions, execution log, ledgers, alerts and
+orders, bound to one brokerage account and, where needed, authenticating with its
+own Schwab grant — with a switcher in the navbar and an "All accounts" monitor on
 Overview. An existing single-account deployment is already a valid one-account
 registry: same paths, no migration, and nothing in the UI changes until a second
 account is added. See `docs/accounts.md`.
@@ -44,6 +46,25 @@ account is added. See `docs/accounts.md`.
   Overview — positions, deployed capital, week/month theta, live alerts, working
   orders and un-adopted broker fills per book, served from the state files with
   no provider calls. Switching remounts the tabs so every panel refetches.
+- **A book can hold its own Schwab login.** One grant per deployment is right
+  when the accounts share a login, and impossible when they don't: the Trader API
+  returns only the accounts a grant covers, so an account under a different login
+  is invisible to this token whatever the consent screen is told. Such a book
+  authenticates separately — its own refresh token
+  (`schwab_token.account-<id>.json`), its own access token, its own client — and
+  the connection resolves from the active account like the state path does.
+  Market data falls back to the shared grant (prices are the same whichever login
+  asks); orders, transactions, cash and reconciliation never do
+  (`data_handler.broker_client` refuses instead). The OAuth `state` carries the
+  connection, so a grant lands on the book that started the flow even if the
+  operator switched books meanwhile, and `SCHWAB_REFRESH_TOKEN` stays the shared
+  grant's credential alone. Disconnecting deletes that book's token; deleting a
+  book takes its credential with it.
+- **The account picker says why it's short.** `/api/accounts/broker-accounts`
+  answers 200 with the count, token status and reason (not connected, expired,
+  zero accounts) instead of an opaque error, and the account-number field accepts
+  a number Schwab doesn't enumerate — flagged, and refused at the ticket until
+  Schwab returns it, so a typo can't misroute a trade.
 - **Removal is safe by construction** — the primary account can't be archived or
   removed; another book with executions is refused unless purged, and a purge
   renames its state file aside (`state.<id>.json.deleted-<ts>`) rather than

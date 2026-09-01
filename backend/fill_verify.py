@@ -178,7 +178,7 @@ def verify_live_fills(limit: int = 20) -> dict:
     orders: list[dict] = []
     if connected:
         import data_handler
-        client = data_handler.client()
+        client = data_handler.broker_client()
         for r in receipts:
             orders.append(_verify_receipt(r, executions_by_id, client))
     else:

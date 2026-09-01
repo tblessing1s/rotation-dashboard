@@ -723,7 +723,7 @@ def data_handler_client_accounts() -> list:
     it. Uses the shared client; a read-only account call (no CFM_LIVE_TRADING
     needed)."""
     import data_handler
-    return data_handler.client().get_accounts(positions=True)
+    return data_handler.broker_client().get_accounts(positions=True)
 
 
 def _demo_broker_accounts() -> list:

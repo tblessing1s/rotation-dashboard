@@ -89,7 +89,7 @@ def _overrides() -> dict[str, bool]:
 
 def _detect(ticker: str) -> bool | None:
     """Inspect near-term call expirations for a non-monthly (weekly) Friday."""
-    if not schwab_api.configured():
+    if not schwab_api.market_configured():
         return None
     today = datetime.now().date()
     to_date = (today + timedelta(days=_LOOKAHEAD_DAYS + 3)).strftime("%Y-%m-%d")

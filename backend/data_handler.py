@@ -20,7 +20,10 @@ import config
 import fetch_budget
 import schwab_api
 
-_client: schwab_api.SchwabClient | None = None
+# One client per OAuth connection (accounts.connection_id): the shared grant every
+# book uses by default, plus one per account that authenticates as its own Schwab
+# login. Keyed rather than singular because an access token belongs to a grant.
+_clients: dict[str, schwab_api.SchwabClient] = {}
 _client_lock = threading.Lock()
 _mem_cache: dict[str, pd.DataFrame] = {}
 # Last fetch error per symbol, so endpoints can explain a missing value instead
@@ -66,11 +69,53 @@ def _symbol_lock(symbol: str) -> threading.Lock:
 
 
 def client() -> schwab_api.SchwabClient:
-    global _client
+    """The MARKET-DATA client — bars, quotes, chains, fundamentals.
+
+    One cached instance per connection, not one per process: a book that
+    authenticates as a different Schwab login needs its own access token, and
+    sharing one instance would let whichever login refreshed last answer for
+    both. Books on the shared grant (the default, and every single-account
+    install) all get the same instance they always had. Account calls take
+    ``broker_client()`` instead — see there for why they must not fall back.
+    """
+    return _client_for(schwab_api.market_connection())
+
+
+def _client_for(connection: str) -> schwab_api.SchwabClient:
     with _client_lock:
-        if _client is None:
-            _client = schwab_api.SchwabClient()
-        return _client
+        existing = _clients.get(connection)
+        if existing is None:
+            existing = schwab_api.SchwabClient(connection=connection)
+            _clients[connection] = existing
+        return existing
+
+
+def broker_client() -> schwab_api.SchwabClient:
+    """The client for ACCOUNT calls — orders, transactions, cash, positions.
+
+    Strictly this book's own connection, with no fallback to the shared login:
+    market data is interchangeable between grants, an account is not. A book that
+    authenticates separately and isn't connected yet raises here rather than
+    quietly placing its order through the deployment's main login.
+    """
+    connection = schwab_api.active_connection()
+    # Zero-arg on purpose: `configured()` already resolves the ACTIVE connection,
+    # and it is the seam the suite substitutes.
+    if not schwab_api.configured():
+        owner = None
+        try:
+            import accounts
+            owner = accounts.connection_owner(connection)
+        except Exception:  # noqa: BLE001
+            owner = None
+        raise schwab_api.SchwabError(
+            f"this account's own Schwab login isn't connected — connect it in "
+            f"Settings → Accounts (/auth/schwab?account={owner})" if owner else
+            "Schwab isn't connected — reconnect it on the Settings tab")
+    # Resolved through client(): with this connection configured, the market
+    # fallback is a no-op and returns the same pinned instance — so there stays
+    # ONE place clients are built (and one seam the suite substitutes).
+    return client()
 
 
 def reset_caches() -> None:
@@ -136,7 +181,7 @@ def _fetch(symbol: str) -> pd.DataFrame:
     global _fallback_events
     start = (datetime.now() - timedelta(days=config.HISTORY_DAYS)).strftime("%Y-%m-%d")
     errors = []
-    if schwab_api.configured():
+    if schwab_api.market_configured():
         try:
             df = client().get_daily_bars(symbol, start)
             _record_success("schwab_bars", symbol)
@@ -154,7 +199,7 @@ def _fetch(symbol: str) -> pd.DataFrame:
             # full is 20+ yrs; slicing from `start` keeps both keyed off one window.
             df = alpha_vantage.daily_bars(symbol).loc[start:]
             _record_success("alpha_vantage_bars", symbol)
-            if schwab_api.configured():
+            if schwab_api.market_configured():
                 _fallback_events += 1
             return df
         except Exception as e:  # noqa: BLE001
@@ -240,7 +285,7 @@ def latest_quote(symbol: str) -> dict | None:
         if df is not None and not df.empty:
             return {"symbol": symbol, "price": float(df["Close"].iloc[-1]), "source": "demo"}
         return None
-    if schwab_api.configured():
+    if schwab_api.market_configured():
         try:
             q = client().get_quote(symbol)
             # last (intraday) -> mark -> close (off-hours / index quotes).
@@ -299,7 +344,7 @@ def live_prices(symbols) -> dict[str, dict]:
         return out
 
     remaining = set(syms)
-    if schwab_api.configured():
+    if schwab_api.market_configured():
         try:
             quotes = client().get_quotes(syms)
             for s, q in quotes.items():

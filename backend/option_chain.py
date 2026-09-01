@@ -56,7 +56,7 @@ def _fetch_chain(ticker: str, refresh: bool = False) -> dict:
         hit = _chain_cache.get(ticker)
         if not refresh and hit and time.time() - hit[0] < _CHAIN_TTL:
             return hit[1]
-        if not schwab_api.configured():
+        if not schwab_api.market_configured():
             raise schwab_api.SchwabError(
                 "Schwab is not connected — re-authorize at /auth/schwab to load option chains")
         today = datetime.now()
@@ -419,7 +419,7 @@ def coverage(ticker: str) -> dict:
         return {"ticker": ticker, "status": "none", "message": "No open position."}
 
     shorts = [sc for sc in (pos.get("short_calls") or []) if sc]
-    if not schwab_api.configured():
+    if not schwab_api.market_configured():
         return {"ticker": ticker, "status": "unknown",
                 "message": "Schwab not connected — live deltas unavailable."}
     try:
@@ -836,7 +836,7 @@ def placement_status() -> dict:
     """
     demo = config.demo_enabled()
     live_toggle = executor.live_enabled()
-    configured = schwab_api.configured()
+    configured = schwab_api.market_configured()
 
     reasons = []
     if not config.CSP_ORDER_PLACEMENT_ENABLED:

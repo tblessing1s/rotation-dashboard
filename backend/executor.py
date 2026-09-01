@@ -2146,7 +2146,7 @@ def _preview_equity_order(payload, ticker, action, contracts, stock_price):
     result = {"order": order, "transmitted": False}
     if schwab_api.configured():
         try:
-            client = data_handler.client()
+            client = data_handler.broker_client()
             result["preview"] = client.preview_order(_order_account_hash(client), order)
         except Exception as exc:  # noqa: BLE001 — preview is advisory, never blocks
             result["preview_error"] = str(exc)
@@ -2765,7 +2765,7 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
     still transmits at the current bid/ask (or is refused if no fresh quote)."""
     _assert_transmit_allowed(action)
     _guard_resubmit(ticker, action)
-    client = data_handler.client()
+    client = data_handler.broker_client()
     account_hash = _order_account_hash(client)
 
     option_symbol = payload.get("option_symbol")
@@ -2860,7 +2860,7 @@ def _place_equity_live(payload, ticker, action, contracts, stock_price, price_so
     """
     _assert_transmit_allowed(action)
     _guard_resubmit(ticker, action)
-    client = data_handler.client()
+    client = data_handler.broker_client()
     account_hash = _order_account_hash(client)
 
     # Quantity is a SHARE COUNT for an equity order, not option contracts. The
@@ -3106,7 +3106,7 @@ def order_status(order_id: str) -> dict:
     if not rec:
         # Already resolved (committed or cleared) — nothing left to confirm.
         return {"order_id": order_id, "status": "unknown"}
-    order = data_handler.client().get_order(rec["account_hash"], order_id)
+    order = data_handler.broker_client().get_order(rec["account_hash"], order_id)
     raw = (order.get("status") or "").upper()
     # The atomic roll has its own lifecycle (partial whole-unit fills, leg-imbalance
     # freeze, rejection fallback) — see _roll_order_status.
@@ -3198,7 +3198,7 @@ def cancel_order(order_id: str) -> dict:
         # Already resolved (committed or cleared) — nothing left to cancel.
         return {"order_id": order_id, "status": "canceled"}
 
-    client = data_handler.client()
+    client = data_handler.broker_client()
     # Reconcile against the broker's current view before attempting the cancel.
     raw = _safe_status(client, rec, order_id)
     if raw == "FILLED":
@@ -4024,7 +4024,7 @@ def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
     if existing is not None:
         return _submission_response(existing, idempotent=True)
 
-    client = data_handler.client()
+    client = data_handler.broker_client()
     account_hash = _order_account_hash(client)
     close_symbol = _roll_symbol(payload, ticker, "from")
     open_symbol = _roll_symbol(payload, ticker, "to")
@@ -4156,7 +4156,7 @@ def submission_status(client_order_ref: str) -> dict:
     if status in (SUB_FILLED, SUB_CANCELED, SUB_REJECTED, SUB_LEG_IMBALANCE):
         return _submission_response(rec)
 
-    client = data_handler.client()
+    client = data_handler.broker_client()
     account_hash = rec.get("account_hash")
     order_id = rec.get("order_id")
 
@@ -4550,7 +4550,7 @@ def _place_live_open(payload, ticker, contracts, stock_price, price_source):
     _guard_resubmit(ticker, "open_position_atomic")
     leap_strike = payload.get("strike")
     short_strike = payload.get("short_strike")
-    client = data_handler.client()
+    client = data_handler.broker_client()
     account_hash = _order_account_hash(client)
 
     leap_symbol = payload.get("option_symbol") or (
@@ -4748,7 +4748,7 @@ def _place_live_exit(payload, ticker, stock_price, price_source):
     leap = position["leap"]
     _le, _la, _shorts, net_ps = _build_exit_legs(position, payload, stock_price)
 
-    client = data_handler.client()
+    client = data_handler.broker_client()
     account_hash = _order_account_hash(client)
 
     def _sym(prefix, strike, default_exp_key):
@@ -4926,7 +4926,7 @@ def _place_live_leap_roll(payload, ticker, position, stock_price, price_source, 
     leap = position["leap"]
     n = int(leap.get("contracts") or 0)
     new_strike = payload.get("to_strike", (est.get("new_leap") or {}).get("strike"))
-    client = data_handler.client()
+    client = data_handler.broker_client()
     account_hash = _order_account_hash(client)
 
     close_symbol = payload.get("from_option_symbol") or (

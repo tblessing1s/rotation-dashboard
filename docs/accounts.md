@@ -68,6 +68,53 @@ Reconciliation reads the same node: a login's `/accounts` response carries every
 linked account, and comparing one book against the union would report every
 sibling account's position as an unexpected broker holding.
 
+## Schwab connections — when the accounts are under different logins
+
+The binding above assumes both accounts sit under ONE Schwab login: one OAuth
+grant, several accounts, pick which. That covers the common case.
+
+It cannot cover an account under a **different login** — a spouse's account, a
+second credential, an account linked on schwab.com for viewing only. The Trader
+API returns only the accounts the grant itself covers, so no answer to the
+consent screen makes that account visible to this token. `/accounts/accountNumbers`
+reporting one account when you can see two is this, not a bug.
+
+So a book can hold **its own grant**:
+
+| | Shared (default) | Own |
+| --- | --- | --- |
+| Token | `DATA_DIR/schwab_token.json` | `schwab_token.account-<id>.json` |
+| Connect | Settings → Schwab card | Settings → Accounts → *Use its own login* → *Connect* |
+| Registry | — | `own_connection: true` |
+
+`accounts.connection_id()` resolves which grant a call uses from the active
+account, exactly as `active_state_path()` resolves the store, and
+`data_handler` caches one client per connection — an access token belongs to a
+grant, so a shared client instance would let whichever login refreshed last
+answer for both.
+
+**Market data falls back; the broker never does.** `data_handler.client()` (bars,
+quotes, chains, fundamentals) uses the shared grant when a book's own grant is
+missing or expired, because prices are the same whichever login asks.
+`data_handler.broker_client()` (orders, transactions, cash, positions) refuses
+instead: an order answered by the wrong login is a correctness failure. A book
+waiting on its own consent therefore keeps its charts and loses only its broker.
+
+Two more rules the code enforces rather than documents:
+
+- the `SCHWAB_REFRESH_TOKEN` env credential belongs to the shared grant **only**
+  — a book that authenticates separately never falls back to it;
+- the OAuth `state` carries the connection, so the callback stores the grant
+  against the book that *started* the flow, not whatever account happens to be
+  active when Schwab redirects back.
+
+Disconnecting deletes that book's refresh token (a credential, not a record — one
+click re-mints it) and returns the book to the shared grant. Deleting a book
+takes its credential with it.
+
+The primary account can't hold its own connection: the deployment's grant IS the
+shared one.
+
 ## What runs for every account
 
 The scheduler (`alert_scheduler`) fans out over every non-archived account —
@@ -106,7 +153,10 @@ registered once, and delivery reads the union across books.
 | `DELETE /api/accounts/<id>[?purge=1]` | remove |
 | `POST /api/accounts/active` | persist the operator's choice |
 | `GET /api/accounts/summary` | every book on one screen |
-| `GET /api/accounts/broker-accounts` | the brokerage accounts this login reaches |
+| `GET /api/accounts/broker-accounts` | the brokerage accounts this book's login reaches, with the reason when the list is short |
+| `GET /api/accounts/connections` | every Schwab grant this deployment holds + its token health |
+| `DELETE /api/accounts/<id>/connection` | discard a book's own grant, back to shared |
+| `GET /auth/schwab` | start consent for the bound book's connection |
 
 `/api/accounts/summary` is read straight off the state files — no provider calls
 — so the "All accounts" monitor on Overview stays one cheap request however many

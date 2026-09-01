@@ -95,7 +95,7 @@ def _fetch_schwab_date(ticker: str) -> str | None:
     """Best-effort next-earnings date from Schwab fundamentals, today or later,
     or None when Schwab isn't connected / exposes no such field."""
     import schwab_api
-    if not schwab_api.configured():
+    if not schwab_api.market_configured():
         return None
     try:
         import data_handler

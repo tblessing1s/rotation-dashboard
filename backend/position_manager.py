@@ -20,7 +20,7 @@ def _live_short_marks(ticker: str, shorts: list[dict]) -> dict[tuple, float]:
     in demo, without Schwab, or on any error it returns {} and callers fall back
     to the stored entry mark. Only legs carrying an expiration can be quoted."""
     import schwab_api
-    if config.demo_enabled() or not schwab_api.configured():
+    if config.demo_enabled() or not schwab_api.market_configured():
         return {}
     syms: dict[str, tuple] = {}
     for sc in shorts:
