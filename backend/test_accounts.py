@@ -578,6 +578,50 @@ def test_broker_account_picker_lists_every_linked_account_and_its_binding(client
     assert [r["bound_to"] for r in body["accounts"]] == [None, "ira"]
 
 
+def test_switching_accounts_keeps_the_market_caches(client, store, monkeypatch):
+    """A switch changes the BOOK, not the data source. Dropping the day's sweep
+    and every cached daily frame on each switch made the next Scan re-sweep the
+    universe on the request path — which is what timed the Scan tab out."""
+    import data_handler
+    import screening
+    called = []
+    monkeypatch.setattr(screening, "clear_cache", lambda: called.append("scan"))
+    monkeypatch.setattr(screening, "clear_memo", lambda: called.append("memo"))
+    monkeypatch.setattr(data_handler, "reset_caches", lambda: called.append("prices"))
+
+    accounts.create("IRA")
+    assert client.post("/api/accounts/active", json={"id": "ira"}).status_code == 200
+    assert accounts.load_registry()["active"] == "ira"
+    assert called == [], f"an account switch must not invalidate market caches (cleared: {called})"
+
+
+def test_the_registry_is_cached_but_follows_the_file(store):
+    """Account resolution sits on hot paths (every load_state, every Schwab
+    client), so the registry read is cached — and must still see a change made
+    outside this process."""
+    accounts.create("IRA")
+    assert [a["id"] for a in accounts.list_accounts()] == [accounts.DEFAULT_ID, "ira"]
+
+    # A write through the module invalidates it…
+    accounts.update("ira", label="Roth")
+    assert accounts.get("ira")["label"] == "Roth"
+
+    # …and so does an edit underneath it.
+    raw = json.load(open(accounts.registry_path(), encoding="utf-8"))
+    raw["accounts"][1]["label"] = "Edited by hand"
+    with open(accounts.registry_path(), "w", encoding="utf-8") as fh:
+        json.dump(raw, fh)
+    os.utime(accounts.registry_path(), (0, 0))   # a distinct mtime, not just a fast rewrite
+    assert accounts.get("ira")["label"] == "Edited by hand"
+
+
+def test_a_cached_registry_is_never_handed_out_to_be_mutated(store):
+    accounts.create("IRA")
+    first = accounts.load_registry()
+    first["accounts"][1]["label"] = "scribbled"
+    assert accounts.get("ira")["label"] == "IRA"
+
+
 def test_deleting_a_book_with_executions_is_refused_over_http(client, store):
     accounts.create("IRA")
     with accounts.use("ira"):

@@ -137,10 +137,34 @@ def _normalize(registry: dict) -> dict:
     return {"active": active, "accounts": accounts}
 
 
+# The parsed registry, keyed by (path, mtime_ns, size). Account resolution sits
+# on genuinely hot paths now — every load_state() resolves a state path through
+# it, and every Schwab client resolves a connection — so re-reading and re-parsing
+# the file on each call is a per-ticker tax across a full-universe scan. The key
+# is the file's own stat, so an edit made outside this process (or a different
+# DATA_DIR under test) is picked up on the next call without an explicit flush.
+_registry_cache: tuple[tuple, dict] | None = None
+
+
 def load_registry() -> dict:
     """The registry as stored, normalized. A missing file is the implicit
-    one-account registry every existing deployment already has."""
+    one-account registry every existing deployment already has.
+
+    Returns a FRESH normalized copy each call (``_normalize`` rebuilds the dicts),
+    so a caller that mutates what it gets — ``update`` does — cannot corrupt the
+    cache behind it."""
+    global _registry_cache
     path = registry_path()
+    try:
+        stat = os.stat(path)
+    except FileNotFoundError:
+        return _default_registry()
+    except OSError as e:
+        raise RegistryCorrupt(f"cannot read {path}: {e}") from e
+    key = (path, stat.st_mtime_ns, stat.st_size)
+    cached = _registry_cache
+    if cached is not None and cached[0] == key:
+        return _normalize(cached[1])
     try:
         with open(path, encoding="utf-8") as fh:
             raw = json.load(fh)
@@ -154,7 +178,9 @@ def load_registry() -> dict:
             "state file is untouched") from e
     if not isinstance(raw, dict):
         raise RegistryCorrupt(f"{path} does not contain an object")
-    return _normalize(raw)
+    registry = _normalize(raw)
+    _registry_cache = (key, registry)
+    return _normalize(registry)
 
 
 def _write_registry(registry: dict) -> dict:
@@ -168,6 +194,8 @@ def _write_registry(registry: dict) -> dict:
         fh.flush()
         os.fsync(fh.fileno())
     os.replace(tmp, path)
+    global _registry_cache
+    _registry_cache = None      # the next read re-stats and re-caches
     return registry
 
 

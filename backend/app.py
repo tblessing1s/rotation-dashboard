@@ -233,8 +233,10 @@ def api_scorecard():
             out = dict(warm)
         # Annotate every row, then filter — so the priced-out rows carry their
         # reason whether or not they are being shown.
+        # Row COPIES: the annotation below is this book's (see /api/scan/ready),
+        # and the sweep underneath is shared across accounts.
         keep, priced_out, bar = scorecard_metrics.split_by_affordability(
-            list(out.get("results") or []), log.load_state())
+            [dict(r) for r in out.get("results") or []], log.load_state())
         out["affordability"] = bar
         shown = (keep + priced_out) if include_unaffordable else keep
         # `gate_results` (the per-gate calibration telemetry) rides on the sweep
@@ -308,7 +310,11 @@ def api_scan_ready():
                                              priced_out=[],
                                              eligible_of_evaluated={"eligible": 0,
                                                                     "evaluated": 0}))
-        rows = list(sc["results"])
+        # Copy the memoized rows before annotating: split_by_affordability writes
+        # this book's `affordable` / `max_lot_cost` onto each row, and the sweep
+        # underneath is SHARED across accounts. Annotating it in place would let
+        # one book's dry powder decide what another book sees as priced out.
+        rows = [dict(r) for r in sc["results"]]
         evaluated_n = len(rows)
 
         # Affordability is not a veto — a lot the account cannot buy today is
@@ -1791,13 +1797,23 @@ def api_accounts_disconnect(account_id: str):
 
 @app.route("/api/accounts/active", methods=["POST"])
 def api_accounts_set_active():
-    """Persist the operator's account choice. Clears the in-memory scan/data
-    caches for the same reason the demo switch does: they memoize per store."""
+    """Persist the operator's account choice.
+
+    Deliberately clears NOTHING. The demo switch drops the scan and price caches
+    because it changes the DATA SOURCE — a sweep computed against synthetic prices
+    must never be replayed for real ones. An account switch changes the BOOK, and
+    the market caches are account-free by construction: the memoized sweep holds
+    market facts only, affordability and the Level-5 overlay are applied per
+    request from the active book's state.
+
+    Clearing them here cost the day's full-universe sweep (`scan_cache.clear()`
+    deletes it) and every cached daily frame on every switch, so the next Scan had
+    to re-sweep ~500 tickers and re-read every parquet — which is what made the
+    Scan tab time out after switching accounts.
+    """
     payload = request.get_json(silent=True) or {}
     try:
         acct = accounts.set_active(payload.get("id") or payload.get("account") or "")
-        screening.clear_cache()
-        data_handler.reset_caches()
         return jsonify({"active": acct["id"], "account": acct})
     except accounts.UnknownAccount as e:
         return _err(e, 404)
