@@ -127,6 +127,10 @@ export const api = {
     request(`/api/put-chain/${ticker}${refresh ? "?refresh=1" : ""}`),
   putPlacementStatus: () => request("/api/put-placement-status"),
   execute: (payload) => request("/api/execute", { method: "POST", body: JSON.stringify(payload) }),
+  // Retire positions holding nothing. Cannot touch a position with any leg, so
+  // it can never remove a real holding.
+  closeEmptyPositions: (reason) =>
+    request("/api/positions/close-empty", { method: "POST", body: JSON.stringify({ reason }) }),
   // Live order lifecycle (used when an order comes back "working"; paper fills immediately).
   orderStatus: (orderId) => request(`/api/order-status?order_id=${encodeURIComponent(orderId)}`),
   cancelOrder: (orderId) => request("/api/order-cancel", { method: "POST", body: JSON.stringify({ order_id: orderId }) }),

@@ -947,7 +947,40 @@ function PutBase({ p }) {
   );
 }
 
-function SharesBase({ p }) {
+function EmptyPositionNotice({ ticker, onCleared }) {
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  async function clear() {
+    if (!window.confirm(
+      `Clear the empty ${ticker} position?\n\n` +
+      `It holds no shares, no calls and no puts — nothing you own is removed. ` +
+      `The execution log keeps an immutable record that it was retired.`)) return;
+    setBusy(true); setErr(null);
+    try {
+      await api.closeEmptyPositions(`operator cleared empty ${ticker} from Positions`);
+      onCleared?.();
+    } catch (e) { setErr(e.message); }
+    finally { setBusy(false); }
+  }
+  return (
+    <div className="mt-2 rounded-lg border border-amber-700/60 bg-amber-500/5 px-3 py-2 text-amber-300">
+      <span className="font-semibold">This position holds nothing.</span> No shares,
+      no calls, no puts — most likely an order that was never actually sent to the
+      broker. It is not a holding and can be cleared.
+      {err && <div className="mt-1 text-rose-400">{err}</div>}
+      <button
+        onClick={clear}
+        disabled={busy}
+        className="mt-2 rounded-md border border-amber-600 px-2.5 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-500/10 disabled:opacity-40"
+      >
+        {busy ? "Clearing…" : "Clear this empty position"}
+      </button>
+    </div>
+  );
+}
+
+
+function SharesBase({ p, onCleared }) {
   const sh = p.shares || {};
   const cov = p.coverage || {};
   const count = Number(sh.count || 0);
@@ -964,7 +997,18 @@ function SharesBase({ p }) {
   const free = lots != null ? lots - sold : null;
 
   if (!count) {
-    return <div className="text-xs text-slate-500">No shares held — buy the base lot to start the engine.</div>;
+    // A position holding NOTHING is a shell, not a holding — an order that was
+    // never sent, or one the broker refused after the position record already
+    // existed. It reads exactly like something you own, so offer the way out
+    // right here rather than leaving the operator to reconcile it by hand.
+    const empty = !(p.short_calls || []).length && !(p.short_puts || []).length
+      && !(p.leap_legs || []).length && !p.leap;
+    return (
+      <div className="text-xs text-slate-500">
+        No shares held — buy the base lot to start the engine.
+        {empty && <EmptyPositionNotice ticker={p.ticker} onCleared={onCleared} />}
+      </div>
+    );
   }
   return (
     <div className="min-w-0">
@@ -1201,7 +1245,7 @@ function PositionRow({ p, diffs, recs, onRecsChanged, focusCard, focused, setRol
           <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
             {p.position_type === "CASH_SECURED_PUT"
               ? <PutBase p={p} />
-              : <SharesBase p={p} />}
+              : <SharesBase p={p} onCleared={afterResolve} />}
           </div>
 
           {/* (2) weekly covered-call capture */}

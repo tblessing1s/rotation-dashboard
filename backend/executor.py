@@ -2094,6 +2094,13 @@ def _commit(payload, ticker, action, contracts, strike, stock_price, price_sourc
     state = log.load_state()
     position = _ensure_position(state, ticker)
     position_update(position)
+    # A position holding NOTHING is not an active position. `_ensure_position`
+    # creates a shell before the mutation runs, so any path that creates one and
+    # then books no leg (a refused order, an adjustment to zero) used to leave an
+    # empty shell showing on the Positions tab as if it were real. This was only
+    # called on the put-close path; running it after every commit is what stops a
+    # shell being created faster than it can be cleaned up.
+    _close_if_empty(position)
     log.recompute_derived(state)
     log.save_state(state)
 
@@ -2623,6 +2630,42 @@ def _put_assigned(payload, ticker, strike, contracts, stock_price, mode="logged"
     return {"success": True, "status": "filled", "execution_id": stored["id"],
             "mode": "logged", "captured_price": stock_price,
             "shares_received": shares_received, "execution": stored}
+
+
+def close_empty_positions(reason: str = "") -> dict:
+    """Close every ACTIVE position that holds nothing, and say which.
+
+    A shell — no shares, no LEAP legs, no short calls, no short puts — is not a
+    position; it is a row left behind by a path that created the position record
+    before booking a leg that never arrived. It shows on the Positions tab exactly
+    like a real holding, which is the whole problem: an operator reading their book
+    cannot tell it apart from something they own.
+
+    SAFE BY CONSTRUCTION: it can only close a position that holds nothing, so it
+    can never remove a real holding, however it is invoked. Each close appends an
+    immutable ``position_cleared`` marker — the execution log stays append-only,
+    and the audit trail records that this row was retired and why.
+    """
+    state = log.load_state()
+    cleared = []
+    for position in state.get("positions", []):
+        if position.get("status") == "closed":
+            continue
+        before = position.get("status")
+        _close_if_empty(position)
+        if position.get("status") == "closed" and before != "closed":
+            cleared.append(position.get("ticker"))
+    if cleared:
+        log.save_state(state)
+        for ticker in cleared:
+            log.append_execution({
+                "ticker": ticker, "action": "position_cleared", "mode": "logged",
+                "reason": (reason or "empty position with no legs held").strip(),
+                "source": "close_empty_positions"})
+        state = log.load_state()
+        log.recompute_derived(state)
+        log.save_state(state)
+    return {"cleared": cleared, "count": len(cleared)}
 
 
 def _close_if_empty(position: dict) -> None:

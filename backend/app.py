@@ -674,6 +674,22 @@ def api_execute():
         return _err(e)
 
 
+@app.route("/api/positions/close-empty", methods=["POST"])
+def api_close_empty_positions():
+    """Retire positions that hold nothing — no shares, no LEAP legs, no short
+    calls, no short puts. A shell like that is a row left behind by a path that
+    created the position record before booking a leg that never arrived, and it
+    reads on the Positions tab exactly like something you own.
+
+    It cannot touch a position that holds anything, so there is no way to lose a
+    real holding through this. Each close appends an immutable marker."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        return jsonify(executor.close_empty_positions(payload.get("reason") or ""))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/order-status")
 def api_order_status():
     order_id = request.args.get("order_id", "")
