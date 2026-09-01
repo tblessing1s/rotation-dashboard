@@ -559,6 +559,17 @@ def _execution_count(path: str) -> int:
     return len(book.get("executions") or []) if book else 0
 
 
+def _deployed_capital(book: dict) -> float:
+    """Capital deployed in one book, through the same helper the Positions and
+    Overview tabs use — a pure function over the state dict, no provider calls."""
+    try:
+        import position_manager
+        return position_manager.deployed_capital(book)
+    except Exception as e:  # noqa: BLE001 — one odd book must not sink the roll-up
+        logger.warning("could not derive deployed capital: %s", e)
+        return 0.0
+
+
 def _account_summary(acct: dict) -> dict:
     """One account's monitoring line, read STRAIGHT off its state file.
 
@@ -615,7 +626,11 @@ def _account_summary(acct: dict) -> dict:
     row.update({
         "open_positions": len(open_positions),
         "tickers": sorted({p.get("ticker") for p in open_positions if p.get("ticker")}),
-        "capital_deployed": round(float(metadata.get("capital_deployed") or 0), 2),
+        # DERIVED from the open positions, exactly as every other view derives it
+        # (position_manager.deployed_capital — shares, LEAP cost bases and put
+        # collateral). metadata.capital_deployed is a legacy field nothing keeps
+        # current: reading it showed a live book as $0 deployed.
+        "capital_deployed": _deployed_capital(book),
         "operating_cash": round(float(metadata.get("operating_cash") or 0), 2),
         "theta": ledger.get("totals") or {},
         "active_alerts": len((book.get("alerts") or {}).get("active") or {}),

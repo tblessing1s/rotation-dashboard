@@ -423,18 +423,36 @@ def test_connections_endpoint_lists_every_grant(client, store, app_creds):
 # ---------------------------------------------------------------------------
 # 5. The roll-up
 # ---------------------------------------------------------------------------
+def _shares_position(ticker: str, count: int, cost_per_share: float) -> dict:
+    return {"ticker": ticker, "status": "open",
+            "shares": {"count": count, "cost_basis_per_share": cost_per_share}}
+
+
+def test_deployed_capital_is_derived_not_read_from_stale_metadata(store):
+    """metadata.capital_deployed is a legacy field nothing maintains — every view
+    derives deployed capital from the open positions. A roll-up that trusted the
+    field showed a live book as $0 deployed."""
+    import position_manager
+    state = log.load_state()
+    state["positions"] = [_shares_position("AAPL", 100, 180.0)]
+    state["metadata"]["capital_deployed"] = 0      # stale, as a real book's is
+    log.save_state(state)
+
+    row = {r["id"]: r for r in accounts.summary()["accounts"]}[accounts.DEFAULT_ID]
+    assert row["capital_deployed"] == 18000.0
+    assert row["capital_deployed"] == position_manager.deployed_capital(log.load_state())
+
+
 def test_summary_rolls_every_book_up_without_provider_calls(store):
     accounts.create("IRA")
     state = log.load_state()
-    state["positions"] = [{"ticker": "AAPL", "status": "open"}]
-    state["metadata"]["capital_deployed"] = 20000
+    state["positions"] = [_shares_position("AAPL", 100, 200.0)]
     state["theta_ledger"]["totals"] = {"this_week": 300, "this_month": 900, "ytd": 5000}
     log.save_state(state)
     with accounts.use("ira"):
         ira = log.load_state()
-        ira["positions"] = [{"ticker": "MSFT", "status": "open"},
+        ira["positions"] = [_shares_position("MSFT", 100, 100.0),
                             {"ticker": "NVDA", "status": "closed"}]
-        ira["metadata"]["capital_deployed"] = 10000
         ira["theta_ledger"]["totals"] = {"this_week": 100, "this_month": 250, "ytd": 1200}
         ira["alerts"]["active"] = {"fp1": {"type": "ROLL_DUE"}}
         log.save_state(ira)
@@ -442,7 +460,9 @@ def test_summary_rolls_every_book_up_without_provider_calls(store):
     summary = accounts.summary()
     rows = {r["id"]: r for r in summary["accounts"]}
     assert rows[accounts.DEFAULT_ID]["open_positions"] == 1
+    assert rows[accounts.DEFAULT_ID]["capital_deployed"] == 20000.0
     assert rows["ira"]["open_positions"] == 1 and rows["ira"]["tickers"] == ["MSFT"]
+    assert rows["ira"]["capital_deployed"] == 10000.0
     assert rows["ira"]["active_alerts"] == 1
     assert summary["totals"] == {
         "accounts": 2, "open_positions": 2, "capital_deployed": 30000.0,
