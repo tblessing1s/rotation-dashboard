@@ -201,3 +201,79 @@ def test_demo_mode_refuses_even_with_every_flag_on(store, live, monkeypatch):
     with pytest.raises(schwab_api.SchwabError, match="demo"):
         executor._place_equity_live({"qty": 100}, "AAA", "buy_shares", 1, 50.0, "schwab")
     assert c.placed == []
+
+
+# ===========================================================================
+# Unfilled -> cancelled -> retry. The loop that makes live trading usable.
+# ===========================================================================
+def test_a_second_order_is_refused_while_the_first_is_still_working(store, live, monkeypatch):
+    """THE hazard behind 'let me try again'. `buy_shares` and `put_opened` were
+    missing from `_LOCKED_INTENTS`, and for a non-locked action `_guard_resubmit`
+    returns BEFORE the belt-and-suspenders pending-order check. So a retry while
+    the first order was still working placed a SECOND live order, and both could
+    fill — a double position on a strategy whose base leg is exactly 100 shares."""
+    monkeypatch.undo()          # drop the fixture's _guard_resubmit stub
+    monkeypatch.setattr(config, "EQUITY_ORDER_PLACEMENT_ENABLED", True)
+    monkeypatch.setattr(config, "_demo_mode", False)
+    monkeypatch.setattr(executor, "live_enabled", lambda: True)
+    monkeypatch.setattr(executor.schwab_api, "configured", lambda: True)
+    monkeypatch.setattr(executor.data_handler, "latest_quote",
+                        lambda t: {"price": 50.0, "bid": 49.98, "ask": 50.02})
+    monkeypatch.setattr(executor, "_record_placement", lambda *a, **kw: None)
+    c = _client(monkeypatch)
+
+    _buy()                                    # first order -> working, pending
+    with pytest.raises(executor.ResubmitLockedError, match="still pending"):
+        _buy()
+    assert len(c.placed) == 1, "the second order must never reach the broker"
+
+
+def test_the_entry_intents_are_all_lock_gated():
+    """`buy_shares` is the shares-primary replacement for `buy_leap`, which was
+    gated from the start; `put_opened` is an entry too. An entry intent that is
+    not gated has no resubmit protection at all."""
+    for intent in ("buy_leap", "sell_short", "buy_shares", "put_opened"):
+        assert intent in executor._LOCKED_INTENTS, intent
+
+
+def test_a_cancelled_order_frees_the_retry(store, live, monkeypatch):
+    """The point of cancelling an unfilled order: the operator reprices and sends
+    again. CANCELED is terminal, so `check_resubmit` allows the next attempt."""
+    import order_lifecycle as olc
+    assert olc.is_terminal("CANCELED")
+    allowed, _ = olc.check_resubmit(
+        {"state": "CANCELED", "attempts": 1, "reconciled": True},
+        config.MAX_RESUBMIT_ATTEMPTS)
+    assert allowed is True
+
+
+def test_retrying_is_capped_rather_than_endless():
+    """Not-filling repeatedly usually means the price is wrong, not that one more
+    identical order will work. The cap stops the loop and alerts."""
+    import order_lifecycle as olc
+    allowed, reason = olc.check_resubmit(
+        {"state": "CANCELED", "attempts": config.MAX_RESUBMIT_ATTEMPTS,
+         "reconciled": True},
+        config.MAX_RESUBMIT_ATTEMPTS)
+    assert allowed is False and "max resubmit attempts" in reason
+
+
+def test_an_unconfirmed_cancel_blocks_the_retry():
+    """If the broker never confirmed the cancel, the order may STILL be working.
+    Placing another one then is how an operator ends up with two live orders."""
+    import order_lifecycle as olc
+    allowed, reason = olc.check_resubmit(
+        {"state": olc.LOCKED_UNKNOWN, "attempts": 1, "reconciled": True},
+        config.MAX_RESUBMIT_ATTEMPTS)
+    assert allowed is False and "UNKNOWN" in reason
+
+
+def test_the_placement_carries_the_fill_window_it_was_placed_under(store, live, monkeypatch):
+    """The client must poll to the SAME deadline the operator configured. The 3s
+    that was hard-coded in the frontend is far too short for a limit at the mid to
+    fill on a normal book — nearly every order was cancelled before it had a
+    chance, which would read as 'live trading does not work'."""
+    _client(monkeypatch)
+    res = _buy()
+    assert res["fill_wait_ms"] == int(config.ORDER_FILL_WAIT_SECONDS * 1000)
+    assert config.ORDER_FILL_WAIT_SECONDS >= 10, "3s cannot fill a mid-priced limit"

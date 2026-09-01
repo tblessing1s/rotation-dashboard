@@ -1001,6 +1001,20 @@ CANCEL_POLL_MAX_ATTEMPTS = 6
 # crossing the spread. Enforced in order_lifecycle.check_resubmit.
 MAX_RESUBMIT_ATTEMPTS = 3
 
+# How long a WORKING order is given to fill before the app cancels it, so the
+# operator can reprice and try again rather than leaving a stale limit resting at
+# the broker. PROPOSED_DEFAULT, env-overridable.
+#
+# This was hard-coded at 3 SECONDS in the frontend. A limit priced at the mid
+# frequently does not fill that fast — on anything but a tight, liquid book it
+# essentially never does — so nearly every order would be cancelled before it had
+# a chance, and the operator would conclude live trading does not work.
+#
+# 15s is a compromise, not a fact: long enough for a mid-priced limit on a normal
+# book, short enough that the operator is not staring at a spinner. Raise it for
+# illiquid names, lower it to get back to the old behaviour.
+ORDER_FILL_WAIT_SECONDS = float(os.environ.get("ORDER_FILL_WAIT_SECONDS") or 15.0)
+
 # PROPOSED_DEFAULT — how a resubmitted order adjusts its limit toward the ask.
 # "none" (the default) re-sends at the SAME mid-seeded limit: honest, never chases
 # price, but may miss again if the market moved. Any price-chasing variant must be

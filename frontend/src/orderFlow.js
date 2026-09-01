@@ -22,7 +22,12 @@ const ACTION_VERB = {
   put_assigned: "Put assignment",
 };
 
-const FILL_TIMEOUT_MS = 3000;
+// How long a working order is given to fill before we cancel it. Served by
+// /api/live-trading (config.ORDER_FILL_WAIT_SECONDS) so it is one tunable number
+// rather than a constant compiled into the bundle; the 3s that was hard-coded
+// here is far too short for a limit at the mid to fill on a normal book, so
+// nearly every order was cancelled before it had a chance.
+const FILL_TIMEOUT_FALLBACK_MS = 15000;
 const POLL_MS = 400;
 // Confirming an UNKNOWN (lost-response / accepted-no-id) order by client_order_ref.
 // A handful of quick reads to catch the common "the ack was just slow" case; if it's
@@ -136,7 +141,9 @@ export async function submitOrder(api, toast, payload) {
   // Live working order — confirm the fill within the window or cancel it.
   const orderId = res.order_id;
   toast.update(id, `${label} working — confirming fill…`, { type: "pending", duration: 0 });
-  const deadline = Date.now() + FILL_TIMEOUT_MS;
+  const waitMs = Number(res.fill_wait_ms) > 0
+    ? Number(res.fill_wait_ms) : FILL_TIMEOUT_FALLBACK_MS;
+  const deadline = Date.now() + waitMs;
   while (Date.now() < deadline) {
     await sleep(POLL_MS);
     let st;
@@ -165,7 +172,8 @@ export async function submitOrder(api, toast, payload) {
   } catch (e) {
     toast.update(
       id,
-      `${label} didn't fill within 3s and could NOT be cancelled (${e.message}). ` +
+      `${label} didn't fill in ${Math.round(waitMs / 1000)}s and could NOT be cancelled ` +
+        `(${e.message}). ` +
         `The order may still be working — cancel it in your broker before placing another.`,
       { type: "error", duration: 0 },
     );
@@ -190,6 +198,9 @@ export async function submitOrder(api, toast, payload) {
     );
     return { ...res, status: "working" };
   }
-  toast.update(id, `${label} didn't fill within 3s — order ${cancelled.status}.`, { type: "error", duration: 8000 });
+  toast.update(id,
+    `${label} didn't fill in ${Math.round(waitMs / 1000)}s — order ${cancelled.status}. ` +
+      `Reprice and send it again.`,
+    { type: "error", duration: 8000 });
   return { ...res, status: cancelled.status };
 }

@@ -390,7 +390,19 @@ class ResubmitLockedError(RuntimeError):
 
 # The per-position resubmission gate covers ENTRY intents (this task's scope). The
 # roll/exit paths have their own freeze/leg-imbalance lifecycle and are untouched.
-_LOCKED_INTENTS = {"buy_leap", "sell_short", "open_position_atomic"}
+# The ENTRY intents guarded by the resubmission lock: no second live order for the
+# same position-intent until the first is confirmed terminal at the broker, capped
+# at MAX_RESUBMIT_ATTEMPTS.
+#
+# `buy_shares` and `put_opened` were missing. Both are entry intents — `buy_shares`
+# is the shares-primary REPLACEMENT for the locked `buy_leap` — and for a
+# non-locked action `_guard_resubmit` returns before even the belt-and-suspenders
+# "is an order still pending?" check. So a retry after an unfilled order could
+# place a SECOND live order while the first was still working, and both could
+# fill. That is the exact hazard the gate exists to prevent, and it was open on
+# the two newest order paths.
+_LOCKED_INTENTS = {"buy_leap", "sell_short", "open_position_atomic",
+                   "buy_shares", "put_opened"}
 
 
 def _num(v) -> float:
@@ -2738,6 +2750,9 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
         "limit_price": limit,
         "staged_limit_price": staged,
         "repriced": bool(staged is not None and abs(limit - staged) > 1e-9),
+        # The fill window this order was placed under, so the client polls to the
+        # SAME deadline the operator configured rather than its own constant.
+        "fill_wait_ms": int(config.ORDER_FILL_WAIT_SECONDS * 1000),
     }
 
 
@@ -2838,6 +2853,7 @@ def _place_equity_live(payload, ticker, action, contracts, stock_price, price_so
         "staged_limit_price": staged,
         "repriced": bool(staged is not None
                          and abs(limit - float(staged)) > 1e-9),
+        "fill_wait_ms": int(config.ORDER_FILL_WAIT_SECONDS * 1000),
     }
 
 
