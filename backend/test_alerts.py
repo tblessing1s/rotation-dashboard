@@ -522,6 +522,9 @@ def test_engineered_state_trips_every_position_condition(isolated_state, monkeyp
 
     fired = sorted((a["type"], a["ticker"]) for a in alerts.evaluate(log.load_state()))
     assert fired == sorted([
+        # The daily digest is not a condition — it fires on EVERY pass, by design,
+        # so it belongs in any exhaustive expectation of what one pass produces.
+        ("DAILY_OUTLOOK", None),
         ("KILL_SWITCH_SPY", "PG"),
         ("CIRCUIT_BREAKER", "PG"),
         ("DELTA_UNCOVERED", "PG"),   # below the 0.50 floor
