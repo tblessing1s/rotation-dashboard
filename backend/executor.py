@@ -756,7 +756,12 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     _gate_verdict = _enforce_execution_window(action, ticker, payload, _gate_now(now))
     _enforce_spread_quality(ticker, payload, _gate_verdict)
 
-    log.save_state(state)  # persist the shell position before recording the fill
+    # Persist the shell position before recording the fill — on a FRESH copy.
+    # ``state`` above was loaded before the execution-window / spread gates, which
+    # fetch from the broker; saving that copy here would overwrite anything
+    # written to the store in the meantime (another order's fill, a reconciliation
+    # report).
+    log.mutate_state(lambda s: _ensure_position(s, ticker))
 
     mode = "live" if live_transmit() else "logged"
 

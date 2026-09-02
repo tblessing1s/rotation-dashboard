@@ -669,7 +669,6 @@ def run_reconciliation(state: dict | None = None, persist: bool = True) -> dict:
     import schwab_api
 
     owns_state = state is None
-    state = state if state is not None else log.load_state()
     as_of = _utcnow()
 
     # Demo mode: reconcile the whole demo book against a synthetic broker fixture
@@ -677,15 +676,35 @@ def run_reconciliation(state: dict | None = None, persist: bool = True) -> dict:
     # fixture is deliberately divergent). Paper positions are included here.
     demo = config.demo_enabled()
 
+    def _persist(report: dict, *, apply: bool) -> None:
+        """Write the report (and freezes) onto the store.
+
+        When this run owns the state it re-reads the file under the lock and
+        applies the report to THAT copy. The broker fetch above can take tens of
+        seconds (longer under a 429 backoff), and the order poll commits fills in
+        the meantime; saving the copy loaded before the fetch overwrote those
+        fills — the short call then showed up at the broker as UNEXPECTED on the
+        next run, with the position frozen for review.
+        """
+        if not persist:
+            return
+        if owns_state:
+            def _apply(fresh: dict) -> None:
+                _persist_report(fresh, report)
+                if apply:
+                    apply_report_to_state(fresh, report)
+            log.mutate_state(_apply)
+            return
+        _persist_report(state, report)
+        if apply:
+            apply_report_to_state(state, report)
+
     # Fetch — a failure here yields a failure report, never an empty broker view.
     try:
         accounts = _demo_broker_accounts() if demo else data_handler_client_accounts()
     except Exception as e:  # noqa: BLE001 — isolate the fetch failure
         report = failure_report(as_of, str(e))
-        if persist:
-            _persist_report(state, report)
-            if owns_state:
-                log.save_state(state)
+        _persist(report, apply=False)
         logger.warning("reconciliation fetch failed: %s", e)
         return report
 
@@ -696,13 +715,16 @@ def run_reconciliation(state: dict | None = None, persist: bool = True) -> dict:
             accounts, None if demo else schwab_api.bound_account_number())
     except OptionSymbolParseError as e:
         report = failure_report(as_of, f"unparseable broker option symbol: {e}")
-        if persist:
-            _persist_report(state, report)
-            if owns_state:
-                log.save_state(state)
+        _persist(report, apply=False)
         logger.error("reconciliation parse failed: %s", e)
         return report
 
+    # The expected view is read AFTER the fetch so a fill the order poll committed
+    # while the broker call was in flight is already in it (the broker held that
+    # leg before the app booked it, so this ordering is the one that can't flag
+    # an app fill as UNEXPECTED).
+    if owns_state:
+        state = log.load_state()
     expected_view, excluded = expected_view_from_state(state, live_only=not demo)
     for ex in excluded:
         if ex["reason"] == "unknown_live_status":
@@ -710,11 +732,7 @@ def run_reconciliation(state: dict | None = None, persist: bool = True) -> dict:
 
     report = reconcile(broker_view, expected_view, as_of)
     report["excluded"] = excluded
-    if persist:
-        _persist_report(state, report)
-        apply_report_to_state(state, report)
-        if owns_state:
-            log.save_state(state)
+    _persist(report, apply=True)
     return report
 
 

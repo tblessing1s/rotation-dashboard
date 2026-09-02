@@ -745,7 +745,6 @@ def run_ingestion(state: dict | None = None, persist: bool = True,
     import logging_handler as log
 
     owns_state = state is None
-    state = state if state is not None else log.load_state()
     as_of = _utcnow()
 
     if feed is None:
@@ -758,10 +757,25 @@ def run_ingestion(state: dict | None = None, persist: bool = True,
             logger.warning("transaction ingestion fetch failed: %s", e)
             return report
 
-    report = build_report(feed, state, as_of)
-    report["broker_ok"] = True
+    # The state is read AFTER the (slow) transactions fetch, and when this run
+    # owns it the report is classified and persisted against a FRESH copy under
+    # the store lock. Loading before the fetch and saving that copy afterwards
+    # overwrote any fill the order poll committed in between — see
+    # logging_handler.mutate_state.
+    if not owns_state:
+        report = build_report(feed, state, as_of)
+        report["broker_ok"] = True
+        if persist:
+            _persist_report(state, report)
+        return report
+
+    def _classify_and_persist(fresh: dict) -> dict:
+        rep = build_report(feed, fresh, as_of)
+        rep["broker_ok"] = True
+        if persist:
+            _persist_report(fresh, rep)
+        return rep
+
     if persist:
-        _persist_report(state, report)
-        if owns_state:
-            log.save_state(state)
-    return report
+        return log.mutate_state(_classify_and_persist)
+    return _classify_and_persist(log.load_state())

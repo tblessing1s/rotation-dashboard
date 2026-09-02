@@ -624,3 +624,68 @@ def test_api_reconcile_get_and_post(store, monkeypatch):
     assert got["last"]["status"] == reconcile.DIRTY
     # The NVDA LEAP is now frozen (missing at broker).
     assert log.find_position(log.load_state(), "NVDA")["needs_review"] is True
+
+
+# ---------------------------------------------------------------------------
+# 8. Lost-update guard: a fill committed WHILE the broker fetch is in flight
+# ---------------------------------------------------------------------------
+def test_fill_committed_during_broker_fetch_survives_persist(store, monkeypatch):
+    """The interval reconciliation loads state, fetches Schwab positions (slow,
+    slower still under a 429 backoff), then persists. A short call the order poll
+    committed during that fetch used to be overwritten by the pre-fetch copy —
+    and the next run then flagged the broker's short as UNEXPECTED_AT_BROKER.
+    The persist must land on a fresh copy, and the report must see the fill."""
+    state = log.load_state()
+    state["positions"] = [{
+        "ticker": "SPCX", "status": "active", "needs_review": False,
+        "shares": {"count": 100}, "short_calls": [], "leap_legs": [], "leap": None}]
+    state["executions"] = [{"id": "exec_001", "ticker": "SPCX", "action": "buy_shares",
+                            "live_transmitted": True}]
+    log.save_state(state)
+
+    def broker_fetch_with_concurrent_fill():
+        # The order poll books the fill while this "fetch" is in flight.
+        log.append_execution({"ticker": "SPCX", "action": "sell_short", "strike": 133.0,
+                              "contracts": 1, "expiration": "2026-09-11",
+                              "premium_per_share": 0.85, "mode": "live"})
+        s = log.load_state()
+        log.find_position(s, "SPCX")["short_calls"] = [
+            {"strike": 133.0, "contracts": 1, "expiration": "2026-09-11"}]
+        log.save_state(s)
+        return [{"securitiesAccount": {"positions": [
+            {"instrument": {"assetType": "EQUITY", "symbol": "SPCX"}, "longQuantity": 100},
+            {"instrument": {"assetType": "OPTION", "symbol": "SPCX  260911C00133000",
+                            "underlyingSymbol": "SPCX", "putCall": "CALL"},
+             "shortQuantity": 1},
+        ]}}]
+    monkeypatch.setattr(reconcile, "data_handler_client_accounts",
+                        broker_fetch_with_concurrent_fill)
+
+    report = reconcile.run_reconciliation()
+    assert report["broker_ok"] is True
+    assert report["diffs"] == [], report["diffs"]
+
+    after = log.load_state()
+    assert [e["action"] for e in after["executions"]] == ["buy_shares", "sell_short"]
+    pos = log.find_position(after, "SPCX")
+    assert pos["short_calls"] and pos["short_calls"][0]["strike"] == 133.0
+    assert pos["needs_review"] is False
+    assert after["reconciliation"]["last"]["as_of"] == report["as_of"]
+
+
+def test_failed_fetch_persists_without_clobbering_concurrent_write(store, monkeypatch):
+    state = log.load_state()
+    state["positions"] = [_frozen_position(needs_review=False, review=None)]
+    log.save_state(state)
+
+    def boom():
+        log.append_execution({"ticker": "NVDA", "action": "sell_short", "strike": 150.0,
+                              "contracts": 1, "expiration": "2026-09-11", "mode": "live"})
+        raise schwab_api.SchwabError("HTTP 429 too many requests")
+    monkeypatch.setattr(reconcile, "data_handler_client_accounts", boom)
+
+    report = reconcile.run_reconciliation()
+    assert report["broker_ok"] is False
+    after = log.load_state()
+    assert any(e["action"] == "sell_short" for e in after["executions"])
+    assert after["reconciliation"]["last"]["status"] == "FAILED"

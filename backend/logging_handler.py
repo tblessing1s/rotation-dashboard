@@ -270,6 +270,26 @@ def save_state(state: dict) -> dict:
         return state
 
 
+def mutate_state(fn):
+    """Read-modify-write the store under the lock: load the CURRENT file, apply
+    ``fn(state)``, save. Returns whatever ``fn`` returns.
+
+    This is the only safe way to persist a change computed across something slow
+    (a broker fetch, a poll). ``load_state()`` hands back a private copy, so a
+    caller that loads, waits on the network, then ``save_state``s that copy
+    overwrites every write that landed in between — a fill committed by the order
+    poll while the interval reconciliation was fetching Schwab positions vanished
+    exactly that way, and the next reconcile then flagged the broker's short call
+    as UNEXPECTED. Do the slow work first, then apply the result to a fresh copy
+    here.
+    """
+    with _lock:
+        state = load_state()
+        result = fn(state)
+        save_state(state)
+        return result
+
+
 def restore_from_backup(backup_path: str) -> dict:
     """Restore ``backup_path`` onto the active state file via the atomic save
     path (never a raw copy), writing the current (possibly corrupt) file aside
