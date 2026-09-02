@@ -1023,6 +1023,14 @@ MAX_RESUBMIT_ATTEMPTS = 3
 # illiquid names, lower it to get back to the old behaviour.
 ORDER_FILL_WAIT_SECONDS = float(os.environ.get("ORDER_FILL_WAIT_SECONDS") or 15.0)
 
+# How close to the broker's fill timestamp a fresh underlying quote must be taken
+# to count as "the spot at the fill". The extrinsic split of a filled short is
+# premium − max(spot − strike, 0), so the spot has to belong to the instant the
+# contract traded. A fill the poll observes within this window is re-quoted NOW;
+# an older fill (a re-poll of an order left behind, a startup sweep) keeps the
+# placement-time capture instead of a quote from a different moment entirely.
+FILL_SPOT_MAX_AGE_SECONDS = float(os.environ.get("FILL_SPOT_MAX_AGE_SECONDS") or 120.0)
+
 # PROPOSED_DEFAULT — how a resubmitted order adjusts its limit toward the ask.
 # "none" (the default) re-sends at the SAME mid-seeded limit: honest, never chases
 # price, but may miss again if the market moved. Any price-chasing variant must be
