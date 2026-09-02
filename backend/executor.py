@@ -1746,6 +1746,9 @@ def _compute_txn_changes(e: dict, ed: dict) -> dict:
 
     if stock is not None:
         ch["stock_price"] = round(stock, 4)
+        # The operator overrode (or supplied) the underlying: the provenance the
+        # History badge shows must say so, whatever the original capture was.
+        ch["stock_price_source"] = "corrected"
     if a == "buy_leap":
         if price is not None:
             ch["execution_price"] = round(price, 2)

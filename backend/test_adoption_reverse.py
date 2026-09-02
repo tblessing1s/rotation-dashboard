@@ -415,6 +415,13 @@ def test_save_transactions_links_stock_extrinsic_and_derives_position(store):
     assert corr["changes"]["entry_extrinsic_per_share"] == 1.83
     # Editing extrinsic back-computed the entry stock price (179 @ 5.10, extr 1.83 -> 182.27).
     assert corr["changes"]["stock_price"] == 182.27
+    # A supplied/overridden underlying re-labels the price's provenance.
+    assert corr["changes"]["stock_price_source"] == "corrected"
+    corr179a = next(e for e in saved["executions"]
+                    if e.get("action") == "txn_correction" and e.get("corrects") == "t_179a")
+    assert corr179a["changes"]["stock_price"] == 186.2
+    assert corr179a["changes"]["stock_price_source"] == "corrected"
+    assert corr179a["changes"]["entry_extrinsic_per_share"] == pytest.approx(2.25)
     # The CORRECTED derived view reflects the edit.
     e179b = next(e for e in log.derived_executions(saved) if e["id"] == "t_179b")
     assert e179b["entry_extrinsic_per_share"] == 1.83

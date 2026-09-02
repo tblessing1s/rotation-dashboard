@@ -249,6 +249,7 @@ const SPOT_SOURCES = [
   [/^assignment:/, "assignment", "slate", "The price entered when the assignment was booked"],
   [/^supplied_stale_quote_unavailable$/, "snapshot", "amber", "No live quote at the time — the ticket's chain snapshot was used"],
   [/^supplied$/, "entered", "slate", "Entered by the operator"],
+  [/^corrected$/, "corrected", "sky", "Set by hand on the History tab after the fill (a txn_correction)"],
   [/^cached_close$/, "day close", "amber", "The cached daily close for the trade day, not the fill moment"],
   [/^expiry_close$/, "expiry close", "slate", "The close on expiry day"],
   [/^unavailable$/, "none", "rose", "No stock price was captured — the extrinsic split is unverified"],
