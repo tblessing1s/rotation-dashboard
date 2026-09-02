@@ -247,3 +247,35 @@ def test_send_error_names_the_push_service_reason(monkeypatch):
         webpush.send("s", "b", [])
     msg = str(ei.value)
     assert "0/1" in msg and "401" in msg and "Unauthorized" in msg
+
+
+# ---------------------------------------------------------------------------
+# Payload shape — what the service worker actually receives.
+# ---------------------------------------------------------------------------
+def test_payload_severity_is_the_worst_in_the_batch():
+    """The batch arrives in evaluator order and the LOW daily digest is
+    evaluated FIRST, so on the first pass of a day it leads every batch. The
+    payload severity drives requireInteraction on the phone — a CRITICAL kill
+    switch riding behind the digest must still be reported as CRITICAL."""
+    import json
+    batch = [{"type": "DAILY_OUTLOOK", "severity": "LOW", "ticker": None},
+             {"type": "KILL_SWITCH_SPY", "severity": "CRITICAL", "ticker": "NVDA",
+              "action_url": "/?action=focus&ticker=NVDA"}]
+    payload = json.loads(webpush._payload("s", "b", batch))
+    assert payload["severity"] == "CRITICAL"
+    assert payload["count"] == 2 and payload["tickers"] == ["NVDA"]
+
+
+def test_payload_deep_links_the_single_actionable_alert_beside_the_digest():
+    """A roll that trips on the same pass as the morning digest is still ONE
+    actionable alert: the tap must land on its roll ticket, not the app root.
+    Two actionable alerts remain a mixed batch -> dashboard."""
+    import json
+    digest = {"type": "DAILY_OUTLOOK", "severity": "LOW", "ticker": None, "action_url": None}
+    roll = {"type": "EXPIRY_FRIDAY", "severity": "MEDIUM", "ticker": "NVDA",
+            "action_url": "/?action=roll&ticker=NVDA&reason=scheduled"}
+    focus = {"type": "CIRCUIT_BREAKER", "severity": "CRITICAL", "ticker": "AMD",
+             "action_url": "/?action=focus&ticker=AMD"}
+    assert json.loads(webpush._payload("s", "b", [digest, roll]))["url"] == roll["action_url"]
+    assert json.loads(webpush._payload("s", "b", [digest, roll, focus]))["url"] == "/"
+    assert json.loads(webpush._payload("s", "b", [digest]))["url"] == "/"

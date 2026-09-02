@@ -36,6 +36,7 @@ import os
 
 import config
 import logging_handler as log
+import notifier
 
 logger = logging.getLogger("cfm.alerts")
 
@@ -264,18 +265,34 @@ def configured() -> bool:
 # Delivery
 # ---------------------------------------------------------------------------
 def _payload(subject: str, body: str, alerts: list[dict]) -> str:
-    worst = alerts[0].get("severity") if alerts else "ALERT"
+    # The batch arrives in EVALUATOR order, not severity order — and the daily
+    # digest (LOW) is evaluated first, so on the first pass of a day it leads
+    # every batch. The severity here drives the service worker's
+    # requireInteraction (CRITICAL must not be dismissable by accident), so it
+    # has to be the WORST in the batch, exactly as the subject line reports it.
+    worst = "ALERT"
+    if alerts:
+        worst = min(alerts, key=lambda a: notifier.SEVERITY_ORDER.get(
+            a.get("severity"), 9)).get("severity") or "ALERT"
     tickers = sorted({a["ticker"] for a in alerts if a.get("ticker")})
-    # A single actionable alert deep-links straight to its prefilled ticket;
-    # a mixed batch opens the dashboard (no single right action to jump to).
-    url = alerts[0].get("action_url") if len(alerts) == 1 else None
+    # A single ACTIONABLE alert deep-links straight to its prefilled ticket; a
+    # batch with several (no single right action to jump to) opens the
+    # dashboard. Informational alerts with no link (the daily digest) do not
+    # count — a roll that trips alongside the morning digest still lands on its
+    # roll ticket.
+    linked = [a["action_url"] for a in alerts if a.get("action_url")]
+    url = linked[0] if len(linked) == 1 else None
+    # Notifications sharing a tag replace each other on the lock screen, so a
+    # delivery check (alerts.test_delivery) gets its own tag: it must never
+    # overwrite a real page the operator has not looked at yet.
+    is_test = bool(alerts) and all(a.get("test") for a in alerts)
     return json.dumps({
         "title": subject,
         "body": body,
         "severity": worst,
         "count": len(alerts),
         "tickers": tickers,
-        "tag": "cfm-alerts",
+        "tag": "cfm-test" if is_test else "cfm-alerts",
         "url": url or "/",
     })
 
