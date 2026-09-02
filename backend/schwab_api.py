@@ -719,6 +719,18 @@ class SchwabClient:
             location = resp.headers.get("Location") or resp.headers.get("location") or ""
             order_id = location.rstrip("/").rsplit("/", 1)[-1] if location else None
             return {"orderId": order_id, "location": location}
+        if resp.status_code == 429:
+            # Rare now that every call is paced and a 429 arms a shared pause, but
+            # when it does happen the operator's question is whether their order
+            # went anywhere. A 429 is a refusal AT THE EDGE — the order never
+            # reached the order engine — so this is the one failure status where
+            # "nothing was sent" can be said without hedging, unlike a timeout or
+            # a 5xx (still UNKNOWN, still re-queried, never called failed).
+            _limiter.note_rate_limited(resp.headers.get("Retry-After"))
+            raise SchwabError(
+                "Schwab is rate-limiting this app right now, so it could not place "
+                "this order — NOTHING was sent to the broker. Wait a few seconds "
+                "and submit again.")
         hint = self._ACCT_HINT if resp.status_code in (401, 403) else ""
         raise SchwabError(f"schwab place order: HTTP {resp.status_code} {resp.text[:300]}{hint}")
 

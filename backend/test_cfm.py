@@ -3,6 +3,7 @@ flow. Run offline (no provider keys) with: python -m pytest backend -q
 """
 import os
 import tempfile
+import time
 
 import numpy as np
 import pandas as pd
@@ -693,6 +694,44 @@ def test_execute_reports_filled_status(monkeypatch, tmp_path):
 
 
 # ---- live order ticket + place/poll/cancel lifecycle -----------------------
+def test_a_forced_chain_pull_is_floored_per_ticker(monkeypatch):
+    """The ticket's bid/ask poll asks for a FORCED chain pull every cycle. The
+    chain is the heaviest Schwab call there is, and re-fetching unchanged strikes
+    spends the paced request budget with the operator's next ORDER queued behind
+    it — so a forced pull inside the floor is served the cached chain."""
+    import option_chain as oc
+
+    pulls = {"n": 0}
+
+    class _Client:
+        def get_option_chain(self, ticker, **kwargs):
+            pulls["n"] += 1
+            return {"status": "SUCCESS", "callExpDateMap": {}}
+
+    monkeypatch.setattr(oc.schwab_api, "market_configured", lambda: True)
+    monkeypatch.setattr(oc.data_handler, "client", lambda: _Client())
+    monkeypatch.setattr(oc, "_chain_cache", {})
+    monkeypatch.setattr(config, "CHAIN_LIVE_REFRESH_MIN_SECONDS", 20)
+
+    assert oc._fetch_chain("ABC")["status"] == "SUCCESS"
+    assert pulls["n"] == 1
+    oc._fetch_chain("ABC", refresh=True)        # inside the floor — cached
+    oc._fetch_chain("ABC", refresh=True)
+    assert pulls["n"] == 1
+
+    # Past the floor, a forced pull goes live again — the ticket still tracks the
+    # market, just at a cadence the request budget survives.
+    stamped, payload = oc._chain_cache["ABC"]
+    oc._chain_cache["ABC"] = (stamped - 21, payload)
+    oc._fetch_chain("ABC", refresh=True)
+    assert pulls["n"] == 2
+
+    # An unforced read keeps the full 5-minute TTL.
+    oc._chain_cache["ABC"] = (time.time() - 60, payload)
+    oc._fetch_chain("ABC")
+    assert pulls["n"] == 2
+
+
 def test_occ_symbol_and_order_ticket():
     import schwab_api
     assert schwab_api.occ_option_symbol("AAPL", "2024-09-20", 250) == "AAPL  240920C00250000"

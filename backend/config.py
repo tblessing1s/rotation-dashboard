@@ -453,6 +453,17 @@ EOD_MAX_AGE_HOURS = 30.0  # == DATA_STALE_HOURS
 # Alpha Vantage free tier is the real constraint (25/day historically; 500 on some
 # keys) — set via env to match the operator's key. Override either via env.
 SCHWAB_DAILY_CALL_LIMIT = int(os.environ.get("SCHWAB_DAILY_CALL_LIMIT") or 40000)      # PROPOSED_DEFAULT
+
+# Floor between FORCED live option-chain pulls for one ticker. The chain is the
+# heaviest call in the API, and the ticket's bid/ask poll asks for a forced pull
+# (`refresh=1`) that skips the 5-minute cache — so an open ticket spends a steady
+# share of the paced request budget (SCHWAB_REQUESTS_PER_MINUTE) on re-fetching a
+# chain whose strikes have not changed, queuing everything else behind it. The
+# floor caps that per ticker however many tickets, tabs or accounts are asking; a
+# request inside the window is served the cached chain rather than refused, so the
+# UI never breaks — it just doesn't re-pull.
+CHAIN_LIVE_REFRESH_MIN_SECONDS = int(
+    os.environ.get("CFM_CHAIN_LIVE_REFRESH_SECONDS") or 20)   # PROPOSED_DEFAULT
 ALPHA_VANTAGE_DAILY_CALL_LIMIT = int(os.environ.get("ALPHA_VANTAGE_DAILY_CALL_LIMIT") or 500)  # PROPOSED_DEFAULT
 
 # Schwab HTTP 429 / Retry-After exponential backoff (the Schwab path has none

@@ -44,17 +44,31 @@ def _chain_lock(ticker: str) -> threading.Lock:
         return _chain_locks.setdefault(ticker, threading.Lock())
 
 
+def _chain_ttl(refresh: bool) -> float:
+    """How old a cached chain may be for this caller.
+
+    A forced refresh (the ticket's bid/ask poll) gets a much shorter TTL, NOT an
+    unconditional re-pull. The chain is the heaviest Schwab call there is, and an
+    open ticket asks for one every poll — a steady share of the paced request
+    budget spent re-fetching strikes that did not change, with every other read
+    queued behind it. Serving a few-seconds-old chain to a poll costs nothing
+    anyone can perceive.
+    """
+    return config.CHAIN_LIVE_REFRESH_MIN_SECONDS if refresh else _CHAIN_TTL
+
+
 def _fetch_chain(ticker: str, refresh: bool = False) -> dict:
     """Raw Schwab CALL chain spanning near-term through ~LEAP expirations, cached
-    for 5 minutes per ticker. One lock per ticker collapses concurrent opens.
-    ``refresh`` bypasses the TTL for a forced live re-pull (the modal's bid/ask
-    poll) — it still takes the lock and refreshes the cache for everyone else."""
+    for 5 minutes per ticker (seconds, for a forced live re-pull — see
+    ``_chain_ttl``). One lock per ticker collapses concurrent opens; a refresh
+    that does pull refreshes the cache for everyone else."""
+    ttl = _chain_ttl(refresh)
     hit = _chain_cache.get(ticker)
-    if not refresh and hit and time.time() - hit[0] < _CHAIN_TTL:
+    if hit and time.time() - hit[0] < ttl:
         return hit[1]
     with _chain_lock(ticker):
         hit = _chain_cache.get(ticker)
-        if not refresh and hit and time.time() - hit[0] < _CHAIN_TTL:
+        if hit and time.time() - hit[0] < ttl:
             return hit[1]
         if not schwab_api.market_configured():
             raise schwab_api.SchwabError(
