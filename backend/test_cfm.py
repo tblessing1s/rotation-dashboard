@@ -1437,3 +1437,106 @@ def test_order_journal_records_placement_and_fill_outside_state(monkeypatch, tmp
     log.save_state(state)
     assert log.order_journal_lookup("ORD1")["stock_price"] == 143.5
     assert log.order_journal_lookup("NOPE") is None
+
+
+# ---------------------------------------------------------------------------
+# The same guarantee on the CLOSE of the short (extrinsic paid back needs the spot)
+# ---------------------------------------------------------------------------
+_CLOSE = {"action": "close_short", "ticker": "ON", "strike": 139.5, "contracts": 5,
+          "close_price_per_share": 6.0, "expiration": "2026-07-10"}
+
+
+def _open_short_live(executor, log, fake, monkeypatch, spot=142.0, premium=5.0):
+    _quote(monkeypatch, spot)
+    executor.execute(dict(_ORDER))
+    fake._status, fake._fill_price = "FILLED", premium
+    assert executor.order_status("ORD1")["status"] == "filled"
+    # The next placement is a NEW broker order.
+    fake._status, fake._fill_price = "WORKING", None
+    fake.place_order = lambda account_hash, order: {"orderId": "ORD2"}
+
+
+def test_close_short_live_refuses_without_a_stock_price(monkeypatch, tmp_path):
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+    _open_short_live(executor, log, fake, monkeypatch)
+    _quote(monkeypatch, None)
+    with pytest.raises(executor.StockPriceUnavailable):
+        executor.execute(dict(_CLOSE))
+    assert "ORD2" not in log.load_state()["pending_orders"]
+    assert log.order_journal_lookup("ORD2") is None
+
+
+def test_close_short_fill_books_juice_paid_back_at_the_fill_spot(monkeypatch, tmp_path):
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+    _open_short_live(executor, log, fake, monkeypatch, spot=142.0, premium=5.0)
+    opened = log.load_state()["executions"][-1]
+    assert opened["entry_extrinsic_per_share"] == pytest.approx(2.5)  # 5.0 − (142 − 139.5)
+
+    _quote(monkeypatch, 141.0)                       # spot when the close is sent
+    res = executor.execute(dict(_CLOSE))
+    assert res["status"] == "working" and res["order_id"] == "ORD2"
+    assert log.get_pending_order("ORD2")["stock_price"] == 141.0
+
+    _quote(monkeypatch, 140.0)                       # spot when it fills
+    fake._status, fake._fill_price = "FILLED", 1.0
+    assert executor.order_status("ORD2")["status"] == "filled"
+
+    ex = log.load_state()["executions"][-1]
+    assert ex["action"] == "close_short"
+    assert ex["stock_price"] == 140.0
+    assert ex["stock_price_at_placement"] == 141.0
+    assert ex["stock_price_at_fill"] == 140.0
+    assert ex["stock_price_source"] == "fill_quote:test"
+    # extrinsic paid back = close − intrinsic at the FILL spot: 1.0 − (140 − 139.5)
+    assert ex["extrinsic_paid_back"] == pytest.approx(0.5)
+    assert ex["extrinsic_sold"] == pytest.approx(2.5)
+    assert ex["net_juice"] == pytest.approx(2.0)
+    pos = log.find_position(log.load_state(), "ON")
+    assert pos["short_calls"] == []
+
+    j = log.order_journal_lookup("ORD2")
+    assert j["events"] == ["placed", "filled"] and j["action"] == "close_short"
+    assert j["stock_price_at_placement"] == 141.0 and j["stock_price"] == 140.0
+    assert j["fill_prices"][0]["close_price_per_share"] == 1.0
+
+
+def test_old_close_fill_keeps_the_placement_spot(monkeypatch, tmp_path):
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+    _open_short_live(executor, log, fake, monkeypatch)
+    _quote(monkeypatch, 141.0)
+    executor.execute(dict(_CLOSE))
+
+    from datetime import datetime, timedelta, timezone
+    filled_at = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S+0000")
+    orig = fake.get_order
+    def get_order(account_hash, order_id):
+        out = orig(account_hash, order_id)
+        out["closeTime"] = filled_at
+        return out
+    fake.get_order = get_order
+    _quote(monkeypatch, 155.0)
+    fake._status, fake._fill_price = "FILLED", 1.0
+    executor.order_status("ORD2")
+    ex = log.load_state()["executions"][-1]
+    assert ex["action"] == "close_short" and ex["stock_price"] == 141.0
+    assert ex["stock_price_source"] == "placement_stale:test"  # a day between fill and capture
+
+
+def test_assignment_booking_is_not_an_order_and_needs_no_quote(monkeypatch, tmp_path):
+    # close_shares_assigned records an event, never transmits: the no-spot-no-order
+    # guard must not refuse it, and the operator's price (else the strike) is kept.
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+    _open_short_live(executor, log, fake, monkeypatch)
+    assert executor._transmits("close_shares_assigned") is False
+    _quote(monkeypatch, None)
+    res = executor.execute({"action": "close_shares_assigned", "ticker": "ON",
+                            "strike": 139.5, "contracts": 5, "stock_price": 145.0})
+    assert res["status"] == "filled"
+    execs = log.load_state()["executions"]
+    closed = [e for e in execs if e["action"] == "close_short"][-1]
+    assert closed["assigned"] is True and closed["stock_price"] == 145.0
+    assert closed["stock_price_source"] == "assignment:supplied"

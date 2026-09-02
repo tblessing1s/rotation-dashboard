@@ -200,6 +200,11 @@ def _transmits(action: str) -> bool:
     """
     if not live_transmit() or not schwab_api.configured():
         return False
+    if action == "close_shares_assigned":
+        # An assignment is an EVENT the operator books after the fact — no order
+        # is sent, so the price at the assignment (the operator's, or the strike)
+        # is the right one, and the no-spot-no-order guard must not refuse it.
+        return False
     if action in EQUITY_ACTIONS:
         return config.EQUITY_ORDER_PLACEMENT_ENABLED
     if action in PUT_ACTIONS:
@@ -1057,6 +1062,9 @@ def resolve_expiry(diff_id: str) -> dict:
     execution, apply = _close_short(close_payload, ticker, strike, contracts, stock_price)
     execution["mode"] = "live" if live_transmit() else "logged"
     execution["reason"] = "expired_worthless"
+    # Where the close's stock price came from: the cached close on expiry day
+    # (the diff carries it) — the instant this contract stopped trading.
+    execution["stock_price_source"] = "expiry_close" if stock_price is not None else "unavailable"
     execution["linked_diff_id"] = diff_id
     if expiry:
         execution["date"] = f"{str(expiry)[:10]}T20:00:00Z"  # timestamp to expiry day
@@ -2446,6 +2454,10 @@ def _commit_assignment(payload, ticker, strike, contracts, stock_price, mode, pr
                                "expiration": match.get("expiration")},
                               ticker, strike_f, sc_contracts, stock_price)
         se["assigned"] = True
+        # Booked from the assignment itself: the operator's price at the event,
+        # else the strike (a call assigned is at/through its strike by definition).
+        se["stock_price_source"] = (f"assignment:{price_source}" if stock_price is not None
+                                    else "assignment:strike")
         committed.append(_commit_one(se, sa, ticker, mode, price_source)["id"])
         n = n or sc_contracts
 
