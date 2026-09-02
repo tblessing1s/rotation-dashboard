@@ -586,7 +586,7 @@ def _capture_price(ticker: str, supplied: float | None,
         the fill being recorded, and would corrupt what it was meant to preserve.
     """
     if at_order_time:
-        q = data_handler.latest_quote(ticker)
+        q = data_handler.fresh_quote(ticker)   # never a cached display quote
         if q and q.get("price") is not None:
             return q["price"], q.get("source") or "schwab"
         if supplied is not None:
@@ -669,7 +669,7 @@ def _stamp_fill_spot(rec: dict, order: dict | None) -> dict:
     quote_px, quote_src = None, None
     if abs(fill_age) <= max_age:
         try:
-            q = data_handler.latest_quote(ticker)
+            q = data_handler.fresh_quote(ticker)   # the fill's own moment, never a cached one
         except Exception as e:  # noqa: BLE001 — a quote failure falls back, never blocks a fill
             log.logger.warning("fill spot re-quote failed for %s: %s", ticker, e)
             q = None
@@ -3001,7 +3001,7 @@ def _equity_limit_price(client, ticker: str) -> float:
     limit. A MARKET order is deliberately not the fallback: an unpriced market
     order on a wide or fast tape is exactly the fill an operator cannot review.
     """
-    quote = data_handler.latest_quote(ticker)
+    quote = data_handler.fresh_quote(ticker)
     price = (quote or {}).get("price")
     bid, ask = (quote or {}).get("bid"), (quote or {}).get("ask")
     if bid is not None and ask is not None:

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 
@@ -276,15 +277,62 @@ def prefetch(symbols, force: bool = False) -> None:
     get_many(symbols, force=force)
 
 
+# ---- Short-lived quote cache ------------------------------------------------
+# A LIVE quote (Schwab / Alpha Vantage) is reused for config.QUOTE_CACHE_SECONDS
+# by display readers — the price strip on every tab, the position card, the
+# alert sweep — so they share one request instead of each asking Schwab. Every
+# request counts against the app-wide ~120/min cap that the 429s came from.
+# Anything that BOOKS a price (order placement, fill capture) calls fresh_quote
+# and never sees a cached value.
+_quote_cache: dict[str, tuple[float, dict]] = {}
+_quote_cache_lock = threading.Lock()
+_quote_clock = time.monotonic
+
+
+def _cached_quote(symbol: str) -> dict | None:
+    ttl = float(config.QUOTE_CACHE_SECONDS or 0)
+    if ttl <= 0:
+        return None
+    with _quote_cache_lock:
+        hit = _quote_cache.get(symbol)
+    if hit and _quote_clock() - hit[0] <= ttl:
+        return dict(hit[1], cached=True)
+    return None
+
+
+def _remember_quote(symbol: str, quote: dict) -> None:
+    if (quote or {}).get("source") in ("schwab", "alphavantage"):
+        with _quote_cache_lock:
+            _quote_cache[symbol] = (_quote_clock(), dict(quote))
+
+
+def clear_quote_cache() -> None:
+    with _quote_cache_lock:
+        _quote_cache.clear()
+
+
+def fresh_quote(symbol: str) -> dict | None:
+    """latest_quote with the cache BYPASSED — the quote for anything that gets
+    booked (the spot at an order, at a fill). Goes through latest_quote so a
+    test that stubs it still governs the capture path."""
+    with _quote_cache_lock:
+        _quote_cache.pop(symbol.upper(), None)
+    return latest_quote(symbol)
+
+
 def latest_quote(symbol: str) -> dict | None:
     """Live quote via Schwab, falling back to Alpha Vantage GLOBAL_QUOTE, then
-    the last cached close. Used at execution time to capture the stock price."""
+    the last cached close. Served from the short quote cache when a live quote
+    is younger than QUOTE_CACHE_SECONDS (see fresh_quote for the booking path)."""
     symbol = symbol.upper()
     if config.demo_enabled():
         df = get_daily(symbol)
         if df is not None and not df.empty:
             return {"symbol": symbol, "price": float(df["Close"].iloc[-1]), "source": "demo"}
         return None
+    hit = _cached_quote(symbol)
+    if hit is not None:
+        return hit
     if schwab_api.market_configured():
         try:
             q = client().get_quote(symbol)
@@ -293,7 +341,9 @@ def latest_quote(symbol: str) -> dict | None:
             if price:
                 _last_error.pop(symbol, None)
                 _record_success("schwab_quote", symbol)
-                return {"symbol": symbol, "price": price, "source": "schwab"}
+                out = {"symbol": symbol, "price": price, "source": "schwab"}
+                _remember_quote(symbol, out)
+                return out
         except Exception as e:  # noqa: BLE001
             _last_error[symbol] = str(e)
     if alpha_vantage.configured():
@@ -302,13 +352,47 @@ def latest_quote(symbol: str) -> dict | None:
             if q.get("last"):
                 _last_error.pop(symbol, None)
                 _record_success("alpha_vantage_quote", symbol)
-                return {"symbol": symbol, "price": q["last"], "source": "alphavantage"}
+                out = {"symbol": symbol, "price": q["last"], "source": "alphavantage"}
+                _remember_quote(symbol, out)
+                return out
         except Exception as e:  # noqa: BLE001
             _last_error[symbol] = str(e)
     df = get_daily(symbol)
     if df is not None and not df.empty:
         return {"symbol": symbol, "price": float(df["Close"].iloc[-1]), "source": "cache"}
     return None
+
+
+def latest_quotes(symbols) -> dict[str, dict | None]:
+    """Quotes for many symbols in as few requests as possible: cache hits
+    first, ONE batched Schwab call for the rest (which also fills the cache),
+    then the per-symbol latest_quote fallbacks for anything still missing. A
+    failure on one name never blanks the others."""
+    syms = list(dict.fromkeys(s.upper() for s in symbols if s))
+    out: dict[str, dict | None] = {}
+    missing: list[str] = []
+    for s in syms:
+        hit = None if config.demo_enabled() else _cached_quote(s)
+        if hit is not None:
+            out[s] = hit
+        else:
+            missing.append(s)
+    if len(missing) > 1 and not config.demo_enabled() and schwab_api.market_configured():
+        try:
+            for s, q in live_prices(missing).items():
+                if q and q.get("source") == "schwab":
+                    out[s] = {"symbol": s, "price": q["price"], "source": "schwab"}
+        except Exception as e:  # noqa: BLE001 — fall through to per-symbol
+            for s in missing:
+                _last_error[s] = str(e)
+        missing = [s for s in missing if s not in out]
+    for s in missing:
+        try:
+            out[s] = latest_quote(s)
+        except Exception as e:  # noqa: BLE001 — one dead quote must not blank the rest
+            _last_error[s] = str(e)
+            out[s] = None
+    return out
 
 
 def live_price(symbol: str) -> float | None:
@@ -354,6 +438,7 @@ def live_prices(symbols) -> dict[str, dict]:
                     remaining.discard(s)
                     _last_error.pop(s, None)
                     _record_success("schwab_quote", s)
+                    _remember_quote(s, {"symbol": s, "price": float(price), "source": "schwab"})
         except Exception as e:  # noqa: BLE001 — degrade to the per-symbol fallbacks
             for s in syms:
                 _last_error[s] = str(e)

@@ -748,6 +748,13 @@ def api_order_status():
         return _err(e)
 
 
+@app.route("/api/schwab/rate-limit")
+def api_schwab_rate_limit():
+    """The process-wide Schwab pacing in effect (requests/minute, tokens left,
+    any 429 pause) — what to look at when reads feel slow."""
+    return jsonify(schwab_api.rate_limit_status())
+
+
 @app.route("/api/ticker-strip")
 def api_ticker_strip():
     """The chrome's per-position readout (spot + distance to each short strike)

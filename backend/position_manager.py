@@ -641,16 +641,13 @@ def ticker_strip(state: dict) -> list[dict]:
     stock is or which side of a strike it's on.
     """
     rows: list[dict] = []
-    for p in state.get("positions", []):
-        if p.get("status") == "closed":
-            continue
+    open_positions = [p for p in state.get("positions", [])
+                      if p.get("status") != "closed" and (p.get("ticker") or "").strip()]
+    # ONE batched quote call for every open name (cache-aware), not one per row.
+    quotes = data_handler.latest_quotes([p["ticker"] for p in open_positions])
+    for p in open_positions:
         ticker = (p.get("ticker") or "").upper()
-        if not ticker:
-            continue
-        try:
-            q = data_handler.latest_quote(ticker)
-        except Exception:  # noqa: BLE001 — one dead quote must not blank the strip
-            q = None
+        q = quotes.get(ticker)
         price = q.get("price") if q else None
         legs: list[dict] = []
         for sc in p.get("short_calls") or []:
@@ -684,6 +681,13 @@ def positions_view(state: dict) -> list[dict]:
     roll_ledger = state.get("roll_ledger") or {}
     by_ticker = roll_ledger.get("by_ticker", {})
     all_rolls = roll_ledger.get("rolls", [])
+    # Warm the quote cache with ONE batched call so each enrich_position below
+    # reads its spot from it instead of asking Schwab per position.
+    try:
+        data_handler.latest_quotes([p.get("ticker") for p in state.get("positions", [])
+                                    if p.get("status") != "closed"])
+    except Exception:  # noqa: BLE001 — best-effort warm-up; per-position reads still work
+        pass
     out = [enrich_position(p, by_ticker.get(p.get("ticker", "")), rolls=all_rolls)
            for p in state.get("positions", [])]
     # Wash-sale visibility on OPEN positions: the cycle derivation marks a
