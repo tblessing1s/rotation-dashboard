@@ -154,3 +154,96 @@ def test_dispatch_reports_webpush_without_crashing(monkeypatch):
         settings={"channels": {"email": False, "ntfy": False}})
     entry = next(x for x in report if x["channel"] == "webpush")
     assert entry["ok"] is False and "simulated" in entry["error"]
+
+
+# ---------------------------------------------------------------------------
+# Delivery parameters — exercised against a fake ``pywebpush`` so the tests run
+# without the real library (its http-ece dep doesn't build everywhere) and
+# without a network.
+# ---------------------------------------------------------------------------
+class _FakeWebPushException(Exception):
+    def __init__(self, msg, response=None):
+        super().__init__(msg)
+        self.response = response
+
+
+class _Resp:
+    def __init__(self, status_code, text=""):
+        self.status_code = status_code
+        self.text = text
+
+
+def _fake_pywebpush(monkeypatch, outcome):
+    """Install a stand-in pywebpush whose webpush() records its kwargs and
+    either succeeds or raises per ``outcome(endpoint)``."""
+    import sys
+    import types
+    calls = []
+
+    def fake_webpush(**kwargs):
+        calls.append(kwargs)
+        err = outcome(kwargs["subscription_info"]["endpoint"])
+        if err is not None:
+            raise err
+
+    mod = types.ModuleType("pywebpush")
+    mod.webpush = fake_webpush
+    mod.WebPushException = _FakeWebPushException
+    monkeypatch.setitem(sys.modules, "pywebpush", mod)
+    return calls
+
+
+def test_send_uses_a_real_ttl_and_high_urgency(monkeypatch):
+    """pywebpush defaults to TTL 0 — 'deliver now or discard' — so a phone that
+    is asleep / off-network at that instant never sees the alert. Every push
+    must carry a positive TTL and high urgency (Android Doze delivery)."""
+    _set_keys()
+    webpush.add_subscription(_sub())
+    calls = _fake_pywebpush(monkeypatch, lambda ep: None)
+    webpush.send("s", "b", [{"severity": "HIGH", "ticker": "NVDA"}])
+    assert len(calls) == 1
+    assert calls[0]["ttl"] == webpush.TTL_SECONDS > 0
+    assert calls[0]["headers"]["Urgency"] == "high"
+    assert calls[0]["vapid_private_key"] == os.environ["VAPID_PRIVATE_KEY"]
+    assert calls[0]["vapid_claims"]["sub"] == "mailto:test@example.com"
+
+
+def test_send_prunes_gone_and_key_mismatch_subscriptions(monkeypatch):
+    """404/410 (device unsubscribed) and FCM's 403 VapidPkHashMismatch (enrolled
+    against a previous server key) are permanent: drop them so they stop
+    failing every batch. A transient 5xx is kept."""
+    _set_keys()
+    webpush.add_subscription(_sub("https://push.example/gone"))
+    webpush.add_subscription(_sub("https://push.example/stale-key"))
+    webpush.add_subscription(_sub("https://push.example/flaky"))
+    webpush.add_subscription(_sub("https://push.example/ok"))
+
+    def outcome(ep):
+        if ep.endswith("/gone"):
+            return _FakeWebPushException("Push failed: 410 Gone", _Resp(410))
+        if ep.endswith("/stale-key"):
+            return _FakeWebPushException(
+                "Push failed: 403 Forbidden\nResponse body:VapidPkHashMismatch",
+                _Resp(403, "the key in the authorization header does not match "
+                           "the key used to create the subscription: VapidPkHashMismatch"))
+        if ep.endswith("/flaky"):
+            return _FakeWebPushException("Push failed: 503", _Resp(503, "try later"))
+        return None
+
+    _fake_pywebpush(monkeypatch, outcome)
+    webpush.send("s", "b", [])  # one device reached -> no error
+    left = {s["endpoint"] for s in webpush.list_subscriptions()}
+    assert left == {"https://push.example/flaky", "https://push.example/ok"}
+
+
+def test_send_error_names_the_push_service_reason(monkeypatch):
+    """When no device is reached, the raised error carries the service's status
+    and message so the 'Send test' toast / alert log explain the failure."""
+    _set_keys()
+    webpush.add_subscription(_sub())
+    _fake_pywebpush(monkeypatch, lambda ep: _FakeWebPushException(
+        "Push failed: 401 Unauthorized\nResponse body:bad jwt", _Resp(401, "bad jwt")))
+    with pytest.raises(RuntimeError) as ei:
+        webpush.send("s", "b", [])
+    msg = str(ei.value)
+    assert "0/1" in msg and "401" in msg and "Unauthorized" in msg
