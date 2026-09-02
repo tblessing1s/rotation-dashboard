@@ -45,6 +45,44 @@ def test_enrich_short_decay_and_roll_now():
     assert pm.enrich_short(dict(sc, current_bid=0.90), 134.0, None)["roll_now"] is False
 
 
+# ---- spot vs strike ----------------------------------------------------------
+def test_strike_gap_signs_the_distance_the_same_way_for_calls_and_puts():
+    """The gap is always spot minus strike; only MONEYNESS inverts. A shared
+    derivation is what stops a call and a put disagreeing about which side of the
+    strike is in the money."""
+    call = pm.strike_gap(141.35, 137, put=False)
+    put = pm.strike_gap(141.35, 137, put=True)
+    assert call["distance"] == put["distance"] == 4.35
+    assert call["distance_pct"] == pytest.approx(3.08, abs=0.01)   # % OF SPOT
+    assert (call["itm"], call["moneyness"]) == (True, "ITM")
+    assert (put["itm"], put["moneyness"]) == (False, "OTM")
+
+    below = pm.strike_gap(132.65, 137, put=False)
+    assert below["distance"] == -4.35 and below["moneyness"] == "OTM"
+    assert pm.strike_gap(137, 137)["moneyness"] == "ATM"
+
+
+def test_strike_gap_is_undefined_without_a_price_never_zero():
+    """No quote is 'unknown', not 'at the money' — a zeroed gap would read as a
+    strike the stock is sitting exactly on."""
+    assert pm.strike_gap(None, 137) == {"stock_price": None, "distance": None,
+                                        "distance_pct": None, "itm": None,
+                                        "moneyness": None}
+    assert pm.strike_gap(141.35, None)["distance"] is None
+
+
+def test_enrich_short_carries_spot_and_the_gap_to_its_strike():
+    sc = {"strike": 137, "contracts": 1, "dte": 5, "current_bid": 1.83,
+          "entry_premium_total": 100.0}
+    out = pm.enrich_short(sc, stock_price=141.35, dividend=None)
+    assert out["stock_price"] == 141.35
+    assert out["strike_distance"] == 4.35
+    assert out["strike_distance_pct"] == pytest.approx(3.08, abs=0.01)
+    assert out["itm"] is True and out["moneyness"] == "ITM"
+    # …and it agrees with the existing defend trigger rather than restating it.
+    assert out["below_strike"] is False
+
+
 def test_deployed_capital_derives_from_open_positions():
     state = {"positions": [
         {"ticker": "A", "status": "active", "leap": {"cost_basis": 12000},

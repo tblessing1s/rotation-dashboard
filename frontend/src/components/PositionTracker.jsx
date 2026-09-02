@@ -683,6 +683,9 @@ function ShortCalls({ p, shorts, setRolling, onOpenTicket }) {
                 )}
               </span>
              </div>
+             <div className="mt-0.5 text-[11px]">
+               <StrikeGap leg={sc} />
+             </div>
              {/* Extrinsic capture: what you sold (the target), how much theta
                  you've collected back so far, and what's left. An ITM short's
                  premium is intrinsic (tracks the stock) + extrinsic (the juice) —
@@ -751,6 +754,46 @@ function ShortCalls({ p, shorts, setRolling, onOpenTicket }) {
 // healthy, and how much income is it making. Verdict + income lead; long-leg
 // internals, structure, deltas and relative strength are one tap away. Active
 // alerts (reconciliation, defend, whipsaw, a tripped kill switch) never hide.
+// Spot against ONE leg's strike — the reading an operator makes first on a short:
+// how far is the stock from the price at which this leg starts to matter.
+//
+// The sign convention comes from the server (position_manager.strike_gap), so a
+// call and a put can't disagree about which side is in the money; this only says
+// it in words. For a covered call, ITM is called-away territory and the gap is
+// what a roll has to climb over; OTM, the gap is the cushion the stock has before
+// that becomes true.
+function StrikeGap({ leg, put = false, className = "" }) {
+  const spot = leg.stock_price;
+  const gap = leg.strike_distance;
+  if (spot == null || gap == null) {
+    return (
+      <span className={`text-slate-600 ${className}`} title="No live price for this name yet">
+        spot unavailable
+      </span>
+    );
+  }
+  const itm = leg.itm === true;
+  const above = gap > 0;
+  const pct = leg.strike_distance_pct;
+  const tone = itm ? "text-amber-300" : "text-slate-400";
+  const meaning = put
+    ? (itm ? "below the strike — assignment territory"
+           : "above the strike — clear of assignment")
+    : (itm ? "above the strike — called away at expiry unless rolled"
+           : "below the strike — cushion before assignment");
+  return (
+    <span
+      className={`${tone} ${className}`}
+      title={`Stock ${fmt(spot, 2)} vs the ${fmt(leg.strike, 2)} strike: ${meaning}.`}
+    >
+      spot {fmt(spot, 2)} · {dollars(Math.abs(gap))}
+      {pct == null ? "" : ` (${fmt(Math.abs(pct), 1)}%)`}{" "}
+      {above ? "above" : "below"} the {fmt(leg.strike, 2)} strike
+      <span className="ml-1 font-semibold">· {leg.moneyness || (itm ? "ITM" : "OTM")}</span>
+    </span>
+  );
+}
+
 // Aggregate short-call capture: how much of the extrinsic sold across every open
 // short has decayed into our pocket. Null when no short carries entry extrinsic.
 function shortCapturePct(shorts) {
@@ -900,6 +943,7 @@ function PutBase({ p }) {
                 {l.extrinsic_per_share == null ? "—" : money(l.extrinsic_per_share * 100 * l.contracts)}
               </span>
             </span>
+            <StrikeGap leg={l} put className="text-xs" />
             {itm && (
               <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-300">
                 ITM — assignment likely
@@ -1031,6 +1075,7 @@ function SharesBase({ p, onCleared }) {
       <div className="mt-1.5 text-xs text-slate-500">
         {money(cost)} cost{cps != null && <> ({fmt(cps, 2)}/sh)</>}
         {value != null && <> · {money(value)} now</>}
+        {spot != null && <> ({fmt(spot, 2)}/sh)</>}
       </div>
       {unreal != null && (
         <div className={`text-xs font-semibold ${unreal >= 0 ? "text-emerald-300" : "text-rose-300"}`}>
@@ -1200,6 +1245,15 @@ function PositionRow({ p, diffs, recs, onRecsChanged, focusCard, focused, setRol
         </span>
         {/* collapsed summary — the three things, each with its tiny visual */}
         <span className="flex flex-wrap items-center justify-end gap-x-4 gap-y-1 text-xs">
+          {/* Spot first: every other number on the row is a consequence of it,
+              and "where is the stock" is the question asked before the row is
+              even opened. */}
+          <span className="flex items-center gap-1" title="Last price used for every figure on this card">
+            <span className="text-slate-500">spot</span>
+            <span className="font-semibold text-slate-200">
+              {p.stock_price == null ? "—" : fmt(p.stock_price, 2)}
+            </span>
+          </span>
           <span className="flex items-center gap-1">
             <span className="text-slate-500">shares</span>
             <span className="font-semibold text-slate-200">{count || "—"}</span>

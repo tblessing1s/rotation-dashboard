@@ -108,6 +108,35 @@ def enrich_leap(leap: dict, stock_price: float | None) -> dict:
     return out
 
 
+def strike_gap(stock_price: float | None, strike, put: bool = False) -> dict:
+    """Where spot sits relative to ONE leg's strike.
+
+    The single derivation both leg types use, so a call and a put can never
+    disagree about which side of the strike is in the money. ``distance`` is
+    always signed the same way — spot minus strike, positive when spot is ABOVE
+    it — and ``itm`` is what inverts: a short call is in the money above its
+    strike, a short put below.
+
+    ``distance_pct`` is a percentage OF SPOT, i.e. how far the stock has to move
+    from here to reach the strike, which is the question being asked when an
+    operator looks at a short leg.
+    """
+    if stock_price is None or strike in (None, ""):
+        return {"stock_price": None, "distance": None, "distance_pct": None,
+                "itm": None, "moneyness": None}
+    spot = float(stock_price)
+    k = float(strike)
+    distance = spot - k
+    itm = (spot < k) if put else (spot > k)
+    return {
+        "stock_price": round(spot, 2),
+        "distance": round(distance, 2),
+        "distance_pct": round(distance / spot * 100, 2) if spot else None,
+        "itm": bool(itm),
+        "moneyness": "ATM" if distance == 0 else ("ITM" if itm else "OTM"),
+    }
+
+
 def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
                  live_mark: float | None = None, today=None,
                  position_type: str | None = None) -> dict:
@@ -200,6 +229,16 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
     # The short's live intrinsic liability — what this leg owes right now, to weigh
     # against the covering LEAP's intrinsic (the hedge-balance check on the book).
     out["current_intrinsic_total"] = round(intrinsic_now * mult, 2) if intrinsic_now is not None and mult else None
+
+    # Spot vs this leg's strike — the reading an operator makes first on a short
+    # call ("how far am I from being called away"), carried on the leg so the card
+    # states it instead of leaving it to be inferred from the share block.
+    gap = strike_gap(stock_price, strike, put=False)
+    out["stock_price"] = gap["stock_price"]
+    out["strike_distance"] = gap["distance"]
+    out["strike_distance_pct"] = gap["distance_pct"]
+    out["itm"] = gap["itm"]
+    out["moneyness"] = gap["moneyness"]
 
     dte = sc.get("dte")
     out["roll_now"] = bool(decay is not None and decay >= config.BUYBACK_DECAY_PCT
@@ -538,7 +577,12 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
         leg["extrinsic_per_share"] = (None if extrinsic_ps is None
                                       else round(extrinsic_ps, 4))
         leg["mark_per_share"] = None if mark_ps is None else round(mark_ps, 4)
-        leg["itm"] = None if price is None else bool(price < strike)
+        gap = strike_gap(price, strike, put=True)
+        leg["itm"] = gap["itm"]
+        leg["stock_price"] = gap["stock_price"]
+        leg["strike_distance"] = gap["distance"]
+        leg["strike_distance_pct"] = gap["distance_pct"]
+        leg["moneyness"] = gap["moneyness"]
         leg["collateral"] = leg.get("collateral") or scan_verdict_put_collateral(strike, n)
         open_puts.append(leg)
     out["short_puts"] = open_puts
