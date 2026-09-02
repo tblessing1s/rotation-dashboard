@@ -42,6 +42,19 @@ logger = logging.getLogger("cfm.alerts")
 # Subscriptions the push service has permanently rejected get pruned on send.
 _GONE_STATUS = {404, 410}
 
+# How long the push service may hold a message for a device that is not
+# reachable right now. pywebpush defaults to a TTL of 0, which RFC 8030 defines
+# as "deliver immediately or discard" — a phone in Doze, with the radio asleep
+# or briefly off-network is "unreachable" to FCM/APNs at that instant, so the
+# alert silently vanished. A day covers an overnight phone-off; the alert stays
+# active in the dashboard regardless, so a late delivery is still correct.
+TTL_SECONDS = 24 * 60 * 60
+
+# Every batch is a lock-screen alert the operator explicitly opted into, and all
+# of them are time-sensitive (kill switch, roll, assignment). "high" urgency is
+# what lets Android deliver through Doze instead of batching it for later.
+URGENCY = "high"
+
 # Auto-generated keypair persisted here when the env vars are not set.
 _VAPID_FILE = os.path.join(config.DATA_DIR, ".vapid_keys.json")
 _cache: dict | None = None  # in-memory {"public":…, "private":…}
@@ -267,6 +280,25 @@ def _payload(subject: str, body: str, alerts: list[dict]) -> str:
     })
 
 
+def _rejected_for_good(code: int | None, response) -> bool:
+    """True when the push service says this subscription can never work again.
+
+    404/410 is the device having unsubscribed (or the browser data wiped). FCM
+    also answers 403 ``VapidPkHashMismatch`` when the subscription was created
+    against a DIFFERENT application-server key than the one signing this push —
+    i.e. the server's VAPID pair changed after the phone enrolled. That
+    subscription is dead for this server; keeping it just fails every batch.
+    The device re-enrolls with the current key the next time the app opens
+    (see frontend/src/push.js), which is the only cure.
+    """
+    if code in _GONE_STATUS:
+        return True
+    if code == 403:
+        text = str(getattr(response, "text", "") or "")
+        return "mismatch" in text.lower()
+    return False
+
+
 def send(subject: str, body: str, alerts: list[dict]) -> None:
     """Push one batch to every stored subscription. Prunes dead subscriptions.
 
@@ -291,20 +323,30 @@ def send(subject: str, body: str, alerts: list[dict]) -> None:
     priv = _private_key()
     dead: set[str] = set()
     sent = 0
+    errors: list[str] = []
     for sub in subs:
         info = {"endpoint": sub["endpoint"], "keys": sub["keys"]}
         try:
             webpush(subscription_info=info, data=data,
-                    vapid_private_key=priv, vapid_claims=dict(claims), timeout=20)
+                    vapid_private_key=priv, vapid_claims=dict(claims),
+                    ttl=TTL_SECONDS, headers={"Urgency": URGENCY}, timeout=20)
             sent += 1
         except WebPushException as e:  # noqa: PERF203 — per-sub isolation
-            code = getattr(getattr(e, "response", None), "status_code", None)
-            if code in _GONE_STATUS:
+            response = getattr(e, "response", None)
+            code = getattr(response, "status_code", None)
+            if _rejected_for_good(code, response):
                 dead.add(sub["endpoint"])
+            errors.append(f"{code or 'error'}: {str(e).splitlines()[0]}")
             logger.error("web push to %s… failed (%s): %s",
                          sub["endpoint"][:40], code, e)
         except Exception as e:  # noqa: BLE001 — never let one sub sink the batch
+            errors.append(str(e).splitlines()[0] if str(e) else type(e).__name__)
             logger.error("web push to %s… errored: %s", sub["endpoint"][:40], e)
     _prune(dead)
     if sent == 0 and subs:
-        raise RuntimeError(f"web push reached 0/{len(subs)} devices")
+        # Surface the push service's own reason (status + first line) so the
+        # "Send test" toast and the alert log say WHY, not just "0 devices".
+        detail = "; ".join(dict.fromkeys(errors))[:300]
+        pruned = f", {len(dead)} dead subscription(s) removed" if dead else ""
+        raise RuntimeError(f"web push reached 0/{len(subs)} devices{pruned}"
+                           + (f" — {detail}" if detail else ""))

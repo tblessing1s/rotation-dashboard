@@ -6,6 +6,7 @@ import {
   enablePush,
   notificationPermission,
   pushSupported,
+  subscriptionMatchesKey,
 } from "../push.js";
 import { useToast } from "./Toast.jsx";
 
@@ -24,15 +25,34 @@ export default function PushSetup() {
   const permission = notificationPermission();
 
   const refresh = React.useCallback(async () => {
+    let key = null;
     try {
-      const key = await api.pushVapidKey();
+      key = await api.pushVapidKey();
       setServer(key);
     } catch {
       setServer({ configured: false, subscriptions: 0 });
     }
     if (supported) {
       const sub = await currentSubscription();
-      setSubscribedHere(!!sub);
+      // "ON" means the browser holds a subscription made with the server's
+      // CURRENT key. One made against an older key can never be delivered to,
+      // so it shows as off and the Enable button re-enrolls it.
+      const live = !!sub && subscriptionMatchesKey(sub, key?.key);
+      setSubscribedHere(live);
+      if (live && key?.configured) {
+        // Re-register on every load: the server-side record lives in the
+        // book's state.json, which a reset / restore / new account can lose
+        // while the phone still believes it is enrolled. Idempotent on the
+        // endpoint, so this is a no-op when the record is already there.
+        try {
+          const res = await api.pushSubscribe(sub.toJSON());
+          if (res && typeof res.count === "number") {
+            setServer((prev) => (prev ? { ...prev, subscriptions: res.count } : prev));
+          }
+        } catch {
+          // Offline / auth hiccup: the next load retries.
+        }
+      }
     }
     setLoaded(true);
   }, [supported]);
@@ -44,7 +64,9 @@ export default function PushSetup() {
   async function enable() {
     setBusy(true);
     try {
-      const { key } = await api.pushVapidKey();
+      // Use the key already fetched on load so requestPermission() runs
+      // inside the click's user activation (iOS Safari requires that).
+      const key = server?.key || (await api.pushVapidKey()).key;
       const sub = await enablePush(key);
       await api.pushSubscribe(sub);
       setSubscribedHere(true);
