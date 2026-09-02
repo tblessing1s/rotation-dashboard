@@ -231,8 +231,56 @@ const EXEC_COLS = [
   "source", "transaction_id", "roll_group_id", "roll_leg", "mode",
   "premium_per_share", "close_price_per_share", "execution_price",
   "extrinsic_captured", "entry_extrinsic_per_share", "extrinsic_sold",
-  "extrinsic_paid_back", "net_juice", "stock_price", "reversed_by", "reverses_action", "reason",
+  "extrinsic_paid_back", "net_juice", "stock_price", "stock_price_source",
+  "stock_price_at_placement", "stock_price_at_fill", "fill_time",
+  "reversed_by", "reverses_action", "reason",
 ];
+
+// Where an execution's stock price came from (executor stamps stock_price_source).
+// The extrinsic split is booked against that price, so the reader needs to see
+// whether it was the spot at the fill, the capture when the order was sent, a
+// number typed in, or nothing at all.
+const SPOT_SOURCES = [
+  [/^fill_quote:/, "at fill", "emerald", "Re-quoted the moment the broker reported the fill"],
+  [/^placement_stale:/, "at order (stale)", "amber", "Captured when the order was sent, but the fill was much later — check the split"],
+  [/^placement:/, "at order", "sky", "Captured when the order was sent (the fill was too old to re-quote, or the quote failed)"],
+  [/^order_journal:/, "app journal", "emerald", "Recovered from the app's order journal for this broker order"],
+  [/^assignment:strike$/, "strike", "slate", "Assignment booked at the strike — no price entered"],
+  [/^assignment:/, "assignment", "slate", "The price entered when the assignment was booked"],
+  [/^supplied_stale_quote_unavailable$/, "snapshot", "amber", "No live quote at the time — the ticket's chain snapshot was used"],
+  [/^supplied$/, "entered", "slate", "Entered by the operator"],
+  [/^cached_close$/, "day close", "amber", "The cached daily close for the trade day, not the fill moment"],
+  [/^expiry_close$/, "expiry close", "slate", "The close on expiry day"],
+  [/^unavailable$/, "none", "rose", "No stock price was captured — the extrinsic split is unverified"],
+];
+const TONE = {
+  emerald: "border-emerald-800 bg-emerald-950/40 text-emerald-300",
+  sky: "border-sky-800 bg-sky-950/40 text-sky-300",
+  amber: "border-amber-800 bg-amber-950/40 text-amber-300",
+  rose: "border-rose-800 bg-rose-950/40 text-rose-300",
+  slate: "border-slate-700 bg-slate-900/60 text-slate-300",
+};
+
+function SpotSource({ source, atPlacement, atFill, fillTime }) {
+  if (source === null || source === undefined || source === "") {
+    return <span className="text-slate-600" title="Recorded before the stock price source was stamped">—</span>;
+  }
+  const hit = SPOT_SOURCES.find(([re]) => re.test(String(source)));
+  const [label, tone, why] = hit ? [hit[1], hit[2], hit[3]] : [String(source), "slate", ""];
+  const detail = [
+    `source: ${source}`,
+    why,
+    atPlacement != null ? `at order: ${atPlacement}` : null,
+    atFill != null ? `at fill: ${atFill}` : null,
+    fillTime ? `filled: ${String(fillTime).slice(0, 19).replace("T", " ")}` : null,
+  ].filter(Boolean).join("\n");
+  return (
+    <span title={detail}
+          className={`inline-block rounded border px-1.5 py-0.5 font-sans text-[10px] font-semibold uppercase tracking-wide ${TONE[tone]}`}>
+      {label}
+    </span>
+  );
+}
 
 function cell(v) {
   if (v === null || v === undefined || v === "") return "—";
@@ -260,6 +308,8 @@ function _toRow(e) {
     source: e.source, roll: e.roll_group_id,
     strike: e.strike ?? "", contracts: e.contracts ?? 1, expiration: e.expiration || "",
     price: _price(e) ?? "", stock_price: e.stock_price ?? "", extrinsic: _extr(e) ?? "",
+    stock_source: e.stock_price_source, stock_at_placement: e.stock_price_at_placement,
+    stock_at_fill: e.stock_price_at_fill, fill_time: e.fill_time,
   };
 }
 function _calcExt(r, stock) {
@@ -326,11 +376,13 @@ function TransactionEditor() {
         edit either and the other is computed. Set the <span className="font-mono">expiration</span> so same-strike weeklies stay separate.
         Prices and extrinsic are <span className="text-slate-400">per share</span>.
         Save derives your open position from these transactions.
+        <span className="ml-1"><span className="font-mono">stock source</span> shows where the price behind the
+        split came from — hover it for the at-order and at-fill captures.</span>
       </p>
       <div className="overflow-x-auto">
         <table className="w-full whitespace-nowrap text-xs">
           <thead><tr className="text-left uppercase tracking-wide text-slate-500">
-            {["date", "action", "strike", "qty", "expiration", "price", "entry stock", "extrinsic", "roll"].map((h) =>
+            {["date", "action", "strike", "qty", "expiration", "price", "entry stock", "stock source", "extrinsic", "roll"].map((h) =>
               <th key={h} className="py-1.5 pr-2">{h}</th>)}
           </tr></thead>
           <tbody className="font-mono text-slate-300">
@@ -347,13 +399,17 @@ function TransactionEditor() {
                          onChange={(e) => onStock(i, e.target.value)} className={`${inp} w-24 ${r.isOpen ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
                 </td>
                 <td className="py-1 pr-2">
+                  <SpotSource source={r.stock_source} atPlacement={r.stock_at_placement}
+                              atFill={r.stock_at_fill} fillTime={r.fill_time} />
+                </td>
+                <td className="py-1 pr-2">
                   <input value={r.extrinsic} placeholder={r.isOpen ? "extrinsic" : "—"} disabled={!r.isOpen}
                          onChange={(e) => onExt(i, e.target.value)} className={`${inp} w-24 ${r.isOpen ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
                 </td>
                 <td className="py-1 pr-2 font-sans text-slate-600">{r.roll || ""}</td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={9} className="py-6 text-center font-sans text-slate-500">No transactions.</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={10} className="py-6 text-center font-sans text-slate-500">No transactions.</td></tr>}
           </tbody>
         </table>
       </div>
@@ -427,7 +483,14 @@ function RawData() {
                   </td>
                 )}
                 {EXEC_COLS.map((c) => (
-                  <td key={c} className={`py-1.5 pr-3 ${c === "source" && e[c] === "broker_manual" ? "text-amber-300" : ""}`}>{cell(e[c])}</td>
+                  <td key={c} className={`py-1.5 pr-3 ${c === "source" && e[c] === "broker_manual" ? "text-amber-300" : ""}`}>
+                    {c === "stock_price_source"
+                      ? <SpotSource source={e.stock_price_source} atPlacement={e.stock_price_at_placement}
+                                    atFill={e.stock_price_at_fill} fillTime={e.fill_time} />
+                      : c === "fill_time" && e.fill_time
+                        ? String(e.fill_time).slice(0, 19).replace("T", " ")
+                        : cell(e[c])}
+                  </td>
                 ))}
               </tr>
             ))}
