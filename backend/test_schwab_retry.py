@@ -129,6 +129,29 @@ def test_get_quotes_retries_transient(monkeypatch):
     assert isinstance(out, dict)
 
 
+def test_rate_limited_order_says_nothing_was_sent(monkeypatch):
+    """A 429 is a refusal AT THE EDGE — the order never reached the order engine,
+    which is the one thing the operator needs told, and the one status where
+    "nothing was sent" can be said without hedging. It also arms the shared pause,
+    so the rest of the app stops sending into a limit Schwab just enforced."""
+    monkeypatch.setattr(schwab_api.time, "sleep", lambda s: None)
+    posts = {"n": 0}
+
+    def fake_post(url, **kwargs):
+        posts["n"] += 1
+        return _Resp(429, text="Too Many Requests", headers={"Retry-After": "3"})
+
+    monkeypatch.setattr(schwab_api.requests, "post", fake_post)
+    client = schwab_api.SchwabClient()
+    monkeypatch.setattr(client, "_token", lambda: "tok")
+    with pytest.raises(schwab_api.SchwabError) as exc:
+        client.place_order("acct-hash", {"orderType": "LIMIT"})
+    assert "NOTHING was sent" in str(exc.value)
+    assert "rate-limiting" in str(exc.value)
+    assert posts["n"] == 1          # still single-attempt: this is the doubling POST
+    assert schwab_api.rate_limit_status()["paused_for"] > 0
+
+
 def test_place_order_is_not_retried(monkeypatch):
     monkeypatch.setattr(schwab_api.time, "sleep", lambda s: None)
     posts = {"n": 0}

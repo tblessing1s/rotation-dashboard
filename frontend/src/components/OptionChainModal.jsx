@@ -93,17 +93,26 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
     return () => { live = false; };
   }, [ticker]);
 
-  // Live bid/ask poll: re-pull the chain (past the 5-min cache) on a short cadence
-  // so the displayed quotes track the market. Only the chain data is replaced —
-  // the operator's action/strike/qty selections are separate state and persist.
-  // Paused while an order is in flight or a live confirm is open so prices don't
-  // shift under the ticket. The backend re-prices off a fresh quote at send anyway.
-  const QUOTE_POLL_MS = 10000;
+  // Live bid/ask poll: re-pull the chain so the displayed quotes track the market.
+  // Only the chain data is replaced — the operator's action/strike/qty selections
+  // are separate state and persist. Paused while an order is in flight or a live
+  // confirm is open so prices don't shift under the ticket; the backend re-prices
+  // off a fresh quote at send anyway.
+  //
+  // CADENCE IS A BUDGET DECISION, not a UI one. The chain is the heaviest call in
+  // the Schwab API and this poll asks for a forced pull, so an open ticket spends
+  // a steady share of the paced request budget re-fetching strikes that did not
+  // change — with the order that follows queued behind it. The server also floors
+  // forced pulls per ticker (config.CHAIN_LIVE_REFRESH_MIN_SECONDS), so a faster
+  // interval here would only re-serve the same cached chain. A hidden tab polls
+  // nothing at all: a ticket parked in a background tab is not watching prices.
+  const QUOTE_POLL_MS = 20000;
   React.useEffect(() => {
     if (error) return undefined;
     let alive = true;
     const id = setInterval(() => {
       if (busy || pendingLive) return;
+      if (typeof document !== "undefined" && document.hidden) return;
       api.optionChain(ticker, "atr", true)
         .then((c) => { if (alive) { setChain(c); setLastUpdated(Date.now()); } })
         .catch(() => { /* transient poll failure — keep the last good chain */ });
