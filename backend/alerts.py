@@ -82,9 +82,11 @@ ALERT_TYPES = {
     "SCAN_SECTOR_SLOT_OPEN": ("MEDIUM", "PROPOSED_DEFAULT: a sector position exited and a bench/ready name is waiting in that now-free sector (one-position-per-sector) -> the slot the diversification cap held is available"),
 }
 
-# The scan-transition alert types deep-link to the affected name's SCAN row (the
-# same query-string pattern the roll/focus flows use; the client routes ?tab=Scan
-# + ticker to the Scorecard and expands the row).
+# The scan-transition alert types deep-link to the SCAN TAB. They used to open
+# that name's row in the full-universe scorecard; the scorecard view is gone from
+# the UI (the sweep, the rejection log and the gate telemetry that read it are
+# not), so the link lands on the scan surface that remains — Ready to Enter —
+# rather than naming a row nothing can show.
 _SCAN_ACTIONS = {
     "SCAN_NEW_READY", "SCAN_DEGRADED",
     "SCAN_PIPELINE_ENTRANT", "SCAN_SECTOR_SLOT_OPEN",
@@ -138,7 +140,9 @@ def _action_url(type_: str, ticker: str | None) -> str | None:
     if type_ in _FOCUS_ACTIONS:
         return f"/?action=focus&ticker={t}{acct}"
     if type_ in _SCAN_ACTIONS:
-        return f"/?tab=Scan&ticker={t}{acct}"
+        # No ticker: there is no per-name universe row to focus any more, and a
+        # parameter nothing consumes is just cruft in the operator's URL bar.
+        return f"/?tab=Scan{acct}"
     return None
 
 
