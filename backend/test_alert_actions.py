@@ -23,6 +23,14 @@ def test_exit_alerts_focus_the_position():
     assert alerts._action_url("CIRCUIT_BREAKER", "AMD") == "/?action=focus&ticker=AMD"
 
 
+def test_scan_transition_alerts_land_on_the_scan_tab_without_a_row():
+    """The universe scorecard is gone from the UI, so there is no per-name row to
+    open — the link lands on the scan surface that remains, and carries no ticker
+    nothing can consume."""
+    assert alerts._action_url("SCAN_NEW_READY", "NVDA") == "/?tab=Scan"
+    assert alerts._action_url("SCAN_DEGRADED", "AMD") == "/?tab=Scan"
+
+
 def test_portfolio_alerts_have_no_deep_link():
     assert alerts._action_url("TOKEN_EXPIRY", None) is None
     assert alerts._action_url("DATA_STALE", None) is None

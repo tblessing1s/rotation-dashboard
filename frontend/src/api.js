@@ -75,8 +75,10 @@ export const api = {
   // One-call landing payload: regime + positions/capital + theta + kill-switch.
   overview: () => request("/api/overview"),
   regime: () => request("/api/regime"),
-  // opts.includeUnaffordable asks the server for the names it filters out by
-  // default (lot cost above the account's dry powder).
+  // The full-universe sweep. No UI reads it any more — the scorecard view is
+  // gone and Ready to Enter is the scan surface — but the endpoint (and the
+  // sweep, the rejection log and the gate telemetry built on it) is intact for
+  // drill-down, so this wrapper stays as the way back in.
   scorecard: (tickers, opts = {}) => {
     const q = new URLSearchParams();
     if (tickers) q.set("tickers", tickers);

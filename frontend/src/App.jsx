@@ -6,7 +6,6 @@ import TickerStrip from "./components/TickerStrip.jsx";
 import GateTelemetry from "./components/GateTelemetry.jsx";
 import Login from "./components/Login.jsx";
 import SchwabStatus from "./components/SchwabStatus.jsx";
-import Scorecard from "./components/Scorecard.jsx";
 import ExecuteTab from "./components/ExecuteTab.jsx";
 import PositionTracker from "./components/PositionTracker.jsx";
 import HistoryTab from "./components/HistoryTab.jsx";
@@ -49,18 +48,12 @@ export default function App() {
   // Set from the ?action=…&ticker=… URL (a tapped push notification) or an
   // in-app "Act" click, so an alert lands you on the prefilled ticket, not a tab.
   const [positionIntent, setPositionIntent] = React.useState(null);
-  // The full-universe Scorecard stays UNMOUNTED until opened, so its ~500-ticker
-  // sweep isn't fetched on every Scan-tab visit.
-  const [scanDetails, setScanDetails] = React.useState(false);
-  // A scan-row deep link (a tapped SCAN_* transition push) focuses one ticker in
-  // the Scorecard — {ticker, id}; a fresh id re-triggers focus for the same name.
-  const [scanIntent, setScanIntent] = React.useState(null);
   // Bumped when the detached background scan finishes, so the Scan panels reload
   // with the freshly-warmed data (see ScanProgress).
   const [scanNonce, setScanNonce] = React.useState(0);
   // Whether a full-universe sweep is in flight, lifted out of ScanProgress. The
   // panels that read that sweep hold their fetch while it runs instead of racing
-  // it — see ReadyToEnter / Scorecard.
+  // it — see ReadyToEnter.
   const [scanRunning, setScanRunning] = React.useState(false);
   // Build identity shown in the footer (version · commit). Fetched once; the
   // /api/version endpoint is open, so this works before/without a session too.
@@ -126,17 +119,10 @@ export default function App() {
     if (target && TABS.includes(target)) {
       setTab(target);
       setExecute(null);
-      // A scan-transition push targets /?tab=Scan&ticker=X — open the full
-      // scorecard and focus that row (expand + scroll), mirroring how a payout
-      // push lands on the finalize card, not just the tab.
-      if (target === "Scan") {
-        const scanTicker = params.get("ticker");
-        if (scanTicker) {
-          setScanDetails(true);
-          setScanIntent({ ticker: scanTicker.toUpperCase(), id: Date.now() });
-          params.delete("ticker");
-        }
-      }
+      // A scan-transition push targets /?tab=Scan — the Scan tab itself, since
+      // the per-name universe row it used to open no longer exists in the UI.
+      // Any stray ticker on such a link is dropped rather than left in the URL.
+      params.delete("ticker");
       params.delete("tab");
       const qs = params.toString();
       window.history.replaceState({}, "", window.location.pathname + (qs ? `?${qs}` : ""));
@@ -305,21 +291,6 @@ export default function App() {
                 >
                   Check any ticker — entry gate &amp; order ticket →
                 </button>
-                <button
-                  onClick={() => setScanDetails((v) => !v)}
-                  className="flex w-full items-center justify-between rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-2 text-sm text-slate-400 hover:bg-slate-900/70"
-                >
-                  <span>{scanDetails ? "Hide" : "Show"} full universe scorecard</span>
-                  <span className="text-xs text-slate-600">
-                    {scanDetails ? "▲ collapse" : "▼ loads the full sweep on open"}
-                  </span>
-                </button>
-                {scanDetails && (
-                  <Scorecard regimeStatus={regimeStatus} refreshKey={scanNonce}
-                             scanRunning={scanRunning}
-                             focusTicker={scanIntent}
-                             onFocusHandled={() => setScanIntent(null)} />
-                )}
               </div>
             )}
             {tab === "Positions" && (
