@@ -47,17 +47,24 @@ function Leg({ leg, spot }) {
 function Chip({ p }) {
   const go = () => window.dispatchEvent(new CustomEvent("cfm-action", { detail: { action: "focus", ticker: p.ticker } }));
   return (
+    // Phone: the chip stacks — name and price on the first line, the legs
+    // beneath — and the row snap-scrolls one chip at a time. From `sm` up it is
+    // the single inline line the desktop chrome has room for.
     <button onClick={go}
-            className="flex shrink-0 items-center gap-2 rounded-md border border-slate-800 bg-slate-900/60 px-2 py-1 text-xs hover:border-slate-600 hover:bg-slate-800/80"
+            className="flex shrink-0 snap-start flex-col items-start gap-0.5 rounded-md border border-slate-800 bg-slate-900/60 px-2 py-1 text-left text-[11px] hover:border-slate-600 hover:bg-slate-800/80 sm:flex-row sm:items-center sm:gap-2 sm:text-xs"
             title={`${p.ticker} · ${p.shares} shares · open the position card`}>
-      <span className="flex items-center gap-1 font-semibold text-slate-100">
-        {p.needs_review && <span className="h-1.5 w-1.5 rounded-full bg-rose-400" title="Needs review — diverged from the broker" />}
-        {p.ticker}
+      <span className="flex items-center gap-2">
+        <span className="flex items-center gap-1 font-semibold text-slate-100">
+          {p.needs_review && <span className="h-1.5 w-1.5 rounded-full bg-rose-400" title="Needs review — diverged from the broker" />}
+          {p.ticker}
+        </span>
+        <span className="font-mono text-slate-200">{p.stock_price != null ? fmt(p.stock_price, 2) : <span className="text-slate-500">—</span>}</span>
       </span>
-      <span className="font-mono text-slate-200">{p.stock_price != null ? fmt(p.stock_price, 2) : <span className="text-slate-500">—</span>}</span>
-      {p.legs.length === 0
-        ? <span className="text-slate-500">no short</span>
-        : p.legs.map((l, i) => <Leg key={i} leg={l} spot={p.stock_price} />)}
+      <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+        {p.legs.length === 0
+          ? <span className="text-slate-500">no short</span>
+          : p.legs.map((l, i) => <Leg key={i} leg={l} spot={p.stock_price} />)}
+      </span>
     </button>
   );
 }
@@ -78,10 +85,10 @@ export default function TickerStrip() {
   if (rows.length === 0) return null;
   const asOf = data?.as_of ? String(data.as_of).slice(11, 16) : null;
   return (
-    <div className="-mx-3 flex items-center gap-2 overflow-x-auto border-t border-slate-800/60 px-3 py-1.5 no-scrollbar">
+    <div className="-mx-3 flex snap-x snap-mandatory items-stretch gap-2 overflow-x-auto border-t border-slate-800/60 px-3 py-1.5 no-scrollbar sm:snap-none sm:items-center">
       {rows.map((p) => <Chip key={p.ticker} p={p} />)}
       {asOf && (
-        <button onClick={reload} className="ml-auto shrink-0 pl-2 text-[10px] text-slate-600 hover:text-slate-400"
+        <button onClick={reload} className="ml-auto shrink-0 self-center pl-2 text-[10px] text-slate-600 hover:text-slate-400"
                 title="Quotes as of (UTC) — click to refresh">
           {asOf}Z
         </button>
