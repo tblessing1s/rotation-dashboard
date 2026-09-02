@@ -48,7 +48,7 @@ function TabButton({ label, active, onClick }) {
 export default function Navbar({ tabs, active, onChange, regimeStatus, onLogout,
                                 alertCount = 0, onAlertsClick, accounts,
                                 accountId, accountBusy, onSelectAccount,
-                                onManageAccounts }) {
+                                onManageAccounts, children }) {
   return (
     <nav
       className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/90 backdrop-blur"
@@ -96,6 +96,10 @@ export default function Navbar({ tabs, active, onChange, regimeStatus, onLogout,
             <TabButton key={t} label={t} active={active === t} onClick={() => onChange(t)} />
           ))}
         </div>
+        {/* Below the tabs, still inside the sticky chrome: the per-position
+            price strip (TickerStrip), so spot and strike distance stay on
+            screen whatever tab is open. */}
+        {children}
       </div>
     </nav>
   );

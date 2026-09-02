@@ -160,6 +160,8 @@ export const api = {
   // (UNKNOWN stays "confirming", a rejection carries Schwab's verbatim reason).
   submissionStatus: (ref) => request(`/api/order-submission-status?ref=${encodeURIComponent(ref)}`),
   positions: () => request("/api/positions"),
+  // The chrome's ticker strip: spot + distance to each short strike, per open position.
+  tickerStrip: () => request("/api/ticker-strip"),
   burn: (ticker) => request(`/api/burn/${ticker}`),
   thetaLedger: (params = "") => request(`/api/theta-ledger${params}`),
   killSwitch: () => request("/api/kill-switch"),

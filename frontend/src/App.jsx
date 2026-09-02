@@ -2,6 +2,7 @@ import React from "react";
 import { api, setActiveAccount } from "./api.js";
 import { ErrorBoundary } from "./components/ui.jsx";
 import Navbar from "./components/Navbar.jsx";
+import TickerStrip from "./components/TickerStrip.jsx";
 import GateTelemetry from "./components/GateTelemetry.jsx";
 import Login from "./components/Login.jsx";
 import SchwabStatus from "./components/SchwabStatus.jsx";
@@ -259,7 +260,10 @@ export default function App() {
               accounts={accountRegistry?.accounts}
               accountId={accountId} accountBusy={accountBusy}
               onSelectAccount={switchAccount}
-              onManageAccounts={() => goToTab("Settings")} />
+              onManageAccounts={() => goToTab("Settings")}>
+        {/* Keyed on the account and on fills so it refetches when either changes. */}
+        <TickerStrip key={`${accountNonce}:${execNonce}`} />
+      </Navbar>
       <main className="mx-auto max-w-7xl px-3 py-4 sm:px-4 sm:py-6">
         <SchwabStatus demo={demo} />
         {/* One boundary around the tab content, keyed on the view: a render throw

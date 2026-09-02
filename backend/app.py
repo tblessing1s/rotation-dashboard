@@ -748,6 +748,19 @@ def api_order_status():
         return _err(e)
 
 
+@app.route("/api/ticker-strip")
+def api_ticker_strip():
+    """The chrome's per-position readout (spot + distance to each short strike)
+    for the active book. Thin and polled from every tab — see
+    position_manager.ticker_strip."""
+    try:
+        state = log.load_state()
+        return jsonify({"as_of": log.utcnow(),
+                        "positions": position_manager.ticker_strip(state)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/orders/pending")
 def api_orders_pending():
     """The active book's pending (placed, not yet settled) orders, with the
