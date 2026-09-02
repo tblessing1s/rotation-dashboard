@@ -289,6 +289,91 @@ function VetCandidates() {
   );
 }
 
+// Pending orders: placed at the broker but not yet settled in state. A record
+// still here after the broker shows a fill is the trace a lost fill leaves — the
+// at-order stock price and limit are on it, so "Re-poll now" books the fill with
+// the economics the original poll would have used (the startup sweep, on demand).
+function PendingOrdersPanel() {
+  const { data, reload } = useApi(api.pendingOrders, [], null);
+  const [busy, setBusy] = React.useState(false);
+  const [result, setResult] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+
+  const repoll = async () => {
+    setBusy(true); setErr(null); setResult(null);
+    try { setResult(await api.repollPendingOrders()); await reload(); }
+    catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+
+  const orders = data?.orders || [];
+  const fmtTs = (s) => (s ? s.slice(0, 16).replace("T", " ") : "—");
+  const statusColor = (s) => (
+    s === "filled" ? "text-emerald-300"
+      : s === "error" ? "text-rose-300"
+        : s === "working" || s === "pending_cancel" ? "text-slate-400" : "text-amber-300");
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Pending orders</span>
+        <button onClick={repoll} disabled={busy || orders.length === 0}
+                className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          {busy ? "Polling…" : "Re-poll now"}
+        </button>
+      </div>
+      {orders.length === 0 && (
+        <p className="mt-2 text-xs text-slate-500">
+          No pending orders — every order this book placed has been settled (filled, canceled or rejected).
+        </p>
+      )}
+      {orders.length > 0 && (
+        <div className="mt-2 space-y-2">
+          <p className="text-xs text-amber-300">
+            {orders.length} order{orders.length > 1 ? "s" : ""} placed but not settled in state. If the broker
+            shows {orders.length > 1 ? "them" : "it"} filled, re-poll to book the fill at the stock price captured when it was sent.
+          </p>
+          {orders.map((o) => (
+            <div key={o.order_id} className="rounded-md border border-slate-800 bg-slate-900/40 p-2">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-sm font-semibold text-slate-200">
+                  {o.ticker} · {o.action}
+                  {o.contracts ? <span className="text-slate-400"> · {o.contracts} × {o.strike ?? "—"}{o.expiration ? ` exp ${o.expiration}` : ""}</span> : null}
+                </span>
+                <span className="font-mono text-[11px] text-slate-500">order {o.order_id}</span>
+              </div>
+              <p className="mt-0.5 font-mono text-[11px] text-slate-400">
+                limit {o.limit_price != null ? `$${fmt(o.limit_price, 2)}` : "—"}
+                {" · "}stock at order {o.stock_price != null ? `$${fmt(o.stock_price, 2)}` : "not captured"}
+                {o.price_source ? ` (${o.price_source})` : ""}
+                {" · "}placed {fmtTs(o.placed_at)}
+                {o.lock_state ? ` · ${o.lock_state}` : ""}
+                {o.filled ? ` · ${o.filled} filled so far` : ""}
+              </p>
+            </div>
+          ))}
+        </div>
+      )}
+      {result && (
+        <div className="mt-2 rounded-md border border-slate-800 bg-slate-900/40 p-2">
+          <p className="text-xs text-slate-300">
+            Polled {result.polled ?? 0} · settled {result.settled ?? 0} · still pending {result.remaining ?? 0}
+            {result.skipped ? ` · ${result.skipped}` : ""}
+          </p>
+          {(result.results || []).map((r) => (
+            <p key={r.order_id} className={`mt-0.5 font-mono text-[11px] ${statusColor(r.status)}`}>
+              {r.ticker} {r.action} order {r.order_id}: {r.status}
+              {r.raw_status ? ` (${r.raw_status})` : ""}
+              {r.execution_id ? ` → booked ${r.execution_id}` : ""}
+              {r.error ? ` — ${r.error}` : ""}
+            </p>
+          ))}
+        </div>
+      )}
+      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
 // Execution ingestion (Schwab transactions -> state, spec §4): the last run
 // summary + any OUT-OF-BAND broker trades surfaced for one-click adoption. A
 // broker_manual trade (e.g. a manual ToS roll) is booked into state only when
@@ -767,6 +852,7 @@ export default function DataHealth() {
       )}
       {!data?.demo && <TieredScheduler data={data} />}
       <ReconcileStatus />
+      {!data?.demo && <PendingOrdersPanel />}
       {!data?.demo && <IngestionPanel />}
       {!data?.demo && <LiveFillVerify />}
       {!data?.demo && <UniverseCheck />}

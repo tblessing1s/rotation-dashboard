@@ -244,6 +244,10 @@ export const api = {
     request("/api/reconcile/record-manual-roll", { method: "POST", body: JSON.stringify(body) }),
   // The global reconciliation-freeze verdict + minutes staleness (spec §5).
   freezeStatus: () => request("/api/reconcile/freeze-status"),
+  // Pending (placed, not yet settled) orders for this book + an on-demand
+  // re-poll against Schwab that books a fill the app never got to commit.
+  pendingOrders: () => request("/api/orders/pending"),
+  repollPendingOrders: () => request("/api/orders/repoll", { method: "POST" }),
   // Execution ingestion from Schwab transactions (spec §4).
   ingestion: () => request("/api/ingestion"),
   runIngestion: () => request("/api/ingestion", { method: "POST" }),

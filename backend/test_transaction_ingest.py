@@ -338,3 +338,30 @@ def test_fetch_failure_reports_error_and_touches_nothing(store, monkeypatch):
     assert any("fetch failed" in e for e in report["errors"])
     state = log.load_state()
     assert not state["ingested_transactions"]
+
+
+# ---------------------------------------------------------------------------
+# Lost-update guard: a fill committed WHILE the transactions fetch is in flight
+# ---------------------------------------------------------------------------
+def test_fill_committed_during_transactions_fetch_survives_persist(store, monkeypatch):
+    """Interval ingestion runs right after reconciliation on the same slow cadence.
+    Loading state before the transactions fetch and saving that copy afterwards
+    overwrote a fill the order poll booked in between. The fresh copy must be
+    what gets classified and persisted: the fill survives AND is recognised as
+    already booked (confirmed, never offered for adoption)."""
+    def fetch_with_concurrent_fill():
+        log.append_execution({"ticker": "ABC", "action": "sell_short", "strike": 110.0,
+                              "contracts": 2, "expiration": "2026-07-17",
+                              "premium_per_share": 1.20, "mode": "live"})
+        return [_sell_short_txn("T1", "ORD-LATE", contracts=2, strike=110.0)]
+    monkeypatch.setattr(ingest, "fetch_transactions", fetch_with_concurrent_fill)
+
+    report = ingest.run_ingestion()
+    assert report["broker_ok"] is True
+    assert not report["proposals"]
+    assert len(report["matched"]) == 1
+
+    state = log.load_state()
+    assert [e["action"] for e in state["executions"]] == ["sell_short"]
+    assert state["ingested_transactions"]["T1"]["source"] == ingest.SOURCE_APP
+    assert state["ingestion"]["last"]["matched"] == 1
