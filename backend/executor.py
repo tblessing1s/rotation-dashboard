@@ -200,6 +200,11 @@ def _transmits(action: str) -> bool:
     """
     if not live_transmit() or not schwab_api.configured():
         return False
+    if action == "close_shares_assigned":
+        # An assignment is an EVENT the operator books after the fact — no order
+        # is sent, so the price at the assignment (the operator's, or the strike)
+        # is the right one, and the no-spot-no-order guard must not refuse it.
+        return False
     if action in EQUITY_ACTIONS:
         return config.EQUITY_ORDER_PLACEMENT_ENABLED
     if action in PUT_ACTIONS:
@@ -388,6 +393,22 @@ class StaleQuoteError(ValueError):
             f"fresh quote at send time, not the chain snapshot; retry once it updates.")
 
 
+class StockPriceUnavailable(ValueError):
+    """A transmitting order could not capture the underlying's price. The spot
+    at the order is what the fill's extrinsic split is booked against — an order
+    that leaves without one books a permanent hole in the juice ledger — so the
+    app refuses to send it (the same discipline as refusing a stale option
+    quote) rather than transmitting and hoping."""
+
+    def __init__(self, action: str, ticker: str, price_source: str):
+        self.action, self.ticker, self.price_source = action, ticker, price_source
+        super().__init__(
+            f"Refusing to place {action} {ticker}: no underlying quote could be "
+            f"captured (source: {price_source or 'unavailable'}). The fill's "
+            "intrinsic/extrinsic split needs the stock price at the order. "
+            "Re-open the ticket for a fresh quote and send again.")
+
+
 class ResubmitLockedError(RuntimeError):
     """A new LIVE order for a position intent was blocked by the resubmission gate
     (order_lifecycle: NO_RESUBMIT_BEFORE_TERMINAL / MAX_RESUBMIT_ATTEMPTS). The API
@@ -479,6 +500,12 @@ def _record_placement(ticker: str, action: str, order_id: str, **extra) -> None:
         "intent": key, "prior_state": olc.SUBMITTED, "new_state": olc.WORKING,
         "raw_status": "SUBMITTED", "attempt": attempts, **extra,
     })
+    # The durable copy (outside state.json) of what this order was sent as —
+    # above all the underlying price captured for it. See order_journal_path.
+    log.append_order_journal({
+        "event": "placed", "order_id": str(order_id), "ticker": (ticker or "").upper(),
+        "action": action, "attempt": attempts, **extra,
+    })
 
 
 def _settle_order(order_id: str, rec: dict, coded_state: str, raw: str, **extra) -> None:
@@ -559,7 +586,7 @@ def _capture_price(ticker: str, supplied: float | None,
         the fill being recorded, and would corrupt what it was meant to preserve.
     """
     if at_order_time:
-        q = data_handler.latest_quote(ticker)
+        q = data_handler.fresh_quote(ticker)   # never a cached display quote
         if q and q.get("price") is not None:
             return q["price"], q.get("source") or "schwab"
         if supplied is not None:
@@ -573,6 +600,114 @@ def _capture_price(ticker: str, supplied: float | None,
     if q:
         return q["price"], q["source"]
     return None, "unavailable"
+
+
+def _require_fill_spot(action: str, ticker: str, stock_price, price_source: str) -> None:
+    """The one checkpoint every transmitting order passes: no captured underlying
+    price, no order. See StockPriceUnavailable."""
+    if stock_price is None:
+        raise StockPriceUnavailable(action, ticker, price_source)
+
+
+# Keys that carry an execution's stock-price provenance from the pending record
+# through the commit payload onto the immutable execution.
+_SPOT_PROVENANCE_KEYS = ("stock_price_at_placement", "stock_price_at_fill",
+                         "stock_price_source", "stock_price_captured_at", "fill_time")
+
+
+def _parse_broker_time(value) -> datetime | None:
+    """Schwab timestamps look like ``2026-09-02T14:27:03+0000`` (no colon in
+    the offset) or end in ``Z``; either parses here, anything else is None."""
+    if not value:
+        return None
+    s = str(value).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    if len(s) >= 5 and s[-5] in "+-" and s[-3] != ":" and s[-4:].isdigit():
+        s = s[:-2] + ":" + s[-2:]
+    try:
+        dt = datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _order_fill_time(order: dict) -> datetime | None:
+    """When the broker says the order filled: the latest execution-leg time,
+    else the order's closeTime, else unknown."""
+    latest = None
+    for act in (order or {}).get("orderActivityCollection") or []:
+        for leg in act.get("executionLegs") or []:
+            t = _parse_broker_time(leg.get("time"))
+            if t and (latest is None or t > latest):
+                latest = t
+    return latest or _parse_broker_time((order or {}).get("closeTime"))
+
+
+def _stamp_fill_spot(rec: dict, order: dict | None) -> dict:
+    """Decide THE stock price a fill is booked against, and record where it came
+    from, on the pending record before it commits.
+
+    The extrinsic split belongs to the instant the contract traded. So:
+      * a fill the poll is observing NOW (within FILL_SPOT_MAX_AGE_SECONDS of the
+        broker's fill time, or with no fill time at all) is re-quoted now;
+      * an older fill (a re-poll of an order left behind, the startup sweep) keeps
+        the placement-time capture — a quote from a different moment would be
+        worse than the one taken seconds before the order went out;
+      * a fill that ends up with neither is booked anyway (it happened) but the
+        record says so, and the operator is alerted to supply the price.
+    Every outcome stamps stock_price_at_placement / _at_fill / _source /
+    _captured_at and the broker fill time onto the record."""
+    ticker = (rec.get("ticker") or "").upper()
+    placed_px = rec.get("stock_price")
+    placed_src = rec.get("price_source") or "unknown"
+    now = datetime.now(timezone.utc)
+    fill_at = _order_fill_time(order or {})
+    fill_age = (now - fill_at).total_seconds() if fill_at else 0.0
+    max_age = float(config.FILL_SPOT_MAX_AGE_SECONDS)
+
+    quote_px, quote_src = None, None
+    if abs(fill_age) <= max_age:
+        try:
+            q = data_handler.fresh_quote(ticker)   # the fill's own moment, never a cached one
+        except Exception as e:  # noqa: BLE001 — a quote failure falls back, never blocks a fill
+            log.logger.warning("fill spot re-quote failed for %s: %s", ticker, e)
+            q = None
+        if q and q.get("price") is not None:
+            quote_px, quote_src = float(q["price"]), (q.get("source") or "schwab")
+
+    if quote_px is not None:
+        chosen, source, captured_at = quote_px, f"fill_quote:{quote_src}", now.isoformat()
+    elif placed_px is not None:
+        placed_at = _parse_broker_time(rec.get("placed_at"))
+        stale = (fill_at is not None and placed_at is not None
+                 and abs((fill_at - placed_at).total_seconds()) > max_age)
+        chosen = float(placed_px)
+        source = f"{'placement_stale' if stale else 'placement'}:{placed_src}"
+        captured_at = rec.get("placed_at")
+        if stale:
+            _alert_order(
+                "ORDER_FILL_STOCK_PRICE_STALE", ticker,
+                f"{ticker} {rec.get('action') or rec.get('kind')} filled at "
+                f"{fill_at.isoformat()} but its stock price is the placement capture "
+                f"from {rec.get('placed_at')} — check the extrinsic split on the execution.",
+                data={"order_id": rec.get("order_id"), "stock_price": chosen})
+    else:
+        chosen, source, captured_at = None, "unavailable", None
+        _alert_order(
+            "ORDER_FILL_NO_STOCK_PRICE", ticker,
+            f"{ticker} {rec.get('action') or rec.get('kind')} filled with NO underlying "
+            "price captured — the extrinsic split is unverified. Supply the stock price "
+            "at the fill on the execution.",
+            data={"order_id": rec.get("order_id")})
+
+    rec["stock_price_at_placement"] = placed_px
+    rec["stock_price_at_fill"] = quote_px
+    rec["stock_price"] = chosen
+    rec["stock_price_source"] = source
+    rec["stock_price_captured_at"] = captured_at
+    rec["fill_time"] = fill_at.isoformat() if fill_at else None
+    return rec
 
 
 def _ensure_position(state: dict, ticker: str) -> dict:
@@ -679,6 +814,7 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
         if (config.CSP_ORDER_PLACEMENT_ENABLED and live_transmit()
                 and schwab_api.configured()):
             expiration = _norm_exp(payload.get("expiration"))
+            _require_fill_spot(action, ticker, stock_price, price_source)
             _enforce_put_ticket_gates(payload, ticker, strike, expiration, contracts)
             # From here the put uses the EXISTING machinery unchanged: the same
             # market-settle window, the same spread gate, the same resubmission
@@ -709,6 +845,11 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     # is only as good as the spot captured at the moment of the order.
     stock_price, price_source = _capture_price(
         ticker, payload.get("stock_price"), at_order_time=_transmits(action))
+    # An order that will actually be sent must carry the underlying's price: the
+    # fill is booked against it (see _stamp_fill_spot) and the execution log is
+    # append-only, so a missing spot here is a permanent hole in the juice ledger.
+    if _transmits(action):
+        _require_fill_spot(action, ticker, stock_price, price_source)
 
     # Level 5 gate (Account & Juice) — entry only. A blocking failure stops the
     # entry unless the payload carries an explicit override_reason, which is
@@ -921,6 +1062,9 @@ def resolve_expiry(diff_id: str) -> dict:
     execution, apply = _close_short(close_payload, ticker, strike, contracts, stock_price)
     execution["mode"] = "live" if live_transmit() else "logged"
     execution["reason"] = "expired_worthless"
+    # Where the close's stock price came from: the cached close on expiry day
+    # (the diff carries it) — the instant this contract stopped trading.
+    execution["stock_price_source"] = "expiry_close" if stock_price is not None else "unavailable"
     execution["linked_diff_id"] = diff_id
     if expiry:
         execution["date"] = f"{str(expiry)[:10]}T20:00:00Z"  # timestamp to expiry day
@@ -966,6 +1110,17 @@ def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
         raise ValueError(f"proposal {proposal_id} has no resolvable underlying — cannot adopt")
     legs = proposal.get("legs") or []
 
+    # Where the stock price for the extrinsic split comes from, in order: the
+    # operator's number; the app's own order journal when this "out-of-band"
+    # order was in fact placed from the app (its fill got lost from the store,
+    # not from the journal); else the cached close for the trade day.
+    spot_source = "supplied" if stock_price is not None else None
+    if stock_price is None and proposal.get("order_id"):
+        journal = log.order_journal_lookup(str(proposal["order_id"]))
+        if journal and journal.get("stock_price") is not None:
+            stock_price = float(journal["stock_price"])
+            spot_source = f"order_journal:{journal.get('stock_price_source') or 'app'}"
+
     # Defense-in-depth against the duplicate-leg defect: state may have changed
     # since the proposal was surfaced (a matching fill got booked, or the operator
     # already reconciled). If every leg now corresponds to an execution the app
@@ -1007,6 +1162,8 @@ def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
         execution["source"] = ingest.SOURCE_BROKER_MANUAL
         execution["transaction_id"] = leg.get("transaction_id")
         execution["broker_order_id"] = proposal.get("order_id")
+        execution["stock_price_source"] = (
+            spot_source or ("cached_close" if px is not None else "unavailable"))
         # Stamp the expiry on the adopted execution (the short builders don't carry
         # it) so a later reversal / reconcile can match the exact leg.
         if payload.get("expiration") and not execution.get("expiration"):
@@ -1035,6 +1192,7 @@ def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
                         if p.get("proposal_id") != proposal_id]
     log.save_state(state)
     return {"success": True, "status": "adopted", "proposal_id": proposal_id,
+            "stock_price": stock_price, "stock_price_source": spot_source,
             "execution_ids": stored_ids, "transaction_ids": txn_ids,
             "source": ingest.SOURCE_BROKER_MANUAL}
 
@@ -1588,6 +1746,9 @@ def _compute_txn_changes(e: dict, ed: dict) -> dict:
 
     if stock is not None:
         ch["stock_price"] = round(stock, 4)
+        # The operator overrode (or supplied) the underlying: the provenance the
+        # History badge shows must say so, whatever the original capture was.
+        ch["stock_price_source"] = "corrected"
     if a == "buy_leap":
         if price is not None:
             ch["execution_price"] = round(price, 2)
@@ -2100,6 +2261,11 @@ def _commit(payload, ticker, action, contracts, strike, stock_price, price_sourc
         except (TypeError, ValueError):
             qm = None
     execution["quoted_mid_per_share"] = qm
+    # Where the booked stock price came from (placement capture / re-quote at the
+    # fill / unavailable) and when — the audit trail for the extrinsic split.
+    for k in _SPOT_PROVENANCE_KEYS:
+        if payload.get(k) is not None:
+            execution[k] = payload[k]
     # Legged-roll linkage: when a roll is executed as two independent single-leg
     # orders (the legacy fallback), each leg carries the shared roll linkage in
     # its payload so the roll ledger treats the pair identically to an atomic roll.
@@ -2291,6 +2457,10 @@ def _commit_assignment(payload, ticker, strike, contracts, stock_price, mode, pr
                                "expiration": match.get("expiration")},
                               ticker, strike_f, sc_contracts, stock_price)
         se["assigned"] = True
+        # Booked from the assignment itself: the operator's price at the event,
+        # else the strike (a call assigned is at/through its strike by definition).
+        se["stock_price_source"] = (f"assignment:{price_source}" if stock_price is not None
+                                    else "assignment:strike")
         committed.append(_commit_one(se, sa, ticker, mode, price_source)["id"])
         n = n or sc_contracts
 
@@ -2802,7 +2972,10 @@ def _place_live(payload, ticker, action, contracts, strike, stock_price, price_s
         if payload.get(k) is not None:
             pending[k] = payload[k]
     log.save_pending_order(order_id, pending)
-    _record_placement(ticker, action, order_id, limit_price=limit)
+    _record_placement(ticker, action, order_id, limit_price=limit,
+                      stock_price=stock_price, price_source=price_source,
+                      contracts=contracts, strike=strike,
+                      expiration=payload.get("expiration"), option_symbol=option_symbol)
     return {
         "success": True,
         "status": "working",
@@ -2828,7 +3001,7 @@ def _equity_limit_price(client, ticker: str) -> float:
     limit. A MARKET order is deliberately not the fallback: an unpriced market
     order on a wide or fast tape is exactly the fill an operator cannot review.
     """
-    quote = data_handler.latest_quote(ticker)
+    quote = data_handler.fresh_quote(ticker)
     price = (quote or {}).get("price")
     bid, ask = (quote or {}).get("bid"), (quote or {}).get("ask")
     if bid is not None and ask is not None:
@@ -2904,7 +3077,8 @@ def _place_equity_live(payload, ticker, action, contracts, stock_price, price_so
                                  "transmitted": True},
     }
     log.save_pending_order(order_id, pending)
-    _record_placement(ticker, action, order_id, limit_price=limit)
+    _record_placement(ticker, action, order_id, limit_price=limit,
+                      stock_price=stock_price, price_source=price_source, qty=qty)
     return {
         "success": True,
         "status": "working",
@@ -2947,12 +3121,17 @@ def _commit_from_pending(rec: dict, fill_price):
         payload["quoted_mid_per_share"] = round(float(rec["limit_price"]), 4)
     # THE SPOT AT THE FILL, not at placement. The order was working for seconds to
     # minutes; the extrinsic split belongs to the instant the contract actually
-    # traded, so re-quote here and fall back to the placement-time capture. This is
-    # the moment the whole execute-from-the-app design exists to capture.
-    fill_spot, fill_spot_source = _capture_price(
-        rec["ticker"], rec.get("stock_price"), at_order_time=True)
+    # traded. _stamp_fill_spot decided it (re-quoted at the fill, or the
+    # placement capture when the fill is older than a fresh quote can stand for)
+    # and recorded its provenance; that provenance rides onto the execution.
+    if "stock_price_source" not in rec:
+        _stamp_fill_spot(rec, {})
+    fill_spot = rec.get("stock_price")
+    fill_spot_source = rec.get("stock_price_source") or rec.get("price_source") or "unknown"
     payload["stock_price"] = fill_spot
-    payload["stock_price_at_placement"] = rec.get("stock_price")
+    for k in _SPOT_PROVENANCE_KEYS:
+        if rec.get(k) is not None:
+            payload[k] = rec[k]
     if fill_price is not None:
         if action == "buy_leap":
             payload["execution_price"] = fill_price * 100
@@ -3002,8 +3181,13 @@ def _commit_roll_from_pending(rec: dict, order: dict, units: int | None = None):
     if open_px is not None:
         payload["premium_per_share"] = open_px
     units = int(units if units is not None else rec["contracts"])
+    if "stock_price_source" not in rec:
+        _stamp_fill_spot(rec, order)
+    for k in _SPOT_PROVENANCE_KEYS:
+        if rec.get(k) is not None:
+            payload[k] = rec[k]
     return _commit_roll(payload, rec["ticker"], units, rec.get("stock_price"),
-                        "live", rec.get("price_source", "schwab"),
+                        "live", rec.get("stock_price_source") or rec.get("price_source", "schwab"),
                         roll_group_id=rec.get("roll_group_id"), alloc_method=method)
 
 
@@ -3057,6 +3241,7 @@ def _roll_order_status(rec: dict, order: dict, order_id: str, raw: str) -> dict:
     new_units = filled_units - already
 
     if new_units > 0:
+        _stamp_fill_spot(rec, order)
         result = _commit_roll_from_pending(rec, order, units=new_units)
         rec["filled"] = already + new_units
         rec["roll_group_id"] = result.get("roll_group_id")
@@ -3120,6 +3305,7 @@ def order_status(order_id: str) -> dict:
         _sync_roll_submission(rec, res)
         return res
     if raw == "FILLED":
+        _stamp_fill_spot(rec, order)
         kind = rec.get("kind")
         if kind == "open":
             result = _commit_open_from_pending(rec, order)
@@ -3161,6 +3347,31 @@ def _capture_order_receipt(order_id, raw_status, rec, order, result) -> None:
         })
     except Exception as e:  # noqa: BLE001 — never let bookkeeping unwind a fill
         log.logger.error("order receipt capture failed for %s: %s", order_id, e)
+    # The durable record of the fill and the stock price it was booked against
+    # (append-only, outside state.json) — what adoption/rebuild recover from if
+    # the store ever loses the execution. Separate try: the receipt above must
+    # not be skipped because the journal failed, nor vice versa.
+    try:
+        execs = result.get("executions") or (
+            [result["execution"]] if result.get("execution") else [])
+        log.append_order_journal({
+            "event": "filled", "order_id": str(order_id),
+            "kind": rec.get("kind") or rec.get("action"), "ticker": rec.get("ticker"),
+            "action": rec.get("action") or rec.get("kind"), "broker_status": raw_status,
+            "execution_ids": [e.get("id") for e in execs if e.get("id")],
+            "stock_price": rec.get("stock_price"),
+            "stock_price_at_placement": rec.get("stock_price_at_placement"),
+            "stock_price_at_fill": rec.get("stock_price_at_fill"),
+            "stock_price_source": rec.get("stock_price_source"),
+            "stock_price_captured_at": rec.get("stock_price_captured_at"),
+            "fill_time": rec.get("fill_time"),
+            "fill_prices": [{"action": e.get("action"), "strike": e.get("strike"),
+                             "premium_per_share": e.get("premium_per_share"),
+                             "close_price_per_share": e.get("close_price_per_share"),
+                             "price_per_share": e.get("price_per_share")} for e in execs],
+        })
+    except Exception as e:  # noqa: BLE001
+        log.logger.error("order journal fill entry failed for %s: %s", order_id, e)
 
 
 # Terminal broker states that confirm an order is truly gone (no longer working).
@@ -4146,6 +4357,7 @@ def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
         "open_option_symbol": open_symbol, "contracts": contracts,
         "net_limit": signed_net, "order_type": order_type,
         "request": order, "placed_at": log.utcnow(), "unknown_attempts": 0,
+        "stock_price": stock_price, "price_source": price_source,
     })
 
     result = client.submit_order(account_hash, order)
@@ -4163,6 +4375,13 @@ def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
                 "price_source": price_source, "account_hash": account_hash,
                 "close_option_symbol": close_symbol, "open_option_symbol": open_symbol,
                 "net_limit": signed_net, "client_order_ref": ref, "placed_at": log.utcnow(),
+            })
+            log.append_order_journal({
+                "event": "placed", "order_id": str(order_id), "ticker": ticker,
+                "action": "roll_short", "contracts": contracts, "net_limit": signed_net,
+                "stock_price": stock_price, "price_source": price_source,
+                "client_order_ref": ref,
+                "close_option_symbol": close_symbol, "open_option_symbol": open_symbol,
             })
             return {"success": True, "status": "working", "order_id": str(order_id),
                     "mode": "live", "client_order_ref": ref,
@@ -4260,7 +4479,14 @@ def submission_status(client_order_ref: str) -> dict:
                     "close_option_symbol": rec.get("close_option_symbol"),
                     "open_option_symbol": rec.get("open_option_symbol"),
                     "net_limit": rec.get("net_limit"), "client_order_ref": client_order_ref,
+                    "stock_price": rec.get("stock_price"),
+                    "price_source": rec.get("price_source"),
                     "placed_at": rec.get("placed_at"), "recovered": True})
+            log.append_order_journal({
+                "event": "placed", "order_id": str(order_id), "ticker": rec.get("ticker"),
+                "action": "roll_short", "contracts": rec.get("contracts"),
+                "stock_price": rec.get("stock_price"), "price_source": rec.get("price_source"),
+                "client_order_ref": client_order_ref, "recovered": True})
         else:
             capped = attempts >= int(config.UNKNOWN_STATUS_MAX_ATTEMPTS)
             rec = log.update_order_submission(
@@ -4504,6 +4730,9 @@ def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source,
         leg_exec["roll_alloc_method"] = alloc_method
         leg_exec["roll_reference_net_mid"] = ref_net_mid
         leg_exec["roll_net_fill"] = net_fill
+        for k in _SPOT_PROVENANCE_KEYS:
+            if payload.get(k) is not None:
+                leg_exec[k] = payload[k]
 
     _stamp_source_rec(close_exec, payload)
     _stamp_source_rec(sell_exec, payload)
@@ -4661,7 +4890,8 @@ def _place_live_open(payload, ticker, contracts, stock_price, price_source):
         "account_hash": account_hash, "leap_symbol": leap_symbol, "short_symbol": short_symbol,
         "net_limit": net_ps, "placed_at": log.utcnow(),
     })
-    _record_placement(ticker, "open_position_atomic", order_id, net_limit=net_ps)
+    _record_placement(ticker, "open_position_atomic", order_id, net_limit=net_ps,
+                      stock_price=stock_price, price_source=price_source)
     return {"success": True, "status": "working", "order_id": str(order_id), "mode": "live",
             "option_symbols": [leap_symbol, short_symbol], "net_limit": net_ps}
 

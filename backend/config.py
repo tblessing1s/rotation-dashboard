@@ -462,6 +462,23 @@ SCHWAB_BACKOFF_BASE_SECONDS = 1.0
 SCHWAB_BACKOFF_MAX_SECONDS = 16.0
 SCHWAB_MAX_RETRIES = 4
 
+# ---- Schwab request rate limit (the whole process) ------------------------
+# Schwab allows ~120 requests a minute per app, across every endpoint. Backoff
+# alone only REACTS to a 429; nothing stopped the app from asking for more than
+# that in the first place — the 400 ms fill poll alone ran at a 150/min pace, on
+# top of the per-account scheduler and the price strip. A process-wide token
+# bucket (schwab_api._limiter) now paces every read BEFORE it is sent, leaving
+# headroom under the cap for the order path, which never waits on the bucket.
+# 0 disables the pacing (the suite runs that way).
+SCHWAB_REQUESTS_PER_MINUTE = int(os.environ.get("SCHWAB_REQUESTS_PER_MINUTE") or 100)
+# When Schwab does answer 429 with no Retry-After, every thread pauses this long
+# (a shared circuit — one 429 must not be answered by seven threads retrying).
+SCHWAB_429_PAUSE_SECONDS = float(os.environ.get("SCHWAB_429_PAUSE_SECONDS") or 2.0)
+# A live quote is reused for this long by DISPLAY readers (the price strip, the
+# position card, the alert sweep), so they share one request instead of each
+# asking. Order placement and fill capture always bypass it (data_handler.fresh_quote).
+QUOTE_CACHE_SECONDS = float(os.environ.get("QUOTE_CACHE_SECONDS") or 5.0)
+
 # ---- INTERACTIVE fetch budget (a human is waiting) -------------------------
 # The knobs above are the BACKGROUND budget: 4 attempts x a 20s call timeout plus
 # 1+2+4s of backoff is ~87 SECONDS for a single symbol. That is correct for the
@@ -1022,6 +1039,14 @@ MAX_RESUBMIT_ATTEMPTS = 3
 # book, short enough that the operator is not staring at a spinner. Raise it for
 # illiquid names, lower it to get back to the old behaviour.
 ORDER_FILL_WAIT_SECONDS = float(os.environ.get("ORDER_FILL_WAIT_SECONDS") or 15.0)
+
+# How close to the broker's fill timestamp a fresh underlying quote must be taken
+# to count as "the spot at the fill". The extrinsic split of a filled short is
+# premium − max(spot − strike, 0), so the spot has to belong to the instant the
+# contract traded. A fill the poll observes within this window is re-quoted NOW;
+# an older fill (a re-poll of an order left behind, a startup sweep) keeps the
+# placement-time capture instead of a quote from a different moment entirely.
+FILL_SPOT_MAX_AGE_SECONDS = float(os.environ.get("FILL_SPOT_MAX_AGE_SECONDS") or 120.0)
 
 # PROPOSED_DEFAULT — how a resubmitted order adjusts its limit toward the ask.
 # "none" (the default) re-sends at the SAME mid-seeded limit: honest, never chases

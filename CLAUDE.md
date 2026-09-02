@@ -64,6 +64,17 @@ Match the surrounding style; don't introduce a linter unless asked.
   carries the per-contract LEAP conversions for historical records) and
   `frontend/src/units.js` (`SHARES_PER_CONTRACT` / `totalDollars`); route
   conversions through them rather than open-coding `* 100` at a new boundary.
+- **Stock price at the fill (guaranteed):** a transmitting order refuses to leave
+  without a captured underlying price (`executor.StockPriceUnavailable`); at the
+  fill `executor._stamp_fill_spot` re-quotes within `FILL_SPOT_MAX_AGE_SECONDS`
+  of the broker's fill time (else keeps the placement capture) and stamps
+  `stock_price_at_placement/_at_fill/_source/_captured_at` on the execution.
+  Every placement and fill is also appended to the **order journal**
+  (`orders[.<account>].jsonl`, `logging_handler.append_order_journal`) — an
+  append-only file OUTSIDE state.json, so the price survives a lost update or a
+  restore; adoption and ingestion recover it by broker order id. Persist anything
+  computed across a slow fetch through `logging_handler.mutate_state`, never by
+  saving a copy loaded before the fetch.
 - **Period bucketing:** bucket executions by date→expiration via
   `logging_handler.bucket_datetime()` — both the theta ledger and the Payouts view
   key off it so they can't disagree. Never re-derive week/month with a bespoke

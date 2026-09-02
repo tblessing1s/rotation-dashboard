@@ -446,6 +446,101 @@ def list_pending_orders() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Order journal — the durable, append-only record of every order this app sent
+# ---------------------------------------------------------------------------
+# One JSON object per line in ``orders[.<account>].jsonl`` next to the account's
+# state file. It is written OUTSIDE state.json on purpose: state.json is a
+# whole-file rewrite on every save, and a stale copy saved over a fresh one (a
+# lost update), a restore from backup, or a repair can all take a fill's
+# placement record — and with it the underlying price captured for the
+# extrinsic split — out of the store. The journal is never rewritten, only
+# appended, so the price an order was placed and filled at can always be
+# recovered by order id, whatever happened to the store since.
+def order_journal_path(state_path: str | None = None) -> str:
+    """``.../state.json`` -> ``.../orders.jsonl``; ``state.ira.json`` ->
+    ``orders.ira.jsonl``; ``state.demo.ira.json`` -> ``orders.demo.ira.jsonl``."""
+    path = state_path or config.active_state_path()
+    directory, base = os.path.split(path)
+    name = base[:-5] if base.endswith(".json") else base
+    name = "orders" + name[len("state"):] if name.startswith("state") else f"orders.{name}"
+    return os.path.join(directory, name + ".jsonl")
+
+
+def append_order_journal(entry: dict) -> dict | None:
+    """Append one journal line. Best-effort by design: a journal failure is
+    logged and never raised, because it must not block an order that is about
+    to be sent or unwind a fill that has already been booked."""
+    try:
+        entry = dict(entry)
+        entry.setdefault("at", utcnow())
+        if entry.get("order_id") is not None:
+            entry["order_id"] = str(entry["order_id"])
+        line = json.dumps(entry, sort_keys=True, default=str)
+        with _lock:
+            path = order_journal_path()
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            with open(path, "a", encoding="utf-8") as fh:
+                fh.write(line + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+        return entry
+    except Exception as e:  # noqa: BLE001 — never let the journal break an order
+        logger.error("order journal append failed: %s", e)
+        return None
+
+
+def order_journal_entries(limit: int | None = None) -> list[dict]:
+    """Every journal line for the active account, oldest first (a malformed
+    line is skipped, never fatal)."""
+    path = order_journal_path()
+    if not os.path.exists(path):
+        return []
+    out: list[dict] = []
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                out.append(json.loads(raw))
+            except ValueError:
+                logger.warning("order journal: skipping malformed line")
+    return out[-limit:] if limit else out
+
+
+def order_journal_lookup(order_id: str) -> dict | None:
+    """The merged journal record for one broker order id: later events overlay
+    earlier ones (so a fill's spot wins over the placement's), ``events`` lists
+    every event seen, and ``execution_ids`` unions every id booked. None when
+    the journal never saw the order."""
+    order_id = str(order_id)
+    merged: dict = {}
+    events: list[str] = []
+    exec_ids: list[str] = []
+    for e in order_journal_entries():
+        if str(e.get("order_id")) != order_id:
+            continue
+        ev = e.get("event")
+        if ev:
+            events.append(ev)
+        if ev == "placed":
+            merged.setdefault("placed_at", e.get("at"))
+            if e.get("stock_price") is not None:
+                merged.setdefault("stock_price_at_placement", e.get("stock_price"))
+        for eid in e.get("execution_ids") or []:
+            if eid not in exec_ids:
+                exec_ids.append(eid)
+        for k, v in e.items():
+            if v is not None and k not in ("event", "execution_ids"):
+                merged[k] = v
+    if not merged:
+        return None
+    merged["events"] = events
+    merged["execution_ids"] = exec_ids
+    return merged
+
+
+# ---------------------------------------------------------------------------
 # Durable order-submission records (incident hotfix, D2/D4/F3)
 # ---------------------------------------------------------------------------
 # Keyed by an app-generated client_order_ref created BEFORE the broker call, so a

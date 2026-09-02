@@ -748,6 +748,26 @@ def api_order_status():
         return _err(e)
 
 
+@app.route("/api/schwab/rate-limit")
+def api_schwab_rate_limit():
+    """The process-wide Schwab pacing in effect (requests/minute, tokens left,
+    any 429 pause) — what to look at when reads feel slow."""
+    return jsonify(schwab_api.rate_limit_status())
+
+
+@app.route("/api/ticker-strip")
+def api_ticker_strip():
+    """The chrome's per-position readout (spot + distance to each short strike)
+    for the active book. Thin and polled from every tab — see
+    position_manager.ticker_strip."""
+    try:
+        state = log.load_state()
+        return jsonify({"as_of": log.utcnow(),
+                        "positions": position_manager.ticker_strip(state)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/orders/pending")
 def api_orders_pending():
     """The active book's pending (placed, not yet settled) orders, with the
@@ -1605,8 +1625,18 @@ def api_ingestion_adopt():
     proposal_id = payload.get("proposal_id", "")
     if not proposal_id:
         return jsonify({"error": "proposal_id is required"}), 400
+    stock_price = payload.get("stock_price")
+    if stock_price in (None, ""):
+        stock_price = None
+    else:
+        try:
+            stock_price = float(stock_price)
+        except (TypeError, ValueError):
+            return jsonify({"error": "stock_price must be a number"}), 400
+        if stock_price <= 0:
+            return jsonify({"error": "stock_price must be positive"}), 400
     try:
-        return jsonify(executor.adopt_broker_trade(proposal_id, payload.get("stock_price")))
+        return jsonify(executor.adopt_broker_trade(proposal_id, stock_price))
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001

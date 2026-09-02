@@ -28,7 +28,16 @@ const ACTION_VERB = {
 // here is far too short for a limit at the mid to fill on a normal book, so
 // nearly every order was cancelled before it had a chance.
 const FILL_TIMEOUT_FALLBACK_MS = 15000;
-const POLL_MS = 400;
+// Fill-poll cadence. Every poll is one Schwab order read, and Schwab allows ~120
+// requests a minute across the whole app — the old 400 ms poll alone ran at a
+// 150/min pace and was what tripped the 429s (which then hit the order path
+// itself). Start quick, so a fill at the mid is confirmed fast, then ease off;
+// an error (a 429 among them) backs off harder. ~9 reads over the 15 s window
+// instead of ~37.
+const POLL_FIRST_MS = 700;
+const POLL_STEP_MS = 400;
+const POLL_MAX_MS = 2000;
+const POLL_ERROR_MAX_MS = 4000;
 // Confirming an UNKNOWN (lost-response / accepted-no-id) order by client_order_ref.
 // A handful of quick reads to catch the common "the ack was just slow" case; if it's
 // still unconfirmed we leave a persistent, truthful message rather than poll forever.
@@ -144,13 +153,18 @@ export async function submitOrder(api, toast, payload) {
   const waitMs = Number(res.fill_wait_ms) > 0
     ? Number(res.fill_wait_ms) : FILL_TIMEOUT_FALLBACK_MS;
   const deadline = Date.now() + waitMs;
+  let pollMs = POLL_FIRST_MS;
   while (Date.now() < deadline) {
-    await sleep(POLL_MS);
+    await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
     let st;
     try {
       st = await api.orderStatus(orderId);
+      pollMs = Math.min(pollMs + POLL_STEP_MS, POLL_MAX_MS);
     } catch {
-      continue; // transient — keep polling until the deadline
+      // Transient (a 429 included) — keep polling until the deadline, but back
+      // off harder so the retries don't feed the very rate limit that failed.
+      pollMs = Math.min(pollMs * 2, POLL_ERROR_MAX_MS);
+      continue;
     }
     if (st.status === "filled") {
       toast.update(id, `${label} filled & logged.`, { type: "success" });

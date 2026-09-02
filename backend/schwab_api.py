@@ -78,6 +78,95 @@ class SchwabError(RuntimeError):
     pass
 
 
+class _RateLimiter:
+    """Process-wide pacing for Schwab requests: a token bucket sized to
+    config.SCHWAB_REQUESTS_PER_MINUTE (capacity = one minute's worth, so a
+    short burst is fine) plus a shared pause any 429 arms for every thread.
+
+    ``wait_seconds`` books a token and returns how long the caller must wait
+    before sending; tokens can go negative, which is how callers queue — each
+    later booking waits a little longer, in order. The ORDER path books a token
+    (it still counts against Schwab's cap) but never waits on the bucket; it
+    only honours the 429 pause, briefly. Clock and sleep are injectable for
+    tests; the suite disables the bucket entirely (rate 0).
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._tokens: float | None = None
+        self._last: float = 0.0
+        self._pause_until: float = 0.0
+        self._clock = time.monotonic
+
+    def reset(self) -> None:
+        with self._lock:
+            self._tokens, self._last, self._pause_until = None, 0.0, 0.0
+
+    @staticmethod
+    def _rate() -> int:
+        try:
+            return max(0, int(config.SCHWAB_REQUESTS_PER_MINUTE or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def wait_seconds(self, *, block_on_tokens: bool = True) -> float:
+        rate = self._rate()
+        now = self._clock()
+        with self._lock:
+            wait = max(0.0, self._pause_until - now)
+            if rate <= 0:
+                return wait
+            cap = float(rate)
+            per_sec = rate / 60.0
+            if self._tokens is None:
+                self._tokens, self._last = cap, now
+            self._tokens = min(cap, self._tokens + (now - self._last) * per_sec)
+            self._last = now
+            self._tokens -= 1.0
+            if self._tokens < 0 and block_on_tokens:
+                wait = max(wait, -self._tokens / per_sec)
+            return wait
+
+    def note_rate_limited(self, retry_after=None) -> float:
+        """Schwab said 429: pause EVERY caller for Retry-After (else the
+        configured default). Returns the pause applied."""
+        try:
+            pause = float(retry_after) if retry_after is not None else None
+        except (TypeError, ValueError):
+            pause = None
+        if pause is None or pause <= 0:
+            pause = float(config.SCHWAB_429_PAUSE_SECONDS)
+        with self._lock:
+            self._pause_until = max(self._pause_until, self._clock() + pause)
+        return pause
+
+    def before_order(self, sleep=time.sleep) -> float:
+        """The order path: never queue behind display reads, but do sit out a
+        429 pause (bounded) rather than send into a limit Schwab just enforced."""
+        wait = min(self.wait_seconds(block_on_tokens=False), 5.0)
+        if wait > 0:
+            logger.warning("schwab order call waiting %.1fs for the rate-limit pause", wait)
+            sleep(wait)
+        return wait
+
+
+_limiter = _RateLimiter()
+
+
+def reset_rate_limiter() -> None:
+    _limiter.reset()
+
+
+def rate_limit_status() -> dict:
+    """For /api/data-health: the pacing in effect and whether a 429 pause is on."""
+    now = _limiter._clock()
+    return {
+        "requests_per_minute": _RateLimiter._rate(),
+        "tokens": round(_limiter._tokens, 1) if _limiter._tokens is not None else None,
+        "paused_for": round(max(0.0, _limiter._pause_until - now), 1),
+    }
+
+
 # HTTP statuses worth retrying: rate-limit (429) + transient server/gateway
 # errors. Any OTHER 4xx (401 re-auth, 403 entitlement, 404) is a durable error a
 # retry won't fix, so it falls straight through to the caller's status check.
@@ -117,6 +206,7 @@ def _request(method: str, url: str, *, sleep=time.sleep, **kwargs):
     # single attempt cannot outlive the request that is waiting on it.
     if "timeout" in kwargs or budget.timeout is not None:
         kwargs["timeout"] = budget.cap_timeout(kwargs.get("timeout"))
+    just_slept = 0.0   # a backoff this caller already sat out counts toward the pace
     for attempt in range(attempts):
         last_attempt = attempt >= attempts - 1
         # Out of time: stop retrying and let the caller degrade to cache. Only an
@@ -131,6 +221,18 @@ def _request(method: str, url: str, *, sleep=time.sleep, **kwargs):
             raise SchwabError(
                 f"request deadline reached after {attempt} attempt(s) "
                 f"({method.upper()} {url}) — serving cached data instead")
+        # Pace the request BEFORE it goes: wait for a token (and for any 429
+        # pause another thread armed). Under an interactive deadline a wait that
+        # would outlive the request is a deadline miss, raised the same way.
+        pace = max(0.0, _limiter.wait_seconds() - just_slept)
+        just_slept = 0.0
+        if pace > 0:
+            remaining = budget.remaining()
+            if remaining is not None and pace > remaining:
+                raise SchwabError(
+                    f"rate-limit pacing ({pace:.1f}s) exceeds the request deadline "
+                    f"({method.upper()} {url}) — serving cached data instead")
+            sleep(pace)
         try:
             resp = http_fn(url, **kwargs)
         except requests.exceptions.RequestException as e:
@@ -141,8 +243,13 @@ def _request(method: str, url: str, *, sleep=time.sleep, **kwargs):
                            method.upper(), url, e.__class__.__name__, wait,
                            attempt + 1, attempts)
             sleep(wait)
+            just_slept = wait
             delay = min(delay * 2, budget.max_seconds)
             continue
+        if resp.status_code == 429:
+            # One 429 pauses EVERY thread (see _RateLimiter), whether or not this
+            # caller has attempts left to retry with.
+            _limiter.note_rate_limited(getattr(resp, "headers", {}).get("Retry-After"))
         if resp.status_code in _RETRYABLE_STATUS and not last_attempt:
             retry_after = getattr(resp, "headers", {}).get("Retry-After")
             try:
@@ -155,6 +262,7 @@ def _request(method: str, url: str, *, sleep=time.sleep, **kwargs):
                            method.upper(), url, resp.status_code, wait,
                            attempt + 1, attempts)
             sleep(wait)
+            just_slept = wait
             delay = min(delay * 2, budget.max_seconds)
             continue
         return resp
@@ -587,6 +695,7 @@ class SchwabClient:
         return cash
 
     def preview_order(self, account_hash: str, order: dict) -> dict:
+        _limiter.before_order()
         resp = requests.post(
             f"{ACCOUNTS_BASE}/accounts/{account_hash}/previewOrder",
             headers=self._auth_headers({"Content-Type": "application/json"}),
@@ -600,6 +709,7 @@ class SchwabClient:
     def place_order(self, account_hash: str, order: dict) -> dict:
         """Transmit a REAL order. Returns {orderId, location}. Caller gates this
         behind the live-trading enable flag (see executor.py)."""
+        _limiter.before_order()
         resp = requests.post(
             f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders",
             headers=self._auth_headers({"Content-Type": "application/json"}),
@@ -638,6 +748,7 @@ class SchwabClient:
               may be live; the caller confirms with the broker before claiming
               anything. status_code is None when the request never got a response.
         """
+        _limiter.before_order()
         url = f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders"
         try:
             resp = requests.post(
@@ -709,6 +820,7 @@ class SchwabClient:
 
     def cancel_order(self, account_hash: str, order_id: str) -> dict:
         """Cancel a working order. Schwab returns 200/201 or an empty 204."""
+        _limiter.before_order()
         resp = requests.delete(
             f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders/{order_id}",
             headers=self._auth_headers(), timeout=30,

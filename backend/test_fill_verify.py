@@ -134,3 +134,29 @@ def test_disconnected_skips_broker_check(monkeypatch):
     assert out["orders"][0]["ok"] is None
     assert any("not connected" in i for i in out["orders"][0]["issues"])
     assert out["reconcile"]["status"] == "clean"
+
+
+def test_equity_fill_matches_by_ticker(monkeypatch):
+    """A shares order's broker leg carries the plain ticker (no OCC symbol). It
+    used to fail the option-symbol parse and report "no matching broker leg" on
+    every equity fill; it must match by instruction + ticker and compare the
+    per-share price."""
+    execution = {"id": "exec_0002", "action": "buy_shares", "qty": 100,
+                 "price_per_share": 140.32, "ticker": "SPCX", "live_transmitted": True,
+                 "date": "2026-09-02T14:00:00Z"}
+    state = {"schema_version": migrations.CURRENT_VERSION, "metadata": {},
+             "positions": [], "executions": [execution],
+             "order_receipts": [{"order_id": "222", "kind": "buy_shares",
+                                 "ticker": "SPCX", "account_hash": "HASH",
+                                 "broker_status": "FILLED",
+                                 "execution_ids": ["exec_0002"],
+                                 "captured_at": "2026-09-02T14:00:00Z"}],
+             "alerts": migrations.default_alert_state()}
+    log.save_state(state)
+    _connect(monkeypatch, _order("FILLED", [("BUY", "SPCX", 100, 140.32)]))
+
+    out = fill_verify.verify_live_fills()
+    order = out["orders"][0]
+    assert order["ok"] is True and order["issues"] == [], order["issues"]
+    assert order["legs"][0]["recorded_price"] == 140.32
+    assert order["legs"][0]["broker_price"] == 140.32

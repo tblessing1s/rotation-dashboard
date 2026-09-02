@@ -736,6 +736,34 @@ def fetch_transactions() -> list:
     return client.get_transactions(account_hash, start_date=start, end_date=end)
 
 
+def _enrich_proposals_from_journal(report: dict) -> None:
+    """A proposal whose broker order id the app's order journal knows was placed
+    FROM the app — its fill just never made it into (or was lost from) the store.
+    Carry the journal's stock price onto the proposal so adoption books the same
+    extrinsic split the original fill would have, without the operator retyping
+    a number the app already captured."""
+    import logging_handler as log
+    for p in report.get("proposals") or []:
+        oid = p.get("order_id")
+        if not oid:
+            continue
+        try:
+            journal = log.order_journal_lookup(str(oid))
+        except Exception as e:  # noqa: BLE001 — enrichment is best-effort
+            logger.warning("order journal lookup failed for %s: %s", oid, e)
+            journal = None
+        if not journal:
+            continue
+        p["app_order"] = True
+        p["app_placed_at"] = journal.get("placed_at") or journal.get("at")
+        if journal.get("stock_price") is not None:
+            p["app_stock_price"] = journal["stock_price"]
+            p["app_stock_price_source"] = journal.get("stock_price_source")
+            p["summary"] = (f"{p.get('summary')} — placed from this app "
+                            f"(stock {journal['stock_price']} captured at "
+                            f"{journal.get('stock_price_source') or 'order'})")
+
+
 def run_ingestion(state: dict | None = None, persist: bool = True,
                   feed: list | None = None) -> dict:
     """Pull the Schwab transactions feed, classify it, and (by default) persist
@@ -765,6 +793,7 @@ def run_ingestion(state: dict | None = None, persist: bool = True,
     if not owns_state:
         report = build_report(feed, state, as_of)
         report["broker_ok"] = True
+        _enrich_proposals_from_journal(report)
         if persist:
             _persist_report(state, report)
         return report
@@ -772,6 +801,7 @@ def run_ingestion(state: dict | None = None, persist: bool = True,
     def _classify_and_persist(fresh: dict) -> dict:
         rep = build_report(feed, fresh, as_of)
         rep["broker_ok"] = True
+        _enrich_proposals_from_journal(rep)
         if persist:
             _persist_report(fresh, rep)
         return rep

@@ -385,6 +385,10 @@ function IngestionPanel() {
   const [adopting, setAdopting] = React.useState(null);
   const [reversing, setReversing] = React.useState(null);
   const [err, setErr] = React.useState(null);
+  // Per-proposal "stock price at fill" — sets the intrinsic/extrinsic split of an
+  // adopted short. The broker record carries the option price, never the
+  // underlying, and a cached daily close only exists for a past trade day.
+  const [fillPx, setFillPx] = React.useState({});
 
   const run = async () => {
     setBusy(true); setErr(null);
@@ -392,9 +396,13 @@ function IngestionPanel() {
     catch (e) { setErr(String(e.message || e)); }
     finally { setBusy(false); }
   };
-  const adopt = async (pid) => {
+  const adopt = async (p) => {
+    const pid = p.proposal_id;
     setAdopting(pid); setErr(null);
-    try { await api.adoptBrokerTrade(pid); await reload(); await reloadAdoptions(); }
+    // The operator's number wins; else the price the app captured for this order
+    // (the backend falls back to its journal too, so this is belt-and-braces).
+    const px = fillPx[pid] !== undefined && fillPx[pid] !== "" ? fillPx[pid] : p.app_stock_price;
+    try { await api.adoptBrokerTrade(pid, px); await reload(); await reloadAdoptions(); }
     catch (e) { setErr(String(e.message || e)); }
     finally { setAdopting(null); }
   };
@@ -438,7 +446,7 @@ function IngestionPanel() {
                   </span>
                   {p.ticker} · {p.action}
                 </span>
-                <button onClick={() => adopt(p.proposal_id)} disabled={adopting === p.proposal_id}
+                <button onClick={() => adopt(p)} disabled={adopting === p.proposal_id}
                         className="rounded-full border border-amber-700 bg-amber-900/40 px-2.5 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-900/70 disabled:opacity-50">
                   {adopting === p.proposal_id ? "Adopting…" : "Adopt"}
                 </button>
@@ -448,6 +456,29 @@ function IngestionPanel() {
                 <p key={i} className="mt-0.5 font-mono text-[11px] text-slate-400">{s}</p>
               ))}
               {p.order_id && <p className="mt-0.5 text-[11px] text-slate-500">broker order {p.order_id}</p>}
+              {(p.legs || []).some((l) => l.asset_type === "OPTION") && (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <label className="text-[11px] uppercase tracking-wide text-slate-500" htmlFor={`fillpx-${p.proposal_id}`}>
+                    Stock price at fill
+                  </label>
+                  <input id={`fillpx-${p.proposal_id}`} type="number" step="0.01" min="0" inputMode="decimal"
+                         value={fillPx[p.proposal_id] ?? (p.app_stock_price != null ? String(p.app_stock_price) : "")}
+                         onChange={(e) => setFillPx((s) => ({ ...s, [p.proposal_id]: e.target.value }))}
+                         placeholder={p.ticker ? `${p.ticker} at ${p.time ? p.time.slice(11, 16) + "Z" : "fill time"}` : "e.g. 139.50"}
+                         className="w-36 rounded-md border border-slate-700 bg-slate-950/60 px-2 py-1 font-mono text-xs text-slate-200 placeholder:text-slate-600" />
+                  {p.app_stock_price != null ? (
+                    <span className="text-[11px] text-emerald-300/90">
+                      Placed from this app — {p.ticker} {String(p.app_stock_price)} was captured for this order
+                      ({p.app_stock_price_source || "order"}). Adopt books that split; override only if you know better.
+                    </span>
+                  ) : (
+                    <span className="text-[11px] text-slate-500">
+                      Sets the intrinsic/extrinsic split. Left blank, the whole option price books as extrinsic
+                      (wrong for an in-the-money strike).
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
           ))}
         </div>

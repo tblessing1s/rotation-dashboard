@@ -63,6 +63,8 @@ def _recorded_per_share(execution: dict) -> float | None:
             return float(execution.get("premium_per_share") or 0)
         if action == "close_short":
             return float(execution.get("close_price_per_share") or 0)
+        if action in ("buy_shares", "sell_shares"):
+            return float(execution.get("price_per_share") or 0)
     except (TypeError, ValueError):
         return None
     return None
@@ -72,6 +74,15 @@ def _match_leg(execution: dict, broker_legs: list[dict]) -> dict | None:
     """Pair a committed execution to its broker leg by instruction + strike."""
     want_instr = INSTRUCTION.get(execution.get("action"))
     strike = execution.get("strike")
+    # A shares leg carries the plain ticker, not an OCC symbol — match it by
+    # instruction + ticker. (Parsing it as an option symbol failed, so every
+    # equity fill used to report "no matching broker leg".)
+    if execution.get("action") in ("buy_shares", "sell_shares"):
+        ticker = (execution.get("ticker") or "").upper()
+        for leg in broker_legs:
+            if leg["instruction"] == want_instr and leg["symbol"].upper() == ticker:
+                return leg
+        return None
     for leg in broker_legs:
         if leg["instruction"] != want_instr:
             continue

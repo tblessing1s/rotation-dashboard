@@ -630,10 +630,64 @@ def enrich_position(position: dict, roll_summary: dict | None = None,
     return out
 
 
+def ticker_strip(state: dict) -> list[dict]:
+    """One line per OPEN position for the app chrome, shown on every tab: the
+    stock's live price and how far it sits from each short strike.
+
+    Deliberately thin — no ledgers, marks, recommendations or accrual — because
+    it is polled from every page. It reads the price through the SAME quote path
+    the position card uses (data_handler.latest_quote) and the same strike_gap
+    derivation, so the strip and the card can never disagree about where the
+    stock is or which side of a strike it's on.
+    """
+    rows: list[dict] = []
+    open_positions = [p for p in state.get("positions", [])
+                      if p.get("status") != "closed" and (p.get("ticker") or "").strip()]
+    # ONE batched quote call for every open name (cache-aware), not one per row.
+    quotes = data_handler.latest_quotes([p["ticker"] for p in open_positions])
+    for p in open_positions:
+        ticker = (p.get("ticker") or "").upper()
+        q = quotes.get(ticker)
+        price = q.get("price") if q else None
+        legs: list[dict] = []
+        for sc in p.get("short_calls") or []:
+            gap = strike_gap(price, sc.get("strike"), put=False)
+            legs.append({
+                "kind": "call", "strike": sc.get("strike"),
+                "contracts": sc.get("contracts"), "expiration": sc.get("expiration"),
+                "distance": gap["distance"], "distance_pct": gap["distance_pct"],
+                "itm": gap["itm"], "moneyness": gap["moneyness"],
+            })
+        for sp in p.get("short_puts") or []:
+            gap = strike_gap(price, sp.get("strike"), put=True)
+            legs.append({
+                "kind": "put", "strike": sp.get("strike"),
+                "contracts": sp.get("contracts"), "expiration": sp.get("expiration"),
+                "distance": gap["distance"], "distance_pct": gap["distance_pct"],
+                "itm": gap["itm"], "moneyness": gap["moneyness"],
+            })
+        rows.append({
+            "ticker": ticker,
+            "stock_price": round(float(price), 2) if price is not None else None,
+            "price_source": (q or {}).get("source"),
+            "shares": int((p.get("shares") or {}).get("count") or 0),
+            "needs_review": bool(p.get("needs_review")),
+            "legs": legs,
+        })
+    return rows
+
+
 def positions_view(state: dict) -> list[dict]:
     roll_ledger = state.get("roll_ledger") or {}
     by_ticker = roll_ledger.get("by_ticker", {})
     all_rolls = roll_ledger.get("rolls", [])
+    # Warm the quote cache with ONE batched call so each enrich_position below
+    # reads its spot from it instead of asking Schwab per position.
+    try:
+        data_handler.latest_quotes([p.get("ticker") for p in state.get("positions", [])
+                                    if p.get("status") != "closed"])
+    except Exception:  # noqa: BLE001 — best-effort warm-up; per-position reads still work
+        pass
     out = [enrich_position(p, by_ticker.get(p.get("ticker", "")), rolls=all_rolls)
            for p in state.get("positions", [])]
     # Wash-sale visibility on OPEN positions: the cycle derivation marks a

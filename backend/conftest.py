@@ -136,7 +136,27 @@ def _pytest_fixtures():
         monkeypatch.setattr(accounts, "registry_path",
                             lambda: str(directory / "accounts.json"))
 
-    return mock_schwab, _legacy_leap_open_in_tests, _isolated_account_registry
+    @pytest.fixture(autouse=True)
+    def _unpaced_schwab_and_fresh_quotes(monkeypatch):
+        """The process-wide Schwab pacing is OFF in the suite (the fakes answer
+        instantly and a test module can easily make more mocked calls than a
+        minute's budget), and the short quote cache starts empty so a price from
+        one test never leaks into the next. The limiter's own tests turn it on."""
+        import config as _config
+        import data_handler as _dh
+        import schwab_api as _sa
+        monkeypatch.setattr(_config, "SCHWAB_REQUESTS_PER_MINUTE", 0)
+        _sa.reset_rate_limiter()
+        _dh.clear_quote_cache()
+        try:
+            yield
+        finally:
+            _sa.reset_rate_limiter()
+            _dh.clear_quote_cache()
+
+    return (mock_schwab, _legacy_leap_open_in_tests, _isolated_account_registry,
+            _unpaced_schwab_and_fresh_quotes)
 
 
-mock_schwab, _legacy_leap_open_in_tests, _isolated_account_registry = _pytest_fixtures()
+(mock_schwab, _legacy_leap_open_in_tests, _isolated_account_registry,
+ _unpaced_schwab_and_fresh_quotes) = _pytest_fixtures()

@@ -365,3 +365,51 @@ def test_fill_committed_during_transactions_fetch_survives_persist(store, monkey
     assert [e["action"] for e in state["executions"]] == ["sell_short"]
     assert state["ingested_transactions"]["T1"]["source"] == ingest.SOURCE_APP
     assert state["ingestion"]["last"]["matched"] == 1
+
+
+def test_adoption_recovers_the_stock_price_from_the_order_journal(store):
+    """A fill placed FROM the app whose execution was lost from the store comes
+    back through ingestion as an "out-of-band" proposal. The journal still holds
+    the price the app captured at the fill — the proposal carries it and
+    adoption books the same extrinsic split the original fill would have."""
+    log.append_order_journal({"event": "placed", "order_id": "TOS1", "ticker": "ABC",
+                              "action": "sell_short", "stock_price": 110.4,
+                              "price_source": "schwab"})
+    log.append_order_journal({"event": "filled", "order_id": "TOS1", "ticker": "ABC",
+                              "action": "sell_short", "stock_price": 110.9,
+                              "stock_price_at_placement": 110.4,
+                              "stock_price_at_fill": 110.9,
+                              "stock_price_source": "fill_quote:schwab",
+                              "execution_ids": ["exec_0007"]})
+
+    feed = [_sell_short_txn("T1", "TOS1", contracts=3, price=1.25)]
+    report = ingest.run_ingestion(feed=feed)
+    assert len(report["proposals"]) == 1
+    p = report["proposals"][0]
+    assert p["app_order"] is True
+    assert p["app_stock_price"] == 110.9
+    assert p["app_stock_price_source"] == "fill_quote:schwab"
+    assert "placed from this app" in p["summary"]
+    state = log.load_state()
+    assert state["ingestion"]["proposals"][0]["app_stock_price"] == 110.9
+
+    res = executor.adopt_broker_trade(p["proposal_id"])   # no stock price typed
+    assert res["stock_price"] == 110.9
+    assert res["stock_price_source"] == "order_journal:fill_quote:schwab"
+    ex = log.load_state()["executions"][-1]
+    assert ex["stock_price"] == 110.9
+    assert ex["stock_price_source"] == "order_journal:fill_quote:schwab"
+    # extrinsic = 1.25 − (110.9 − 110.0)
+    assert ex["entry_extrinsic_per_share"] == pytest.approx(0.35)
+
+
+def test_adoption_prefers_the_operator_price_over_the_journal(store):
+    log.append_order_journal({"event": "filled", "order_id": "TOS1", "ticker": "ABC",
+                              "action": "sell_short", "stock_price": 110.9,
+                              "stock_price_source": "fill_quote:schwab"})
+    feed = [_sell_short_txn("T1", "TOS1", contracts=3, price=1.25)]
+    report = ingest.run_ingestion(feed=feed)
+    res = executor.adopt_broker_trade(report["proposals"][0]["proposal_id"], stock_price=110.5)
+    assert res["stock_price"] == 110.5 and res["stock_price_source"] == "supplied"
+    ex = log.load_state()["executions"][-1]
+    assert ex["stock_price"] == 110.5 and ex["stock_price_source"] == "supplied"
