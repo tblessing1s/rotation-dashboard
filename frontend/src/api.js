@@ -219,6 +219,7 @@ export const api = {
       body: JSON.stringify(dryRun === undefined ? {} : { dry_run: dryRun }),
     }),
   ackAlert: (id) => request("/api/alerts/ack", { method: "POST", body: JSON.stringify({ id }) }),
+  testAlert: () => request("/api/alerts/test", { method: "POST" }),
   // Recommendation trust layer: open recs + the derived trust scoreboard.
   recommendations: () => request("/api/recommendations"),
   runRecommendations: () => request("/api/recommendations/run", { method: "POST", body: JSON.stringify({}) }),

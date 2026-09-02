@@ -1484,6 +1484,84 @@ def _run_locked(notify: bool, dry_run: bool | None) -> dict:
             "active_count": len(active), "delivery": delivery, "dry_run": bool(dry_run)}
 
 
+def sample_alert(state: dict | None = None) -> dict:
+    """A realistic "this position needs attention" alert, for a delivery check.
+
+    Modelled on the book's own positions so the operator sees exactly what a
+    real page looks like: the first open position with a short call gets an
+    expiry-style roll alert (deep-linked to ITS roll ticket, like EXPIRY_FRIDAY);
+    an open position without a short gets a focus link; an empty book gets a
+    portfolio-scope sample with no link. The record is marked ``test`` so the
+    subject line says TEST and it is NEVER persisted — nothing here touches the
+    active set, the log or dedup.
+    """
+    state = state or log.load_state()
+    ticker, strike = None, None
+    for p in _open_positions(state):
+        if p.get("short_calls"):
+            ticker, strike = p.get("ticker"), p["short_calls"][0].get("strike")
+            break
+    if ticker is None:
+        opened = _open_positions(state)
+        ticker = opened[0].get("ticker") if opened else None
+    if ticker and strike is not None:
+        link_type, message = "EXPIRY_FRIDAY", (
+            f"TEST — this is what a position alert looks like: {ticker} short {strike} "
+            f"expires in 1 day(s) and is not rolled.")
+    elif ticker:
+        link_type, message = "KILL_SWITCH_SPY", (
+            f"TEST — this is what a position alert looks like: {ticker} needs attention.")
+    else:
+        link_type, message = None, (
+            "TEST — this is what a position alert looks like. No open position yet, "
+            "so this sample carries no ticker.")
+    return {
+        "type": "TEST_DELIVERY", "severity": "HIGH", "test": True,
+        "rule": "Delivery check — not a condition. Sent through the SAME channels, "
+                "settings and dry-run switch a real alert would use.",
+        "ticker": ticker, "message": message,
+        "action": "Tap the notification: it should open the dashboard on this position.",
+        "data": {"strike": strike}, "fingerprint": "TEST_DELIVERY",
+        "action_url": _action_url(link_type, ticker) if link_type else None,
+    }
+
+
+def test_delivery() -> dict:
+    """Push one sample position alert through the REAL delivery path.
+
+    The "Send test" push button proves the phone is wired, but it bypasses the
+    operator settings — a book with dry-run on, or the webpush channel switched
+    off, passes that test and then silently swallows the real alert a week
+    later. This check goes through ``notifier.dispatch`` with the persisted
+    settings, so the report says what would ACTUALLY happen to a real page:
+    which channels delivered, which failed and why, or that dry-run / no
+    configured channel diverted it to the server log. Persists nothing.
+    """
+    state = log.load_state()
+    settings = get_settings(state)
+    sample = sample_alert(state)
+    delivery = notifier.dispatch([sample], settings, dry_run=settings["dry_run"])
+    delivered = [d["channel"] for d in delivery if d.get("ok") and d["channel"] != "log"]
+    failed = [d for d in delivery if not d.get("ok")]
+    channels = {ch.name: {"configured": ch.configured(),
+                          "enabled": settings["channels"].get(ch.name) is not False}
+                for ch in notifier.CHANNELS}
+    if settings["dry_run"]:
+        verdict = ("Dry run is ON — a real alert would be written to the server log "
+                   "and NOT delivered. Turn dry run off to receive alerts.")
+    elif delivered:
+        verdict = f"Delivered via {', '.join(delivered)}."
+    elif failed:
+        verdict = "Delivery FAILED on every channel: " + "; ".join(
+            f"{d['channel']}: {d.get('error', 'unknown error')}" for d in failed)
+    else:
+        verdict = ("No channel is configured and enabled — a real alert would only "
+                   "reach the server log. Enable push on this device (or set up email/ntfy).")
+    return {"alert": sample, "delivery": delivery, "delivered": delivered,
+            "dry_run": bool(settings["dry_run"]), "channels": channels,
+            "ok": bool(delivered), "verdict": verdict}
+
+
 def acknowledge(alert_id: str) -> dict:
     state = log.load_state()
     alerts_state = state.setdefault("alerts", {})

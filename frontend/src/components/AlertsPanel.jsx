@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import PushSetup from "./PushSetup.jsx";
 import { Card, Loading, Pill, useApi } from "./ui.jsx";
+import { useToast } from "./Toast.jsx";
 
 const CHANNEL_LABELS = { email: "Email", ntfy: "Push (ntfy)", webpush: "Push (this app)" };
 
@@ -64,7 +65,27 @@ function AlertRow({ alert, onAck }) {
 }
 
 function Settings({ settings, types, onSaved }) {
+  const toast = useToast();
   const [busy, setBusy] = React.useState(false);
+  const [testing, setTesting] = React.useState(false);
+  const [lastTest, setLastTest] = React.useState(null);
+
+  // "Would I actually get paged?" — one SAMPLE position alert through the real
+  // dispatch path (channels, toggles, dry run as saved), reported honestly.
+  // Unlike the push "Send test" below, a dry-run book or a disabled channel
+  // shows up here as the failure it would be on the day.
+  async function sendSample() {
+    setTesting(true);
+    try {
+      const res = await api.testAlert();
+      setLastTest(res);
+      toast.show(res.verdict, { type: res.ok ? "success" : "error", duration: 9000 });
+    } catch (e) {
+      toast.show(e.message || "Sample alert failed.", { type: "error", duration: 7000 });
+    } finally {
+      setTesting(false);
+    }
+  }
 
   async function patch(p) {
     setBusy(true);
@@ -97,6 +118,28 @@ function Settings({ settings, types, onSaved }) {
         ))}
       </div>
       <PushSetup />
+      <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950/40 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">
+            Would a position alert reach me?
+          </span>
+          <button onClick={sendSample} disabled={testing}
+                  className="rounded-full border border-emerald-600/50 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50">
+            {testing ? "Sending…" : "Send sample position alert"}
+          </button>
+        </div>
+        <p className="mt-1 text-xs text-slate-500">
+          Sends one sample “needs attention” alert for an open position through the same
+          channels, toggles and dry-run switch a real alert uses. Tap the notification —
+          it should open that position’s roll ticket.
+        </p>
+        {lastTest && (
+          <p className={`mt-1 text-xs ${lastTest.ok ? "text-emerald-300" : "text-amber-300"}`}>
+            {lastTest.verdict}
+            {lastTest.alert?.ticker && <span className="text-slate-500"> (sample: {lastTest.alert.ticker})</span>}
+          </p>
+        )}
+      </div>
       <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
         {Object.entries(types || {}).map(([type, info]) => (
           <label key={type} className="flex items-center gap-2 text-xs text-slate-300" title={info.rule}>

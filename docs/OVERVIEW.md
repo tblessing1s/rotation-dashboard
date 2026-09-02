@@ -99,7 +99,18 @@ implement `name`, `configured()`, `send()` and add to `CHANNELS`. Shipped:
 
 **API**: `GET /api/alerts` (active + log + settings), `POST /api/alerts/run`,
 `POST /api/alerts/ack {id}`, `POST /api/alerts/settings` (per-type
-enable/disable, channel toggles, dry-run).
+enable/disable, channel toggles, dry-run), `POST /api/alerts/test` (one SAMPLE
+"position needs attention" alert, modelled on the book's own open position, sent
+through the real channels with the persisted settings — the "would I actually
+get paged?" check; reports which channels delivered, or that dry-run / a
+disabled channel would have diverted a real alert to the log; persists nothing).
+
+**Validating delivery end to end**: `backend/test_alert_delivery.py` walks the
+whole chain — a state file with a short call expiring tomorrow, `alerts.run()`
+as the scheduler calls it, `notifier.dispatch`, `webpush.send`, the real
+`pywebpush` encryption + VAPID signing — and decrypts the push as the phone
+would. On a device: Settings → Alerts → "Send sample position alert" (the push
+panel's "Send test" only proves the phone is wired; it bypasses the settings).
 
 **UI**: Alerts panel on the Settings tab (acknowledge, run-now, settings,
 history) plus a navbar bell with the active count.

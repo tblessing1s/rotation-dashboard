@@ -43,6 +43,10 @@ def format_subject(alerts: list[dict]) -> str:
     scope = ", ".join(tickers[:4]) or "portfolio"
     account = account_label()
     tag = f"CFM {worst.get('severity', 'ALERT')}" + (f" · {account}" if account else "")
+    if alerts and all(a.get("test") for a in alerts):
+        # A delivery check (alerts.test_delivery) — say so in the title, so the
+        # lock screen never reads as a real "roll now" on a quiet day.
+        tag = f"CFM TEST · {tag[4:]}"
     return f"[{tag}] {len(alerts)} alert(s) — {scope}"
 
 

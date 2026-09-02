@@ -1327,6 +1327,17 @@ def api_alerts_run():
         return _err(e)
 
 
+@app.route("/api/alerts/test", methods=["POST"])
+def api_alerts_test():
+    """Send one SAMPLE position alert through the real delivery path (channels,
+    settings and dry-run as persisted) and report what happened — the operator's
+    "would I actually get paged?" check. Persists nothing."""
+    try:
+        return jsonify(alerts.test_delivery())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/alerts/ack", methods=["POST"])
 def api_alerts_ack():
     payload = request.get_json(silent=True) or {}
