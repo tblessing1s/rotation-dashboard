@@ -1605,8 +1605,18 @@ def api_ingestion_adopt():
     proposal_id = payload.get("proposal_id", "")
     if not proposal_id:
         return jsonify({"error": "proposal_id is required"}), 400
+    stock_price = payload.get("stock_price")
+    if stock_price in (None, ""):
+        stock_price = None
+    else:
+        try:
+            stock_price = float(stock_price)
+        except (TypeError, ValueError):
+            return jsonify({"error": "stock_price must be a number"}), 400
+        if stock_price <= 0:
+            return jsonify({"error": "stock_price must be positive"}), 400
     try:
-        return jsonify(executor.adopt_broker_trade(proposal_id, payload.get("stock_price")))
+        return jsonify(executor.adopt_broker_trade(proposal_id, stock_price))
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001

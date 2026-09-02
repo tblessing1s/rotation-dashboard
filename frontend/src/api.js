@@ -252,8 +252,15 @@ export const api = {
   ingestion: () => request("/api/ingestion"),
   runIngestion: () => request("/api/ingestion", { method: "POST" }),
   // Adopt one out-of-band broker trade (a proposal) into state.json.
-  adoptBrokerTrade: (proposalId) =>
-    request("/api/ingestion/adopt", { method: "POST", body: JSON.stringify({ proposal_id: proposalId }) }),
+  // stockPrice (optional) is the underlying at fill time — it sets the
+  // intrinsic/extrinsic split of an adopted short; without it the whole premium
+  // books as extrinsic.
+  adoptBrokerTrade: (proposalId, stockPrice) =>
+    request("/api/ingestion/adopt", {
+      method: "POST",
+      body: JSON.stringify({ proposal_id: proposalId,
+                             ...(stockPrice != null && stockPrice !== "" ? { stock_price: Number(stockPrice) } : {}) }),
+    }),
   // List booked broker_manual adoptions + reverse (undo) one exactly.
   adoptions: () => request("/api/ingestion/adoptions"),
   reverseAdoption: (proposalId) =>

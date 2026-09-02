@@ -385,6 +385,10 @@ function IngestionPanel() {
   const [adopting, setAdopting] = React.useState(null);
   const [reversing, setReversing] = React.useState(null);
   const [err, setErr] = React.useState(null);
+  // Per-proposal "stock price at fill" — sets the intrinsic/extrinsic split of an
+  // adopted short. The broker record carries the option price, never the
+  // underlying, and a cached daily close only exists for a past trade day.
+  const [fillPx, setFillPx] = React.useState({});
 
   const run = async () => {
     setBusy(true); setErr(null);
@@ -394,7 +398,7 @@ function IngestionPanel() {
   };
   const adopt = async (pid) => {
     setAdopting(pid); setErr(null);
-    try { await api.adoptBrokerTrade(pid); await reload(); await reloadAdoptions(); }
+    try { await api.adoptBrokerTrade(pid, fillPx[pid]); await reload(); await reloadAdoptions(); }
     catch (e) { setErr(String(e.message || e)); }
     finally { setAdopting(null); }
   };
@@ -448,6 +452,22 @@ function IngestionPanel() {
                 <p key={i} className="mt-0.5 font-mono text-[11px] text-slate-400">{s}</p>
               ))}
               {p.order_id && <p className="mt-0.5 text-[11px] text-slate-500">broker order {p.order_id}</p>}
+              {(p.legs || []).some((l) => l.asset_type === "OPTION") && (
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <label className="text-[11px] uppercase tracking-wide text-slate-500" htmlFor={`fillpx-${p.proposal_id}`}>
+                    Stock price at fill
+                  </label>
+                  <input id={`fillpx-${p.proposal_id}`} type="number" step="0.01" min="0" inputMode="decimal"
+                         value={fillPx[p.proposal_id] ?? ""}
+                         onChange={(e) => setFillPx((s) => ({ ...s, [p.proposal_id]: e.target.value }))}
+                         placeholder={p.ticker ? `${p.ticker} at ${p.time ? p.time.slice(11, 16) + "Z" : "fill time"}` : "e.g. 139.50"}
+                         className="w-36 rounded-md border border-slate-700 bg-slate-950/60 px-2 py-1 font-mono text-xs text-slate-200 placeholder:text-slate-600" />
+                  <span className="text-[11px] text-slate-500">
+                    Sets the intrinsic/extrinsic split. Left blank, the whole option price books as extrinsic
+                    (wrong for an in-the-money strike).
+                  </span>
+                </div>
+              )}
             </div>
           ))}
         </div>
