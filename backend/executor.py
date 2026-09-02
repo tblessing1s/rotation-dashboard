@@ -3392,6 +3392,77 @@ def reconcile_pending_orders_on_startup() -> dict:
     return {"reconciled": resolved, "pending": len(pending)}
 
 
+def list_pending_orders() -> list[dict]:
+    """Operator-facing view of the active book's pending orders — placed at the
+    broker but not yet settled (filled / canceled / rejected) in state.
+
+    A record left here after a fill has already happened is exactly the trace a
+    lost fill leaves behind (the poll that would have booked it never ran, or
+    its commit was overwritten): the captured at-order stock price and the
+    placement limit still live on it, so a re-poll can book the fill with the
+    same economics the original poll would have used."""
+    lock_by_order = {}
+    state = log.load_state()
+    for lock in (state.get("order_locks") or {}).values():
+        if lock.get("order_id") is not None:
+            lock_by_order[str(lock["order_id"])] = lock.get("state")
+    out = []
+    for oid, rec in (state.get("pending_orders") or {}).items():
+        payload = rec.get("payload") or {}
+        out.append({
+            "order_id": str(oid),
+            "ticker": rec.get("ticker"),
+            "action": rec.get("action") or rec.get("kind"),
+            "kind": rec.get("kind"),
+            "contracts": rec.get("contracts"),
+            "strike": rec.get("strike"),
+            "expiration": payload.get("expiration") or payload.get("to_expiration"),
+            "option_symbol": rec.get("option_symbol"),
+            "limit_price": rec.get("limit_price"),
+            "stock_price": rec.get("stock_price"),
+            "price_source": rec.get("price_source"),
+            "placed_at": rec.get("placed_at"),
+            "filled": rec.get("filled"),
+            "lock_state": lock_by_order.get(str(oid)),
+        })
+    out.sort(key=lambda r: r.get("placed_at") or "")
+    return out
+
+
+def repoll_pending_orders() -> dict:
+    """Operator-triggered re-poll of every pending order against the broker —
+    the startup reconciler's sweep, on demand, without waiting for a restart.
+
+    Each order goes through the ordinary ``order_status`` path, so a FILLED
+    order is booked with the pending record's captured stock price and cleared;
+    a terminal cancel/reject clears it; a working order stays. Unlike the
+    startup sweep this never hard-locks on a broker read failure: the operator is
+    looking at the result, and a transient 429 on a click must not lock a
+    position — the error is reported per order and the record is kept."""
+    if not schwab_api.configured():
+        return {"skipped": "broker-not-configured", "polled": 0, "settled": 0, "results": []}
+    results = []
+    settled = 0
+    for order_id, rec in log.list_pending_orders().items():
+        row = {"order_id": str(order_id), "ticker": rec.get("ticker"),
+               "action": rec.get("action") or rec.get("kind")}
+        try:
+            res = order_status(order_id)
+            row["status"] = res.get("status")
+            row["raw_status"] = res.get("raw_status")
+            if res.get("execution_id"):
+                row["execution_id"] = res["execution_id"]
+            if row["status"] not in ("working", "pending_cancel", "unknown", "partially_filled"):
+                settled += 1
+        except Exception as e:  # noqa: BLE001 — report per order, keep the record
+            log.logger.warning("re-poll: order %s unresolved (%s)", order_id, e)
+            row["status"] = "error"
+            row["error"] = str(e)
+        results.append(row)
+    return {"polled": len(results), "settled": settled, "results": results,
+            "remaining": len(log.list_pending_orders())}
+
+
 def _capture_entry_context(ticker: str, payload: dict) -> dict | None:
     """Freeze the immutable entry_context snapshot at entry time, and fire the
     low-severity data-quality alert if too many tracked fields came back null.

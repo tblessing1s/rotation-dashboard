@@ -1231,3 +1231,81 @@ def test_level2_is_a_veto_not_a_selector(monkeypatch):
     weak = scan_score.compute_score(sector_rs1m=-5.0, sector_breadth=20.0,
                                     net_juice_weekly_pct=2.0)
     assert weak["score"] < strong["score"]
+
+
+# ---------------------------------------------------------------------------
+# Pending-orders panel + on-demand re-poll (a lost fill's recovery path)
+# ---------------------------------------------------------------------------
+def test_list_pending_orders_exposes_captured_stock_price(monkeypatch, tmp_path):
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+    executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                      "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                      "expiration": "2026-07-10"})
+
+    rows = executor.list_pending_orders()
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["order_id"] == "ORD1" and row["ticker"] == "ON" and row["action"] == "sell_short"
+    assert row["contracts"] == 5 and row["strike"] == 139.5 and row["expiration"] == "2026-07-10"
+    assert row["stock_price"] == 142          # the at-order capture a re-poll books the fill at
+    assert row["limit_price"] == 6.0 and row["placed_at"]
+    assert row["lock_state"] == "WORKING"
+
+
+def test_repoll_books_a_fill_the_poll_never_committed(monkeypatch, tmp_path):
+    # The order filled at the broker but the app's fill poll never ran (or its
+    # commit was overwritten). The pending record is the trace it left; a re-poll
+    # must book the fill with the ORIGINAL captured stock price and clear it.
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+    executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                      "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                      "expiration": "2026-07-10"})
+    fake._status, fake._fill_price = "FILLED", 5.0
+
+    out = executor.repoll_pending_orders()
+    assert out["polled"] == 1 and out["settled"] == 1 and out["remaining"] == 0
+    assert out["results"][0]["status"] == "filled" and out["results"][0]["execution_id"]
+
+    state = log.load_state()
+    assert "ORD1" not in state["pending_orders"]
+    ex = state["executions"][-1]
+    assert ex["action"] == "sell_short" and ex["premium_per_share"] == 5.0
+    assert ex["stock_price"] == 142
+    pos = log.find_position(state, "ON")
+    assert len(pos["short_calls"]) == 1 and pos["short_calls"][0]["strike"] == 139.5
+    assert executor.list_pending_orders() == []
+
+
+def test_repoll_reports_a_broker_error_without_hard_locking(monkeypatch, tmp_path):
+    import schwab_api
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+    executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                      "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                      "expiration": "2026-07-10"})
+
+    def boom(account_hash, order_id):
+        raise schwab_api.SchwabError("schwab account: HTTP 429 too many requests")
+    fake.get_order = boom
+
+    out = executor.repoll_pending_orders()
+    assert out["polled"] == 1 and out["settled"] == 0 and out["remaining"] == 1
+    assert out["results"][0]["status"] == "error" and "429" in out["results"][0]["error"]
+    state = log.load_state()
+    assert "ORD1" in state["pending_orders"]  # kept for the next re-poll
+    # A transient read failure on an operator click must NOT lock the position.
+    assert state["order_locks"]["ON:sell_short"]["state"] == "WORKING"
+
+
+def test_repoll_leaves_a_working_order_pending(monkeypatch, tmp_path):
+    fake = _FakeSchwab(status="WORKING")
+    executor, log = _live_executor(monkeypatch, tmp_path, fake)
+    executor.execute({"action": "sell_short", "ticker": "ON", "strike": 139.5,
+                      "contracts": 5, "premium_per_share": 6.0, "stock_price": 142,
+                      "expiration": "2026-07-10"})
+    out = executor.repoll_pending_orders()
+    assert out["settled"] == 0 and out["remaining"] == 1
+    assert out["results"][0]["status"] == "working"
+    assert "ORD1" in log.load_state()["pending_orders"]

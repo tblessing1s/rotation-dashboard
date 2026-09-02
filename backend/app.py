@@ -748,6 +748,27 @@ def api_order_status():
         return _err(e)
 
 
+@app.route("/api/orders/pending")
+def api_orders_pending():
+    """The active book's pending (placed, not yet settled) orders, with the
+    stock price captured at order time — what a re-poll would book a fill at."""
+    try:
+        return jsonify({"orders": executor.list_pending_orders()})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/orders/repoll", methods=["POST"])
+def api_orders_repoll():
+    """Re-poll every pending order against Schwab now (the startup sweep, on
+    demand): a fill that happened at the broker but never got booked is committed
+    with its original captured economics; terminal orders are cleared."""
+    try:
+        return jsonify(executor.repoll_pending_orders())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/order-cancel", methods=["POST"])
 def api_order_cancel():
     payload = request.get_json(silent=True) or {}
