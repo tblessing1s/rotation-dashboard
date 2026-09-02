@@ -856,8 +856,93 @@ function MathRow({ label, value, strong = false, tone = "" }) {
   );
 }
 
+// Sum one enriched field across legs, keeping null distinct from zero: a leg
+// missing the field is skipped, and an all-missing set reads "—" rather than $0.00
+// (no data and nothing owed are different answers to "what does the short owe").
+function sumField(rows, key) {
+  let total = 0, any = false;
+  for (const r of rows || []) {
+    if (r[key] == null) continue;
+    total += Number(r[key]);
+    any = true;
+  }
+  return any ? total : null;
+}
+
+// The short-call side of the same directional bet, netted against the shares.
+//
+// A covered call's premium is intrinsic + extrinsic. Only the INTRINSIC half
+// tracks the stock 1:1 against the share base: it is the obligation that grows as
+// the stock climbs (gains above the strike get handed over at assignment) and
+// melts as the stock falls (that cash stays ours). So the intrinsic swing since
+// each short was sold — position_manager's signed `intrinsic_captured_total`
+// (entry intrinsic − intrinsic owed now) — is exactly the piece that offsets the
+// shares' unrealized move, and netting the two is the "is this balancing out"
+// read the share block alone can't give.
+//
+// What this is NOT: a position P/L. The two legs are measured from their OWN
+// entries (shares from cost basis, the short from its sale price), so the net says
+// how the two moves offset each other, not what the position is worth. Extrinsic
+// is deliberately excluded — it is theta income, not a directional offset, and it
+// has its own capture meter on the short leg.
+function ShortIntrinsicMath({ p, unreal }) {
+  const spot = p.stock_price;
+  const shorts = (p.short_calls || []).filter((sc) => Number(sc.contracts || 0) > 0);
+  if (!shorts.length) return null;
+  const owedNow = sumField(shorts, "current_intrinsic_total");
+  const soldAtEntry = sumField(shorts, "entry_intrinsic_total");
+  const swing = sumField(shorts, "intrinsic_captured_total");
+  const net = unreal != null && swing != null ? unreal + swing : null;
+  const anyItm = shorts.some((sc) => sc.itm === true);
+  // Only spell the swing out as "entry − now" when EVERY leg carries both halves;
+  // with a partial set the two sums cover different legs and the subtraction would
+  // not reproduce the swing shown beside it.
+  const complete = shorts.every((sc) => sc.entry_intrinsic_total != null
+    && sc.current_intrinsic_total != null && sc.intrinsic_captured_total != null);
+  return (
+    <>
+      <div className="border-t border-slate-800 pt-1" />
+      <div className="text-slate-500">Short-call intrinsic = max(spot − strike, 0) × 100 × contracts</div>
+      {shorts.map((sc, i) => (
+        <MathRow
+          key={i}
+          label={`  ${sc.contracts}× ${fmt(sc.strike, 2)}C${sc.expiration ? ` ${String(sc.expiration).slice(5)}` : ""}`}
+          value={`max(${fmt(spot, 2)} − ${fmt(sc.strike, 2)}, 0) = ${fmt(sc.current_intrinsic_per_share, 2)}/sh → ${dollars(sc.current_intrinsic_total)}`}
+          tone={sc.itm ? "text-amber-300" : ""}
+        />
+      ))}
+      <MathRow label="  intrinsic owed now" value={dollars(owedNow)} strong
+        tone={owedNow ? "text-amber-300" : ""} />
+      <MathRow label="  intrinsic sold at entry" value={dollars(soldAtEntry)} />
+      <MathRow label="  = intrinsic swing (entry − now)"
+        value={complete
+          ? `${dollars(soldAtEntry)} − ${dollars(owedNow)} = ${signedDollars(swing)}`
+          : signedDollars(swing)}
+        strong tone={swing != null && swing >= 0 ? "text-emerald-300" : "text-rose-300"} />
+      <div className="pt-1 text-slate-500">Balance = share unrealized + intrinsic swing</div>
+      <MathRow label="  net directional"
+        value={net != null ? `${signedDollars(unreal)} + ${signedDollars(swing)} = ${signedDollars(net)}` : "—"}
+        strong tone={net != null && net >= 0 ? "text-emerald-300" : "text-rose-300"} />
+      <div className="text-slate-600">
+        {spot == null
+          ? "No live spot — the short's intrinsic can't be priced yet."
+          : anyItm
+            ? "A short is ITM — the shares' gain above that strike is what the intrinsic owed hands back at assignment."
+            : "Every short is OTM — nothing owed, so the shares carry the move alone."}
+      </div>
+      <div className="text-slate-600">
+        Each leg is measured from its own entry (shares from cost basis, short from its sale),
+        so this is how the two moves offset — not a position P/L. Extrinsic is theta income,
+        not a directional offset, and is excluded here.
+      </div>
+    </>
+  );
+}
+
 // Derivation of the share base: the owned lot's cost against its current market
-// value, and the covered-lot capacity the short leg is allowed to sell into.
+// value, the short calls' intrinsic netted against that move (ShortIntrinsicMath —
+// the "is this balancing out" read), and the covered-lot capacity the short leg is
+// allowed to sell into.
 // Per-line results are the payload's own enriched fields (position_manager's
 // covered_lots), so the pieces shown sum exactly to the totals above them.
 function SharesBaseMath({ p }) {
@@ -883,6 +968,7 @@ function SharesBaseMath({ p }) {
       <MathRow label="  = unrealized"
         value={cost != null && value != null ? `${dollars(value)} − ${dollars(cost)} = ${signedDollars(value - cost)}` : "—"}
         strong tone={cost != null && value != null && value >= cost ? "text-emerald-300" : "text-rose-300"} />
+      <ShortIntrinsicMath p={p} unreal={cost != null && value != null ? value - cost : null} />
       <div className="border-t border-slate-800 pt-1" />
       <div className="text-slate-500">Coverable lots = floor(shares ÷ 100) — a fragment is never coverable</div>
       <MathRow label={`  floor(${count} ÷ 100)`} value={`${lots ?? "—"} lot${lots === 1 ? "" : "s"}`} strong />
