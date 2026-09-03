@@ -16,12 +16,22 @@ Matching semantics (the trust contract):
 - Executions BEFORE metadata.trust_layer_since predate the engine and are
   excluded (they would otherwise all read as misses).
 
-Scope: matchable operator actions are ENTER (buy_leap / atomic open, excluding
-scale-ins), ROLL_OUT (roll pairs with reason scheduled / 75%-rule / earnings),
-DEFEND (roll pairs with reason defend), and EXIT (close_leap, excluding LEAP
-rolls). Mechanical LEAP rolls, kill-switch-exit roll legs (part of an exit),
-scale-in adds, standalone leg repairs, and reconciliation adjustments are out
-of scope by rule and never synthesize misses — the operator doc lists them.
+Scope: matchable operator actions are ENTER (buy_shares opening a fresh base, or
+the legacy buy_leap / atomic open, excluding scale-ins), ROLL_OUT (roll pairs
+with reason scheduled / 75%-rule / earnings), DEFEND (roll pairs with reason
+defend), and EXIT (a sell_shares that closes the whole base, or the legacy
+close_leap, excluding LEAP rolls). Mechanical LEAP rolls, kill-switch-exit roll
+legs (part of an exit), scale-in adds and partial trims, called-away deliveries
+and put assignments, standalone leg repairs, and reconciliation adjustments are
+out of scope by rule and never synthesize misses — the operator doc lists them.
+
+Shares are scoped by the BASE-LEG BALANCE, not by the action name: a buy into an
+existing share base is a scale-in and a sale that leaves shares standing is a
+trim, and neither is a graded ENTER/EXIT. The balance is replayed from the whole
+execution log (including records before trust_layer_since, and including the
+mechanical put_assigned / close_shares_assigned that move shares without being
+operator actions), so a position opened before the trust layer still exits to
+zero correctly.
 """
 from __future__ import annotations
 
@@ -43,17 +53,32 @@ _ROLL_REASON_ACTION = {
     "kill-switch-exit": None,
 }
 
+# Order ACTION -> graded action type. Keyed on the bare action (see
+# _order_action): an order event's ``intent`` is the per-position lock KEY,
+# "TICKER:action", never a bare action, so looking a raw intent up here matches
+# nothing.
 _INTENT_ACTION = {
     "open": ActionType.ENTER,
     "open_position_atomic": ActionType.ENTER,
     "buy_leap": ActionType.ENTER,
+    "buy_shares": ActionType.ENTER,      # the shares-primary entry order
     "exit": ActionType.EXIT,
     "close_position_atomic": ActionType.EXIT,
     "close_leap": ActionType.EXIT,
+    # The shares-primary exit order. Unlike map_actions — which grades only a
+    # sale that closes the whole base — this grades the ORDER, so a trim's
+    # ticket is graded too: its lifecycle has to be legal either way, and a
+    # cleanly filled trim passes.
+    "sell_shares": ActionType.EXIT,
     "roll_short": ActionType.ROLL_OUT,   # refined to DEFEND via the roll_reason
     "roll_leap": None,                   # mechanical LEAP roll — out of scope
     "sell_short": None,
     "close_short": None,
+    # Mechanical or out-of-scope, listed so they read as decided rather than
+    # forgotten (an unlisted action already grades as None).
+    "close_shares_assigned": None,       # called-away delivery, not an operator act
+    "put_assigned": None,
+    "put_opened": None,
 }
 
 
@@ -75,6 +100,51 @@ def _iso(dt: datetime) -> str:
 # ---------------------------------------------------------------------------
 # 1) Executions -> matchable operator-action instances
 # ---------------------------------------------------------------------------
+# Executions that move the owned-share base, and the field each carries the size
+# in. put_assigned / close_shares_assigned are MECHANICAL — they move shares but
+# are never graded as operator actions; they appear here only so the balance the
+# ENTER/EXIT scoping reads stays true.
+_SHARE_DELTA = {
+    "buy_shares": ("qty", +1),
+    "put_assigned": ("shares_received", +1),
+    "sell_shares": ("qty", -1),
+    "close_shares_assigned": ("qty", -1),
+}
+
+
+def _share_balances(executions: list[dict]) -> dict[int, tuple[int, int]]:
+    """Replay the owned-share base per ticker over the WHOLE log. Returns
+    {execution index: (before, after)} for every share-moving execution — the
+    balance context that decides whether a buy is a fresh entry and a sale is a
+    full exit.
+
+    Replayed in DATE order, not list order: the log is append-only, but
+    ``append_execution`` only ``setdefault``s the timestamp, so a backdated
+    record (an assignment booked on its assignment_date, a seeded history) can
+    land after a newer one. Log position breaks ties, keeping the legs of one
+    order in the order they were written. A record whose date will not parse is
+    left out of the balance exactly as ``map_actions`` leaves it out of grading —
+    guessing its place would silently mis-scope a real entry or exit."""
+    running: dict[str, int] = {}
+    out: dict[int, tuple[int, int]] = {}
+    order = sorted((i for i, e in enumerate(executions)
+                    if _SHARE_DELTA.get(e.get("action")) and _parse_ts(e.get("date"))),
+                   key=lambda i: (_parse_ts(executions[i].get("date")), i))
+    for idx in order:
+        e = executions[idx]
+        field, sign = _SHARE_DELTA[e.get("action")]
+        try:
+            qty = int(e.get(field) or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        t = (e.get("ticker") or "").upper()
+        before = running.get(t, 0)
+        after = max(before + sign * qty, 0)
+        running[t] = after
+        out[idx] = (before, after)
+    return out
+
+
 def map_actions(state: dict) -> list[dict]:
     """Classify the immutable executions into matchable operator-action
     instances: {action_type, ticker, at, execution_ids, strike, net, live}."""
@@ -82,7 +152,9 @@ def map_actions(state: dict) -> list[dict]:
     out: list[dict] = []
     rolls: dict[str, dict] = {}
     exits: dict[tuple, dict] = {}
-    for e in state.get("executions", []):
+    executions = state.get("executions", [])
+    balances = _share_balances(executions)
+    for idx, e in enumerate(executions):
         at = _parse_ts(e.get("date"))
         if at is None or (since is not None and at < since):
             continue
@@ -120,6 +192,37 @@ def map_actions(state: dict) -> list[dict]:
                 "net": None, "live": e.get("live_transmitted") is True,
                 "open_id": e.get("open_id"),
             })
+        elif action == "buy_shares":
+            # The shares-primary ENTER. A builder/lot add carries the lot_add
+            # stamp, and any buy into a standing base is a scale-in whether or not
+            # it is stamped — both are out of scope, exactly like leap_add.
+            before, _after = balances.get(idx, (0, 0))
+            if e.get("lot_add") or before > 0:
+                continue
+            out.append({
+                "action_type": ActionType.ENTER, "ticker": t, "at": at,
+                "execution_ids": [e.get("id")], "strike": None,
+                "net": None, "live": e.get("live_transmitted") is True,
+                "open_id": e.get("open_id"), "qty": e.get("qty"),
+            })
+        elif action == "sell_shares":
+            # The shares-primary EXIT — but ONLY when the DAY closes the whole
+            # base. Same-day sales collect into one instance (an exit split across
+            # fills is one action), and the day is kept only if the last of them
+            # leaves zero shares: a trim that leaves shares standing is a
+            # scale-out, and grading it as an unrecommended exit would synthesize
+            # a coverage miss for a position the operator never exited.
+            _before, after = balances.get(idx, (0, 0))
+            key = (t, str(e.get("date"))[:10])
+            inst = exits.setdefault(key, {
+                "action_type": ActionType.EXIT, "ticker": t, "at": at,
+                "execution_ids": [], "strike": None, "net": None,
+                "live": False, "exit_reason": e.get("exit_reason"),
+            })
+            inst["execution_ids"].append(e.get("id"))
+            inst["at"] = max(inst["at"], at)
+            inst["live"] = inst["live"] or e.get("live_transmitted") is True
+            inst["_shares_after"] = after
         elif action == "close_leap":
             # Same-day close_leap legs on one ticker are ONE exit action (a
             # multi-tranche close writes one record per leg).
@@ -129,6 +232,13 @@ def map_actions(state: dict) -> list[dict]:
                 "execution_ids": [], "strike": e.get("strike"), "net": None,
                 "live": False, "exit_reason": e.get("exit_reason"),
             })
+            # The bucket may have been opened by a same-day share sale, which
+            # carries neither field — fill them from the LEAP leg.
+            inst["_leap_close"] = True
+            if inst.get("strike") is None:
+                inst["strike"] = e.get("strike")
+            if inst.get("exit_reason") is None:
+                inst["exit_reason"] = e.get("exit_reason")
             inst["execution_ids"].append(e.get("id"))
             inst["at"] = max(inst["at"], at)
             inst["live"] = inst["live"] or e.get("live_transmitted") is True
@@ -147,7 +257,16 @@ def map_actions(state: dict) -> list[dict]:
         for k in ("_premium", "_buyback", "_net_fill"):
             inst.pop(k, None)
     out.extend(rolls.values())
-    out.extend(exits.values())
+    for inst in exits.values():
+        # A shares day that ended with shares still standing was a trim, not an
+        # exit — unless the same bucket also holds a legacy close_leap, which is
+        # an exit on its own terms.
+        shares_after = inst.pop("_shares_after", None)
+        if (shares_after is not None and shares_after > 0
+                and not inst.pop("_leap_close", False)):
+            continue
+        inst.pop("_leap_close", None)
+        out.append(inst)
     for inst in out:
         # source_rec_id passthrough: an execution staged from a recommendation
         # card carries the rec id; the anchor exec's value wins.
@@ -360,13 +479,13 @@ def _grade_slippage(exec_ids: list, executions_by_id: dict, state: dict,
                   bound_pct=round(bound_pct * 100, 3))
 
 
-_MULTI_LEG_INTENTS = {"open", "open_position_atomic", "exit",
+_MULTI_LEG_ACTIONS = {"open", "open_position_atomic", "exit",
                       "close_position_atomic", "roll_short", "roll_leap"}
 
 
-def _grade_orphan(intent: str | None, final_state: str | None,
+def _grade_orphan(action: str | None, final_state: str | None,
                   exec_ids: list) -> dict:
-    if intent not in _MULTI_LEG_INTENTS:
+    if action not in _MULTI_LEG_ACTIONS:
         return _check(CheckStatus.NOT_APPLICABLE)
     if final_state in (olc.PARTIAL_FILL_CANCELED,):
         return _check(CheckStatus.FAIL, FidelityDefect.PARTIAL_FILL,
@@ -382,6 +501,31 @@ def _grade_orphan(intent: str | None, final_state: str | None,
     if final_state in (olc.CANCELED, olc.REJECTED, olc.EXPIRED):
         return _check(CheckStatus.PASS, committed_legs=0)
     return _check(CheckStatus.PENDING)
+
+
+def _order_action(events: list[dict]) -> str | None:
+    """The bare order action for one order's events.
+
+    An order event carries BOTH its action ("roll_short") and its ``intent`` —
+    the per-position resubmission-lock key, ``executor._intent_key``, which is
+    "TICKER:action". Grading keys off the action, so reading ``intent`` raw
+    matched nothing for any live ticket: every one graded action_type None and,
+    worse, skipped NO_ORPHAN_LEG as NOT_APPLICABLE, so an orphaned leg on a live
+    atomic roll passed as clean.
+
+    Prefers the event's own ``action`` and falls back to the intent key's
+    suffix, so events written without one (older records, hand-built fixtures
+    carrying a bare intent) still resolve. Ticker and action never contain ":",
+    so the split is exact, and it is a no-op on an already-bare value."""
+    for ev in reversed(events):
+        action = ev.get("action")
+        if action:
+            return str(action)
+    for ev in reversed(events):
+        intent = ev.get("intent")
+        if intent:
+            return str(intent).rsplit(":", 1)[-1]
+    return None
 
 
 def _grade_cancel(events: list[dict], final_state: str | None,
@@ -439,6 +583,7 @@ def derive_order_fidelity(state: dict, now: datetime) -> dict:
         events = sorted(events, key=lambda ev: ev.get("seq") or 0)
         final_state = events[-1].get("new_state")
         intent = events[-1].get("intent") or events[0].get("intent")
+        action = _order_action(events)
         exec_ids = receipts_by_order.get(oid, [])
         bound = config.REC_MAX_SLIPPAGE_PCT_OF_MID
         # A ticket staged from a recommendation carries its own bound.
@@ -455,7 +600,7 @@ def derive_order_fidelity(state: dict, now: datetime) -> dict:
             FidelityCheck.LIFECYCLE_LEGAL: _grade_lifecycle(events),
             FidelityCheck.SLIPPAGE_IN_BOUND: _grade_slippage(exec_ids, executions_by_id,
                                                              state, bound),
-            FidelityCheck.NO_ORPHAN_LEG: _grade_orphan(intent, final_state, exec_ids),
+            FidelityCheck.NO_ORPHAN_LEG: _grade_orphan(action, final_state, exec_ids),
             FidelityCheck.CANCEL_CONFIRMED_DEAD: _grade_cancel(events, final_state, now),
             # Post-fill reconciliation (positions + buying-power diff) is a
             # separate work item; NEVER silently pass in its absence.
@@ -463,14 +608,16 @@ def derive_order_fidelity(state: dict, now: datetime) -> dict:
         }
         out[oid] = {
             "order_id": oid, "paper": False,
-            "ticker": events[-1].get("ticker"), "intent": intent,
-            "action_type": _INTENT_ACTION.get(intent or ""),
+            # ``intent`` stays the raw lock key (it is how the order is found in
+            # the order-lock / journal records); ``action`` is what grading used.
+            "ticker": events[-1].get("ticker"), "intent": intent, "action": action,
+            "action_type": _INTENT_ACTION.get(action or ""),
             "state": final_state, "terminal": olc.is_terminal(final_state),
             "checks": checks, "pass": _ticket_pass(checks),
             "graded_at": _iso(now),
         }
         # Refine roll tickets to DEFEND when the committed legs say so.
-        if intent == "roll_short":
+        if action == "roll_short":
             for eid in exec_ids:
                 e = executions_by_id.get(eid) or {}
                 mapped = _ROLL_REASON_ACTION.get(e.get("roll_reason"))
@@ -509,7 +656,7 @@ def derive_order_fidelity(state: dict, now: datetime) -> dict:
                        else _ROLL_REASON_ACTION.get(g.get("roll_reason")))
         out[oid] = {
             "order_id": oid, "paper": True, "ticker": g["ticker"],
-            "intent": g["kind"], "action_type": action_type,
+            "intent": g["kind"], "action": g["kind"], "action_type": action_type,
             "state": "PAPER_FILLED", "terminal": True,
             "checks": checks, "pass": _ticket_pass(checks),
             "graded_at": _iso(now),

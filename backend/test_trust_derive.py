@@ -373,3 +373,156 @@ def test_writers_persist_and_recompute(tmp_path, monkeypatch):
     res = state["recommendation_resolutions"]
     assert res and res[0]["status"] == Resolution.OVERRIDDEN
     assert state["trust_scoreboard"]["open_recommendations"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Shares-primary coverage: buy_shares / sell_shares are the live ENTER and EXIT
+# actions (buy_leap is refused by the executor), so the trust layer has to see
+# them or coverage/precision read zero for the only structure the app trades.
+# Scoping is by the owned-share BALANCE, not the action name.
+# ---------------------------------------------------------------------------
+def _shares_exec(eid, action, at, qty=100, ticker="AAPL", live=True, **extra):
+    return {"id": eid, "ticker": ticker, "action": action, "date": _iso(at),
+            "qty": qty, "live_transmitted": live, **extra}
+
+
+def test_buy_shares_is_an_enter_action():
+    at = NOW - timedelta(days=30)
+    acts = trust_derive.map_actions(_state(execs=[_shares_exec("e1", "buy_shares", at)]))
+    assert [a["action_type"] for a in acts] == [ActionType.ENTER]
+    assert acts[0]["ticker"] == "AAPL" and acts[0]["live"] is True
+    assert acts[0]["execution_ids"] == ["e1"]
+
+
+def test_sell_shares_closing_the_base_is_an_exit_action():
+    open_at, exit_at = NOW - timedelta(days=30), NOW - timedelta(hours=2)
+    acts = trust_derive.map_actions(_state(execs=[
+        _shares_exec("e1", "buy_shares", open_at),
+        _shares_exec("e2", "sell_shares", exit_at),
+    ]))
+    assert [a["action_type"] for a in acts] == [ActionType.ENTER, ActionType.EXIT]
+    assert acts[1]["execution_ids"] == ["e2"]
+
+
+@pytest.mark.parametrize("second_buy", [
+    {"lot_add": True},   # a builder/lot add carries the stamp
+    {},                  # ...and an unstamped buy into a standing base is still a scale-in
+])
+def test_scale_in_is_not_a_second_enter(second_buy):
+    at = NOW - timedelta(days=30)
+    acts = trust_derive.map_actions(_state(execs=[
+        _shares_exec("e1", "buy_shares", at),
+        _shares_exec("e2", "buy_shares", at + timedelta(days=5), **second_buy),
+    ]))
+    assert [a["action_type"] for a in acts] == [ActionType.ENTER]
+    assert acts[0]["execution_ids"] == ["e1"]
+
+
+def test_partial_trim_is_not_an_exit_and_synthesizes_no_miss():
+    """A trim that leaves shares standing is a scale-out. Grading it as an exit
+    would invent a COVERAGE_MISS for a position that is still open — and a single
+    miss in the window hard-blocks graduation."""
+    open_at = NOW - timedelta(days=30)
+    state = _state(execs=[
+        _shares_exec("e1", "buy_shares", open_at, qty=200),
+        _shares_exec("e2", "sell_shares", open_at + timedelta(days=5), qty=100),
+    ])
+    assert [a["action_type"] for a in trust_derive.map_actions(state)] == [ActionType.ENTER]
+    exits = [r for r in trust_derive.resolve(state, NOW)
+             if r.get("action_type") == ActionType.EXIT]
+    assert exits == []
+
+
+def test_trim_then_close_grades_only_the_closing_sale():
+    open_at = NOW - timedelta(days=30)
+    close_at = NOW - timedelta(hours=2)
+    acts = trust_derive.map_actions(_state(execs=[
+        _shares_exec("e1", "buy_shares", open_at, qty=200),
+        _shares_exec("e2", "sell_shares", open_at + timedelta(days=5), qty=100),
+        _shares_exec("e3", "sell_shares", close_at, qty=100),
+    ]))
+    assert [a["action_type"] for a in acts] == [ActionType.ENTER, ActionType.EXIT]
+    assert acts[1]["execution_ids"] == ["e3"]
+
+
+def test_same_day_share_sales_are_one_exit_action():
+    """An exit split across fills is ONE action — otherwise a two-fill exit reads
+    as one match plus one coverage miss."""
+    open_at = NOW - timedelta(days=30)
+    day = NOW - timedelta(hours=4)
+    acts = trust_derive.map_actions(_state(execs=[
+        _shares_exec("e1", "buy_shares", open_at, qty=200),
+        _shares_exec("e2", "sell_shares", day, qty=100),
+        _shares_exec("e3", "sell_shares", day + timedelta(hours=1), qty=100),
+    ]))
+    assert [a["action_type"] for a in acts] == [ActionType.ENTER, ActionType.EXIT]
+    assert acts[1]["execution_ids"] == ["e2", "e3"]
+
+
+def test_share_balance_replays_across_the_trust_layer_boundary():
+    """A position opened BEFORE trust_layer_since still exits to zero: the balance
+    replays the whole log, only the emission of instances is gated by `since`."""
+    acts = trust_derive.map_actions(_state(execs=[
+        _shares_exec("e1", "buy_shares", datetime(2025, 6, 1, tzinfo=timezone.utc)),
+        _shares_exec("e2", "sell_shares", NOW - timedelta(hours=2)),
+    ]))
+    assert [a["action_type"] for a in acts] == [ActionType.EXIT]
+
+
+def test_called_away_and_put_assignment_are_mechanical_not_operator_actions():
+    """Assignment moves shares without the operator acting, so it grades nothing —
+    but it must still move the balance, or the next buy reads as a scale-in and
+    the next sale never reaches zero."""
+    t0 = NOW - timedelta(days=40)
+    acts = trust_derive.map_actions(_state(execs=[
+        _shares_exec("e1", "buy_shares", t0),
+        _shares_exec("e2", "close_shares_assigned", t0 + timedelta(days=5), strike=215.0),
+        {"id": "e3", "ticker": "AAPL", "action": "put_assigned",
+         "date": _iso(t0 + timedelta(days=10)), "shares_received": 100,
+         "strike": 200.0, "live_transmitted": True},
+        _shares_exec("e4", "sell_shares", NOW - timedelta(hours=2)),
+    ]))
+    assert [a["action_type"] for a in acts] == [ActionType.ENTER, ActionType.EXIT]
+    assert acts[0]["execution_ids"] == ["e1"] and acts[1]["execution_ids"] == ["e4"]
+
+
+def test_shares_entry_and_exit_resolve_against_their_recommendations():
+    """The whole point: an emitted ENTER/EXIT on a shares position now resolves
+    EXECUTED_MATCHED instead of silently expiring."""
+    enter_at, exit_at = NOW - timedelta(days=30), NOW - timedelta(hours=2)
+    enter_rec = _rec("rec_00001", ActionType.ENTER, emitted=enter_at - timedelta(hours=1),
+                     valid_hours=24, trigger=TriggerRule.GATE_ALL_PASS)
+    exit_rec = _rec("rec_00002", ActionType.EXIT, emitted=exit_at - timedelta(hours=1),
+                    valid_hours=72, trigger=TriggerRule.KILL_RS_SPY_CONFIRMED)
+    state = _state(recs=[enter_rec, exit_rec], execs=[
+        _shares_exec("e1", "buy_shares", enter_at),
+        _shares_exec("e2", "sell_shares", exit_at),
+    ])
+    trust_derive.recompute(state, NOW)
+    by_id = {r["rec_id"]: r for r in state["recommendation_resolutions"]}
+    assert by_id["rec_00001"]["status"] == Resolution.EXECUTED_MATCHED
+    assert by_id["rec_00002"]["status"] == Resolution.EXECUTED_MATCHED
+    # Both are resolved, so neither is left dangling open to expire.
+    assert trust_derive.open_recommendations(state, NOW) == []
+    cov = state["trust_scoreboard"]["by_action_type"]
+    assert cov[ActionType.ENTER]["coverage"]["rate"] == 1.0
+    assert cov[ActionType.EXIT]["coverage"]["rate"] == 1.0
+
+
+def test_unrecommended_shares_entry_is_a_coverage_miss():
+    state = _state(execs=[_shares_exec("e1", "buy_shares", NOW - timedelta(hours=2))])
+    misses = [r for r in trust_derive.resolve(state, NOW)
+              if r["status"] == Resolution.COVERAGE_MISS]
+    assert [m["action_type"] for m in misses] == [ActionType.ENTER]
+
+
+def test_share_balance_replays_in_date_order_not_log_order():
+    """append_execution only setdefaults the timestamp, so a backdated record can
+    land after a newer one. Replaying by list position would read the buy as a
+    scale-in (balance already 1) and the sale as a trim off nothing."""
+    acts = trust_derive.map_actions(_state(execs=[
+        _shares_exec("e2", "sell_shares", NOW - timedelta(hours=2)),
+        _shares_exec("e1", "buy_shares", NOW - timedelta(days=30)),  # dated earlier
+    ]))
+    assert [a["action_type"] for a in acts] == [ActionType.ENTER, ActionType.EXIT]
+    assert acts[0]["execution_ids"] == ["e1"] and acts[1]["execution_ids"] == ["e2"]

@@ -116,3 +116,33 @@ def test_entry_candidates_excludes_known_no_weeklies(monkeypatch):
     out = rr._entry_candidates({"tickers": {}}, None)
     tickers = {c["ticker"] for c in out}
     assert tickers == {"AAA", "CCC"}   # BBB (no weeklies) and DDD (not GO) excluded
+
+
+def test_juice_evidence_is_stamped_on_the_snapshot(monkeypatch):
+    """The JUICE_HURDLE_FAIL trigger records the juice block from the snapshot as
+    its evidence. The yield read a key leap_health does not return
+    ("juice_yield_pct" vs "weekly_juice_yield_pct"), so an exit recommendation
+    carried a null yield — the trigger firing with its own numbers blank."""
+    import leap_policy
+    import recommendation_runner as runner
+    monkeypatch.setattr(leap_policy, "leap_health", lambda *a, **k: {
+        "juice_adequate": False, "weekly_juice_yield_pct": 0.55,
+        "juice_target_pct": 0.75, "juice_capital": 18200.0,
+        "juice_capital_basis": "spot_x_shares", "maintenance_status": "unknown"})
+    tk = runner._ticker_snapshot("AAPL", {"ticker": "AAPL"}, None, 182.0, None, None)
+    assert tk["juice"]["inadequate"] is True
+    assert tk["juice"]["yield_pct"] == 0.55
+    assert tk["juice"]["target_pct"] == 0.75
+    assert tk["juice"]["capital_basis"] == "spot_x_shares"
+
+
+def test_enter_alerts_deep_link_to_the_entry_ticket():
+    """An ENTER names a ticker the book does not hold, so the old focus link
+    pointed at a position card that will never render."""
+    import recommendation_runner as runner
+    enter = runner._rec_action_url({"action_type": "ENTER", "rec_id": "rec_1"}, "AVGO")
+    assert enter == "/?action=enter&ticker=AVGO&rec_id=rec_1"
+    # Everything else still focuses its position card, now carrying the rec id.
+    exit_url = runner._rec_action_url({"action_type": "EXIT", "rec_id": "rec_2"}, "MSFT")
+    assert exit_url == "/?action=focus&ticker=MSFT&rec_id=rec_2"
+    assert runner._rec_action_url({"action_type": "ENTER"}, "") is None

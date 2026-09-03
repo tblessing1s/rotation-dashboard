@@ -220,3 +220,83 @@ def test_fmt_dual_tz_shows_et_and_operator_local():
     dt = datetime(2026, 7, 13, 10, 0, tzinfo=ET)
     s = runner._fmt_dual_tz(dt)
     assert "10:00 ET" in s and "9:00 CDT" in s   # default operator TZ is Central
+
+
+# ---- write ordering across the slow phase ------------------------------------
+# release_pending used to load state, fetch a market snapshot, run the
+# auto-submit, and only then save the copy it had loaded before all of it. These
+# pin the two writes that were lost.
+
+def test_autosubmit_execution_survives_the_release(paper_state, monkeypatch):
+    """The one that was not even a race: the pre-approved auto-submit commits an
+    execution through log.append_execution, and the trailing save of the
+    pre-submit copy erased it. The record read EXECUTED while the book held no
+    execution for an order that was live at the broker."""
+    import logging_handler as log
+    ea = datetime(2026, 7, 13, 10, 0, tzinfo=ET)
+    _persist(_state_with_pending(ea, pre_approved=True))
+    monkeypatch.setattr(runner.engine, "evaluate",
+                        lambda *a, **k: [{"action_type": ActionType.DEFEND,
+                                          "position_id": "XLK", "ticker": "XLK"}])
+
+    def _submit(rec, now):        # what executor does: append an execution
+        log.append_execution({"ticker": "XLK", "action": "sell_short", "strike": 250.0,
+                              "contracts": 1, "premium_per_share": 2.0,
+                              "live_transmitted": True})
+
+    summary = runner.release_pending(now=ea, notify=False, submit_fn=_submit)
+    assert summary["executed"] == 1
+    after = log.load_state()
+    assert settle.find(after, "rec_00001")["settle"]["status"] == settle.SettleStatus.EXECUTED
+    assert len(after["executions"]) == 1, "the auto-submitted order's execution was clobbered"
+    assert after["executions"][0]["action"] == "sell_short"
+
+
+def test_a_write_landing_during_the_snapshot_fetch_survives(paper_state, monkeypatch):
+    """A fill committed by the order poll while the market snapshot is being
+    fetched must not be overwritten — the case mutate_state exists for."""
+    import logging_handler as log
+    ea = datetime(2026, 7, 13, 10, 0, tzinfo=ET)
+    _persist(_state_with_pending(ea))
+    monkeypatch.setattr(runner.engine, "evaluate",
+                        lambda *a, **k: [{"action_type": ActionType.DEFEND,
+                                          "position_id": "XLK", "ticker": "XLK"}])
+
+    def _slow_snapshot(*a, **k):
+        # Stands in for another thread committing during the provider fetch.
+        log.append_execution({"ticker": "XLK", "action": "close_short", "strike": 250.0,
+                              "contracts": 1, "close_price_per_share": 0.4})
+        return {"tickers": {}}
+    monkeypatch.setattr(runner, "build_market_snapshot", _slow_snapshot)
+
+    summary = runner.release_pending(now=ea, notify=False)
+    assert summary["released"] == 1
+    after = log.load_state()
+    assert len(after["executions"]) == 1, "the concurrent fill was clobbered"
+    assert settle.find(after, "rec_00001")["settle"]["status"] == settle.SettleStatus.RELEASED
+
+
+def test_a_rec_dismissed_during_the_fetch_is_not_transitioned(paper_state, monkeypatch):
+    """The rec is re-checked as PENDING on the fresh copy, so a decision made
+    against the pre-fetch state cannot overwrite a transition someone else made
+    in the meantime."""
+    import logging_handler as log
+    ea = datetime(2026, 7, 13, 10, 0, tzinfo=ET)
+    _persist(_state_with_pending(ea))
+    monkeypatch.setattr(runner.engine, "evaluate",
+                        lambda *a, **k: [{"action_type": ActionType.DEFEND,
+                                          "position_id": "XLK", "ticker": "XLK"}])
+
+    def _snapshot_then_cancel(*a, **k):
+        def _cancel(fresh):
+            settle.mark(settle.find(fresh, "rec_00001"),
+                        settle.SettleStatus.SELF_CANCELED, ea, "cancelled elsewhere")
+        log.mutate_state(_cancel)
+        return {"tickers": {}}
+    monkeypatch.setattr(runner, "build_market_snapshot", _snapshot_then_cancel)
+
+    summary = runner.release_pending(now=ea, notify=False)
+    assert summary == {"released": 0, "self_canceled": 0, "expired": 0, "executed": 0}
+    rec = settle.find(log.load_state(), "rec_00001")
+    assert rec["settle"]["status"] == settle.SettleStatus.SELF_CANCELED
+    assert rec["settle"]["events"][-1]["note"] == "cancelled elsewhere"

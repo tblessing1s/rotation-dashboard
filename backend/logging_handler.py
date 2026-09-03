@@ -1371,13 +1371,14 @@ def recompute_derived(state: dict) -> dict:
     today = now.date()
     for p in state.get("positions", []):
         ticker = p.get("ticker", "")
-        if p.get("status") == "closed" or not (p.get("leap") or {}):
+        if p.get("status") == "closed":
             p["leap_dte"] = None
             p["trailing_avg_weekly_juice"] = None
             continue
-        leap = p["leap"]
-        # leap_dte: calendar days to expiry from the stored expiration; fall
-        # back to the static entry-time snapshot when no expiration is stored.
+        leap = p.get("leap") or {}
+        # leap_dte is LEAP-only and stays None for a shares base: calendar days to
+        # expiry from the stored expiration, falling back to the static entry-time
+        # snapshot when no expiration is stored.
         dte = None
         exp = leap.get("expiration")
         if exp:
@@ -1385,9 +1386,19 @@ def recompute_derived(state: dict) -> dict:
                 dte = (datetime.strptime(str(exp)[:10], "%Y-%m-%d").date() - today).days
             except ValueError:
                 dte = None
-        p["leap_dte"] = dte if dte is not None else leap.get("dte")
+        p["leap_dte"] = (dte if dte is not None else leap.get("dte")) if leap else None
         # trailing_avg_weekly_juice: mean net juice over the last N COMPLETED
         # weeks for this ticker (weeks_rows is sorted ascending by week).
+        #
+        # STRUCTURE-AGNOSTIC, and this loop used to gate it behind `leap` along
+        # with leap_dte. The juice is collected by the weekly SHORT CALL, which a
+        # shares base sells exactly like a LEAP diagonal did, and the theta ledger
+        # it reads is keyed by (week, ticker) with no notion of the base leg — so
+        # gating it left every shares position with a null trailing juice, and
+        # with it every downstream income-hurdle read (leap_policy.leap_health's
+        # juice_adequate, the JUICE_INADEQUATE alert, the engine's
+        # JUICE_HURDLE_FAIL trigger) permanently dark for the only structure the
+        # app can now open.
         juice_weeks = [r["net_juice"] for r in weeks_rows
                        if r["ticker"] == ticker and r["week"] < cur_week]
         juice_weeks = juice_weeks[-config.JUICE_TRAILING_WEEKS:]

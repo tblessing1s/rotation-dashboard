@@ -186,7 +186,7 @@ function AccountGate({ gate }) {
   );
 }
 
-export default function ExecuteTab({ initialTicker, onExecuted, onBack }) {
+export default function ExecuteTab({ initialTicker, sourceRecId, onExecuted, onBack }) {
   const toast = useToast();
   const [ticker, setTicker] = React.useState(initialTicker || "");
   const [gate, setGate] = React.useState(null);
@@ -228,7 +228,12 @@ export default function ExecuteTab({ initialTicker, onExecuted, onBack }) {
   // order ticket); submitOrder drives the toast lifecycle (submit → fill/cancel)
   // and we refresh the dependent tabs on success.
   async function runExecute(payload) {
-    const res = await submitOrder(api, toast, payload);
+    // When the ticket was opened from an ENTER recommendation card, stamp the
+    // rec id on every order it sends (mirrors RollModal). The execution carries
+    // it as source_rec_id so resolution matching prefers the exact record the
+    // operator acted on instead of falling back to type/ticker/validity.
+    const res = await submitOrder(api, toast,
+      sourceRecId ? { ...payload, source_rec_id: sourceRecId } : payload);
     onExecuted?.();
     return res;
   }

@@ -663,8 +663,10 @@ def check_leap_roll_due(state: dict) -> list[dict]:
     import leap_policy
     out = []
     for p in _open_positions(state):
-        if not (p.get("leap") or {}):
-            continue
+        # No LEAP gate: the income hurdle is structure-agnostic (the juice comes
+        # from the weekly short call either way), and gating it here left every
+        # shares position — the only structure the app can now open — silently
+        # exempt from the one alert that catches quiet underperformance.
         t = p.get("ticker", "")
         import dividends  # deferred: continuous dividend yield for burn/roll math
         health = leap_policy.leap_health(p, q=dividends.yield_for(p.get("ticker", "")))
@@ -696,8 +698,10 @@ def check_capital_burn(state: dict) -> list[dict]:
     import leap_policy
     out = []
     for p in _open_positions(state):
-        if not (p.get("leap") or {}):
-            continue
+        # No LEAP gate: the income hurdle is structure-agnostic (the juice comes
+        # from the weekly short call either way), and gating it here left every
+        # shares position — the only structure the app can now open — silently
+        # exempt from the one alert that catches quiet underperformance.
         t = p.get("ticker", "")
         import dividends  # deferred: continuous dividend yield for burn/roll math
         health = leap_policy.leap_health(p, q=dividends.yield_for(p.get("ticker", "")))
@@ -735,8 +739,10 @@ def check_juice_inadequate(state: dict) -> list[dict]:
     import leap_policy
     out = []
     for p in _open_positions(state):
-        if not (p.get("leap") or {}):
-            continue
+        # No LEAP gate: the income hurdle is structure-agnostic (the juice comes
+        # from the weekly short call either way), and gating it here left every
+        # shares position — the only structure the app can now open — silently
+        # exempt from the one alert that catches quiet underperformance.
         t = p.get("ticker", "")
         import dividends  # deferred: continuous dividend yield for burn/roll math
         health = leap_policy.leap_health(p, q=dividends.yield_for(p.get("ticker", "")))
@@ -747,14 +753,20 @@ def check_juice_inadequate(state: dict) -> list[dict]:
         yld, tgt = health.get("weekly_juice_yield_pct"), health.get("juice_target_pct")
         if yld is None or tgt is None:
             continue
+        # Name the capital the yield is measured against — "% of LEAP capital" on
+        # a shares position would be a wrong number with a wrong label.
+        capital = ("share capital" if health.get("juice_capital_basis") == "spot_x_shares"
+                   else "LEAP capital")
         out.append(_alert(
             "JUICE_INADEQUATE", t,
-            (f"{t} trailing weekly juice is {yld:g}% of LEAP capital, below the {tgt:g}% "
+            (f"{t} trailing weekly juice is {yld:g}% of {capital}, below the {tgt:g}% "
              f"income target (last {config.JUICE_TRAILING_WEEKS} completed weeks)."),
             ("This position still funds its own decay but no longer clears the strategy's "
              "income target — roll to a better strike/week, or redeploy the capital into a "
              "candidate that pays before it erodes."),
             {"weekly_juice_yield_pct": yld, "juice_target_pct": tgt,
+             "juice_capital": health.get("juice_capital"),
+             "juice_capital_basis": health.get("juice_capital_basis"),
              "trailing_avg_weekly_juice": health.get("trailing_avg_weekly_juice"),
              "trailing_weeks": config.JUICE_TRAILING_WEEKS,
              "maintenance_status": health.get("maintenance_status")},
@@ -770,8 +782,10 @@ def check_delta_velocity(state: dict) -> list[dict]:
     import leap_policy
     out = []
     for p in _open_positions(state):
-        if not (p.get("leap") or {}):
-            continue
+        # No LEAP gate: the income hurdle is structure-agnostic (the juice comes
+        # from the weekly short call either way), and gating it here left every
+        # shares position — the only structure the app can now open — silently
+        # exempt from the one alert that catches quiet underperformance.
         t = p.get("ticker", "")
         import dividends  # deferred: continuous dividend yield for burn/roll math
         health = leap_policy.leap_health(p, q=dividends.yield_for(p.get("ticker", "")))

@@ -95,6 +95,12 @@ export default function App() {
   // the resulting execution carries source_rec_id (trust-layer matching).
   const goToAction = React.useCallback((action, ticker, reason, recId) => {
     if (!action || !ticker) return;
+    // "enter" is the one action with no position to land on — it opens the
+    // entry-gate + order-ticket flow directly, carrying the rec id with it.
+    if (action === "enter") {
+      setExecute({ ticker, recId, id: Date.now() });
+      return;
+    }
     setPositionIntent({ action, ticker, reason, recId, id: Date.now() });
     setExecute(null);
     setTab("Positions");
@@ -224,9 +230,11 @@ export default function App() {
   }
 
   // Open the entry-gate + order-ticket flow (from a scan pick, a position card,
-  // or the blank "check a ticker" button on Scan).
-  function openTicket(ticker = "") {
-    setExecute({ ticker, id: Date.now() });
+  // an ENTER recommendation card, or the blank "check a ticker" button on Scan).
+  // recId (optional) is the recommendation that staged the entry — it rides into
+  // the order payload as source_rec_id, the same way a roll's does.
+  function openTicket(ticker = "", recId = undefined) {
+    setExecute({ ticker, recId, id: Date.now() });
   }
 
   if (authed === null) {
@@ -262,6 +270,7 @@ export default function App() {
           <ExecuteTab
             key={execute.id}
             initialTicker={execute.ticker}
+            sourceRecId={execute.recId}
             onBack={() => setExecute(null)}
             onExecuted={() => setExecNonce((n) => n + 1)}
           />

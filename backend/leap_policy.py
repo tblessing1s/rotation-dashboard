@@ -168,18 +168,47 @@ def leap_health(position: dict, df=None, stock_price: float | None = None,
     else:
         maintenance_status = "burning"
 
-    # Ongoing income adequacy: realized trailing weekly juice as a % of deployed
-    # LEAP capital vs the strategy's per-profile target — the same bar the entry
-    # gate (juice_adequacy) checks ONCE, re-checked every recompute. Distinct from
-    # capital-burn (juice below LEAP THETA, the extreme): this owns the wide band
-    # where a position still self-funds its decay but no longer clears the income
-    # target — quietly underperforming while capital is intact to redeploy.
+    # Ongoing income adequacy: realized trailing weekly juice as a % of the capital
+    # DEPLOYED IN THE BASE LEG, vs that structure's weekly target — the same bar
+    # the entry gate (juice_adequacy) checks ONCE, re-checked every recompute.
+    # Distinct from capital-burn (juice below LEAP THETA, the extreme): this owns
+    # the wide band where a position still self-funds its decay but no longer
+    # clears the income target — quietly underperforming while capital is intact
+    # to redeploy.
+    #
+    # BOTH the capital and the target are per-structure, and they have to move
+    # together — a yield and a bar denominated on different capital is the one
+    # mistake this block can make. A share base ties up the FULL share cost where
+    # a LEAP tied up a ~50%-of-spot premium, so the same weekly dollars land
+    # several-fold lower against it; carrying the LEAP bar across would report
+    # every shares position as inadequate forever. config.SHARES_JUICE_FLOOR_PCT
+    # is the share-denominated bar (see its note for that recalibration).
+    #
+    # A position holding BOTH (shares bought against surviving LEAP legs) scores on
+    # the LEAP arm — that leg is the dominant capital, and understating total
+    # capital errs toward NOT firing an exit, which is the safe direction here.
     juice_yield_pct = juice_target_pct = juice_adequate = None
-    leap_cost = float(leap.get("cost_basis") or 0)
-    if trailing_juice is not None and leap_cost:
-        import account_gate
-        juice_target_pct = account_gate.weekly_yield_target_pct(ticker)
-        juice_yield_pct = round(trailing_juice / leap_cost * 100, 2)
+    juice_capital = juice_capital_basis = None
+    share_count = int((position.get("shares") or {}).get("count") or 0)
+    if not leap and share_count:
+        # SHARES base. Deployed capital is spot x shares, matching how
+        # SHARES_JUICE_FLOOR_PCT is denominated — and the right basis for a
+        # hurdle whose question is "should this capital be redeployed?", which is
+        # asked of what the shares are worth NOW, not what they cost. Unpriced
+        # means unassessable (None), never a default that could fire an exit.
+        if stock_price is not None:
+            juice_capital = float(stock_price) * share_count
+            juice_capital_basis = "spot_x_shares"
+            juice_target_pct = config.SHARES_JUICE_FLOOR_PCT
+    else:
+        leap_cost = float(leap.get("cost_basis") or 0)
+        if leap_cost:
+            import account_gate
+            juice_capital = leap_cost
+            juice_capital_basis = "leap_cost_basis"
+            juice_target_pct = account_gate.weekly_yield_target_pct(ticker)
+    if trailing_juice is not None and juice_capital:
+        juice_yield_pct = round(trailing_juice / juice_capital * 100, 2)
         juice_adequate = juice_yield_pct >= juice_target_pct
 
     policy = roll_policy(dte, weeks_remaining)
@@ -203,6 +232,11 @@ def leap_health(position: dict, df=None, stock_price: float | None = None,
         "weekly_juice_yield_pct": juice_yield_pct,
         "juice_target_pct": juice_target_pct,
         "juice_adequate": juice_adequate,
+        # Which capital the yield above is a percentage OF. Carried so a reader
+        # (alert copy, UI, a later calibration) can never mistake a share-
+        # denominated yield for a LEAP-denominated one.
+        "juice_capital": round(juice_capital, 2) if juice_capital else None,
+        "juice_capital_basis": juice_capital_basis,
         "leap_delta": leap_delta,
         "delta_velocity": _delta_velocity(position),
         "roll_due": policy["roll_due"],

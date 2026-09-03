@@ -277,14 +277,30 @@ function ticketSummary(t) {
   const legs = (t.legs || [])
     .map((l) => {
       const when = l.expiration ? ` exp ${l.expiration}` : l.dte != null ? ` ${l.dte} DTE` : "";
-      return `${(l.instruction || "").replaceAll("_", " ")} ${fmt(l.strike, 2)}${when}`;
+      // A shares leg has no strike — its size IS the leg (100 shares, delta 1.0).
+      const what = l.role === "shares" ? `${fmt(l.quantity, 0)} shares` : fmt(l.strike, 2);
+      return `${(l.instruction || "").replaceAll("_", " ")} ${what}${when}`;
     })
     .join(" / ");
-  const net = t.estimates?.net_per_share;
+  // Each ticket shape nets under its own key: the LEAP exit/roll per share, the
+  // shares exit as equity proceeds less the option buyback, the shares ENTRY as
+  // a debit (share cost less the premium collected) — negated here so the
+  // credit/debit wording below reads off one signed number.
+  const est = t.estimates || {};
+  const net = est.net_per_share != null ? est.net_per_share
+    : est.net_credit_per_share != null ? est.net_credit_per_share
+    : est.net_debit_per_share != null ? -Math.abs(est.net_debit_per_share)
+    : null;
   const netStr = net != null
     ? `est ${net < 0 ? "−" : ""}$${Math.abs(Number(net)).toFixed(2)}/sh ${net >= 0 ? "credit" : "debit"}`
     : "unpriced";
-  return [legs, (t.order_type || "").replaceAll("_", " "), netStr].filter(Boolean).join(" · ");
+  // What the lot actually COSTS — the number an entry decision turns on, and the
+  // one thing a per-share figure hides (a $220/sh name and a $960/sh name read
+  // alike until you see $22k next to $96k).
+  const lot = t.estimates?.shares_notional;
+  const lotStr = lot != null ? `${money(lot)} lot` : null;
+  return [legs, (t.order_type || "").replaceAll("_", " "), lotStr, netStr]
+    .filter(Boolean).join(" · ");
 }
 
 // Dismissal modal: one coded reason is mandatory; OTHER additionally demands a
@@ -366,7 +382,8 @@ function DismissRecModal({ rec, onClose, onDismissed }) {
 }
 
 // One actionable recommendation on its position card.
-function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onPreapprove }) {
+function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onPreapprove,
+                  showTicker = false }) {
   const v = validity(rec.valid_until, now);
   const t = rec.proposed_ticket;
   const badge = REC_BADGE[rec.action_type] || "border-slate-600 bg-slate-800/60 text-slate-300";
@@ -375,6 +392,12 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm">
       <div className="flex flex-wrap items-center gap-2">
+        {/* Under a position card the ticker is in the header above; an ENTER rec
+            has no position, so without this the card never says which name it
+            is proposing. */}
+        {showTicker && (
+          <span className="font-semibold text-slate-100">{rec.ticker}</span>
+        )}
         <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${badge}`}>
           {(rec.action_type || "").replaceAll("_", " ")}
         </span>
@@ -407,8 +430,10 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
           <ul className="mt-1 space-y-0.5">
             {(t.legs || []).map((l, i) => (
               <li key={i}>
-                {(l.instruction || "").replaceAll("_", " ")} {l.quantity != null ? `${l.quantity}× ` : ""}
-                {fmt(l.strike, 2)}
+                {(l.instruction || "").replaceAll("_", " ")}{" "}
+                {l.role === "shares"
+                  ? `${fmt(l.quantity, 0)} shares`
+                  : `${l.quantity != null ? `${l.quantity}× ` : ""}${fmt(l.strike, 2)}`}
                 {l.expiration ? ` exp ${l.expiration}` : ""}{l.dte != null ? ` (${l.dte} DTE)` : ""}
                 {l.role ? <span className="text-slate-500"> · {l.role}</span> : null}
               </li>
@@ -416,7 +441,12 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
           </ul>
           <div className="mt-1 text-slate-400">
             {(t.order_type || "").replaceAll("_", " ")}
-            {" · "}limit {t.limit_price != null ? `$${Number(t.limit_price).toFixed(2)}/sh` : "unpriced"}
+            {/* An EQUITY ticket is two orders (the equity leg plus its option
+                cover), so it carries no single net limit — say that, rather than
+                rendering a priced ticket as "limit unpriced". */}
+            {t.order_type === "EQUITY"
+              ? <> · two orders — the option leg re-prices from the live chain</>
+              : <>{" · "}limit {t.limit_price != null ? `$${Number(t.limit_price).toFixed(2)}/sh` : "unpriced"}</>}
             {t.min_acceptable_net_credit != null && <> · min net ${Number(t.min_acceptable_net_credit).toFixed(2)}/sh</>}
             {t.max_slippage_pct_of_mid != null && <> · max slip {t.max_slippage_pct_of_mid}% of mid</>}
             {t.price_source && <> · priced from {t.price_source}</>}
@@ -462,6 +492,71 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
     </div>
   );
 }
+
+// Open ENTER recommendations, which have NO POSITION to hang under — the engine
+// emits them against a ticker the book does not hold yet. They used to render
+// nowhere: the strip below is inside positions.map, so an ENTER had no card, was
+// counted in the Overview digest's "review on Positions" pointer, and could only
+// resolve by expiring.
+//
+// They live here rather than on Scan deliberately. This is a COMMITTED CLAIM the
+// engine made before the operator acted, and it is graded on that basis — a
+// different thing from the scan's ranked shortlist, whose panel is built to a
+// pressure guard that forbids flagging any row as the action to take. Keeping the
+// two apart preserves both: the shortlist stays a ranking, this stays a claim.
+function ProposedEntries({ recs, onRecsChanged, onEnter }) {
+  const now = useNow();
+  const [dismissing, setDismissing] = React.useState(null);
+  const [detailId, setDetailId] = React.useState(null);
+  const list = (recs || []).filter((r) => r.action_type === "ENTER");
+  if (list.length === 0) return null;
+
+  // Execute opens the entry-gate + order ticket for the ticker, carrying the rec
+  // id so the resulting buy_shares execution is stamped source_rec_id. No new
+  // order path: it is the same flow a scan pick opens.
+  const execute = (rec) =>
+    onEnter?.(rec.ticker, rec.rec_id);
+
+  async function preapprove(rec, approve) {
+    try {
+      await api.preapproveRecommendation(rec.rec_id, approve);
+      onRecsChanged?.();
+    } catch (e) {
+      /* the card keeps its current state; the next poll re-syncs */
+    }
+  }
+
+  return (
+    <Card title={`Proposed entries (${list.length})`}>
+      <p className="mb-2 text-[11px] text-slate-500">
+        The engine committed to these before you acted — every gate clear on a name
+        you don&rsquo;t hold. Executing one stages the entry ticket; dismissing one
+        records why. Either way the claim is graded.
+      </p>
+      <div className="space-y-2">
+        {list.map((rec) => (
+          <RecCard
+            key={rec.rec_id} rec={rec} now={now}
+            expanded={detailId === rec.rec_id}
+            onToggleDetail={() => setDetailId((id) => (id === rec.rec_id ? null : rec.rec_id))}
+            onExecute={() => execute(rec)}
+            onDismiss={() => setDismissing(rec)}
+            onPreapprove={preapprove}
+            showTicker
+          />
+        ))}
+      </div>
+      {dismissing && (
+        <DismissRecModal
+          rec={dismissing}
+          onClose={() => setDismissing(null)}
+          onDismissed={() => { setDismissing(null); onRecsChanged?.(); }}
+        />
+      )}
+    </Card>
+  );
+}
+
 
 // The recommendation strip under a position's header. Actionable recs (never
 // NO_ACTION) render as cards; when the ONLY open rec is an ALL_CLEAR/NO_ACTION,
@@ -1441,15 +1536,22 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
     onIntentHandled?.();
   }, [intent, data, onIntentHandled, focusCard]);
 
-  // Open recommendations grouped by ticker for the position cards.
+  // Open recommendations grouped by ticker for the position cards. ENTER recs are
+  // split out: they name a ticker the book does not hold, so grouping them here
+  // put them under a position card that will never render.
   const recsByTicker = React.useMemo(() => {
     const out = {};
     for (const r of recsData?.open || []) {
+      if (r.action_type === "ENTER") continue;
       const t = (r.ticker || "").toUpperCase();
       if (t) (out[t] ||= []).push(r);
     }
     return out;
   }, [recsData]);
+
+  const enterRecs = React.useMemo(
+    () => (recsData?.open || []).filter((r) => r.action_type === "ENTER"),
+    [recsData]);
 
   // Open (unresolved) reconciliation diffs indexed by ticker — drives the review
   // panel + the state-unverified marker on frozen positions.
@@ -1486,6 +1588,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
         <BookSummary positions={positions} diffsByTicker={openDiffsByTicker} risk={risk} />
       )}
       <PortfolioRisk data={risk} />
+      <ProposedEntries recs={enterRecs} onRecsChanged={reloadRecs} onEnter={onOpenTicket} />
 
       {positions.length === 0 && <Card>No open positions.</Card>}
       {positions.map((p) => (

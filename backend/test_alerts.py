@@ -681,3 +681,101 @@ def test_post_close_slot_fires_the_evening():
     ran = {s: date(2026, 7, 1) for s in config.ALERT_SCHEDULE_ET if s < "16:15"}
     at_1620 = datetime(2026, 7, 1, 16, 20, tzinfo=et)
     assert alert_scheduler.due_slots(at_1620, ran) == ["16:15"]
+
+
+# ---------------------------------------------------------------------------
+# The income hurdle on a SHARES base. Both the capital and the target are
+# per-structure: a share base ties up the FULL share cost where a LEAP tied up a
+# ~50%-of-spot premium, so carrying the LEAP bar (~1.88%/wk) across denominators
+# would report every shares position as inadequate forever. The share bar is
+# config.SHARES_JUICE_FLOOR_PCT.
+# ---------------------------------------------------------------------------
+def _shares_pos(ticker="PG", shares=100, trailing=None, **over):
+    p = {"ticker": ticker, "sector": "XLP", "status": "active",
+         "position_type": "SHARES",
+         "shares": {"count": shares, "cost_basis_per_share": 120.0, "cap": 1000},
+         "short_calls": [], "trailing_avg_weekly_juice": trailing}
+    p.update(over)
+    return p
+
+
+def test_shares_juice_is_denominated_on_share_capital_not_leap_cost(monkeypatch):
+    import data_handler
+    import leap_policy
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
+    # 100 shares @ 128 = $12,800 deployed; the bar is 0.75%/wk = $96/wk.
+    h = leap_policy.leap_health(_shares_pos(trailing=96.0), stock_price=128.0)
+    assert h["juice_capital"] == pytest.approx(12800.0)
+    assert h["juice_capital_basis"] == "spot_x_shares"
+    assert h["juice_target_pct"] == config.SHARES_JUICE_FLOOR_PCT
+    assert h["weekly_juice_yield_pct"] == pytest.approx(0.75, abs=0.01)
+    assert h["juice_adequate"] is True
+    # Thin week -> below the bar.
+    thin = leap_policy.leap_health(_shares_pos(trailing=70.0), stock_price=128.0)
+    assert thin["weekly_juice_yield_pct"] == pytest.approx(0.55, abs=0.01)
+    assert thin["juice_adequate"] is False
+
+
+def test_the_leap_bar_is_never_applied_to_share_capital(monkeypatch):
+    """The regression that would matter most: the LEAP target on share capital
+    would need ~$240/wk on a $12,800 lot — a covered call does not pay that, so
+    every shares position would read inadequate and the EXIT trigger would fire
+    on the whole book."""
+    import account_gate
+    import data_handler
+    import leap_policy
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
+    leap_bar = account_gate.weekly_yield_target_pct("PG")
+    assert leap_bar > config.SHARES_JUICE_FLOOR_PCT * 2   # the bars are far apart
+    # A realistic covered-call week clears the share bar and would fail the LEAP one.
+    h = leap_policy.leap_health(_shares_pos(trailing=110.0), stock_price=128.0)
+    assert h["juice_target_pct"] == config.SHARES_JUICE_FLOOR_PCT
+    assert h["juice_adequate"] is True
+    assert h["weekly_juice_yield_pct"] < leap_bar
+
+
+def test_shares_juice_is_unassessable_when_unpriced(monkeypatch):
+    """Never a default that could fire an exit: no spot means no verdict."""
+    import data_handler
+    import leap_policy
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([]))
+    h = leap_policy.leap_health(_shares_pos(trailing=10.0), stock_price=None)
+    assert h["juice_adequate"] is None
+    assert h["juice_capital"] is None
+
+
+def test_fresh_shares_position_with_no_history_is_not_flagged(monkeypatch):
+    import data_handler
+    import leap_policy
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
+    h = leap_policy.leap_health(_shares_pos(trailing=None), stock_price=128.0)
+    assert h["juice_adequate"] is None
+    assert alerts.check_juice_inadequate(_state(_shares_pos(trailing=None))) == []
+
+
+def test_juice_inadequate_alert_reaches_a_shares_position(monkeypatch):
+    """The alert used to `continue` on any position with no LEAP leg, which is
+    every position the app can now open."""
+    import data_handler
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
+    out = alerts.check_juice_inadequate(_state(_shares_pos(trailing=70.0)))
+    assert len(out) == 1 and out[0]["type"] == "JUICE_INADEQUATE"
+    assert "share capital" in out[0]["message"]      # not "LEAP capital"
+    assert out[0]["data"]["juice_capital_basis"] == "spot_x_shares"
+    assert out[0]["data"]["juice_capital"] == pytest.approx(12800.0)
+
+
+def test_legacy_leap_juice_arm_is_unchanged(monkeypatch):
+    """The LEAP arm keeps its own denominator and target — a legacy position must
+    grade exactly as it did before the shares arm existed."""
+    import data_handler
+    import leap_policy
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
+    p = _pos()                       # leap cost_basis 12250, shares count 0
+    p["trailing_avg_weekly_juice"] = 130.0
+    h = leap_policy.leap_health(p, stock_price=128.0)
+    assert h["juice_capital_basis"] == "leap_cost_basis"
+    assert h["juice_capital"] == pytest.approx(12250.0)
+    assert h["weekly_juice_yield_pct"] == pytest.approx(1.06, abs=0.02)
+    assert h["juice_target_pct"] == pytest.approx(1.88, abs=0.01)
+    assert h["juice_adequate"] is False
