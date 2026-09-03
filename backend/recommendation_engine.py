@@ -60,14 +60,23 @@ _EXIT_PRIORITY = (
 _ROLL_PRIORITY = (
     TriggerRule.DEFEND_BELOW_STRIKE,      # -> DEFEND
     TriggerRule.EARNINGS_WINDOW,          # -> ROLL_OUT (deep-ITM earnings strike)
-    TriggerRule.DIVIDEND_ASSIGNMENT_RISK, # -> ROLL_OUT (re-establish time value)
+    TriggerRule.DIVIDEND_ASSIGNMENT_RISK, # -> DEFEND (roll out to re-establish time value)
     TriggerRule.ROLL_75PCT,               # -> ROLL_OUT (early juice capture)
     TriggerRule.ROLL_SCHEDULED_WEEKLY,    # -> ROLL_OUT (weekly cadence)
 )
+# The action type MUST agree with the roll_reason the ticket carries (_ROLL_REASON
+# below): the executed roll pair is graded by trust_derive._ROLL_REASON_ACTION
+# from its roll_reason alone, so a rec whose action_type says one thing while its
+# ticket's reason maps to another can never be EXECUTED_MATCHED — it expires and
+# the operator's roll synthesizes a COVERAGE_MISS. DIVIDEND_ASSIGNMENT_RISK is
+# DEFEND for that reason: every other surface (the ASSIGNMENT_RISK alert's roll
+# deep link, executor.ROLL_REASONS, the whipsaw ledger's defensive-drag count)
+# already labels an assignment-risk roll "defend", so the engine follows the
+# execution side rather than inventing a reason no other path emits.
 _TRIGGER_ACTION = {
     TriggerRule.DEFEND_BELOW_STRIKE: ActionType.DEFEND,
     TriggerRule.EARNINGS_WINDOW: ActionType.ROLL_OUT,
-    TriggerRule.DIVIDEND_ASSIGNMENT_RISK: ActionType.ROLL_OUT,
+    TriggerRule.DIVIDEND_ASSIGNMENT_RISK: ActionType.DEFEND,
     TriggerRule.ROLL_75PCT: ActionType.ROLL_OUT,
     TriggerRule.ROLL_SCHEDULED_WEEKLY: ActionType.ROLL_OUT,
 }
@@ -510,10 +519,13 @@ _KILL_EXIT_CODE = {
     TriggerRule.DTE_PLANNED_EXIT: "OPERATOR_DISCRETION",
 }
 
+# Keys must be executor.ROLL_REASONS members, and each reason's
+# trust_derive._ROLL_REASON_ACTION mapping must equal the rule's _TRIGGER_ACTION
+# (pinned by test_roll_trigger_action_types_agree_with_their_graded_roll_reason).
 _ROLL_REASON = {
     TriggerRule.DEFEND_BELOW_STRIKE: "defend",
     TriggerRule.EARNINGS_WINDOW: "earnings",
-    TriggerRule.DIVIDEND_ASSIGNMENT_RISK: "defend",
+    TriggerRule.DIVIDEND_ASSIGNMENT_RISK: "defend",   # graded DEFEND, like the alert's deep link
     TriggerRule.ROLL_75PCT: "75%-rule",
     TriggerRule.ROLL_SCHEDULED_WEEKLY: "scheduled",
 }

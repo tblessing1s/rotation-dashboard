@@ -27,7 +27,10 @@ class ActionType:
 # every defensive roll-down, so the two would be indistinguishable at matching
 # time. This iteration emits DEFEND for the defensive roll-down and never emits
 # ROLL_DOWN; the constant exists so the graduation config (which names both) has
-# a stable key if a future change splits them.
+# a stable key if a future change splits them. The same constraint decides the
+# action type of every roll trigger: it must be whatever trust_derive grades the
+# ticket's roll_reason as (the dividend assignment-risk roll is DEFEND because
+# its roll lands with reason "defend"), or the recommendation can never match.
 ACTION_TYPES = frozenset({
     ActionType.ENTER, ActionType.ROLL_OUT, ActionType.ROLL_DOWN,
     ActionType.DEFEND, ActionType.EXIT, ActionType.NO_ACTION,
@@ -55,7 +58,7 @@ class TriggerRule:
     JUICE_HURDLE_FAIL = "JUICE_HURDLE_FAIL"            # trailing juice under target/burn -> EXIT (redeploy)
     DTE_PLANNED_EXIT = "DTE_PLANNED_EXIT"              # LEAP at/below planned-exit DTE -> EXIT/roll long
     EARNINGS_WINDOW = "EARNINGS_WINDOW"                # earnings inside window -> ROLL_OUT deep-ITM
-    DIVIDEND_ASSIGNMENT_RISK = "DIVIDEND_ASSIGNMENT_RISK"  # extrinsic collapse (div escalation) -> ROLL_OUT
+    DIVIDEND_ASSIGNMENT_RISK = "DIVIDEND_ASSIGNMENT_RISK"  # extrinsic collapse (div escalation) -> DEFEND (roll out)
     GATE_ALL_PASS = "GATE_ALL_PASS"                    # every entry gate clear -> ENTER
     ALL_CLEAR = "ALL_CLEAR"                            # explicit no-action claim for the pass
 
