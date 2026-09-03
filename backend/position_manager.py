@@ -409,12 +409,20 @@ def _parse_day(value):
 
 def whipsaw_status(position: dict, rolls: list[dict] | None = None,
                    today=None) -> dict:
-    """The cumulative defend-whipsaw guard for one position, derived from its
+    """The cumulative DEFENSIVE-whipsaw guard for one position, derived from its
     roll-ledger entries. Trips when EITHER too many defensive (reason="defend")
-    rolls landed in the trailing WHIPSAW_WINDOW_WEEKS, OR cumulative roll drag
-    (debits paid) has passed WHIPSAW_DRAG_PCT of the position's capital. Scoped to
-    the current cycle (rolls on/after the position's entry_date, when known) so a
-    prior cycle's rolls don't bleed in. Pure — no market data."""
+    rolls landed in the trailing WHIPSAW_WINDOW_WEEKS, OR cumulative DEFENSIVE
+    roll drag (debits paid rescuing a breached/assignment-risk short) has passed
+    WHIPSAW_DRAG_PCT of the position's capital. Scoped to the current cycle
+    (rolls on/after the position's entry_date, when known) so a prior cycle's
+    rolls don't bleed in. Pure — no market data.
+
+    BOTH legs are scoped to reason=="defend" — a debit paid on a routine
+    (reason="scheduled"/"75%-rule") roll-up-for-more-extrinsic is an ordinary
+    cashflow-management cost, not the "roll-down after roll-down" defensive
+    grind this guard exists to catch (see the module comment above
+    config.WHIPSAW_DEFEND_ROLLS), and must never count toward EITHER trip
+    condition."""
     from datetime import date, timedelta
     today = today or date.today()
     ticker = position.get("ticker", "")
@@ -422,12 +430,12 @@ def whipsaw_status(position: dict, rolls: list[dict] | None = None,
     entry = _parse_day(position.get("entry_date"))
     if entry:
         rolls = [r for r in rolls if (_parse_day(r.get("date")) or today) >= entry]
+    defend_rolls = [r for r in rolls if r.get("reason") == "defend"]
 
     window_start = today - timedelta(weeks=config.WHIPSAW_WINDOW_WEEKS)
-    defends = [r for r in rolls if r.get("reason") == "defend"
-               and (_parse_day(r.get("date")) or today) >= window_start]
+    defends = [r for r in defend_rolls if (_parse_day(r.get("date")) or today) >= window_start]
     n_def = len(defends)
-    drag = round(sum(r["net"] for r in rolls
+    drag = round(sum(r["net"] for r in defend_rolls
                      if r.get("net") is not None and r["net"] < 0), 2)
     capital = position_capital(position)
     drag_pct = round(abs(drag) / capital * 100, 1) if capital else None
