@@ -96,8 +96,16 @@ def _ticker_snapshot(ticker: str, position: dict | None, q_pair, price, bars,
                                          q=tk.get("q") or 0.0)
             tk["juice"] = {
                 "inadequate": lh.get("juice_adequate") is False,
-                "yield_pct": lh.get("juice_yield_pct"),
+                # leap_health returns weekly_juice_yield_pct; this read the
+                # non-existent "juice_yield_pct", so the yield stamped on a
+                # JUICE_HURDLE_FAIL recommendation was always null — the trigger
+                # fired with its own evidence blank. The adequacy flag above was
+                # always right (it reads the correct key), so only the recorded
+                # figures were affected.
+                "yield_pct": lh.get("weekly_juice_yield_pct"),
                 "target_pct": lh.get("juice_target_pct"),
+                "capital": lh.get("juice_capital"),
+                "capital_basis": lh.get("juice_capital_basis"),
                 "maintenance_status": lh.get("maintenance_status"),
             }
         except Exception:  # noqa: BLE001
@@ -191,6 +199,18 @@ def build_market_snapshot(state: dict, include_entry: bool = True) -> dict:
     return market
 
 
+def _rec_action_url(rec: dict, ticker: str) -> str | None:
+    """The in-app deep link for a recommendation's alert. ENTER has no position
+    to focus, so it routes to the entry-gate + order-ticket flow."""
+    from urllib.parse import quote
+    if not ticker:
+        return None
+    action = "enter" if rec.get("action_type") == ActionType.ENTER else "focus"
+    url = f"/?action={action}&ticker={quote(ticker)}"
+    rid = rec.get("rec_id")
+    return f"{url}&rec_id={quote(str(rid))}" if rid else url
+
+
 def _notify(new_recs: list[dict], staged: dict, state: dict, dry_run: bool | None) -> None:
     """Push newly emitted ACTIONABLE recommendations through the existing
     notifier channels. The ALERT ALWAYS FIRES — a settle-deferred rec is not
@@ -199,7 +219,6 @@ def _notify(new_recs: list[dict], staged: dict, state: dict, dry_run: bool | Non
     input (Design §7). Dedup is inherent: the engine emits a given claim once per
     validity window, so a repeat pass re-sends nothing."""
     import notifier
-    from urllib.parse import quote
     actionable = [r for r in new_recs if r.get("action_type") != ActionType.NO_ACTION]
     if not actionable:
         return
@@ -237,7 +256,11 @@ def _notify(new_recs: list[dict], staged: dict, state: dict, dry_run: bool | Non
                      "settle_status": (sb or {}).get("status"),
                      "executable_at": (sb or {}).get("executable_at")},
             "fingerprint": f"RECOMMENDATION|{t}|{r.get('rec_id')}",
-            "action_url": f"/?action=focus&ticker={quote(t)}" if t else None,
+            # An ENTER names a ticker the book does NOT hold, so "focus" would
+            # deep-link to a position card that will never render; it opens the
+            # entry ticket instead, carrying the rec id so the resulting
+            # execution is stamped source_rec_id.
+            "action_url": _rec_action_url(r, t),
         })
     try:
         notifier.dispatch(batch, settings, dry_run=dry_run)
@@ -395,7 +418,6 @@ def _notify_settle(events: list[tuple[dict, str]], state: dict,
     """Push release-pass outcomes (self-cancel / released / expired) — so a defense
     that self-cancels because the gap filled tells the operator so, per Design §6."""
     import notifier
-    from urllib.parse import quote
     settings = (state.get("alerts") or {}).get("settings") or {}
     if dry_run is None:
         dry_run = bool(settings.get("dry_run", config.alerts_dry_run_default()))
@@ -419,7 +441,7 @@ def _notify_settle(events: list[tuple[dict, str]], state: dict,
             "data": {"rec_id": rec.get("rec_id"), "settle_status": status,
                      "action_type": rec.get("action_type")},
             "fingerprint": f"RECOMMENDATION_SETTLE|{t}|{rec.get('rec_id')}|{status}",
-            "action_url": f"/?action=focus&ticker={quote(t)}" if t else None,
+            "action_url": _rec_action_url(rec, t),
         })
     try:
         notifier.dispatch(batch, settings, dry_run=dry_run)
