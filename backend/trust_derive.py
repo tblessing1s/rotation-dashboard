@@ -29,9 +29,11 @@ Shares are scoped by the BASE-LEG BALANCE, not by the action name: a buy into an
 existing share base is a scale-in and a sale that leaves shares standing is a
 trim, and neither is a graded ENTER/EXIT. The balance is replayed from the whole
 execution log (including records before trust_layer_since, and including the
-mechanical put_assigned / close_shares_assigned that move shares without being
-operator actions), so a position opened before the trust layer still exits to
-zero correctly.
+mechanical put_assigned / close_shares_assigned / EQUITY-leg adjustment that move
+shares without being operator actions), so a position opened before the trust
+layer still exits to zero correctly, and a buy voided the same day by a
+reconciliation adjustment does not leave a phantom balance that mis-scopes the
+next real trade as a scale-in.
 """
 from __future__ import annotations
 
@@ -103,13 +105,51 @@ def _iso(dt: datetime) -> str:
 # Executions that move the owned-share base, and the field each carries the size
 # in. put_assigned / close_shares_assigned are MECHANICAL — they move shares but
 # are never graded as operator actions; they appear here only so the balance the
-# ENTER/EXIT scoping reads stays true.
+# ENTER/EXIT scoping reads stays true. `adjustment` is the same kind of
+# mechanical mover (see _share_delta below) but carries its OWN signed delta
+# rather than a fixed-sign field, so it does not fit this table.
 _SHARE_DELTA = {
     "buy_shares": ("qty", +1),
     "put_assigned": ("shares_received", +1),
     "sell_shares": ("qty", -1),
     "close_shares_assigned": ("qty", -1),
 }
+
+
+def _share_delta(e: dict) -> int | None:
+    """The signed share-count change one execution makes, or None when it does
+    not move the base at all.
+
+    `adjustment` (executor._adjustment, the reconciliation-correction path — "the
+    operator committing truth forward") is handled separately from the table
+    above because its EQUITY leg carries an already-signed `quantity_delta`
+    rather than a fixed-sign qty field; an OPTION-leg adjustment (correcting a
+    short/LEAP count) never touches shares and returns None here.
+
+    Excluding `adjustment` was a real gap, not a hypothetical: a buy_shares
+    entered in error and voided the same day by `quantity_delta: -100, reason:
+    "Trade never happened"` left the replayed balance permanently 100 shares
+    ahead of the real book. The NEXT buy_shares then read as a scale-in into a
+    position that no longer existed and was silently dropped from ENTER grading
+    — invisible to the trust layer, on the position that was still open and had
+    just been rolled — while the voided original kept surfacing as the only
+    graded coverage miss."""
+    action = e.get("action")
+    if action == "adjustment":
+        if (e.get("instrument_type") or "").upper() != "EQUITY":
+            return None
+        try:
+            return int(e.get("quantity_delta") or 0)
+        except (TypeError, ValueError):
+            return 0
+    spec = _SHARE_DELTA.get(action)
+    if spec is None:
+        return None
+    field, sign = spec
+    try:
+        return sign * int(e.get(field) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _share_balances(executions: list[dict]) -> dict[int, tuple[int, int]]:
@@ -128,18 +168,14 @@ def _share_balances(executions: list[dict]) -> dict[int, tuple[int, int]]:
     running: dict[str, int] = {}
     out: dict[int, tuple[int, int]] = {}
     order = sorted((i for i, e in enumerate(executions)
-                    if _SHARE_DELTA.get(e.get("action")) and _parse_ts(e.get("date"))),
+                    if _share_delta(e) is not None and _parse_ts(e.get("date"))),
                    key=lambda i: (_parse_ts(executions[i].get("date")), i))
     for idx in order:
         e = executions[idx]
-        field, sign = _SHARE_DELTA[e.get("action")]
-        try:
-            qty = int(e.get(field) or 0)
-        except (TypeError, ValueError):
-            qty = 0
+        delta = _share_delta(e)
         t = (e.get("ticker") or "").upper()
         before = running.get(t, 0)
-        after = max(before + sign * qty, 0)
+        after = max(before + delta, 0)
         running[t] = after
         out[idx] = (before, after)
     return out
