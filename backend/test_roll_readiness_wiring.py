@@ -97,16 +97,22 @@ def test_thin_buffer_alone_flags_ready_even_with_fresh_decay(isolated_state, mon
 
 
 def test_readiness_is_purely_additive(isolated_state, monkeypatch):
-    """Attaching roll_readiness must not perturb any existing roll_options field."""
+    """Attaching roll_readiness (and the roll-dialog audit's other additive
+    fields — regime_target, ex_div, cash-reserve context, etc; see roll_advisor
+    and the phase-1 roll-dialog audit) must not remove or repurpose any field a
+    caller already depended on; this pins the full response shape."""
     short_call = {"strike": 133, "contracts": 1, "dte": 8, "expiration": "2026-07-10",
                   "entry_premium_total": 500.0, "entry_extrinsic_per_share": 1.00}
     _mock_common(monkeypatch, short_call, chain_mark=17.15)
 
     out = oc.roll_options("PG")
-    assert set(out) - {"roll_readiness"} == {
-        "ticker", "underlying_price", "regime", "atr", "atr_mult", "itm_pct",
-        "posture", "suggested_strike", "earnings_date", "iv_rank",
-        "current_short", "expirations"}
+    assert set(out) == {
+        "ticker", "underlying_price", "quote_fetched_at", "regime", "atr", "atr_mult",
+        "itm_pct", "suggested_strike", "regime_target", "target_deadband",
+        "roll_up_blocked", "earnings_date", "ex_div", "iv_rank", "current_short",
+        "expirations", "roll_readiness", "weekly_juice_floor_pct",
+        "juice_parity_band_pct", "quote_stale_after_seconds", "operating_cash",
+        "reserve_required"}
     assert out["suggested_strike"] is not None
     assert out["current_short"]["strike"] == 133
     assert out["current_short"]["current_mark"] == pytest.approx(17.15)

@@ -224,7 +224,7 @@ def _detect_action(has_leap: bool, open_shorts: list, management_only: bool = Fa
     return "close_short", "A short call is already open — roll it (buy to close)."
 
 
-def roll_options(ticker: str) -> dict:
+def roll_options(ticker: str, prior_target: float | None = None) -> dict:
     """Data for the short-roll picker: the current open short with its live
     buy-to-close cost, plus every candidate expiration out to ROLL_MAX_DTE with
     nearby strikes around the regime-aware ATR target.
@@ -233,6 +233,10 @@ def roll_options(ticker: str) -> dict:
     (pick an expiration) and the SAME or a DIFFERENT strike (pick a strike within
     it). The current short's own strike is always included in every expiration's
     list so a same-strike roll is selectable everywhere.
+
+    ``prior_target`` (optional): the DISPLAYED default strike from a caller's own
+    previous fetch, for strike_policy.apply_deadband — see ``target_deadband``
+    below. Omit on a fresh dialog open (nothing to hold against yet).
     """
     ticker = ticker.strip().upper()
     if not ticker:
@@ -246,6 +250,7 @@ def roll_options(ticker: str) -> dict:
                 "error": "no open short to roll"}
 
     payload = _fetch_chain(ticker)
+    quote_fetched_at = (_chain_cache.get(ticker) or (None,))[0]
     underlying, contracts = schwab_api.parse_call_chain(payload)
     if underlying is None:
         quote = data_handler.latest_quote(ticker)
@@ -253,21 +258,14 @@ def roll_options(ticker: str) -> dict:
     if not contracts:
         raise schwab_api.SchwabError(f"no call contracts returned for {ticker}")
 
-    # Regime + posture aware target strike (same rule the entry chain uses;
-    # RED is fully supported here since rolling an open short is allowed even
-    # on a red tape — only fresh entries are blocked).
     reg = screening.regime()
     df = data_handler.get_daily(ticker)
     atr_val = indicators.atr(df)
     price = underlying if underlying is not None else indicators.last(df)
-    sp = (strike_policy.suggest_strike(price, atr_val, reg.get("status"))
-          if atr_val is not None and price is not None else None)
-    atr_mult = sp["atr_mult"] if sp else None
-    itm_pct = sp["itm_pct"] if sp else None
-    posture = sp["posture"] if sp else None
-    suggested_strike = sp["strike"] if sp else None
 
     # The current short to roll = the nearest-dated open leg, with a live buyback.
+    # Computed BEFORE the target strike below because RED's target needs it (no
+    # roll-UP permitted — see strike_policy.regime_target_strike).
     current = min(open_shorts, key=lambda s: s.get("dte") if s.get("dte") is not None else 1e9)
     cur_strike = current.get("strike")
     cur_exp = current.get("expiration")
@@ -288,6 +286,26 @@ def roll_options(ticker: str) -> dict:
         "current_mark": (match or {}).get("mark"),
         "entry_extrinsic_per_share": current.get("entry_extrinsic_per_share"),
     }
+
+    # Regime-depth target strike — Travis's documented multiples, scoped to this
+    # dialog only (see strike_policy.regime_target_strike). RED is fully
+    # supported here since rolling an open short is allowed even on a red tape
+    # (only fresh entries are blocked); RED additionally caps the target at the
+    # current strike (roll down/out only).
+    rt = (strike_policy.regime_target_strike(price, atr_val, reg.get("status"), current_strike=cur_strike)
+          if atr_val is not None and price is not None else None)
+    atr_mult = rt["atr_mult"] if rt else None
+    itm_pct = rt["itm_pct"] if rt else None
+    raw_target = rt["raw_target"] if rt else None
+    roll_up_blocked = bool(rt and rt["roll_up_blocked"])
+    live_target_strike = rt["strike"] if rt else None
+
+    # Deadband on the DISPLAYED DEFAULT only (strike_policy.apply_deadband) — the
+    # strike LIST below always tracks live_target_strike regardless.
+    deadband = strike_policy.apply_deadband(prior_target, raw_target, atr_val)
+    suggested_strike = (deadband["strike"] if deadband["held"] else live_target_strike)
+    if suggested_strike is None:
+        suggested_strike = live_target_strike if live_target_strike is not None else cur_strike
 
     # ADVISORY ONLY (roll_advisor.roll_readiness) — is this contract's extrinsic
     # mostly banked already, or has the strike itself gone thin on cushion?
@@ -315,6 +333,25 @@ def roll_options(ticker: str) -> dict:
     earn_strike = (strike_policy.suggest_earnings_strike(price, atr_val, reg.get("status"))["strike"]
                    if earn_date is not None and atr_val is not None and price is not None else None)
 
+    # Next ex-dividend — best-effort, ALREADY normalized (see dividends.py; the
+    # underlying Schwab field names are unverified candidates, tracked there —
+    # this consumes only the normalized {ex_date, amount, source} shape, never a
+    # raw provider key). None/"none" source means genuinely unknown, not zero.
+    try:
+        ex_div = dividends.cached_dividend(ticker)
+    except Exception:  # noqa: BLE001 — dividend lookup must not sink the roll picker
+        ex_div = {"ex_date": None, "amount": None, "source": "none"}
+
+    # Cash-reserve context for the shadow roll-up guard (§1.5) — same reserve
+    # figure capital_summary uses (state.metadata.reserve_required, falling back
+    # to config.RESERVE_REQUIRED), same operating-cash resolver account_gate's
+    # Level-5 gate uses. The actual PASS/FAIL is computed by the caller once a
+    # candidate strike/week is chosen; this just supplies the two live numbers.
+    import account_gate
+    cash_info = account_gate.resolve_operating_cash(state)
+    reserve_required = float((state.get("metadata") or {}).get("reserve_required")
+                             or config.RESERVE_REQUIRED)
+
     # Candidate expirations out to ROLL_MAX_DTE, each with nearby strikes.
     by_exp: dict[str, dict] = {}
     for c in contracts:
@@ -329,7 +366,10 @@ def roll_options(ticker: str) -> dict:
             continue
         by_exp.setdefault(exp, {"expiration": exp, "dte": dte, "contracts": []})["contracts"].append(c)
 
-    default_target = suggested_strike if suggested_strike is not None else cur_strike
+    # The strike LIST always centers on the LIVE target (never the deadbanded
+    # default) — the deadband is display-default-only, per strike_policy.
+    # apply_deadband's contract.
+    default_target = live_target_strike if live_target_strike is not None else cur_strike
     expirations = []
     for exp in sorted(by_exp, key=lambda e: by_exp[e]["dte"]):
         grp = by_exp[exp]
@@ -341,19 +381,35 @@ def roll_options(ticker: str) -> dict:
         except (TypeError, ValueError):
             exp_date = None
         earnings_in_week = bool(earn_date and exp_date and today <= earn_date <= exp_date)
+        ex_div_date = None
+        try:
+            ex_div_date = (datetime.strptime(str(ex_div["ex_date"])[:10], "%Y-%m-%d").date()
+                          if ex_div.get("ex_date") else None)
+        except (TypeError, ValueError):
+            ex_div_date = None
+        ex_div_in_week = bool(ex_div_date and exp_date and today <= ex_div_date <= exp_date)
         target = earn_strike if (earnings_in_week and earn_strike is not None) else default_target
         strikes = indicators.get_nearby_strikes(grp["contracts"], target, underlying, count=7)
-        # Guarantee the current strike is offered so "same strike" always works.
-        if cur_strike is not None and not any(s["strike"] == cur_strike for s in strikes):
-            same = next((c for c in grp["contracts"] if c.get("strike") == cur_strike), None)
-            if same:
-                strikes = sorted(strikes + [indicators._augment(same, underlying)],
-                                 key=lambda s: s["strike"])
+        # Guarantee the current strike AND the displayed default are offered, so
+        # "same strike" and the deadbanded default are always selectable.
+        for must_have in {cur_strike, suggested_strike} - {None}:
+            if not any(s["strike"] == must_have for s in strikes):
+                same = next((c for c in grp["contracts"] if c.get("strike") == must_have), None)
+                if same:
+                    strikes = sorted(strikes + [indicators._augment(same, underlying)],
+                                     key=lambda s: s["strike"])
+        # juice/wk + cushion (roll-dialog audit §1.1/§1.3) — computed HERE, once,
+        # server-side, so the ranking/columns the frontend shows are never a
+        # second, independently-drifting implementation of the same math.
+        for s in strikes:
+            s["juice_per_week_pct"] = roll_advisor.juice_per_week(s.get("mark"), s["strike"], underlying, grp["dte"])
+            s["cushion_atr"] = roll_advisor.cushion_atr(s["strike"], underlying, atr_val)
         expirations.append({
             "expiration": exp,
             "dte": grp["dte"],
             "is_current_week": exp == cur_exp,
             "earnings_in_week": earnings_in_week,
+            "ex_div_in_week": ex_div_in_week,
             "deep_itm_suggested": bool(earnings_in_week and earn_strike is not None),
             "strikes": strikes,
         })
@@ -361,17 +417,26 @@ def roll_options(ticker: str) -> dict:
     return {
         "ticker": ticker,
         "underlying_price": round(underlying, 2) if underlying is not None else None,
+        "quote_fetched_at": quote_fetched_at,
         "regime": reg.get("status"),
         "atr": round(atr_val, 2) if atr_val is not None else None,
         "atr_mult": atr_mult,
         "itm_pct": itm_pct,
-        "posture": posture,
         "suggested_strike": suggested_strike,
+        "regime_target": rt,
+        "target_deadband": deadband,
+        "roll_up_blocked": roll_up_blocked,
         "earnings_date": earn_date.isoformat() if earn_date else None,
+        "ex_div": ex_div,
         "iv_rank": iv_history.iv_rank(ticker),
         "current_short": current_view,
         "expirations": expirations,
         "roll_readiness": roll_readiness,
+        "weekly_juice_floor_pct": config.SHARES_JUICE_FLOOR_PCT,
+        "juice_parity_band_pct": config.ROLL_JUICE_PARITY_BAND_PCT,
+        "quote_stale_after_seconds": config.ROLL_QUOTE_STALE_SECONDS,
+        "operating_cash": cash_info.get("amount"),
+        "reserve_required": reserve_required,
     }
 
 

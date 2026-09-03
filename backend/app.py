@@ -584,8 +584,9 @@ def api_roll_options():
     ticker = request.args.get("ticker", "")
     if not ticker:
         return jsonify({"error": "ticker is required"}), 400
+    prior_target = request.args.get("prior_target", type=float)
     try:
-        return jsonify(option_chain.roll_options(ticker))
+        return jsonify(option_chain.roll_options(ticker, prior_target=prior_target))
     except option_chain.RegimeBlocked as e:
         return jsonify({"error": str(e), "regime": "red"}), 403
     except Exception as e:  # noqa: BLE001

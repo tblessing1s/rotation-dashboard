@@ -768,17 +768,49 @@ DEFAULT_STRIKE_POSTURE = "conservative"  # PROPOSED_DEFAULT until the operator p
 # and RED blocks new entries (the Level 1 regime gate, unchanged). These are the
 # canonical multiples the strategy is documented against.
 #
-# SCOPED FOLLOW-UP (not applied here): the live STRIKE_TABLE above encodes a
-# DIFFERENT, internally-consistent scheme (shallower-when-safe -> deeper-when-
-# dangerous: conservative green 0.5x, yellow 1.0x, red 1.5x) that predates this
-# policy and drives the already-open-position defend/roll-down selector across
-# BOTH postures. Reconciling the table to these multiples changes calibrated
-# strategy numbers for aggressive + RED defend rows too, so it is deliberately
-# left for a separate, reviewable change (see CHANGELOG "strike-policy follow-up").
+# SCOPED FOLLOW-UP (partially applied — see below): the live STRIKE_TABLE above
+# encodes a DIFFERENT, internally-consistent scheme (shallower-when-safe ->
+# deeper-when-dangerous: conservative green 0.5x, yellow 1.0x, red 1.5x) that
+# predates this policy and STILL drives entry, defend, and the roll-down
+# selector — unified reconciliation of the table to these multiples changes
+# calibrated strategy numbers for aggressive + RED defend rows too, so THAT
+# remains deliberately deferred (see CHANGELOG "strike-policy follow-up").
+# What IS now wired up (2026-09, roll-dialog audit): the roll dialog's OWN
+# target-strike label/default (option_chain.roll_options, via
+# strike_policy.regime_target_strike) reads these two constants directly,
+# scoped to that one dialog only — not STRIKE_TABLE, not entry, not the
+# defend/roll-down selector, which are untouched by this change.
 # The regime plumbing is already correct: strike_policy.suggest_strike() consumes
 # screening.regime()["status"], which is now the dwell-adjusted PUBLISHED regime.
 STRIKE_ATR_MULT_GREEN = 1.5    # HARD_CFM_RULE — documented GREEN short-strike ATR distance
 STRIKE_ATR_MULT_YELLOW = 2.0   # HARD_CFM_RULE — documented YELLOW short-strike ATR distance
+
+# TRAVIS_EXTENSION — the ITM% floor under the roll dialog's regime_target_strike
+# (STRIKE_ATR_MULT_GREEN/YELLOW above), applied uniformly across green/yellow/red
+# as a hard floor beneath whichever ATR-multiple target results. Deliberately a
+# separate constant from STRIKE_TABLE's per-cell itm_pct values (0.00-0.05) —
+# conflating the two would silently retune STRIKE_TABLE's own calibration.
+ROLL_REGIME_TARGET_ITM_FLOOR_PCT = 0.03
+
+# PROPOSED_DEFAULT — the roll week-ranking's parity band (juice/wk, roll_advisor
+# §1.1): two candidate weeks within this many percentage-points/wk of each other
+# are treated as a tie, broken toward the SHORTER DTE (fewer days of gap risk,
+# more roll opportunities) rather than literal-max juice/wk.
+ROLL_JUICE_PARITY_BAND_PCT = 0.05
+
+# PROPOSED_DEFAULT — once a target strike is displayed in an open Roll dialog, it
+# is held (not flipped) until the continuous (pre-rounding) target drifts more
+# than this many ATRs past the rounding boundary that produced it. Prevents a
+# few-cent spot wobble from flipping the displayed default strike mid-decision.
+ROLL_TARGET_DEADBAND_ATR_MULT = 0.25
+
+# PROPOSED_DEFAULT — the Roll dialog's CURRENT SHORT block flags its quote
+# snapshot STALE (advisory badge only) when the underlying chain fetch is older
+# than this many seconds. Matches option_chain._CHAIN_TTL's 5-minute cache: this
+# is deliberately far tighter than the cache TTL so the badge fires well before
+# the snapshot is at its oldest possible.
+ROLL_QUOTE_STALE_SECONDS = 60
+
 LEAP_ROLL_DTE = 30           # (legacy, unused) superseded by LEAP_ROLL_DTE_FLOOR
                               # in the LEAP capital-preservation section below
 ROLL_MAX_DTE = 45            # short-roll picker offers expirations out to this DTE
