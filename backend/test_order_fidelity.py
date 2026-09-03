@@ -11,7 +11,8 @@ import alerts  # noqa: E402
 import config  # noqa: E402
 import order_lifecycle as olc  # noqa: E402
 import trust_derive  # noqa: E402
-from rec_types import CheckStatus, FidelityCheck, FidelityDefect  # noqa: E402
+from rec_types import (ActionType, CheckStatus, FidelityCheck,  # noqa: E402
+                       FidelityDefect)
 
 NOW = datetime(2026, 7, 10, 20, 0, tzinfo=timezone.utc)
 SINCE = "2026-01-01T00:00:00Z"
@@ -180,3 +181,93 @@ def test_slippage_bound_from_source_recommendation_ticket():
     fid = trust_derive.derive_order_fidelity(state, NOW)["o7"]
     # 7.1% adverse would fail the 5% default but passes the rec's 10% bound
     assert fid["checks"][FidelityCheck.SLIPPAGE_IN_BOUND]["status"] == CheckStatus.PASS
+
+
+# ---------------------------------------------------------------------------
+# The intent key vs the bare action. A live order event's `intent` is the
+# per-position resubmission-lock key ("AAPL:roll_short", executor._intent_key),
+# not a bare action — so grading that read `intent` raw matched nothing for any
+# live ticket. Every one graded action_type None and skipped NO_ORPHAN_LEG as
+# NOT_APPLICABLE, which let an orphaned leg pass as a clean ticket. Only the
+# fixtures above, which carry a bare intent, ever exercised the mapped path.
+# ---------------------------------------------------------------------------
+def _live_events(order_id, chain, ticker="AAPL", action="roll_short", start=None):
+    """Events in the shape executor._record_placement actually writes: the lock
+    key in `intent`, the bare action alongside it in `action`."""
+    out = _events(order_id, chain, ticker=ticker,
+                  intent=f"{ticker.upper()}:{action}", start=start)
+    for ev in out:
+        ev["action"] = action
+    return out
+
+
+def test_live_intent_key_resolves_to_the_bare_action():
+    ev = _live_events("o1", [olc.SUBMITTED, olc.WORKING, olc.FILLED])
+    state = _state(events=ev, receipts=[{"order_id": "o1", "execution_ids": ["e1", "e2"]}],
+                   execs=_roll_execs())
+    fid = trust_derive.derive_order_fidelity(state, NOW)["o1"]
+    assert fid["action"] == "roll_short"
+    assert fid["intent"] == "AAPL:roll_short"      # raw lock key kept as provenance
+    assert fid["action_type"] == ActionType.ROLL_OUT
+    assert fid["checks"][FidelityCheck.NO_ORPHAN_LEG]["status"] == CheckStatus.PASS
+    assert fid["pass"] is True
+
+
+def test_orphan_leg_is_caught_on_a_ticket_carrying_the_intent_key():
+    """The regression that mattered: a live two-leg roll that FILLED with one
+    committed leg is a naked leg. It used to grade NOT_APPLICABLE -> pass."""
+    ev = _live_events("o1", [olc.SUBMITTED, olc.WORKING, olc.FILLED])
+    state = _state(events=ev, receipts=[{"order_id": "o1", "execution_ids": ["e1"]}],
+                   execs=_roll_execs()[:1])
+    fid = trust_derive.derive_order_fidelity(state, NOW)["o1"]
+    orphan = fid["checks"][FidelityCheck.NO_ORPHAN_LEG]
+    assert orphan["status"] == CheckStatus.FAIL
+    assert orphan["defect"] == FidelityDefect.ORPHAN_LEG
+    assert fid["pass"] is False
+
+
+def test_defend_refinement_fires_on_a_live_roll():
+    """The roll_reason refinement compared the raw intent to "roll_short", so a
+    live defensive roll never refined to DEFEND either."""
+    ev = _live_events("o1", [olc.SUBMITTED, olc.WORKING, olc.FILLED])
+    execs = _roll_execs()
+    for e in execs:
+        e["roll_reason"] = "defend"
+    state = _state(events=ev, receipts=[{"order_id": "o1", "execution_ids": ["e1", "e2"]}],
+                   execs=execs)
+    assert trust_derive.derive_order_fidelity(state, NOW)["o1"]["action_type"] == ActionType.DEFEND
+
+
+def test_action_falls_back_to_the_intent_suffix_when_the_event_has_no_action():
+    """Older events (and hand-built fixtures) carry only the intent — the suffix
+    after the ticker is still the action."""
+    ev = _events("o1", [olc.SUBMITTED, olc.WORKING, olc.FILLED], intent="AAPL:roll_short")
+    assert all("action" not in e for e in ev)
+    state = _state(events=ev, receipts=[{"order_id": "o1", "execution_ids": ["e1", "e2"]}],
+                   execs=_roll_execs())
+    fid = trust_derive.derive_order_fidelity(state, NOW)["o1"]
+    assert fid["action"] == "roll_short"
+    assert fid["action_type"] == ActionType.ROLL_OUT
+
+
+def test_bare_intent_still_resolves():
+    """Stripping is a no-op on a value that carries no ticker prefix."""
+    ev = _events("o1", [olc.SUBMITTED, olc.WORKING, olc.FILLED], intent="roll_short")
+    state = _state(events=ev, receipts=[{"order_id": "o1", "execution_ids": ["e1", "e2"]}],
+                   execs=_roll_execs())
+    assert trust_derive.derive_order_fidelity(state, NOW)["o1"]["action"] == "roll_short"
+
+
+def test_shares_orders_grade_under_enter_and_exit():
+    """The shares-primary orders are the live entry and exit, so their tickets
+    have to land under an action type or graduation can never see their fidelity.
+    Both are single-leg equity orders — NO_ORPHAN_LEG stays not-applicable."""
+    for action, expected in (("buy_shares", ActionType.ENTER),
+                             ("sell_shares", ActionType.EXIT)):
+        ev = _live_events("o1", [olc.SUBMITTED, olc.WORKING, olc.FILLED], action=action)
+        state = _state(events=ev, receipts=[{"order_id": "o1", "execution_ids": ["e1"]}],
+                       execs=[{"id": "e1", "ticker": "AAPL", "action": action,
+                               "date": _iso(NOW), "qty": 100, "live_transmitted": True}])
+        fid = trust_derive.derive_order_fidelity(state, NOW)["o1"]
+        assert fid["action_type"] == expected, action
+        assert fid["checks"][FidelityCheck.NO_ORPHAN_LEG]["status"] == CheckStatus.NOT_APPLICABLE

@@ -53,17 +53,32 @@ _ROLL_REASON_ACTION = {
     "kill-switch-exit": None,
 }
 
+# Order ACTION -> graded action type. Keyed on the bare action (see
+# _order_action): an order event's ``intent`` is the per-position lock KEY,
+# "TICKER:action", never a bare action, so looking a raw intent up here matches
+# nothing.
 _INTENT_ACTION = {
     "open": ActionType.ENTER,
     "open_position_atomic": ActionType.ENTER,
     "buy_leap": ActionType.ENTER,
+    "buy_shares": ActionType.ENTER,      # the shares-primary entry order
     "exit": ActionType.EXIT,
     "close_position_atomic": ActionType.EXIT,
     "close_leap": ActionType.EXIT,
+    # The shares-primary exit order. Unlike map_actions — which grades only a
+    # sale that closes the whole base — this grades the ORDER, so a trim's
+    # ticket is graded too: its lifecycle has to be legal either way, and a
+    # cleanly filled trim passes.
+    "sell_shares": ActionType.EXIT,
     "roll_short": ActionType.ROLL_OUT,   # refined to DEFEND via the roll_reason
     "roll_leap": None,                   # mechanical LEAP roll — out of scope
     "sell_short": None,
     "close_short": None,
+    # Mechanical or out-of-scope, listed so they read as decided rather than
+    # forgotten (an unlisted action already grades as None).
+    "close_shares_assigned": None,       # called-away delivery, not an operator act
+    "put_assigned": None,
+    "put_opened": None,
 }
 
 
@@ -464,13 +479,13 @@ def _grade_slippage(exec_ids: list, executions_by_id: dict, state: dict,
                   bound_pct=round(bound_pct * 100, 3))
 
 
-_MULTI_LEG_INTENTS = {"open", "open_position_atomic", "exit",
+_MULTI_LEG_ACTIONS = {"open", "open_position_atomic", "exit",
                       "close_position_atomic", "roll_short", "roll_leap"}
 
 
-def _grade_orphan(intent: str | None, final_state: str | None,
+def _grade_orphan(action: str | None, final_state: str | None,
                   exec_ids: list) -> dict:
-    if intent not in _MULTI_LEG_INTENTS:
+    if action not in _MULTI_LEG_ACTIONS:
         return _check(CheckStatus.NOT_APPLICABLE)
     if final_state in (olc.PARTIAL_FILL_CANCELED,):
         return _check(CheckStatus.FAIL, FidelityDefect.PARTIAL_FILL,
@@ -486,6 +501,31 @@ def _grade_orphan(intent: str | None, final_state: str | None,
     if final_state in (olc.CANCELED, olc.REJECTED, olc.EXPIRED):
         return _check(CheckStatus.PASS, committed_legs=0)
     return _check(CheckStatus.PENDING)
+
+
+def _order_action(events: list[dict]) -> str | None:
+    """The bare order action for one order's events.
+
+    An order event carries BOTH its action ("roll_short") and its ``intent`` —
+    the per-position resubmission-lock key, ``executor._intent_key``, which is
+    "TICKER:action". Grading keys off the action, so reading ``intent`` raw
+    matched nothing for any live ticket: every one graded action_type None and,
+    worse, skipped NO_ORPHAN_LEG as NOT_APPLICABLE, so an orphaned leg on a live
+    atomic roll passed as clean.
+
+    Prefers the event's own ``action`` and falls back to the intent key's
+    suffix, so events written without one (older records, hand-built fixtures
+    carrying a bare intent) still resolve. Ticker and action never contain ":",
+    so the split is exact, and it is a no-op on an already-bare value."""
+    for ev in reversed(events):
+        action = ev.get("action")
+        if action:
+            return str(action)
+    for ev in reversed(events):
+        intent = ev.get("intent")
+        if intent:
+            return str(intent).rsplit(":", 1)[-1]
+    return None
 
 
 def _grade_cancel(events: list[dict], final_state: str | None,
@@ -543,6 +583,7 @@ def derive_order_fidelity(state: dict, now: datetime) -> dict:
         events = sorted(events, key=lambda ev: ev.get("seq") or 0)
         final_state = events[-1].get("new_state")
         intent = events[-1].get("intent") or events[0].get("intent")
+        action = _order_action(events)
         exec_ids = receipts_by_order.get(oid, [])
         bound = config.REC_MAX_SLIPPAGE_PCT_OF_MID
         # A ticket staged from a recommendation carries its own bound.
@@ -559,7 +600,7 @@ def derive_order_fidelity(state: dict, now: datetime) -> dict:
             FidelityCheck.LIFECYCLE_LEGAL: _grade_lifecycle(events),
             FidelityCheck.SLIPPAGE_IN_BOUND: _grade_slippage(exec_ids, executions_by_id,
                                                              state, bound),
-            FidelityCheck.NO_ORPHAN_LEG: _grade_orphan(intent, final_state, exec_ids),
+            FidelityCheck.NO_ORPHAN_LEG: _grade_orphan(action, final_state, exec_ids),
             FidelityCheck.CANCEL_CONFIRMED_DEAD: _grade_cancel(events, final_state, now),
             # Post-fill reconciliation (positions + buying-power diff) is a
             # separate work item; NEVER silently pass in its absence.
@@ -567,14 +608,16 @@ def derive_order_fidelity(state: dict, now: datetime) -> dict:
         }
         out[oid] = {
             "order_id": oid, "paper": False,
-            "ticker": events[-1].get("ticker"), "intent": intent,
-            "action_type": _INTENT_ACTION.get(intent or ""),
+            # ``intent`` stays the raw lock key (it is how the order is found in
+            # the order-lock / journal records); ``action`` is what grading used.
+            "ticker": events[-1].get("ticker"), "intent": intent, "action": action,
+            "action_type": _INTENT_ACTION.get(action or ""),
             "state": final_state, "terminal": olc.is_terminal(final_state),
             "checks": checks, "pass": _ticket_pass(checks),
             "graded_at": _iso(now),
         }
         # Refine roll tickets to DEFEND when the committed legs say so.
-        if intent == "roll_short":
+        if action == "roll_short":
             for eid in exec_ids:
                 e = executions_by_id.get(eid) or {}
                 mapped = _ROLL_REASON_ACTION.get(e.get("roll_reason"))
@@ -613,7 +656,7 @@ def derive_order_fidelity(state: dict, now: datetime) -> dict:
                        else _ROLL_REASON_ACTION.get(g.get("roll_reason")))
         out[oid] = {
             "order_id": oid, "paper": True, "ticker": g["ticker"],
-            "intent": g["kind"], "action_type": action_type,
+            "intent": g["kind"], "action": g["kind"], "action_type": action_type,
             "state": "PAPER_FILLED", "terminal": True,
             "checks": checks, "pass": _ticket_pass(checks),
             "graded_at": _iso(now),
