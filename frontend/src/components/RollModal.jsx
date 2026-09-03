@@ -120,6 +120,25 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
   const newCredit = chosen?.mark != null ? totalDollars(chosen.mark, qtyNum) : null;
   const netCredit = buyback != null && newCredit != null ? newCredit - buyback : null;
 
+  // For the SAME strike currently chosen, compare the net credit/(debit) across
+  // every expiration that happens to offer it — surfaces the "next week is
+  // cheaper for the same strike bump" read without doing the mental math.
+  // Advisory only: purely informational, never changes which weeks are
+  // selectable or disables anything.
+  const weekComparison = React.useMemo(() => {
+    if (buyback == null || strike == null) return [];
+    const rows = [];
+    for (const exp of exps) {
+      const s = (exp.strikes || []).find((s) => s.strike === strike);
+      if (!s || s.mark == null) continue;
+      const credit = totalDollars(s.mark, qtyNum);
+      rows.push({ expiration: exp.expiration, dte: exp.dte, netCredit: credit - buyback });
+    }
+    if (rows.length < 2) return [];
+    const best = rows.reduce((a, b) => (b.netCredit > a.netCredit ? b : a));
+    return rows.map((r) => ({ ...r, isBest: r.expiration === best.expiration }));
+  }, [exps, strike, buyback, qtyNum]);
+
   const canExecute = qtyNum > 0 && cur && chosen && selectedExp
     && !(sameStrike && sameWeek); // rolling to the exact same leg is a no-op
 
@@ -227,6 +246,35 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
               )}
             </div>
 
+            {/* Roll-timing advisory — informational only, never blocks anything below */}
+            {data.roll_readiness && data.roll_readiness.ready !== null && (
+              <div className={`rounded-lg border p-3 text-sm ${
+                data.roll_readiness.ready
+                  ? "border-violet-500/40 bg-violet-500/10 text-violet-200"
+                  : "border-slate-800 bg-slate-950 text-slate-400"
+              }`}>
+                <div className="flex items-center gap-2">
+                  <span className={`rounded px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide ${
+                    data.roll_readiness.ready ? "bg-violet-500/15 text-violet-300" : "bg-slate-800 text-slate-500"
+                  }`}>
+                    advisory
+                  </span>
+                  <span className="font-semibold">
+                    {data.roll_readiness.ready ? "Clear to roll early" : "No rush — theta still working"}
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-current/90">
+                  {data.roll_readiness.extrinsic_captured_pct != null && (
+                    <>extrinsic {fmt(data.roll_readiness.extrinsic_captured_pct, 0)}% captured (threshold {fmt(data.roll_readiness.decay_threshold_pct, 0)}%)</>
+                  )}
+                  {data.roll_readiness.itm_buffer_pct != null && (
+                    <>{data.roll_readiness.extrinsic_captured_pct != null ? " · " : ""}ITM buffer {fmt(data.roll_readiness.itm_buffer_pct, 1)}% (floor {fmt(data.roll_readiness.itm_floor_pct, 0)}%)</>
+                  )}
+                  {!data.roll_readiness.ready && " — rolling now trades cheap late-cycle decay for a slower-burning fresh contract; usually better to wait unless the strike itself needs to change."}
+                </p>
+              </div>
+            )}
+
             {/* Week choice */}
             <div className="rounded-lg border border-slate-800 bg-slate-950 p-3">
               <div className="mb-2 text-xs uppercase tracking-wide text-slate-500">Roll to week</div>
@@ -263,6 +311,19 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
                 </select>
               )}
             </div>
+
+            {weekComparison.length > 1 && (
+              <div className="rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400">
+                <span className="uppercase tracking-wide text-slate-500">{fmt(strike, 2)} strike, by week</span>
+                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                  {weekComparison.map((r) => (
+                    <span key={r.expiration} className={r.isBest ? "font-semibold text-emerald-300" : ""}>
+                      {r.expiration} ({r.dte}d): {bigDollars(r.netCredit)}{r.isBest ? " · cheapest" : ""}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
 
             {selectedExp?.earnings_in_week && (
               <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 text-sm text-amber-200">

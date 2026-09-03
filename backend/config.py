@@ -838,6 +838,14 @@ EARNINGS_ROLL_ITM_PCT = 0.08
 BUYBACK_DECAY_PCT = 0.75
 BUYBACK_MIN_DTE = 2            # HARD_CFM_RULE — ">2 days to expiration" leg of the rule
 
+# PROPOSED_DEFAULT — roll_advisor.roll_readiness's "clear to roll early" thresholds
+# for the Roll modal. Deliberately separate from BUYBACK_DECAY_PCT above (a
+# different rule, on a different scale — this one reads extrinsic_captured_pct,
+# 0-100, not total premium decay) and from ASSIGNMENT_EXTRINSIC_FLOOR below (a
+# hard cents floor, not a percent buffer). Advisory only — see roll_advisor.py.
+ROLL_READY_DECAY_PCT = 80.0     # % of sold extrinsic already captured
+ROLL_READY_ITM_FLOOR_PCT = 3.0  # % ITM cushion below which the strike itself is thin
+
 # HARD_CFM_RULE — coverage floor: a LEAP below 0.50 delta no longer behaves like
 # stock, so the short call is effectively uncovered risk.
 LEAP_DELTA_FLOOR = 0.50

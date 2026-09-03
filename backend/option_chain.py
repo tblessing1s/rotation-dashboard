@@ -25,6 +25,9 @@ import indicators
 import iv_history
 import logging_handler as log
 import market_calendar
+import position_manager
+import position_types
+import roll_advisor
 import schwab_api
 import screening
 import strike_policy
@@ -274,16 +277,29 @@ def roll_options(ticker: str) -> dict:
         match = next((c for c in contracts if c.get("strike") == cur_strike), None)
     match = indicators._augment(match, underlying) if match else None
     cur_exp = cur_exp or (match or {}).get("expiration")
+    cur_dte = current.get("dte") if current.get("dte") is not None else (match or {}).get("dte")
     current_view = {
         "strike": cur_strike,
         "contracts": current.get("contracts"),
         "expiration": cur_exp,
-        "dte": current.get("dte") if current.get("dte") is not None else (match or {}).get("dte"),
+        "dte": cur_dte,
         "current_bid": (match or {}).get("bid"),
         "current_ask": (match or {}).get("ask"),
         "current_mark": (match or {}).get("mark"),
         "entry_extrinsic_per_share": current.get("entry_extrinsic_per_share"),
     }
+
+    # ADVISORY ONLY (roll_advisor.roll_readiness) — is this contract's extrinsic
+    # mostly banked already, or has the strike itself gone thin on cushion?
+    # Reuses position_manager.enrich_short (the position tile's own decay/
+    # extrinsic math) rather than recomputing it here, so the two views can
+    # never disagree. Never gates which strikes/weeks are offered above.
+    enriched = position_manager.enrich_short(
+        current, price, None, live_mark=(match or {}).get("mark"),
+        position_type=position_types.of(pos))
+    itm_buffer_pct = enriched.get("strike_distance_pct") if enriched.get("itm") else None
+    roll_readiness = roll_advisor.roll_readiness(
+        enriched.get("extrinsic_captured_pct"), itm_buffer_pct, cur_dte)
 
     # Next earnings date — a roll week that SPANS the report gets a deep-ITM
     # suggested strike so the short keeps intrinsic cover across the gap.
@@ -355,6 +371,7 @@ def roll_options(ticker: str) -> dict:
         "iv_rank": iv_history.iv_rank(ticker),
         "current_short": current_view,
         "expirations": expirations,
+        "roll_readiness": roll_readiness,
     }
 
 
