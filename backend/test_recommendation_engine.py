@@ -550,3 +550,80 @@ def test_roll_ticket_new_leg_prices_sanely_against_realistic_vol():
     net = ticket["estimates"]["net_per_share"]
     assert net is not None
     assert -20 < net < 20, f"a weekly-strike roll's net credit should be single digits, got {net}"
+
+
+# ---------------------------------------------------------------------------
+# Action type <-> roll_reason agreement. A roll recommendation is graded from
+# the EXECUTED pair's roll_reason (trust_derive._ROLL_REASON_ACTION), never from
+# the record's own action_type, so the two tables have to agree or a followed
+# recommendation reads as an unmatched action. DIVIDEND_ASSIGNMENT_RISK was the
+# live case: emitted ROLL_OUT with a "defend" ticket, so the roll it asked for
+# graded DEFEND, the rec expired, and a DEFEND coverage miss (a hard graduation
+# blocker) was synthesized for doing exactly what the engine said.
+# ---------------------------------------------------------------------------
+def test_roll_trigger_action_types_agree_with_their_graded_roll_reason():
+    import executor
+    import trust_derive
+    assert set(engine._ROLL_REASON) == set(engine._TRIGGER_ACTION)
+    for rule, reason in engine._ROLL_REASON.items():
+        assert reason in executor.ROLL_REASONS, (rule, reason)
+        assert trust_derive._ROLL_REASON_ACTION.get(reason) == engine._TRIGGER_ACTION[rule], (
+            f"{rule}: engine emits {engine._TRIGGER_ACTION[rule]} but its ticket's "
+            f"roll_reason {reason!r} is graded {trust_derive._ROLL_REASON_ACTION.get(reason)}")
+
+
+def _assignment_risk_case():
+    # ITM short (price 186 vs 180 strike -> 6.00 intrinsic) whose mark 6.05 leaves
+    # 0.05 of extrinsic, below a 0.50 dividend going ex before the 07-17 expiry.
+    # Not below strike (no DEFEND_BELOW_STRIKE), not decayed (no ROLL_75PCT),
+    # 4 DTE (no scheduled roll): the dividend escalation is the only trigger.
+    p = _shares_position(current_bid=6.05)
+    p["dividend"] = {"ex_date": "2026-07-13", "amount": 0.50}
+    tk = _healthy_tk(price=186.0)
+    return p, tk
+
+
+def test_dividend_assignment_risk_emits_defend_with_a_defend_ticket():
+    p, tk = _assignment_risk_case()
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
+    assert len(recs) == 1, recs
+    rec = recs[0]
+    assert rec["trigger_rule"] == TriggerRule.DIVIDEND_ASSIGNMENT_RISK
+    assert rec["action_type"] == ActionType.DEFEND
+    ticket = rec["proposed_ticket"]
+    assert ticket["action"] == "roll_short"
+    assert ticket["roll_reason"] == "defend"
+    # Still a roll OUT to the next weekly — re-establishing time value is the
+    # point; only the graded action type changed.
+    sto = [l for l in ticket["legs"] if l["instruction"] == "SELL_TO_OPEN"][0]
+    assert sto["dte"] == 4 + 7
+
+
+def test_following_a_dividend_assignment_risk_rec_grades_as_matched():
+    import trust_derive
+    from rec_types import Resolution
+    p, tk = _assignment_risk_case()
+    rec = dict(engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])[0])
+    rec["rec_id"] = "rec_00001"
+    # The card hands RollModal the ticket's roll_reason; the executed pair
+    # carries it on both legs (executor stamps roll_reason from the payload).
+    at = (NOW + timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    reason = rec["proposed_ticket"]["roll_reason"]
+    execs = [
+        {"id": "e1", "ticker": "AAPL", "action": "close_short", "date": at,
+         "roll_group_id": "g1", "roll_reason": reason, "close_price_per_share": 6.0,
+         "live_transmitted": True, "source_rec_id": "rec_00001"},
+        {"id": "e2", "ticker": "AAPL", "action": "sell_short", "date": at,
+         "roll_group_id": "g1", "roll_reason": reason, "strike": 178.0,
+         "premium_per_share": 7.0, "live_transmitted": True,
+         "source_rec_id": "rec_00001"},
+    ]
+    state = {"recommendations": [rec], "recommendation_overrides": [],
+             "executions": execs,
+             "metadata": {"trust_layer_since": "2026-01-01T00:00:00Z"}}
+    res = trust_derive.resolve(state, NOW + timedelta(days=4))
+    statuses = {r["status"] for r in res}
+    assert Resolution.COVERAGE_MISS not in statuses, res
+    matched = [r for r in res if r["status"] == Resolution.EXECUTED_MATCHED]
+    assert len(matched) == 1 and matched[0]["rec_id"] == "rec_00001"
+    assert matched[0]["action_type"] == ActionType.DEFEND
