@@ -327,16 +327,19 @@ def _stage_new(stored: list[dict], market: dict, now: datetime) -> dict:
            if r.get("action_type") != ActionType.NO_ACTION}
     if not ids:
         return {}
-    state = log.load_state()
-    staged: dict = {}
-    for rec in state.get("recommendations", []):
-        if rec.get("rec_id") in ids and not rec.get("settle"):
-            verdict = _verdict_for_rec(rec, market, now)
-            if settle.stage(rec, verdict, now):
-                staged[rec["rec_id"]] = rec["settle"]
-    if staged:
-        log.save_state(state)
-    return staged
+    # Read-modify-write under the lock, like release_pending: the gate verdicts
+    # below are cheap and local (no provider read), so the window is small — but
+    # a load/save pair around a loop is still a load/save pair, and a fill the
+    # order poll commits inside it would be overwritten just the same.
+    def _stage(state: dict) -> dict:
+        staged: dict = {}
+        for rec in state.get("recommendations", []):
+            if rec.get("rec_id") in ids and not rec.get("settle"):
+                verdict = _verdict_for_rec(rec, market, now)
+                if settle.stage(rec, verdict, now):
+                    staged[rec["rec_id"]] = rec["settle"]
+        return staged
+    return log.mutate_state(_stage)
 
 
 def _trigger_still_holds(rec: dict, market: dict, state: dict, now: datetime):
@@ -359,6 +362,27 @@ def _trigger_still_holds(rec: dict, market: dict, state: dict, now: datetime):
     return False
 
 
+# Which summary counter each terminal transition increments.
+_SUMMARY_KEY = {
+    settle.SettleStatus.EXPIRED: "expired",
+    settle.SettleStatus.SELF_CANCELED: "self_canceled",
+    settle.SettleStatus.RELEASED: "released",
+}
+
+
+def _mark_by_id(state: dict, rec_id: str, status: str, now: datetime,
+                note: str) -> dict | None:
+    """Stamp a settle transition on the rec as it exists in ``state``. Used inside
+    mutate_state so the write lands on the freshly loaded copy, never on a rec
+    object read before the slow work. Returns the fresh rec, or None when it is
+    gone or was never staged."""
+    rec = settle.find(state, rec_id)
+    if rec is None or not rec.get("settle"):
+        return None
+    settle.mark(rec, status, now, note)
+    return rec
+
+
 def release_pending(now: datetime | None = None, market: dict | None = None,
                     notify: bool = True, dry_run: bool | None = None,
                     submit_fn=None) -> dict:
@@ -366,52 +390,101 @@ def release_pending(now: datetime | None = None, market: dict | None = None,
     against a fresh snapshot: still-firing -> RELEASED (and, if pre-approved,
     auto-submitted via ``submit_fn``); cleared -> SELF_CANCELED (with a
     notification); stale past validity -> EXPIRED. All transitions append to the
-    record. Deterministic given ``now``."""
+    record. Deterministic given ``now``.
+
+    THE WRITE ORDER IS THE POINT OF THE PHASING BELOW. This used to load state,
+    build the market snapshot (a provider fetch per open position), run the
+    auto-submit, and only then save_state() the copy loaded before any of it.
+    Two ways to lose a write, and the second is not even a race:
+
+      * a fill committed by the order poll during the snapshot fetch was
+        overwritten — the case logging_handler.mutate_state exists for;
+      * the pre-approved auto-submit's OWN execution was erased. The submit
+        commits through log.append_execution; the trailing save of the pre-submit
+        copy then wrote over it. The record said EXECUTED while the book held no
+        execution for an order that was live at the broker, so positions and the
+        theta ledger missed it and the next reconciliation would flag the
+        broker's real leg as UNEXPECTED.
+
+    So: decide against the snapshot, apply the transitions to a FRESH state under
+    the lock, submit OUTSIDE the lock, then record the outcome on a fresh state
+    again. The submit must stay outside because _lock is an RLock — a nested
+    append would be allowed to run and then be clobbered by the outer save, which
+    makes reentrancy silent here rather than a deadlock.
+    """
     now = _coerce_now(now)
     state = log.load_state()
     due = settle.due(state, now)
     summary = {"released": 0, "self_canceled": 0, "expired": 0, "executed": 0}
     if not due:
         return summary
+
+    # ---- 1) Decide. Slow (a provider fetch per position), and writes nothing. -
     if market is None:
         market = build_market_snapshot(state, include_entry=False)
-    events: list[tuple[dict, str]] = []
+    decisions: list[dict] = []
     for rec in due:
         if settle.is_expired(rec, now):
-            settle.mark(rec, settle.SettleStatus.EXPIRED, now,
-                        "validity window elapsed before the settle window opened")
-            summary["expired"] += 1
-            events.append((rec, settle.SettleStatus.EXPIRED))
+            decisions.append({"rec_id": rec.get("rec_id"),
+                              "status": settle.SettleStatus.EXPIRED, "submit": False,
+                              "note": "validity window elapsed before the settle "
+                                      "window opened"})
             continue
         holds = _trigger_still_holds(rec, market, state, now)
         if holds is False:
-            settle.mark(rec, settle.SettleStatus.SELF_CANCELED, now,
-                        "trigger no longer valid at release — condition cleared "
-                        "(e.g. the gap filled / stock recovered above the strike)")
-            summary["self_canceled"] += 1
-            events.append((rec, settle.SettleStatus.SELF_CANCELED))
+            decisions.append({"rec_id": rec.get("rec_id"),
+                              "status": settle.SettleStatus.SELF_CANCELED, "submit": False,
+                              "note": "trigger no longer valid at release — condition "
+                                      "cleared (e.g. the gap filled / stock recovered "
+                                      "above the strike)"})
             continue
-        note = ("released after the settle window; trigger re-validated"
-                if holds else "released; trigger could not be re-validated — confirm manually")
-        settle.mark(rec, settle.SettleStatus.RELEASED, now, note)
-        summary["released"] += 1
-        if holds and rec["settle"].get("pre_approved") and submit_fn is not None:
-            try:
-                submit_fn(rec, now)
-                settle.mark(rec, settle.SettleStatus.EXECUTED, now,
-                            "auto-submitted on release (pre-approved, trigger re-validated)")
-                summary["executed"] += 1
-                events.append((rec, settle.SettleStatus.EXECUTED))
-                continue
-            except Exception as e:  # noqa: BLE001 — a submit failure never loses the record
-                settle.mark(rec, settle.SettleStatus.RELEASED, now,
-                            f"pre-approved auto-submit failed ({e}); confirm manually")
-        events.append((rec, settle.SettleStatus.RELEASED))
-    log.save_state(state)
-    if notify and events:
-        _notify_settle(events, state, dry_run)
-    return summary
+        decisions.append({
+            "rec_id": rec.get("rec_id"), "status": settle.SettleStatus.RELEASED,
+            "note": ("released after the settle window; trigger re-validated" if holds
+                     else "released; trigger could not be re-validated — confirm manually"),
+            "submit": bool(holds and (rec.get("settle") or {}).get("pre_approved")
+                           and submit_fn is not None),
+        })
 
+    # ---- 2) Apply, to a state loaded now rather than before the fetch. --------
+    def _apply(fresh: dict) -> list[dict]:
+        applied = []
+        for d in decisions:
+            # Re-check PENDING on the fresh copy: the operator may have dismissed
+            # the rec, or a concurrent pass moved it, while we were fetching.
+            rec = settle.find(fresh, d["rec_id"])
+            if rec is None or not settle.is_pending(rec):
+                continue
+            settle.mark(rec, d["status"], now, d["note"])
+            summary[_SUMMARY_KEY[d["status"]]] += 1
+            applied.append({**d, "rec": rec})
+        return applied
+
+    applied = log.mutate_state(_apply)
+
+    # ---- 3) Submit outside the lock; record the outcome on a fresh state. -----
+    events: list[tuple[dict, str]] = []
+    for d in applied:
+        status = d["status"]
+        if d["submit"]:
+            try:
+                submit_fn(d["rec"], now)
+                status = settle.SettleStatus.EXECUTED
+                note = ("auto-submitted on release (pre-approved, trigger "
+                        "re-validated)")
+                summary["executed"] += 1
+            except Exception as e:  # noqa: BLE001 — a submit failure never loses the record
+                status = settle.SettleStatus.RELEASED
+                note = f"pre-approved auto-submit failed ({e}); confirm manually"
+            fresh_rec = log.mutate_state(
+                lambda st, rid=d["rec_id"], s=status, n=note: _mark_by_id(st, rid, s, now, n))
+            if fresh_rec is not None:
+                d["rec"] = fresh_rec
+        events.append((d["rec"], status))
+
+    if notify and events:
+        _notify_settle(events, log.load_state(), dry_run)
+    return summary
 
 def _notify_settle(events: list[tuple[dict, str]], state: dict,
                    dry_run: bool | None) -> None:
