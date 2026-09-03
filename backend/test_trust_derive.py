@@ -564,3 +564,62 @@ def test_share_balance_replays_in_date_order_not_log_order():
     ]))
     assert [a["action_type"] for a in acts] == [ActionType.ENTER, ActionType.EXIT]
     assert acts[0]["execution_ids"] == ["e1"] and acts[1]["execution_ids"] == ["e2"]
+
+
+# ---------------------------------------------------------------------------
+# Coverage-miss acknowledgements (schema v23): classify, never excuse.
+# ---------------------------------------------------------------------------
+def _ack(ids, reason="OPERATOR_DISCRETION", note=None, aid="ack_00001"):
+    return {"id": aid, "execution_ids": list(ids), "reason": reason, "note": note,
+            "at": _iso(NOW - timedelta(minutes=30))}
+
+
+def test_miss_key_is_order_independent():
+    assert trust_derive.miss_key(["b", "a"]) == trust_derive.miss_key(["a", "b"]) == "a,b"
+    assert trust_derive.miss_key([]) == ""
+
+
+def test_acknowledgement_attaches_to_its_miss_and_no_other():
+    pair = _roll_pair(gid="roll1", reason="scheduled")
+    other = _roll_pair(gid="roll2", reason="scheduled", at=NOW - timedelta(hours=1))
+    state = _state(execs=pair + other)
+    state["coverage_miss_acks"] = [_ack(["roll1_s", "roll1_c"], note="rolled early on purpose")]
+    res = trust_derive.resolve(state, NOW)
+    misses = {r["miss_key"]: r for r in res if r["status"] == Resolution.COVERAGE_MISS}
+    assert set(misses) == {"roll1_c,roll1_s", "roll2_c,roll2_s"}
+    acked = misses["roll1_c,roll1_s"]["acknowledged"]
+    assert acked["reason"] == "OPERATOR_DISCRETION" and acked["note"] == "rolled early on purpose"
+    assert acked["id"] == "ack_00001"
+    assert "acknowledged" not in misses["roll2_c,roll2_s"]
+
+
+def test_first_acknowledgement_wins():
+    state = _state(execs=_roll_pair(gid="roll1", reason="scheduled"))
+    state["coverage_miss_acks"] = [_ack(["roll1_c", "roll1_s"], reason="RULE_GAP", aid="ack_00001"),
+                                   _ack(["roll1_c", "roll1_s"], reason="OTHER", aid="ack_00002")]
+    res = trust_derive.resolve(state, NOW)
+    miss = [r for r in res if r["status"] == Resolution.COVERAGE_MISS][0]
+    assert miss["acknowledged"]["id"] == "ack_00001"
+    assert miss["acknowledged"]["reason"] == "RULE_GAP"
+
+
+def test_acknowledged_miss_still_counts_and_still_blocks_graduation():
+    # A clean history that would otherwise clear the cycle bar, plus one
+    # acknowledged miss: coverage, the miss total, and graduation all read the
+    # miss exactly as they would an unacknowledged one.
+    recs, execs = _clean_history(n=12, action=ActionType.EXIT)
+    # A different ticker: same-day close legs on one name collapse into a
+    # single exit action, which would fold this into the matched cycle.
+    miss = _exit_exec("exec_miss", ticker="MSFT", at=NOW - timedelta(minutes=5), live=True)
+    state = _state(recs=recs, execs=execs + [miss])
+    state["coverage_miss_acks"] = [_ack(["exec_miss"])]
+    res = trust_derive.resolve(state, NOW)
+    board = trust_derive.scoreboard(state, res, {}, NOW)
+    cov = board["by_action_type"][ActionType.EXIT]["coverage"]
+    assert cov["total_manual_actions"] == 13 and cov["matched"] == 12
+    assert cov["misses_acknowledged"] == 1
+    assert board["totals"]["coverage_misses"] == 1
+    assert board["totals"]["coverage_misses_acknowledged"] == 1
+    grad = board["by_action_type"][ActionType.EXIT]["graduation"]
+    assert grad["eligible"] is False
+    assert any("coverage miss" in f for f in grad["failing"])

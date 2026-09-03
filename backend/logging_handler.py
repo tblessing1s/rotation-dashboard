@@ -88,6 +88,10 @@ def _default_state() -> dict:
         # order_events source is capped, graded verdicts must outlive it).
         "recommendations": [],
         "recommendation_overrides": [],
+        # Operator acknowledgements of coverage misses (schema v23): append-only,
+        # immutable, keyed on the miss's execution ids. Classifies a miss; never
+        # removes one (see rec_types.MissAckReason).
+        "coverage_miss_acks": [],
         "order_fidelity": {},
         # Per-position accrual ledger (schema v21) — realized extrinsic at cycle
         # close plus received dividends, compounding toward the next 100-share lot.
@@ -657,6 +661,22 @@ def append_recommendation_override(override: dict) -> dict:
         recompute_derived(state)
         save_state(state)
         return override
+
+
+def append_coverage_miss_ack(ack: dict) -> dict:
+    """Append one operator acknowledgement of a coverage miss (coded reason +
+    optional note, keyed on the miss's execution ids). Immutable once written;
+    the derived resolution picks it up on the recompute below. Validation of the
+    reason and of the miss's existence happens at the API layer."""
+    with _lock:
+        state = load_state()
+        ack = dict(ack)
+        ack.setdefault("id", f"ack_{len(state.get('coverage_miss_acks', [])) + 1:05d}")
+        ack.setdefault("at", utcnow())
+        state.setdefault("coverage_miss_acks", []).append(ack)
+        recompute_derived(state)
+        save_state(state)
+        return ack
 
 
 def get_order_lock(intent_key: str) -> dict | None:

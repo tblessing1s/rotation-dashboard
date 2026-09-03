@@ -236,6 +236,13 @@ export const api = {
       body: JSON.stringify({ rec_id: recId, approve }),
     }),
   trustScoreboard: () => request("/api/trust-scoreboard"),
+  // Classify a coverage miss with a coded reason. The miss stays counted (and
+  // still blocks graduation); it stops re-paging and reads as acknowledged.
+  acknowledgeMiss: (executionIds, reason, note) =>
+    request("/api/recommendations/acknowledge-miss", {
+      method: "POST",
+      body: JSON.stringify({ execution_ids: executionIds, reason, ...(note ? { note } : {}) }),
+    }),
   reconcile: () => request("/api/reconcile"),
   runReconcile: () => request("/api/reconcile", { method: "POST" }),
   verifyFills: (limit) =>

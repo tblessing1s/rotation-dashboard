@@ -1041,6 +1041,8 @@ def check_trust_coverage_miss(state: dict) -> list[dict]:
             continue
         if str(res.get("at") or "")[:10] < cutoff:
             continue
+        if res.get("acknowledged"):
+            continue  # classified by the operator — stays on the board, stops paging
         t = res.get("ticker")
         execs = ",".join(str(x) for x in res.get("execution_ids") or [])
         out.append(_alert(

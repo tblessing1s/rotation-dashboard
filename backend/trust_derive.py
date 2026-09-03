@@ -48,6 +48,7 @@ from rec_types import (ActionType, CheckStatus, FidelityCheck, FidelityDefect,
 _ROLL_REASON_ACTION = {
     "scheduled": ActionType.ROLL_OUT,
     "75%-rule": ActionType.ROLL_OUT,
+    "extrinsic-captured": ActionType.ROLL_OUT,   # ROLL_EXTRINSIC_CAPTURED early roll
     "earnings": ActionType.ROLL_OUT,
     "defend": ActionType.DEFEND,
     # kill-switch-exit rolls are part of an exit in progress — the close_leap
@@ -315,12 +316,29 @@ def map_actions(state: dict) -> list[dict]:
     return out
 
 
+def miss_key(execution_ids) -> str:
+    """The stable identity of one coverage miss: its execution ids, sorted and
+    joined. A miss has no rec_id (that is what makes it a miss), so this is what
+    an acknowledgement is keyed on, and it is order-independent so the UI can
+    hand back the ids in any order."""
+    return ",".join(sorted(str(i) for i in (execution_ids or []) if i))
+
+
+def _acks_by_key(state: dict) -> dict[str, dict]:
+    """First acknowledgement per miss wins (mirrors overrides)."""
+    out: dict[str, dict] = {}
+    for ack in state.get("coverage_miss_acks", []) or []:
+        out.setdefault(miss_key(ack.get("execution_ids")), ack)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # 2) Resolution matching
 # ---------------------------------------------------------------------------
 def resolve(state: dict, now: datetime) -> list[dict]:
     """Derive recommendation_resolutions from recs + overrides + executions."""
     recs = state.get("recommendations", []) or []
+    acks = _acks_by_key(state)
     by_id = {r.get("rec_id"): r for r in recs}
     overrides: dict[str, dict] = {}
     for ov in state.get("recommendation_overrides", []) or []:
@@ -429,15 +447,24 @@ def resolve(state: dict, now: datetime) -> list[dict]:
     for idx, inst in enumerate(actions):
         if idx in matched_actions:
             continue
-        resolutions.append({
+        key = miss_key(inst["execution_ids"])
+        miss = {
             "rec_id": None, "status": Resolution.COVERAGE_MISS,
             "action_type": inst["action_type"], "ticker": inst["ticker"],
             "execution_ids": inst["execution_ids"], "live": inst["live"],
             "at": _iso(inst["at"]),
+            "miss_key": key,
             "snapshot": {"strike": inst.get("strike"), "net": inst.get("net"),
                          "roll_reason": inst.get("roll_reason"),
                          "exit_reason": inst.get("exit_reason")},
-        })
+        }
+        ack = acks.get(key)
+        if ack:
+            # Classified, not excused: the miss stays a miss for coverage and
+            # graduation; only the read (and the alert) change.
+            miss["acknowledged"] = {"id": ack.get("id"), "reason": ack.get("reason"),
+                                    "note": ack.get("note"), "at": ack.get("at")}
+        resolutions.append(miss)
     return resolutions
 
 
@@ -825,6 +852,10 @@ def scoreboard(state: dict, resolutions: list[dict], fidelity_map: dict,
                 "matched": len(matched), "total_manual_actions": total_manual,
                 "rate": round(len(matched) / total_manual, 3) if total_manual else None,
                 "misses": misses,
+                # Acknowledged misses are still misses (the rate above and the
+                # graduation gate both count them); this only says how many the
+                # operator has classified.
+                "misses_acknowledged": sum(1 for m in misses if m.get("acknowledged")),
             },
             "precision": {
                 "executed_matched": len(matched), "overridden": len(overridden),
@@ -853,6 +884,9 @@ def scoreboard(state: dict, resolutions: list[dict], fidelity_map: dict,
                              if r.get("trigger_rule") == TriggerRule.ALL_CLEAR),
             "coverage_misses": sum(1 for r in resolutions
                                    if r["status"] == Resolution.COVERAGE_MISS),
+            "coverage_misses_acknowledged": sum(
+                1 for r in resolutions
+                if r["status"] == Resolution.COVERAGE_MISS and r.get("acknowledged")),
             "fidelity_failures": sum(1 for f in fidelity if f.get("pass") is False),
         },
         "reconciliation_status": ("NOT_YET_IMPLEMENTED"),

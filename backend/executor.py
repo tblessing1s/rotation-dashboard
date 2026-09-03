@@ -143,7 +143,8 @@ class SpreadAckRequiredError(RuntimeError):
 
 # Why a roll happened — the whipsaw ledger key. Unrecognized values fall back to
 # "scheduled" so the ledger enum stays clean for later calibration.
-ROLL_REASONS = {"scheduled", "75%-rule", "defend", "earnings", "kill-switch-exit"}
+ROLL_REASONS = {"scheduled", "75%-rule", "defend", "earnings", "kill-switch-exit",
+                "extrinsic-captured"}   # the engine's early juice-capture roll
 
 # Why a cycle ended — a CODED reason (exit_reasons.ExitReason) logged on the
 # close_leap execution and carried onto the derived cycle record. Validated at

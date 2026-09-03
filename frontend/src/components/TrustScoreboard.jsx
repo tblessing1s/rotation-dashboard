@@ -104,6 +104,71 @@ function ActionTypeCard({ actionType, m }) {
 }
 
 // A loud (CRITICAL-styled) list: red when populated, a calm green line when not.
+// Coded reasons for acknowledging a coverage miss (rec_types.MissAckReason).
+// An acknowledgement classifies the miss — it does not excuse it: the miss keeps
+// counting against coverage and graduation; it only stops re-paging.
+const MISS_ACK_REASONS = [
+  ["OPERATOR_DISCRETION", "I acted outside the rules on purpose"],
+  ["ENGINE_MISSED", "A rule should have fired — engine defect"],
+  ["RULE_GAP", "No rule covers what I did — candidate rule"],
+  ["OTHER", "Other (note required)"],
+];
+
+function MissAckForm({ miss, onDone, onCancel }) {
+  const toast = useToast();
+  const [reason, setReason] = React.useState("OPERATOR_DISCRETION");
+  const [note, setNote] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const needsNote = reason === "OTHER";
+  async function submit() {
+    setBusy(true);
+    try {
+      await api.acknowledgeMiss(miss.execution_ids || [], reason, note.trim() || undefined);
+      toast.show(`${miss.ticker} ${miss.action_type} miss acknowledged (${reason})`, { type: "success" });
+      onDone?.();
+    } catch (e) {
+      toast.show(String(e.message || e), { type: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <div className="mt-1.5 rounded-md border border-rose-400/40 bg-slate-950/60 p-2 text-xs text-slate-200">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-400">
+        Acknowledge — still counts as a miss; stops paging
+      </div>
+      <div className="space-y-1">
+        {MISS_ACK_REASONS.map(([code, label]) => (
+          <label key={code} className="flex items-center gap-2">
+            <input
+              type="radio" name={`ack-${miss.miss_key}`} checked={reason === code}
+              onChange={() => setReason(code)}
+            />
+            <span className="font-mono text-[11px] text-slate-300">{code}</span>
+            <span className="text-slate-400">{label}</span>
+          </label>
+        ))}
+      </div>
+      <input
+        value={note} onChange={(e) => setNote(e.target.value)}
+        placeholder={needsNote ? "Note (required)" : "Note (optional)"}
+        className="mt-2 w-full rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-100"
+      />
+      <div className="mt-2 flex gap-2">
+        <button
+          onClick={submit} disabled={busy || (needsNote && !note.trim())}
+          className="rounded-full border border-rose-500/60 bg-rose-500/20 px-2.5 py-0.5 text-xs font-semibold text-rose-100 hover:bg-rose-500/30 disabled:opacity-50"
+        >
+          {busy ? "Saving…" : "Acknowledge"}
+        </button>
+        <button onClick={onCancel} className="rounded-full border border-slate-600 px-2.5 py-0.5 text-xs text-slate-300 hover:bg-slate-800">
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function LoudSection({ title, items, renderItem }) {
   if (!items || items.length === 0) {
     return (
@@ -126,6 +191,7 @@ export default function TrustScoreboard() {
   const toast = useToast();
   const { data, error, loading, reload } = useApi(api.trustScoreboard, [], null);
   const [running, setRunning] = React.useState(false);
+  const [ackKey, setAckKey] = React.useState(null); // miss_key with the ack form open
 
   async function runNow() {
     setRunning(true);
@@ -196,6 +262,9 @@ export default function TrustScoreboard() {
           {" "}({board.open_actionable ?? 0} actionable)</span>
         <span className={totals.coverage_misses ? "text-rose-300" : ""}>
           coverage misses <span className="font-semibold">{totals.coverage_misses ?? 0}</span>
+          {totals.coverage_misses_acknowledged ? (
+            <span className="text-slate-400"> ({totals.coverage_misses_acknowledged} acknowledged)</span>
+          ) : null}
         </span>
         <span className={totals.fidelity_failures ? "text-rose-300" : ""}>
           fidelity failures <span className="font-semibold">{totals.fidelity_failures ?? 0}</span>
@@ -217,16 +286,40 @@ export default function TrustScoreboard() {
         <LoudSection
           title="Coverage misses (you acted, the engine hadn't committed)"
           items={misses}
-          renderItem={(mi, i) => (
-            <li key={i} className="text-rose-100">
-              <span className="font-semibold">{mi.ticker}</span>
-              {" · "}{(mi.action_type || "").replaceAll("_", " ")}
-              {" · "}{ts(mi.at)}
-              {(mi.execution_ids || []).length > 0 && (
-                <span className="text-rose-300/80"> · exec {(mi.execution_ids || []).join(", ")}</span>
-              )}
-            </li>
-          )}
+          renderItem={(mi, i) => {
+            const ack = mi.acknowledged;
+            const key = mi.miss_key || (mi.execution_ids || []).join(",") || String(i);
+            return (
+              <li key={key} className={ack ? "text-rose-200/70" : "text-rose-100"}>
+                <span className="font-semibold">{mi.ticker}</span>
+                {" · "}{(mi.action_type || "").replaceAll("_", " ")}
+                {" · "}{ts(mi.at)}
+                {(mi.execution_ids || []).length > 0 && (
+                  <span className="text-rose-300/80"> · exec {(mi.execution_ids || []).join(", ")}</span>
+                )}
+                {ack ? (
+                  <span className="text-slate-400" title={ack.note || undefined}>
+                    {" · "}acknowledged <span className="font-mono text-[11px]">{ack.reason}</span>
+                    {ack.note ? ` — ${ack.note}` : ""}
+                  </span>
+                ) : ackKey === key ? (
+                  <MissAckForm
+                    miss={mi}
+                    onDone={() => { setAckKey(null); reload(); }}
+                    onCancel={() => setAckKey(null)}
+                  />
+                ) : (
+                  <button
+                    onClick={() => setAckKey(key)}
+                    className="ml-2 rounded-full border border-rose-400/50 px-2 py-0.5 text-[11px] text-rose-200 hover:bg-rose-500/20"
+                    title="Classify this miss with a coded reason. It still counts; it stops paging."
+                  >
+                    Acknowledge
+                  </button>
+                )}
+              </li>
+            );
+          }}
         />
         <LoudSection
           title="Fidelity failures (staged order broke its contract)"

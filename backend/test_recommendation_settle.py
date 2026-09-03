@@ -43,11 +43,13 @@ def test_current_version_and_migration_chain():
     # shares-primary base leg (position_type discriminator + lot-aware shares
     # record); v19 added the transaction-ingestion stores. (Named for v18 until the
     # chain outgrew it — the assertion is the head version, whatever it is.)
-    assert migrations.CURRENT_VERSION == 22
+    assert migrations.CURRENT_VERSION == 23
     assert migrations.MIGRATIONS[17] is migrations._v17_to_v18
     assert migrations.MIGRATIONS[18] is migrations._v18_to_v19
     assert migrations.MIGRATIONS[19] is migrations._v19_to_v20
     assert migrations.MIGRATIONS[20] is migrations._v20_to_v21
+    assert migrations.MIGRATIONS[21] is migrations._v21_to_v22
+    assert migrations.MIGRATIONS[22] is migrations._v22_to_v23
 
 
 # ---- staging -----------------------------------------------------------------

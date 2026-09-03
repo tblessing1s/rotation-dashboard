@@ -1442,6 +1442,45 @@ def api_recommendations_dismiss():
         return _err(e)
 
 
+@app.route("/api/recommendations/acknowledge-miss", methods=["POST"])
+def api_recommendations_acknowledge_miss():
+    """Operator acknowledgement of a COVERAGE_MISS with a CODED reason (+ optional
+    note; OTHER requires one). Appends an immutable record keyed on the miss's
+    execution ids — the miss itself is derived and is never removed; it is
+    classified. Body: {execution_ids: [...], reason, note?}."""
+    import rec_types
+    import trust_derive
+    payload = request.get_json(silent=True) or {}
+    ids = payload.get("execution_ids") or []
+    if isinstance(ids, str):
+        ids = [ids]
+    ids = [str(i) for i in ids if i]
+    reason = str(payload.get("reason") or "").strip().upper()
+    note = (payload.get("note") or "").strip() or None
+    if not ids:
+        return jsonify({"error": "execution_ids is required"}), 400
+    if not rec_types.is_miss_ack_reason(reason):
+        return jsonify({"error": f"reason must be one of {sorted(rec_types.MISS_ACK_REASONS)}"}), 400
+    if rec_types.miss_ack_requires_note(reason) and not note:
+        return jsonify({"error": f"a typed note is required for {reason}"}), 400
+    try:
+        state = log.load_state()
+        key = trust_derive.miss_key(ids)
+        miss = next((r for r in state.get("recommendation_resolutions", []) or []
+                     if r.get("status") == "COVERAGE_MISS" and r.get("miss_key") == key), None)
+        if miss is None:
+            return jsonify({"error": f"no coverage miss on executions {', '.join(sorted(ids))}"}), 404
+        if miss.get("acknowledged"):
+            return jsonify({"error": "that coverage miss is already acknowledged",
+                            "acknowledged": miss["acknowledged"]}), 409
+        stored = log.append_coverage_miss_ack({
+            "execution_ids": sorted(ids), "ticker": miss.get("ticker"),
+            "action_type": miss.get("action_type"), "reason": reason, "note": note})
+        return jsonify({"acknowledgement": stored})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/recommendations/preapprove", methods=["POST"])
 def api_recommendations_preapprove():
     """Toggle pre-approval on a PENDING_SETTLE recommendation. A pre-approved rec

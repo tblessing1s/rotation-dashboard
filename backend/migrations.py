@@ -17,7 +17,7 @@ import logging
 
 logger = logging.getLogger("cfm.alerts")
 
-CURRENT_VERSION = 22
+CURRENT_VERSION = 23
 
 
 class MigrationAbortedError(RuntimeError):
@@ -396,6 +396,21 @@ def _v21_to_v22(state: dict) -> dict:
     return state
 
 
+def _v22_to_v23(state: dict) -> dict:
+    """v23 (coverage-miss acknowledgements): one additive store.
+
+    ``coverage_miss_acks`` is the operator's append-only, immutable record
+    against a COVERAGE_MISS — a coded reason (rec_types.MissAckReason) keyed on
+    the miss's execution ids, the mirror of ``recommendation_overrides``. It
+    classifies the miss (operator discretion vs an engine that should have
+    fired vs a rule that doesn't exist yet); it never removes one. The derived
+    resolution carries the acknowledgement, the alert stops re-paging it, and
+    coverage / graduation count it exactly as before. Seeded empty; nothing is
+    backfilled — an acknowledgement is an operator act, never inferred."""
+    state.setdefault("coverage_miss_acks", [])
+    return state
+
+
 MIGRATIONS = {
     1: _v1_to_v2,
     2: _v2_to_v3,
@@ -418,6 +433,7 @@ MIGRATIONS = {
     19: _v19_to_v20,
     20: _v20_to_v21,
     21: _v21_to_v22,
+    22: _v22_to_v23,
 }
 
 

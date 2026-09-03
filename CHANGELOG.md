@@ -1,5 +1,32 @@
 # Changelog
 
+## v2.16.0 — Coverage-miss acknowledgements + the extrinsic-captured roll (state schema v23)
+
+Two trust-layer additions, both born from the first live coverage misses.
+
+- **Acknowledge a coverage miss** (`coverage_miss_acks`, append-only,
+  immutable, schema v23): the operator classifies a miss with a coded reason —
+  `OPERATOR_DISCRETION`, `ENGINE_MISSED`, `RULE_GAP`, `OTHER`+note
+  (`rec_types.MissAckReason`) — keyed on the miss's execution ids. An
+  acknowledged miss STILL counts against coverage and still blocks graduation
+  for its window (the hard rule is untouched); it stops re-paging through
+  `TRUST_COVERAGE_MISS` and reads as acknowledged on the scoreboard. `POST
+  /api/recommendations/acknowledge-miss`; Acknowledge button on the scoreboard's
+  miss list. Derived resolutions now carry `miss_key` + `acknowledged`.
+- **`ROLL_EXTRINSIC_CAPTURED`** (TRAVIS_EXTENSION): once
+  `config.ROLL_EXTRINSIC_CAPTURED_PCT` (anchored to the Roll modal's advisory
+  `ROLL_READY_DECAY_PCT`, 80%) of the extrinsic sold at entry is captured, the
+  engine recommends rolling OUT to the next weekly at any remaining DTE — the
+  juice is banked, sell fresh extrinsic. Reads `enrich_short`'s
+  `extrinsic_captured_pct`, not total premium decay (an ITM short's intrinsic
+  keeps the 75% rule from firing long after the extrinsic is gone). Ranked
+  after the scheduled weekly roll so an imminent expiry still reads as cadence.
+  New roll reason `extrinsic-captured` (executor, trust grading → ROLL_OUT).
+- **Fix** DIVIDEND_ASSIGNMENT_RISK recommendations are graded DEFEND (their
+  ticket already carried roll reason `defend`, so following one could never
+  match and synthesized a DEFEND coverage miss). A guard test pins every roll
+  trigger's action type to what its ticket's roll reason grades as.
+
 ## v2.15.0 — Multiple accounts
 
 One Schwab login usually reaches several brokerage accounts — and sometimes the
