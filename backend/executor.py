@@ -3900,6 +3900,16 @@ def _sell_short(payload, ticker, strike, contracts, stock_price):
         "premium_per_share": premium_per_share, "premium_total": premium_total,
         "stock_price": stock_price, "entry_extrinsic_per_share": entry_extrinsic_per_share,
     }
+    # ROLL_STRIKE_CHOICE (TRAVIS_EXTENSION, shadow/telemetry-only) — present only
+    # when this open leg came from the Roll dialog's regime-target advisory
+    # (roll_advisor / strike_policy.regime_target_strike). A nested, ADDITIVE
+    # field: recompute_derived's theta/accrual ledgers read only named scalar
+    # fields (net_juice/net_juice_total etc, see logging_handler.py) and never
+    # this key, so it carries no accounting weight — it exists purely so a later
+    # analysis can see what was recommended vs. what was actually chosen.
+    choice = payload.get("roll_strike_choice")
+    if choice:
+        execution["roll_strike_choice"] = dict(choice)
 
     def apply(position):
         position.setdefault("short_calls", []).append({
@@ -4212,6 +4222,7 @@ def _place_legged_roll(payload, ticker, contracts, stock_price, price_source):
         "expiration": payload.get("to_expiration"),
         "dte": payload.get("to_dte", payload.get("dte", 5)), "stock_price": stock_price,
         "roll_group_id": roll_group_id, "roll_leg": "open", "roll_reason": reason,
+        "roll_strike_choice": payload.get("roll_strike_choice"),
     }
     # Buy-to-close first, then sell-to-open — the historical legged order.
     close_res = _place_live(close_payload, ticker, "close_short", contracts,
@@ -4700,6 +4711,7 @@ def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source,
         "stock_price": stock_price,
         "expiration": payload.get("to_expiration"),
         "dte": payload.get("to_dte", payload.get("dte", 5)),
+        "roll_strike_choice": payload.get("roll_strike_choice"),
     }
     sell_exec, sell_apply = _sell_short(sell_payload, ticker, to_strike, contracts, stock_price)
 

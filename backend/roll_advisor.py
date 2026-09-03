@@ -58,3 +58,101 @@ def roll_readiness(extrinsic_captured_pct: float | None,
         "dte": dte,
         "advisory": True,
     }
+
+
+# ---------------------------------------------------------------------------
+# Phase-1 roll-dialog audit (2026-09) — juice/wk, cushion, week ranking, and the
+# roll-up guard. SINGLE-SOURCED here (not reimplemented in the frontend) so the
+# number the operator decides on and the number a test pins can never drift;
+# ``option_chain.roll_options`` attaches ``juice_per_week_pct``/``cushion_atr``
+# to every strike row server-side, and ``frontend/src/components/RollModal.jsx``
+# only ever DISPLAYS/RANKS what's already there — it does no price arithmetic
+# of its own. All PURE, all advisory/shadow: nothing here blocks anything.
+# ---------------------------------------------------------------------------
+
+def juice_per_week(mark: float | None, strike: float | None,
+                   spot: float | None, dte: int | None) -> float | None:
+    """Extrinsic yield, normalized to a 7-CALENDAR-day week — the SAME day-count
+    convention as ``burn.net_juice_per_week`` ([NET_JUICE_TIME_BASE]), so this
+    number is directly comparable to it and to config.SHARES_JUICE_FLOOR_PCT.
+    Expressed as %/wk (matches SHARES_JUICE_FLOOR_PCT's own 0-100-ish scale, not
+    a 0-1 fraction). ``new_extrinsic = mark - max(spot-strike, 0)`` per the
+    roll-dialog audit spec — mark-based, not the bid/ask-midpoint
+    ``indicators.calculate_extrinsic`` other pickers use; the two are
+    deliberately different metrics shown side by side in the roll dialog (see
+    the audit's §0.3/§1.7 notes), not a bug.
+
+    None when any input is missing or dte<=0 (a same-day/expired contract has no
+    meaningful weekly rate). PURE."""
+    if mark is None or strike is None or not spot or not dte or dte <= 0:
+        return None
+    intrinsic = max(spot - strike, 0.0)
+    extrinsic = mark - intrinsic
+    return (extrinsic / spot) * (7.0 / dte) * 100.0
+
+
+def cushion_atr(strike: float | None, spot: float | None, atr_value: float | None) -> float | None:
+    """Downside cushion in ATR units: (spot - strike) / ATR. Display-only. PURE."""
+    if strike is None or not spot or not atr_value:
+        return None
+    return (spot - strike) / atr_value
+
+
+def rank_weeks_by_juice(rows: list[dict], parity_band_pct: float | None = None) -> dict:
+    """Pick the "best rate" week from ``rows`` (each ``{"expiration", "dte",
+    "juice_per_week_pct"}``, e.g. one strike's row across every candidate
+    expiration) — the highest juice/wk, with two weeks within
+    ``parity_band_pct`` (default config.ROLL_JUICE_PARITY_BAND_PCT) of each
+    other treated as a tie and broken toward the SHORTER DTE (fewer days of gap
+    risk, more roll opportunities). Deliberately NOT a net-debit ranking — see
+    the roll-dialog audit §1.1: a further-dated contract is ALWAYS cheaper to
+    reach for the same strike (more remaining extrinsic to offset the buyback)
+    regardless of whether it's actually the better rate.
+
+    Returns ``{"best": <row or None>, "rows": rows}``; rows with no priceable
+    juice/wk are ignored for the pick but still returned. PURE."""
+    band = parity_band_pct if parity_band_pct is not None else config.ROLL_JUICE_PARITY_BAND_PCT
+    priced = [r for r in rows if r.get("juice_per_week_pct") is not None]
+    if not priced:
+        return {"best": None, "rows": rows}
+    best = priced[0]
+    for r in priced[1:]:
+        within = abs(r["juice_per_week_pct"] - best["juice_per_week_pct"]) <= band
+        if within:
+            if r["dte"] < best["dte"]:
+                best = r
+        elif r["juice_per_week_pct"] > best["juice_per_week_pct"]:
+            best = r
+    return {"best": best, "rows": rows}
+
+
+def roll_up_guard(*, current_strike: float | None, chosen_strike: float | None,
+                  earnings_in_week: bool | None, ex_div_known: bool,
+                  ex_div_in_week: bool | None, chosen_juice_per_week_pct: float | None,
+                  juice_floor_pct: float | None, operating_cash: float | None,
+                  reserve_required: float | None, net_credit: float | None) -> dict | None:
+    """SHADOW (TRAVIS_EXTENSION) — rolling to a strike ABOVE the current one is
+    economically a fresh entry at that strike; this runs the Level-5-equivalent
+    checks (earnings-in-cycle, ex-div-in-cycle, weekly-juice adequacy, cash
+    reserve) as PASS/FAIL/UNKNOWN, worst-signal-wins for the summary. ZERO
+    blocking authority — a caller must never use this to refuse a roll.
+
+    Returns None when it doesn't apply (chosen_strike <= current_strike, or
+    either strike is unknown). PURE."""
+    if current_strike is None or chosen_strike is None or chosen_strike <= current_strike:
+        return None
+    checks = [
+        {"id": "earnings", "label": "No earnings inside cycle",
+         "status": "FAIL" if earnings_in_week else "PASS"},
+        {"id": "ex_div", "label": "Ex-div inside cycle",
+         "status": "UNKNOWN" if not ex_div_known else ("FAIL" if ex_div_in_week else "PASS")},
+        {"id": "juice", "label": "Weekly-juice adequacy",
+         "status": ("UNKNOWN" if chosen_juice_per_week_pct is None or juice_floor_pct is None
+                    else ("PASS" if chosen_juice_per_week_pct >= juice_floor_pct else "FAIL"))},
+        {"id": "cash_reserve", "label": "Cash reserve",
+         "status": ("UNKNOWN" if net_credit is None or operating_cash is None or reserve_required is None
+                    else ("PASS" if operating_cash + net_credit >= reserve_required else "FAIL"))},
+    ]
+    summary = ("FAIL" if any(c["status"] == "FAIL" for c in checks)
+              else "UNKNOWN" if any(c["status"] == "UNKNOWN" for c in checks) else "PASS")
+    return {"checks": checks, "summary": summary, "advisory": True}

@@ -13,6 +13,17 @@ function bigDollars(n) {
   const v = Number(n);
   return (v < 0 ? "-$" : "$") + Math.abs(v).toLocaleString(undefined, { maximumFractionDigits: 0 });
 }
+function pct(n, d = 2) {
+  if (n === null || n === undefined || Number.isNaN(n)) return "—";
+  return `${Number(n).toFixed(d)}%`;
+}
+
+// juice/wk and cushion-in-ATR-units (roll-dialog audit §1.1/§1.3) are computed
+// SERVER-SIDE ONLY (option_chain.roll_options -> roll_advisor.juice_per_week/
+// cushion_atr) and arrive pre-attached on every strike row as
+// juice_per_week_pct/cushion_atr — this component does no price arithmetic of
+// its own, only ranks/displays what's already there, so there is exactly one
+// implementation of the money math to keep correct.
 
 /**
  * Roll an open short call. The user decides two things independently:
@@ -119,12 +130,18 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
   const buyback = cur?.current_mark != null ? totalDollars(cur.current_mark, qtyNum) : null;
   const newCredit = chosen?.mark != null ? totalDollars(chosen.mark, qtyNum) : null;
   const netCredit = buyback != null && newCredit != null ? newCredit - buyback : null;
+  const parityBand = data?.juice_parity_band_pct ?? 0.05;
+  const juiceFloor = data?.weekly_juice_floor_pct;
 
-  // For the SAME strike currently chosen, compare the net credit/(debit) across
-  // every expiration that happens to offer it — surfaces the "next week is
-  // cheaper for the same strike bump" read without doing the mental math.
-  // Advisory only: purely informational, never changes which weeks are
-  // selectable or disables anything.
+  // For the SAME strike currently chosen, compare EXTRINSIC YIELD (juice/wk, not
+  // raw net debit) across every expiration that happens to offer it (roll-dialog
+  // audit §1.1). Ranked by juice/wk — "best rate" — not by which is cheapest to
+  // reach, since a further-dated contract is ALWAYS cheaper for the same strike
+  // (more remaining extrinsic to offset the buyback) regardless of whether it's
+  // actually the better rate of return. Net debit is still shown (it's what hits
+  // the cash-reserve check) but demoted. Two weeks within parityBand %/wk of each
+  // other are treated as a tie, broken toward the SHORTER DTE. Advisory only —
+  // purely informational, never changes which weeks are selectable.
   const weekComparison = React.useMemo(() => {
     if (buyback == null || strike == null) return [];
     const rows = [];
@@ -132,17 +149,88 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
       const s = (exp.strikes || []).find((s) => s.strike === strike);
       if (!s || s.mark == null) continue;
       const credit = totalDollars(s.mark, qtyNum);
-      rows.push({ expiration: exp.expiration, dte: exp.dte, netCredit: credit - buyback });
+      rows.push({
+        expiration: exp.expiration, dte: exp.dte, netCredit: credit - buyback,
+        juicePerWeekPct: s.juice_per_week_pct,
+      });
     }
     if (rows.length < 2) return [];
-    const best = rows.reduce((a, b) => (b.netCredit > a.netCredit ? b : a));
+    const priced = rows.filter((r) => r.juicePerWeekPct != null);
+    const best = (priced.length ? priced : rows).reduce((a, b) => {
+      if (a.juicePerWeekPct == null) return b;
+      if (b.juicePerWeekPct == null) return a;
+      const within = Math.abs(b.juicePerWeekPct - a.juicePerWeekPct) <= parityBand;
+      if (within) return b.dte < a.dte ? b : a;   // tie -> shorter DTE
+      return b.juicePerWeekPct > a.juicePerWeekPct ? b : a;
+    });
     return rows.map((r) => ({ ...r, isBest: r.expiration === best.expiration }));
-  }, [exps, strike, buyback, qtyNum]);
+  }, [exps, strike, buyback, qtyNum, parityBand]);
+
+  // Cushion + juice/wk per strike, already computed server-side and attached
+  // to each strike row (§1.3) — just renamed to camelCase for JSX use.
+  const strikeRows = React.useMemo(() => strikesForExp.map((s) => ({
+    ...s,
+    cushionAtr: s.cushion_atr,
+    juicePerWeekPct: s.juice_per_week_pct,
+  })), [strikesForExp]);
+
+  // Juice-floor advisory at the regime target (§1.4) — the regime-depth target
+  // may sit deep enough ITM that its extrinsic yield can't clear the weekly-
+  // juice floor. Never auto-selects a shallower strike; just names the
+  // shallowest one (in THIS expiration's ladder) that would clear it.
+  const floorAdvisory = React.useMemo(() => {
+    const targetStrike = data?.regime_target?.strike;
+    if (targetStrike == null || juiceFloor == null || !strikeRows.length) return null;
+    const atTarget = strikeRows.find((s) => s.strike === targetStrike);
+    const juiceAtTarget = atTarget ? atTarget.juicePerWeekPct : null;
+    if (juiceAtTarget == null || juiceAtTarget >= juiceFloor) return null;
+    const candidate = strikeRows
+      .filter((s) => s.strike >= targetStrike && s.juicePerWeekPct != null && s.juicePerWeekPct >= juiceFloor)
+      .sort((a, b) => a.strike - b.strike)[0] || null;
+    return { targetStrike, juiceAtTarget, floor: juiceFloor, candidate };
+  }, [data, strikeRows, juiceFloor]);
+
+  // Roll-up guard (§1.5, TRAVIS_EXTENSION, SHADOW): rolling to a strike ABOVE
+  // the current one is economically a fresh entry at that strike — surfaced as
+  // PASS/FAIL/UNKNOWN per Level-5-equivalent check, worst-signal-wins summary,
+  // ZERO blocking authority. Only shown when it applies.
+  const rollUpGuard = React.useMemo(() => {
+    if (!cur || !chosen || chosen.strike <= cur.strike) return null;
+    const chosenRow = strikeRows.find((s) => s.strike === chosen.strike);
+    const chosenJuice = chosenRow?.juicePerWeekPct ?? null;
+    const exDivKnown = !!data?.ex_div?.ex_date;
+    const checks = [
+      { id: "earnings", label: "No earnings inside cycle",
+        status: selectedExp?.earnings_in_week ? "FAIL" : "PASS" },
+      { id: "ex_div", label: "Ex-div inside cycle",
+        status: !exDivKnown ? "UNKNOWN" : (selectedExp?.ex_div_in_week ? "FAIL" : "PASS") },
+      { id: "juice", label: "Weekly-juice adequacy",
+        status: chosenJuice == null || juiceFloor == null ? "UNKNOWN"
+          : (chosenJuice >= juiceFloor ? "PASS" : "FAIL") },
+      { id: "cash_reserve", label: "Cash reserve",
+        status: (netCredit == null || data?.operating_cash == null || data?.reserve_required == null)
+          ? "UNKNOWN"
+          : ((data.operating_cash + netCredit >= data.reserve_required) ? "PASS" : "FAIL") },
+    ];
+    const summary = checks.some((c) => c.status === "FAIL") ? "FAIL"
+      : checks.some((c) => c.status === "UNKNOWN") ? "UNKNOWN" : "PASS";
+    return { checks, summary, chosenJuice };
+  }, [cur, chosen, selectedExp, data, netCredit, juiceFloor, strikeRows]);
+
+  // Quote staleness (§1.7) — advisory badge only, never blocks. quote_fetched_at
+  // is the backend chain-cache's actual fetch time (option_chain._fetch_chain),
+  // not the request-serve time, so this reflects the true snapshot age even on
+  // a cache hit.
+  const quoteAgeSeconds = data?.quote_fetched_at != null
+    ? (Date.now() / 1000) - data.quote_fetched_at : null;
+  const quoteStale = quoteAgeSeconds != null && data?.quote_stale_after_seconds != null
+    && quoteAgeSeconds > data.quote_stale_after_seconds;
 
   const canExecute = qtyNum > 0 && cur && chosen && selectedExp
     && !(sameStrike && sameWeek); // rolling to the exact same leg is a no-op
 
   function buildPayload() {
+    const chosenRow = strikeRows.find((s) => s.strike === chosen?.strike);
     return {
       action: "roll_short",
       ticker: data.ticker,
@@ -158,6 +246,17 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
       roll_reason: reason, // whipsaw-ledger key: scheduled | 75%-rule | defend | earnings | kill-switch-exit
       client_order_ref: clientOrderRef.current, // idempotency key — one order per staged roll
       ...(sourceRecId ? { source_rec_id: sourceRecId } : {}),
+      // ROLL_STRIKE_CHOICE (§1.6, telemetry-only) — what was recommended vs.
+      // what was actually chosen; logged on the open leg's execution, never
+      // consumed by the theta/accrual ledgers (see executor._sell_short).
+      roll_strike_choice: {
+        regime: data.regime,
+        regime_target_strike: data.regime_target?.strike ?? null,
+        floor_strike: floorAdvisory?.candidate?.strike ?? null,
+        chosen_strike: chosen.strike,
+        juice_per_week_at_chosen: chosenRow?.juicePerWeekPct ?? null,
+        cushion_atr_at_chosen: chosenRow?.cushionAtr ?? null,
+      },
     };
   }
 
@@ -218,7 +317,15 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
             <div className="rounded-lg border border-slate-800 bg-slate-950 p-3 text-sm">
               <div className="mb-1 flex items-center justify-between">
                 <span className="text-xs uppercase tracking-wide text-slate-500">Current short (buy to close)</span>
-                {data.regime && <Pill status={data.regime}>{data.regime}</Pill>}
+                <div className="flex items-center gap-1.5">
+                  {quoteStale && (
+                    <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300"
+                      title={`Quote snapshot is ${Math.round(quoteAgeSeconds)}s old`}>
+                      stale
+                    </span>
+                  )}
+                  {data.regime && <Pill status={data.regime}>{data.regime}</Pill>}
+                </div>
               </div>
               <div className="text-slate-200">
                 {fmt(cur?.strike, 2)}C · {cur?.contracts}c · exp {cur?.expiration || "—"}
@@ -228,9 +335,15 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
               {data.underlying_price != null && (
                 <div className="mt-1 text-xs text-slate-500">
                   Spot {dollars(data.underlying_price)} · target {data.suggested_strike != null ? fmt(data.suggested_strike, 2) : "—"}{" "}
-                  ({data.atr_mult}×ATR {fmt(data.atr, 2)}
-                  {data.itm_pct != null ? ` / ${(data.itm_pct * 100).toFixed(0)}% ITM floor` : ""}
-                  {data.posture ? `, ${data.posture}` : ""})
+                  ({data.regime ? `${data.regime[0].toUpperCase()}${data.regime.slice(1)} · ` : ""}
+                  {data.atr_mult}×ATR {fmt(data.atr, 2)}
+                  {data.itm_pct != null ? ` / ${(data.itm_pct * 100).toFixed(0)}% ITM floor` : ""})
+                  {data.roll_up_blocked && (
+                    <span className="ml-1 text-rose-300">
+                      — {data.regime} blocks rolling up; capped at the current strike ({fmt(data.regime_target?.rule_strike, 2)} uncapped)
+                    </span>
+                  )}
+                  {data.target_deadband?.held && <span className="ml-1 text-slate-600">(held)</span>}
                 </div>
               )}
               {data.iv_rank?.iv_rank != null && (
@@ -314,11 +427,49 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
 
             {weekComparison.length > 1 && (
               <div className="rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400">
-                <span className="uppercase tracking-wide text-slate-500">{fmt(strike, 2)} strike, by week</span>
+                <span className="uppercase tracking-wide text-slate-500">{fmt(strike, 2)} strike, by week — ranked by juice/wk</span>
                 <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
                   {weekComparison.map((r) => (
                     <span key={r.expiration} className={r.isBest ? "font-semibold text-emerald-300" : ""}>
-                      {r.expiration} ({r.dte}d): {bigDollars(r.netCredit)}{r.isBest ? " · cheapest" : ""}
+                      {r.expiration} ({r.dte}d): {r.juicePerWeekPct != null ? pct(r.juicePerWeekPct, 2) + "/wk" : "—"}
+                      <span className="text-slate-500"> · net {bigDollars(r.netCredit)}</span>
+                      {r.isBest ? " · best rate" : ""}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Juice-floor advisory at the regime target (§1.4) — SHADOW, never
+               auto-selects a shallower strike */}
+            {floorAdvisory && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-200">
+                <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300">advisory</span>{" "}
+                Regime target ({fmt(floorAdvisory.targetStrike, 2)}) yields {pct(floorAdvisory.juiceAtTarget, 2)}/wk, below floor {pct(floorAdvisory.floor, 2)}/wk.
+                {floorAdvisory.candidate
+                  ? <> Shallowest strike meeting floor in this week: <span className="font-semibold">{fmt(floorAdvisory.candidate.strike, 2)}</span> ({fmt(floorAdvisory.candidate.cushionAtr, 1)}×ATR cushion).</>
+                  : " No strike in this week's ladder clears the floor."}
+              </div>
+            )}
+
+            {/* Roll-up guard (§1.5) — SHADOW, zero blocking authority */}
+            {rollUpGuard && (
+              <div className={`rounded-lg border p-3 text-xs ${
+                rollUpGuard.summary === "FAIL" ? "border-rose-500/40 bg-rose-500/5 text-rose-200"
+                  : rollUpGuard.summary === "UNKNOWN" ? "border-slate-700 bg-slate-950 text-slate-400"
+                  : "border-emerald-500/30 bg-emerald-500/5 text-emerald-200"
+              }`}>
+                <div className="flex items-center gap-2">
+                  <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-slate-400">advisory · shadow</span>
+                  <span className="font-semibold uppercase">{rollUpGuard.summary}</span>
+                  <span className="text-slate-400">— rolling to {fmt(chosen?.strike, 2)} is above the current strike ({fmt(cur?.strike, 2)}), treated as a fresh entry</span>
+                </div>
+                <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5">
+                  {rollUpGuard.checks.map((c) => (
+                    <span key={c.id} className={
+                      c.status === "FAIL" ? "text-rose-300" : c.status === "UNKNOWN" ? "text-slate-500" : "text-emerald-300"
+                    }>
+                      {c.label}: {c.status}
                     </span>
                   ))}
                 </div>
@@ -341,15 +492,15 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
                 <span className="text-xs uppercase tracking-wide text-slate-500">Roll to strike</span>
                 {selectedExp && <span className="text-xs text-slate-500">exp {selectedExp.expiration} · {selectedExp.dte} DTE</span>}
               </div>
-              {strikesForExp.length ? (
+              {strikeRows.length ? (
                 <>
-                  <div className="grid grid-cols-[auto_repeat(4,1fr)] gap-2 text-xs uppercase tracking-wide text-slate-500">
-                    <span className="w-6" /><span>Strike</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
+                  <div className="grid grid-cols-[auto_repeat(6,1fr)] gap-2 text-xs uppercase tracking-wide text-slate-500">
+                    <span className="w-6" /><span>Strike</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span><span>Cushion</span><span>Juice/wk</span>
                   </div>
-                  {strikesForExp.map((s) => (
+                  {strikeRows.map((s) => (
                     <label
                       key={s.strike}
-                      className={`grid grid-cols-[auto_repeat(4,1fr)] items-center gap-2 rounded-lg px-1 py-1 ${
+                      className={`grid grid-cols-[auto_repeat(6,1fr)] items-center gap-2 rounded-lg px-1 py-1 ${
                         s.strike === strike ? "bg-emerald-500/10" : "hover:bg-slate-800/50"
                       }`}
                     >
@@ -362,11 +513,13 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
                       <span className="text-sm font-semibold tabular-nums text-slate-100">
                         {fmt(s.strike, 2)}
                         {cur && s.strike === cur.strike && <span className="ml-1 text-[10px] font-normal text-sky-300">SAME</span>}
-                        {s.suggested && <span className="ml-1 text-[10px] font-normal text-emerald-400">{selectedExp?.deep_itm_suggested ? "DEEP-ITM" : "ATR"}</span>}
+                        {s.suggested && <span className="ml-1 text-[10px] font-normal text-emerald-400">{selectedExp?.deep_itm_suggested ? "DEEP-ITM" : "REGIME"}</span>}
                       </span>
                       <span className="text-sm tabular-nums text-slate-300">{dollars(s.bid)} / {dollars(s.ask)}</span>
                       <span className="text-sm tabular-nums text-slate-400">{dollars(s.mark)}</span>
                       <span className="text-sm tabular-nums text-emerald-300">{dollars(s.extrinsic)}</span>
+                      <span className="text-sm tabular-nums text-slate-400">{s.cushionAtr != null ? `${s.cushionAtr.toFixed(1)}×` : "—"}</span>
+                      <span className="text-sm tabular-nums text-sky-300">{s.juicePerWeekPct != null ? pct(s.juicePerWeekPct, 2) : "—"}</span>
                     </label>
                   ))}
                 </>
