@@ -387,7 +387,7 @@ def test_old_state_migrates_additively_and_loses_nothing():
          "shares": {"count": 200, "cost_basis_per_share": 10.0}}]}
     migrated, changed = migrations.migrate(dict(old), state_path=None)
     assert changed is True
-    assert migrated["schema_version"] == 22
+    assert migrated["schema_version"] == migrations.CURRENT_VERSION
     p = migrated["positions"][0]
     assert p["position_type"] == "SHARES"          # untouched
     assert p["shares"]["count"] == 200             # untouched

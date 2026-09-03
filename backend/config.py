@@ -878,6 +878,17 @@ BUYBACK_MIN_DTE = 2            # HARD_CFM_RULE — ">2 days to expiration" leg o
 ROLL_READY_DECAY_PCT = 80.0     # % of sold extrinsic already captured
 ROLL_READY_ITM_FLOOR_PCT = 3.0  # % ITM cushion below which the strike itself is thin
 
+# TRAVIS_EXTENSION / PROPOSED_DEFAULT — the recommendation engine's early-roll
+# trigger (ROLL_EXTRINSIC_CAPTURED): once this much of the extrinsic sold at
+# entry has been captured, the juice is banked and the engine recommends rolling
+# OUT to the next weekly to sell fresh extrinsic, whatever the DTE (a contract
+# expiring today is the scheduled weekly roll, not an early one). Same 0-100
+# extrinsic_captured_pct scale as the Roll modal's advisory badge, and anchored to
+# its threshold so the badge and the recommendation can't disagree about "done".
+# Distinct from the 75% rule (BUYBACK_DECAY_PCT reads TOTAL premium decay, which
+# an ITM short's intrinsic drags down; this reads the extrinsic alone).
+ROLL_EXTRINSIC_CAPTURED_PCT = ROLL_READY_DECAY_PCT
+
 # HARD_CFM_RULE — coverage floor: a LEAP below 0.50 delta no longer behaves like
 # stock, so the short call is effectively uncovered risk.
 LEAP_DELTA_FLOOR = 0.50

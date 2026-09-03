@@ -55,6 +55,7 @@ class TriggerRule:
     DEFEND_BELOW_STRIKE = "DEFEND_BELOW_STRIKE"        # closed below short strike -> DEFEND roll-down
     ROLL_75PCT = "ROLL_75PCT"                          # >=75% decayed, >2 DTE -> ROLL_OUT early
     ROLL_SCHEDULED_WEEKLY = "ROLL_SCHEDULED_WEEKLY"    # expiry imminent -> ROLL_OUT (weekly cadence)
+    ROLL_EXTRINSIC_CAPTURED = "ROLL_EXTRINSIC_CAPTURED"  # sold extrinsic mostly banked -> ROLL_OUT early (juice capture)
     JUICE_HURDLE_FAIL = "JUICE_HURDLE_FAIL"            # trailing juice under target/burn -> EXIT (redeploy)
     DTE_PLANNED_EXIT = "DTE_PLANNED_EXIT"              # LEAP at/below planned-exit DTE -> EXIT/roll long
     EARNINGS_WINDOW = "EARNINGS_WINDOW"                # earnings inside window -> ROLL_OUT deep-ITM
@@ -72,6 +73,7 @@ TRIGGER_RULES = frozenset({
     TriggerRule.CIRCUIT_BREAKER, TriggerRule.WHIPSAW_GUARD,
     TriggerRule.DELTA_COVERAGE_FLOOR, TriggerRule.DEFEND_BELOW_STRIKE,
     TriggerRule.ROLL_75PCT, TriggerRule.ROLL_SCHEDULED_WEEKLY,
+    TriggerRule.ROLL_EXTRINSIC_CAPTURED,
     TriggerRule.JUICE_HURDLE_FAIL, TriggerRule.DTE_PLANNED_EXIT,
     TriggerRule.EARNINGS_WINDOW, TriggerRule.DIVIDEND_ASSIGNMENT_RISK,
     TriggerRule.GATE_ALL_PASS, TriggerRule.ALL_CLEAR,
@@ -97,6 +99,31 @@ OVERRIDE_REASONS = frozenset({
 })
 
 OVERRIDE_NOTE_REQUIRED = frozenset({OverrideReason.OTHER})
+
+
+class MissAckReason:
+    """Coded reason the operator records against a COVERAGE_MISS — the mirror
+    image of OverrideReason. An override says "the engine committed and I
+    disagreed"; an acknowledgement says "I acted and the engine had not
+    committed, and here is which side that is on". It classifies the miss, it
+    never excuses it: an acknowledged miss still counts against coverage and
+    still blocks graduation for its window (the hard rule is untouched). What
+    it changes is the read — the board can tell an operator who went off-script
+    on purpose from an engine that was blind — and the alert stops re-paging a
+    miss the operator has already looked at."""
+
+    OPERATOR_DISCRETION = "OPERATOR_DISCRETION"   # I acted outside the rules deliberately
+    ENGINE_MISSED = "ENGINE_MISSED"               # a rule should have fired — engine defect
+    RULE_GAP = "RULE_GAP"                         # no rule covers what I did — candidate rule
+    OTHER = "OTHER"                               # typed note required
+
+
+MISS_ACK_REASONS = frozenset({
+    MissAckReason.OPERATOR_DISCRETION, MissAckReason.ENGINE_MISSED,
+    MissAckReason.RULE_GAP, MissAckReason.OTHER,
+})
+
+MISS_ACK_NOTE_REQUIRED = frozenset({MissAckReason.OTHER})
 
 
 class Resolution:
@@ -168,3 +195,11 @@ def is_override_reason(v: str | None) -> bool:
 
 def override_requires_note(v: str | None) -> bool:
     return v in OVERRIDE_NOTE_REQUIRED
+
+
+def is_miss_ack_reason(v: str | None) -> bool:
+    return v in MISS_ACK_REASONS
+
+
+def miss_ack_requires_note(v: str | None) -> bool:
+    return v in MISS_ACK_NOTE_REQUIRED

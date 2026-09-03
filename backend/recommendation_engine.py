@@ -63,6 +63,9 @@ _ROLL_PRIORITY = (
     TriggerRule.DIVIDEND_ASSIGNMENT_RISK, # -> DEFEND (roll out to re-establish time value)
     TriggerRule.ROLL_75PCT,               # -> ROLL_OUT (early juice capture)
     TriggerRule.ROLL_SCHEDULED_WEEKLY,    # -> ROLL_OUT (weekly cadence)
+    TriggerRule.ROLL_EXTRINSIC_CAPTURED,  # -> ROLL_OUT (extrinsic banked; after the
+                                          #    scheduled roll so an imminent expiry
+                                          #    still reads as the weekly cadence)
 )
 # The action type MUST agree with the roll_reason the ticket carries (_ROLL_REASON
 # below): the executed roll pair is graded by trust_derive._ROLL_REASON_ACTION
@@ -79,6 +82,7 @@ _TRIGGER_ACTION = {
     TriggerRule.DIVIDEND_ASSIGNMENT_RISK: ActionType.DEFEND,
     TriggerRule.ROLL_75PCT: ActionType.ROLL_OUT,
     TriggerRule.ROLL_SCHEDULED_WEEKLY: ActionType.ROLL_OUT,
+    TriggerRule.ROLL_EXTRINSIC_CAPTURED: ActionType.ROLL_OUT,
 }
 
 
@@ -477,6 +481,23 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
         if (dte is not None and int(dte) <= config.EXPIRY_WARN_DTE
                 and TriggerRule.ROLL_SCHEDULED_WEEKLY not in triggers):
             triggers[TriggerRule.ROLL_SCHEDULED_WEEKLY] = {"short": key, "dte": dte}
+        # Extrinsic captured — the juice is banked, so roll OUT and sell fresh
+        # extrinsic, at ANY remaining DTE (TRAVIS_EXTENSION). Reads enrich_short's
+        # extrinsic_captured_pct (the position tile's own figure), never total
+        # premium decay: an ITM short's intrinsic makes the 75% rule read low
+        # long after the extrinsic itself is gone. A contract expiring today is
+        # left to the scheduled weekly roll above (it outranks this one anyway).
+        captured = es.get("extrinsic_captured_pct")
+        if (captured is not None and dte is not None and int(dte) >= 1
+                and float(captured) >= config.ROLL_EXTRINSIC_CAPTURED_PCT
+                and TriggerRule.ROLL_EXTRINSIC_CAPTURED not in triggers):
+            triggers[TriggerRule.ROLL_EXTRINSIC_CAPTURED] = {
+                "short": key, "dte": dte,
+                "extrinsic_captured_pct": captured,
+                "threshold_pct": config.ROLL_EXTRINSIC_CAPTURED_PCT,
+                "entry_extrinsic_per_share": es.get("entry_extrinsic_per_share"),
+                "current_extrinsic_per_share": es.get("current_extrinsic_per_share"),
+            }
 
     features = {
         "price": price, "last_close": last_close,
@@ -491,10 +512,12 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
         "delta_coverage": {k: cov.get(k) for k in ("min_leg_delta", "long_delta", "short_delta")},
         "shorts": [{"strike": sc.get("strike"), "dte": sc.get("dte"),
                     "expiration": sc.get("expiration"),
-                    "decay_pct": position_manager.enrich_short(
-                        sc, price if price is not None else last_close,
-                        position.get("dividend"), today=today).get("decay_pct")}
-                   for sc in position.get("short_calls", [])],
+                    "decay_pct": _es.get("decay_pct"),
+                    "extrinsic_captured_pct": _es.get("extrinsic_captured_pct")}
+                   for sc in position.get("short_calls", [])
+                   for _es in (position_manager.enrich_short(
+                       sc, price if price is not None else last_close,
+                       position.get("dividend"), today=today),)],
         "kill_switch_status": ks["status"],
     }
     return {"triggers": triggers, "features": features}
@@ -528,6 +551,7 @@ _ROLL_REASON = {
     TriggerRule.DIVIDEND_ASSIGNMENT_RISK: "defend",   # graded DEFEND, like the alert's deep link
     TriggerRule.ROLL_75PCT: "75%-rule",
     TriggerRule.ROLL_SCHEDULED_WEEKLY: "scheduled",
+    TriggerRule.ROLL_EXTRINSIC_CAPTURED: "extrinsic-captured",
 }
 
 
@@ -563,7 +587,8 @@ def _build_action_rec(position: dict, market: dict, now: datetime,
         # (mirrors executor.defend_recommendation's default).
         roll_dte = int(dte) if dte else 5
         if rule in (TriggerRule.ROLL_75PCT, TriggerRule.ROLL_SCHEDULED_WEEKLY,
-                    TriggerRule.EARNINGS_WINDOW, TriggerRule.DIVIDEND_ASSIGNMENT_RISK):
+                    TriggerRule.EARNINGS_WINDOW, TriggerRule.DIVIDEND_ASSIGNMENT_RISK,
+                    TriggerRule.ROLL_EXTRINSIC_CAPTURED):
             roll_dte = (int(dte) if dte else 0) + 7  # roll OUT to the next weekly
         ticket = _roll_ticket(position, sc, tk, new_strike=pol.get("strike"),
                               roll_dte=roll_dte, roll_reason=_ROLL_REASON[rule], q=q)

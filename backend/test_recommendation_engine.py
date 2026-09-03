@@ -627,3 +627,70 @@ def test_following_a_dividend_assignment_risk_rec_grades_as_matched():
     matched = [r for r in res if r["status"] == Resolution.EXECUTED_MATCHED]
     assert len(matched) == 1 and matched[0]["rec_id"] == "rec_00001"
     assert matched[0]["action_type"] == ActionType.DEFEND
+
+
+# ---------------------------------------------------------------------------
+# ROLL_EXTRINSIC_CAPTURED (TRAVIS_EXTENSION): once the sold extrinsic is mostly
+# banked, roll OUT and sell fresh juice — at any remaining DTE. Reads the same
+# extrinsic_captured_pct the position tile shows, never total premium decay.
+# ---------------------------------------------------------------------------
+def _captured_case(current_bid=3.4, dte=4, price=183.0):
+    # Sold 5.00/sh of which 2.50 was extrinsic. At 183 vs the 180 strike the
+    # short holds 3.00 intrinsic, so a 3.40 mark leaves 0.40 extrinsic: 84% of
+    # the sold extrinsic is captured while TOTAL decay is only 32% (the 75% rule
+    # stays quiet) — exactly the ITM case the new trigger exists for.
+    p = _shares_position(current_bid=current_bid, short_dte=dte)
+    p["short_calls"][0]["entry_extrinsic_per_share"] = 2.5
+    return p, _healthy_tk(price=price)
+
+
+def test_extrinsic_captured_emits_an_early_roll_out():
+    p, tk = _captured_case()
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
+    assert len(recs) == 1, recs
+    rec = recs[0]
+    assert rec["action_type"] == ActionType.ROLL_OUT
+    assert rec["trigger_rule"] == TriggerRule.ROLL_EXTRINSIC_CAPTURED
+    ticket = rec["proposed_ticket"]
+    assert ticket["action"] == "roll_short"
+    assert ticket["roll_reason"] == "extrinsic-captured"
+    sto = [l for l in ticket["legs"] if l["instruction"] == "SELL_TO_OPEN"][0]
+    assert sto["dte"] == 4 + 7          # OUT to the next weekly
+    detail = rec["input_snapshot"]["trigger_detail"]
+    assert detail["extrinsic_captured_pct"] == 84.0
+    assert detail["threshold_pct"] == config.ROLL_EXTRINSIC_CAPTURED_PCT
+    # the evidence rides the features too, so an ALL_CLEAR shows what was seen
+    assert rec["input_snapshot"]["shorts"][0]["extrinsic_captured_pct"] == 84.0
+
+
+def test_extrinsic_captured_below_threshold_is_all_clear():
+    # 4.00 mark -> 1.00 extrinsic left -> 60% captured, under the 80% bar.
+    p, tk = _captured_case(current_bid=4.0)
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
+    assert [r["trigger_rule"] for r in recs] == [TriggerRule.ALL_CLEAR]
+    assert recs[0]["input_snapshot"]["shorts"][0]["extrinsic_captured_pct"] == 60.0
+
+
+def test_extrinsic_captured_fires_at_any_dte_but_yields_to_the_scheduled_roll():
+    # Far from expiry: fires on its own.
+    p, tk = _captured_case(dte=9)
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
+    assert recs[0]["trigger_rule"] == TriggerRule.ROLL_EXTRINSIC_CAPTURED
+    # Expiry imminent: the weekly cadence is the dominant claim; the capture
+    # trigger is preserved as secondary evidence rather than lost.
+    p, tk = _captured_case(dte=1)
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
+    assert recs[0]["trigger_rule"] == TriggerRule.ROLL_SCHEDULED_WEEKLY
+    assert TriggerRule.ROLL_EXTRINSIC_CAPTURED in recs[0]["input_snapshot"]["secondary_triggers"]
+    # Expiring today: not an early roll at all.
+    p, tk = _captured_case(dte=0)
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
+    assert TriggerRule.ROLL_EXTRINSIC_CAPTURED not in recs[0]["input_snapshot"].get("secondary_triggers", [])
+
+
+def test_extrinsic_captured_unmeasurable_never_fires():
+    # No entry extrinsic recorded -> captured % is None -> silent, not "ready".
+    p, tk = _captured_case()
+    del p["short_calls"][0]["entry_extrinsic_per_share"]
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
+    assert [r["trigger_rule"] for r in recs] == [TriggerRule.ALL_CLEAR]

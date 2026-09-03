@@ -14,7 +14,12 @@ reconciliation is `NOT_YET_IMPLEMENTED`, **no action type can be eligible**.
 alert slot (08:30 → 16:15 ET) also runs a recommendation pass. For each open
 position it either emits an actionable recommendation — EXIT, DEFEND, ROLL_OUT
 — with a concrete proposed ticket (legs, strikes, net limit, minimum
-acceptable net credit, max slippage), or an explicit **ALL_CLEAR**. Silence is
+acceptable net credit, max slippage), or an explicit **ALL_CLEAR**. ROLL_OUT
+fires on the weekly cadence, the 75% rule, an earnings window, and
+`ROLL_EXTRINSIC_CAPTURED`: once `ROLL_EXTRINSIC_CAPTURED_PCT` (80%) of the
+extrinsic sold at entry is banked, at any remaining DTE, the engine proposes
+rolling out to the next weekly to sell fresh juice (roll reason
+`extrinsic-captured`). Silence is
 not a valid output: if you act and no recommendation existed, that becomes a
 **coverage miss**, the loudest failure on the scoreboard.
 
@@ -63,6 +68,25 @@ item). Failures page you through the normal alert channels.
 
 Tunable numbers are `PROPOSED_DEFAULT` in `backend/config.py`; the hard
 requirements are code, not config.
+
+## Acknowledging a coverage miss
+
+A miss cannot be dismissed — it is derived from the immutable execution and
+recommendation logs, and the zero-misses graduation rule is code, not config.
+What you *can* do is classify it. **Acknowledge** on the scoreboard's miss list
+records an append-only `coverage_miss_acks` entry keyed on the miss's execution
+ids, with a coded reason:
+
+- `OPERATOR_DISCRETION` — you acted outside the rules on purpose (the engine
+  was right to stay silent; the disagreement is yours).
+- `ENGINE_MISSED` — a rule should have fired; treat it as an engine defect.
+- `RULE_GAP` — nothing in the rule set covers what you did; a candidate rule.
+- `OTHER` — typed note required.
+
+An acknowledged miss **still counts**: the coverage rate and the graduation gate
+read it exactly as before. It stops re-paging through `TRUST_COVERAGE_MISS`,
+reads as acknowledged on the board, and gives the calibration record a reason
+instead of a blank. First acknowledgement wins; there is no un-acknowledge.
 
 ## What is deliberately OUT of coverage scope
 
