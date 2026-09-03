@@ -436,3 +436,49 @@ def test_naked_short_on_a_shares_position_exits_via_delta_coverage():
     assert len(recs) == 1
     assert recs[0]["trigger_rule"] == TriggerRule.DELTA_COVERAGE_FLOOR
     assert recs[0]["proposed_ticket"]["action"] == "sell_shares"
+
+
+def test_juice_hurdle_fail_exits_a_shares_position():
+    """JUICE_HURDLE_FAIL was unreachable on a shares base: the runner's snapshot
+    reads leap_policy.leap_health, which had only a LEAP-cost denominator, so
+    `inadequate` was never True. With the share-denominated hurdle live, a
+    position whose trailing juice is under the floor exits — selling the shares."""
+    tk = dict(_healthy_tk(price=182.0),
+              juice={"inadequate": True, "yield_pct": 0.55, "target_pct": 0.75,
+                     "maintenance_status": "unknown"})
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([_shares_position()]), NOW)
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec["action_type"] == ActionType.EXIT
+    assert rec["trigger_rule"] == TriggerRule.JUICE_HURDLE_FAIL
+    assert rec["input_snapshot"]["trigger_detail"]["juice"]["target_pct"] == 0.75
+    ticket = rec["proposed_ticket"]
+    assert ticket["action"] == "sell_shares" and ticket["qty"] == 100
+    assert ticket["legs"][-1]["role"] == "shares"
+
+
+def test_adequate_juice_leaves_a_shares_position_alone():
+    tk = dict(_healthy_tk(price=182.0),
+              juice={"inadequate": False, "yield_pct": 1.10, "target_pct": 0.75,
+                     "maintenance_status": "unknown"})
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([_shares_position()]), NOW)
+    assert [r["trigger_rule"] for r in recs] == [TriggerRule.ALL_CLEAR]
+
+
+def test_unassessable_juice_never_fires_the_exit():
+    """`inadequate` is False for an unpriced/warming-up position, so a missing
+    verdict can never be mistaken for a failing one."""
+    tk = dict(_healthy_tk(price=182.0), juice={"inadequate": False, "yield_pct": None,
+                                               "target_pct": 0.75})
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([_shares_position()]), NOW)
+    assert [r["trigger_rule"] for r in recs] == [TriggerRule.ALL_CLEAR]
+
+
+def test_exit_triggers_still_outrank_the_juice_hurdle():
+    """JUICE_HURDLE_FAIL is last in _EXIT_PRIORITY — a kill-switch exit on the
+    same pass wins the slot and the juice failure is recorded as secondary."""
+    tk = dict(_healthy_tk(price=182.0), rs3m_vs_spy=-6.0,
+              juice={"inadequate": True, "yield_pct": 0.55, "target_pct": 0.75})
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([_shares_position()]), NOW)
+    assert recs[0]["trigger_rule"] == TriggerRule.KILL_RS_SPY_CONFIRMED
+    assert TriggerRule.JUICE_HURDLE_FAIL in recs[0]["input_snapshot"]["secondary_triggers"]

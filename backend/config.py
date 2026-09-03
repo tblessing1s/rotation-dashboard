@@ -550,10 +550,24 @@ PER_POSITION_CAP_USD = float(os.environ.get("PER_POSITION_CAP_USD") or 15000)
 # figure was a yield on a ~50%-of-spot premium; the same dollars of weekly
 # extrinsic measured against the FULL share cost land several-fold lower, so
 # carrying 1.5 across denominators would have rejected essentially the whole
-# universe. 0.75 is the midpoint of the 0.7-0.8%/wk band. Until v21 this constant
-# had NO consumer anywhere in the tree; it is now the JUICE_ENGINE arm of
-# scan_triggers.shadow_floor. SHADOW ONLY — see that function; it has zero
-# blocking authority and no switch exists to give it any.
+# universe. 0.75 is the midpoint of the 0.7-0.8%/wk band.
+#
+# TWO CONSUMERS, WITH DIFFERENT AUTHORITY — read this before changing the number:
+#
+#   1. ENTRY (scan): the JUICE_ENGINE arm of scan_triggers.shadow_floor. STILL
+#      SHADOW ONLY — see that function; it has zero blocking authority over a
+#      scan verdict and no switch exists to give it any. Unchanged.
+#   2. POSITION (held): the weekly income target in leap_policy.leap_health for a
+#      SHARES base, which DOES carry authority — it drives the JUICE_INADEQUATE
+#      alert and the recommendation engine's JUICE_HURDLE_FAIL trigger, and that
+#      trigger emits an EXIT. Graduated deliberately (operator decision, 2026-09);
+#      before it, the whole income hurdle was dark on a shares position because
+#      leap_health had only a LEAP-cost denominator.
+#
+# So raising this number now proposes exiting live positions, where before it only
+# moved a shadow ranking. It is the SHARE-denominated bar; the LEAP arm keeps
+# account_gate.weekly_yield_target_pct (a yield on ~50%-of-spot premium, several
+# times higher), and the two must never be swapped.
 SHARES_JUICE_FLOOR_PCT = 0.75
 
 # ---- Tradeability floor (scan veto) ---------------------------------------

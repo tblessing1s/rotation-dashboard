@@ -654,3 +654,73 @@ def test_place_live_guard_blocks_demo_broker_call(store, monkeypatch):
     with pytest.raises(schwab_api.SchwabError, match="demo/paper mode"):
         executor._place_live({"option_symbol": "NVDA_X"}, "NVDA", "buy_leap",
                              5, 75, 100.0, "supplied")
+
+
+# ---------------------------------------------------------------------------
+# trailing_avg_weekly_juice on a SHARES base. The juice is collected by the
+# weekly SHORT CALL, which a shares base sells exactly like a LEAP diagonal did,
+# and the theta ledger it reads is keyed by (week, ticker) with no notion of the
+# base leg. recompute_derived nonetheless gated the field behind `leap` along
+# with leap_dte, which left every shares position with a null trailing juice —
+# and with it the whole income hurdle (leap_health's juice_adequate, the
+# JUICE_INADEQUATE alert, the engine's JUICE_HURDLE_FAIL trigger) permanently
+# dark for the only structure the app can now open.
+# ---------------------------------------------------------------------------
+def _shares_juice_state(store_path, weekly_premium=1.50, weeks=4):
+    """A shares position whose last `weeks` weekly covered calls closed for juice."""
+    state = log.load_state()
+    state["positions"] = [{
+        "ticker": "AAPL", "status": "active", "position_type": "SHARES",
+        "shares": {"count": 100, "cost_basis_per_share": 170.0, "cap": 1000},
+        "short_calls": [], "dividend": None,
+    }]
+    state["executions"] = []
+    for i, day in enumerate(["2026-06-05", "2026-06-12", "2026-06-19", "2026-06-26"][:weeks]):
+        state["executions"] += [
+            {"id": f"o{i}", "ticker": "AAPL", "action": "sell_short",
+             "date": f"{day}T14:00:00Z", "strike": 185.0, "contracts": 1,
+             "premium_per_share": weekly_premium,
+             "entry_extrinsic_per_share": weekly_premium, "expiration": day},
+            {"id": f"c{i}", "ticker": "AAPL", "action": "close_short",
+             "date": f"{day}T20:00:00Z", "strike": 185.0, "contracts": 1,
+             "close_price_per_share": 0.10, "extrinsic_sold": weekly_premium,
+             "stock_price": 182.0, "expiration": day},
+        ]
+    log.recompute_derived(state)
+    return state
+
+
+def test_trailing_juice_derives_for_a_shares_position(store):
+    state = _shares_juice_state(store)
+    p = state["positions"][0]
+    # The ledger itself was never structure-aware — it always had the weeks.
+    assert [r["net_juice"] for r in state["theta_ledger"]["weeks"]] == [140.0] * 4
+    # ...but the per-position field used to come back None for a shares base.
+    assert p["trailing_avg_weekly_juice"] == 140.0
+    # leap_dte stays LEAP-only and is correctly None here.
+    assert p["leap_dte"] is None
+
+
+def test_shares_trailing_juice_feeds_the_income_hurdle(store, monkeypatch):
+    """End to end: the derived figure lands in leap_health against the share bar.
+    140/wk on 100 shares @ 182 = $18,200 is 0.77%/wk, just over the 0.75% floor."""
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: None)
+    state = _shares_juice_state(store)
+    h = leap_policy.leap_health(state["positions"][0], stock_price=182.0)
+    assert h["juice_capital_basis"] == "spot_x_shares"
+    assert h["weekly_juice_yield_pct"] == pytest.approx(0.77, abs=0.01)
+    assert h["juice_target_pct"] == config.SHARES_JUICE_FLOOR_PCT
+    assert h["juice_adequate"] is True
+    # A thinner premium drops under the floor and flags.
+    thin = _shares_juice_state(store, weekly_premium=1.00)
+    ht = leap_policy.leap_health(thin["positions"][0], stock_price=182.0)
+    assert ht["weekly_juice_yield_pct"] == pytest.approx(0.49, abs=0.01)
+    assert ht["juice_adequate"] is False
+
+
+def test_closed_position_keeps_a_null_trailing_juice(store):
+    state = _shares_juice_state(store)
+    state["positions"][0]["status"] = "closed"
+    log.recompute_derived(state)
+    assert state["positions"][0]["trailing_avg_weekly_juice"] is None
+    assert state["positions"][0]["leap_dte"] is None
