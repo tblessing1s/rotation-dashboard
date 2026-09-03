@@ -39,6 +39,7 @@ import indicators
 import kill_switch
 import position_manager
 import strike_policy
+import units
 from rec_types import ActionType, TriggerRule
 
 ENGINE_VERSION = 1
@@ -153,25 +154,14 @@ def _roll_ticket(position: dict, sc: dict, tk: dict, *, new_strike: float | None
     }
 
 
-def _exit_ticket(position: dict, tk: dict, q: float, exit_reason_code: str | None) -> dict:
-    """A full-exit ticket: SELL_TO_CLOSE every LEAP leg + BUY_TO_CLOSE every
-    open short, one NET ticket (mirrors executor._build_exit_legs' shape)."""
-    import logging_handler as log
-    legs, leap_value, short_cost = [], 0.0, 0.0
-    priced = True
-    for leg in log.leap_legs(position):
-        n = int(leg.get("contracts") or 0)
-        if not n:
-            continue
-        per_share = (float(leg["current_bid"]) / (n * 100)
-                     if leg.get("current_bid") is not None else None)
-        if per_share is None:
-            priced = False
-        else:
-            leap_value += per_share * n
-        legs.append({"instruction": "SELL_TO_CLOSE", "role": "leap",
-                     "strike": leg.get("strike"), "expiration": leg.get("expiration"),
-                     "quantity": n})
+def _short_close_legs(position: dict, tk: dict,
+                      q: float) -> tuple[list[dict], float, float, bool]:
+    """(BUY_TO_CLOSE legs, buyback per share x contracts, buyback in whole
+    dollars, priced?) for every open short. Shared by both exit-ticket shapes:
+    the LEAP shape nets in the per-share convention, the shares shape nets in
+    dollars against the equity proceeds, so both figures are carried here rather
+    than converted at either call site."""
+    legs, cost_ps, cost_dollars, priced = [], 0.0, 0.0, True
     for sc in position.get("short_calls", []):
         n = int(sc.get("contracts") or 0)
         if not n:
@@ -180,10 +170,98 @@ def _exit_ticket(position: dict, tk: dict, q: float, exit_reason_code: str | Non
         if mark is None:
             priced = False
         else:
-            short_cost += mark * n
+            cost_ps += mark * n
+            cost_dollars += units.total_dollars(mark, n)
         legs.append({"instruction": "BUY_TO_CLOSE", "role": "short",
                      "strike": sc.get("strike"), "expiration": sc.get("expiration"),
                      "quantity": n})
+    return legs, cost_ps, cost_dollars, priced
+
+
+def _shares_exit_ticket(position: dict, tk: dict, q: float, exit_reason_code: str | None,
+                        share_count: int, leap_legs: list[dict],
+                        leap_dollars: float, leap_priced: bool) -> dict:
+    """The SHARES-primary full exit: BUY_TO_CLOSE every open short, then SELL the
+    whole share base. Cover FIRST — selling the shares while the call is still
+    open leaves a naked short, which is the one shape the exit must never pass
+    through.
+
+    Two orders, not one, exactly as ``_enter_ticket`` splits the entry: an equity
+    sale cannot ride the same Schwab order as an option buy-to-close. The equity
+    order is the executable action and the covers ride a ``short_cover`` block.
+    There is deliberately no blended ``limit_price`` / ``min_acceptable_net_credit``
+    here — share proceeds dwarf the option leg, so a single net bound across both
+    would grade nothing meaningful (the LEAP shape below, one real NET ticket,
+    keeps its bounds).
+
+    ``leap_legs`` is normally empty. It is non-empty only for a position caught
+    mid-migration (shares bought against surviving LEAP legs — ``_buy_shares``
+    setdefault-tags such a position SHARES), and those legs are sold with the rest
+    so neither the ticket nor its proceeds estimate silently drops them."""
+    short_legs, short_cost_ps, short_cost_dollars, priced = _short_close_legs(position, tk, q)
+    price = tk.get("price") or tk.get("last_close")
+    proceeds_ps = round(float(price), 2) if price is not None else None
+    notional = round(float(price) * share_count, 2) if price is not None else None
+    buyback_total = round(short_cost_dollars, 2) if priced else None
+    leap_proceeds = (round(leap_dollars, 2) if leap_priced else None) if leap_legs else 0.0
+    net_credit = (round(notional + leap_proceeds - buyback_total, 2)
+                  if None not in (notional, leap_proceeds, buyback_total) else None)
+    net_ps = (round(net_credit / share_count, 2)
+              if net_credit is not None and share_count else None)
+    return {
+        "action": "sell_shares",
+        "ticker": position.get("ticker"),
+        "exit_reason_code": exit_reason_code,
+        "qty": share_count,
+        "legs": leap_legs + short_legs + [{"instruction": "SELL", "role": "shares",
+                                           "quantity": share_count, "target_delta": 1.0}],
+        "order_type": "EQUITY",
+        "short_cover": ({"action": "close_short", "legs": short_legs,
+                         "buyback_per_share": round(short_cost_ps, 2) if priced else None,
+                         "buyback_total": buyback_total} if short_legs else None),
+        "max_slippage_pct_of_mid": config.REC_MAX_SLIPPAGE_PCT_OF_MID,
+        "estimates": {"shares_proceeds_per_share": proceeds_ps,
+                      "shares_notional": notional,
+                      "short_buyback_per_share": round(short_cost_ps, 2) if priced else None,
+                      "leap_proceeds": leap_proceeds if leap_legs else None,
+                      "net_credit": net_credit, "net_credit_per_share": net_ps},
+        "price_source": "estimate" if proceeds_ps is not None else "unpriced",
+    }
+
+
+def _exit_ticket(position: dict, tk: dict, q: float, exit_reason_code: str | None) -> dict:
+    """A full-exit ticket, in the shape the position's BASE LEG requires.
+
+    SHARES (the live structure) -> ``_shares_exit_ticket``: an equity sale plus a
+    separate option cover. LEGACY LEAP -> one NET ticket: SELL_TO_CLOSE every LEAP
+    leg + BUY_TO_CLOSE every open short (mirrors executor._build_exit_legs' shape).
+
+    The split keys off the SHARE COUNT rather than ``position_types.of`` so a
+    position mid-migration (shares bought against surviving LEAP legs) still
+    proposes the share sale; its LEAP legs ride the same ticket as SELL_TO_CLOSE."""
+    import logging_handler as log
+    share_count = int((position.get("shares") or {}).get("count") or 0)
+    leap_legs, leap_value, leap_dollars, priced = [], 0.0, 0.0, True
+    for leg in log.leap_legs(position):
+        n = int(leg.get("contracts") or 0)
+        if not n:
+            continue
+        per_share = (units.leap_per_share(float(leg["current_bid"])) / n
+                     if leg.get("current_bid") is not None else None)
+        if per_share is None:
+            priced = False
+        else:
+            leap_value += per_share * n
+            leap_dollars += float(leg["current_bid"])   # current_bid is the per-contract total
+        leap_legs.append({"instruction": "SELL_TO_CLOSE", "role": "leap",
+                          "strike": leg.get("strike"), "expiration": leg.get("expiration"),
+                          "quantity": n})
+    if share_count:
+        return _shares_exit_ticket(position, tk, q, exit_reason_code, share_count,
+                                   leap_legs, leap_dollars, priced)
+    short_legs, short_cost, _short_dollars, short_priced = _short_close_legs(position, tk, q)
+    legs = leap_legs + short_legs
+    priced = priced and short_priced
     net = round(leap_value - short_cost, 2) if priced and legs else None
     limit, floor = _net_bounds(net)
     return {

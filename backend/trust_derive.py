@@ -16,12 +16,22 @@ Matching semantics (the trust contract):
 - Executions BEFORE metadata.trust_layer_since predate the engine and are
   excluded (they would otherwise all read as misses).
 
-Scope: matchable operator actions are ENTER (buy_leap / atomic open, excluding
-scale-ins), ROLL_OUT (roll pairs with reason scheduled / 75%-rule / earnings),
-DEFEND (roll pairs with reason defend), and EXIT (close_leap, excluding LEAP
-rolls). Mechanical LEAP rolls, kill-switch-exit roll legs (part of an exit),
-scale-in adds, standalone leg repairs, and reconciliation adjustments are out
-of scope by rule and never synthesize misses — the operator doc lists them.
+Scope: matchable operator actions are ENTER (buy_shares opening a fresh base, or
+the legacy buy_leap / atomic open, excluding scale-ins), ROLL_OUT (roll pairs
+with reason scheduled / 75%-rule / earnings), DEFEND (roll pairs with reason
+defend), and EXIT (a sell_shares that closes the whole base, or the legacy
+close_leap, excluding LEAP rolls). Mechanical LEAP rolls, kill-switch-exit roll
+legs (part of an exit), scale-in adds and partial trims, called-away deliveries
+and put assignments, standalone leg repairs, and reconciliation adjustments are
+out of scope by rule and never synthesize misses — the operator doc lists them.
+
+Shares are scoped by the BASE-LEG BALANCE, not by the action name: a buy into an
+existing share base is a scale-in and a sale that leaves shares standing is a
+trim, and neither is a graded ENTER/EXIT. The balance is replayed from the whole
+execution log (including records before trust_layer_since, and including the
+mechanical put_assigned / close_shares_assigned that move shares without being
+operator actions), so a position opened before the trust layer still exits to
+zero correctly.
 """
 from __future__ import annotations
 
@@ -75,6 +85,51 @@ def _iso(dt: datetime) -> str:
 # ---------------------------------------------------------------------------
 # 1) Executions -> matchable operator-action instances
 # ---------------------------------------------------------------------------
+# Executions that move the owned-share base, and the field each carries the size
+# in. put_assigned / close_shares_assigned are MECHANICAL — they move shares but
+# are never graded as operator actions; they appear here only so the balance the
+# ENTER/EXIT scoping reads stays true.
+_SHARE_DELTA = {
+    "buy_shares": ("qty", +1),
+    "put_assigned": ("shares_received", +1),
+    "sell_shares": ("qty", -1),
+    "close_shares_assigned": ("qty", -1),
+}
+
+
+def _share_balances(executions: list[dict]) -> dict[int, tuple[int, int]]:
+    """Replay the owned-share base per ticker over the WHOLE log. Returns
+    {execution index: (before, after)} for every share-moving execution — the
+    balance context that decides whether a buy is a fresh entry and a sale is a
+    full exit.
+
+    Replayed in DATE order, not list order: the log is append-only, but
+    ``append_execution`` only ``setdefault``s the timestamp, so a backdated
+    record (an assignment booked on its assignment_date, a seeded history) can
+    land after a newer one. Log position breaks ties, keeping the legs of one
+    order in the order they were written. A record whose date will not parse is
+    left out of the balance exactly as ``map_actions`` leaves it out of grading —
+    guessing its place would silently mis-scope a real entry or exit."""
+    running: dict[str, int] = {}
+    out: dict[int, tuple[int, int]] = {}
+    order = sorted((i for i, e in enumerate(executions)
+                    if _SHARE_DELTA.get(e.get("action")) and _parse_ts(e.get("date"))),
+                   key=lambda i: (_parse_ts(executions[i].get("date")), i))
+    for idx in order:
+        e = executions[idx]
+        field, sign = _SHARE_DELTA[e.get("action")]
+        try:
+            qty = int(e.get(field) or 0)
+        except (TypeError, ValueError):
+            qty = 0
+        t = (e.get("ticker") or "").upper()
+        before = running.get(t, 0)
+        after = max(before + sign * qty, 0)
+        running[t] = after
+        out[idx] = (before, after)
+    return out
+
+
 def map_actions(state: dict) -> list[dict]:
     """Classify the immutable executions into matchable operator-action
     instances: {action_type, ticker, at, execution_ids, strike, net, live}."""
@@ -82,7 +137,9 @@ def map_actions(state: dict) -> list[dict]:
     out: list[dict] = []
     rolls: dict[str, dict] = {}
     exits: dict[tuple, dict] = {}
-    for e in state.get("executions", []):
+    executions = state.get("executions", [])
+    balances = _share_balances(executions)
+    for idx, e in enumerate(executions):
         at = _parse_ts(e.get("date"))
         if at is None or (since is not None and at < since):
             continue
@@ -120,6 +177,37 @@ def map_actions(state: dict) -> list[dict]:
                 "net": None, "live": e.get("live_transmitted") is True,
                 "open_id": e.get("open_id"),
             })
+        elif action == "buy_shares":
+            # The shares-primary ENTER. A builder/lot add carries the lot_add
+            # stamp, and any buy into a standing base is a scale-in whether or not
+            # it is stamped — both are out of scope, exactly like leap_add.
+            before, _after = balances.get(idx, (0, 0))
+            if e.get("lot_add") or before > 0:
+                continue
+            out.append({
+                "action_type": ActionType.ENTER, "ticker": t, "at": at,
+                "execution_ids": [e.get("id")], "strike": None,
+                "net": None, "live": e.get("live_transmitted") is True,
+                "open_id": e.get("open_id"), "qty": e.get("qty"),
+            })
+        elif action == "sell_shares":
+            # The shares-primary EXIT — but ONLY when the DAY closes the whole
+            # base. Same-day sales collect into one instance (an exit split across
+            # fills is one action), and the day is kept only if the last of them
+            # leaves zero shares: a trim that leaves shares standing is a
+            # scale-out, and grading it as an unrecommended exit would synthesize
+            # a coverage miss for a position the operator never exited.
+            _before, after = balances.get(idx, (0, 0))
+            key = (t, str(e.get("date"))[:10])
+            inst = exits.setdefault(key, {
+                "action_type": ActionType.EXIT, "ticker": t, "at": at,
+                "execution_ids": [], "strike": None, "net": None,
+                "live": False, "exit_reason": e.get("exit_reason"),
+            })
+            inst["execution_ids"].append(e.get("id"))
+            inst["at"] = max(inst["at"], at)
+            inst["live"] = inst["live"] or e.get("live_transmitted") is True
+            inst["_shares_after"] = after
         elif action == "close_leap":
             # Same-day close_leap legs on one ticker are ONE exit action (a
             # multi-tranche close writes one record per leg).
@@ -129,6 +217,13 @@ def map_actions(state: dict) -> list[dict]:
                 "execution_ids": [], "strike": e.get("strike"), "net": None,
                 "live": False, "exit_reason": e.get("exit_reason"),
             })
+            # The bucket may have been opened by a same-day share sale, which
+            # carries neither field — fill them from the LEAP leg.
+            inst["_leap_close"] = True
+            if inst.get("strike") is None:
+                inst["strike"] = e.get("strike")
+            if inst.get("exit_reason") is None:
+                inst["exit_reason"] = e.get("exit_reason")
             inst["execution_ids"].append(e.get("id"))
             inst["at"] = max(inst["at"], at)
             inst["live"] = inst["live"] or e.get("live_transmitted") is True
@@ -147,7 +242,16 @@ def map_actions(state: dict) -> list[dict]:
         for k in ("_premium", "_buyback", "_net_fill"):
             inst.pop(k, None)
     out.extend(rolls.values())
-    out.extend(exits.values())
+    for inst in exits.values():
+        # A shares day that ended with shares still standing was a trim, not an
+        # exit — unless the same bucket also holds a legacy close_leap, which is
+        # an exit on its own terms.
+        shares_after = inst.pop("_shares_after", None)
+        if (shares_after is not None and shares_after > 0
+                and not inst.pop("_leap_close", False)):
+            continue
+        inst.pop("_leap_close", None)
+        out.append(inst)
     for inst in out:
         # source_rec_id passthrough: an execution staged from a recommendation
         # card carries the rec id; the anchor exec's value wins.

@@ -333,3 +333,106 @@ def test_xlk_july6_snapshot_blocking_verdict_and_no_enter(monkeypatch):
         "XLK July 6th: the engine must NOT recommend entry on the labeled failure case"
     blockers = engine._entry_blocked(candidate, _market({"XLK": tk}, regime="green"))
     assert blockers, "worst-signal-wins must name at least one blocker"
+
+
+# ---------------------------------------------------------------------------
+# Shares-primary EXIT ticket. The base leg is 100 real shares, so the exit has
+# to SELL them — a ticket that only buys back the short leaves the whole
+# position standing and prices the exit as a small debit instead of a large
+# credit.
+# ---------------------------------------------------------------------------
+def _shares_position(ticker="AAPL", shares=100, short_strike=180.0, short_dte=4,
+                     current_bid=4.5, contracts=1):
+    return {
+        "ticker": ticker, "status": "active", "entry_date": "2026-06-01",
+        "position_type": "SHARES",
+        "shares": {"count": shares, "cost_basis_per_share": 170.0,
+                   "cap": 1000, "pct_to_cap": 10},
+        "short_calls": [{"strike": short_strike, "contracts": contracts,
+                         "dte": short_dte, "expiration": "2026-07-17",
+                         "current_bid": current_bid,
+                         "entry_premium_total": 500.0,
+                         "open_date": "2026-07-06"}],
+        "circuit_breaker": {"price": 100.0, "source": "manual", "entry_price": 185.0},
+        "dividend": None,
+    }
+
+
+def test_shares_exit_ticket_sells_the_share_base():
+    tk = _healthy_tk(price=182.0)
+    ticket = engine._exit_ticket(_shares_position(), tk, 0.0, "KILL_SWITCH_SPY")
+    assert ticket["action"] == "sell_shares"
+    assert ticket["order_type"] == "EQUITY"
+    assert ticket["qty"] == 100
+    # Cover FIRST, then release the shares — the reverse order is a naked short.
+    assert [(l["instruction"], l["role"]) for l in ticket["legs"]] == [
+        ("BUY_TO_CLOSE", "short"), ("SELL", "shares")]
+    sale = ticket["legs"][-1]
+    assert sale["quantity"] == 100 and sale["target_delta"] == 1.0
+
+
+def test_shares_exit_ticket_nets_share_proceeds_against_the_buyback():
+    tk = _healthy_tk(price=182.0)
+    ticket = engine._exit_ticket(_shares_position(), tk, 0.0, "KILL_SWITCH_SPY")
+    est = ticket["estimates"]
+    assert est["shares_proceeds_per_share"] == 182.0
+    assert est["shares_notional"] == pytest.approx(18200.0)
+    # One contract at a 4.50 mark = $450 to cover (units.total_dollars).
+    assert est["short_buyback_per_share"] == pytest.approx(4.5)
+    assert ticket["short_cover"]["buyback_total"] == pytest.approx(450.0)
+    assert est["net_credit"] == pytest.approx(17750.0)
+    assert est["net_credit_per_share"] == pytest.approx(177.5)
+    # An equity sale and an option cover are two orders; there is no single net
+    # limit across them (the LEAP shape below keeps its bounds).
+    assert "limit_price" not in ticket
+    assert "min_acceptable_net_credit" not in ticket
+    assert ticket["max_slippage_pct_of_mid"] == config.REC_MAX_SLIPPAGE_PCT_OF_MID
+
+
+def test_shares_exit_ticket_unpriced_when_the_snapshot_has_no_price():
+    tk = dict(_healthy_tk(), price=None, last_close=None)
+    ticket = engine._exit_ticket(_shares_position(), tk, 0.0, None)
+    assert ticket["price_source"] == "unpriced"
+    assert ticket["estimates"]["net_credit"] is None
+    assert ticket["legs"][-1]["role"] == "shares"   # the sale is still proposed
+
+
+def test_legacy_leap_exit_ticket_is_unchanged():
+    """The LEAP shape is byte-for-byte what it was — old positions still price as
+    one NET ticket, and the append-only log keeps needing that forever."""
+    tk = _healthy_tk(price=182.0)
+    ticket = engine._exit_ticket(_position(), tk, 0.0, "KILL_SWITCH_SPY")
+    assert ticket["action"] == "close_position"
+    assert [(l["instruction"], l["role"]) for l in ticket["legs"]] == [
+        ("SELL_TO_CLOSE", "leap"), ("BUY_TO_CLOSE", "short")]
+    # LEAP mark 5600/contract = 56.00/share, less the 4.50 short buyback.
+    assert ticket["estimates"]["net_per_share"] == pytest.approx(51.5)
+    assert ticket["limit_price"] == pytest.approx(51.5)
+    assert ticket["order_type"] == "NET_CREDIT"
+
+
+def test_shares_position_emits_an_exit_with_the_share_sale_end_to_end():
+    """Through evaluate(), not just the ticket builder: a shares position whose
+    RS3M-vs-SPY has gone negative exits by selling the shares."""
+    p = _shares_position()
+    tk = dict(_healthy_tk(price=182.0), rs3m_vs_spy=-6.0)
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW)
+    assert len(recs) == 1
+    rec = recs[0]
+    assert rec["action_type"] == ActionType.EXIT
+    assert rec["trigger_rule"] == TriggerRule.KILL_RS_SPY_CONFIRMED
+    ticket = rec["proposed_ticket"]
+    assert ticket["action"] == "sell_shares" and ticket["qty"] == 100
+    assert ticket["legs"][-1] == {"instruction": "SELL", "role": "shares",
+                                  "quantity": 100, "target_delta": 1.0}
+
+
+def test_naked_short_on_a_shares_position_exits_via_delta_coverage():
+    """2 shorts against 1 coverable lot is the shares floor breach; the exit that
+    follows still proposes the share sale."""
+    p = _shares_position(contracts=1)
+    p["short_calls"] = p["short_calls"] * 2
+    recs = engine.evaluate(_market({"AAPL": _healthy_tk(price=182.0)}), _state([p]), NOW)
+    assert len(recs) == 1
+    assert recs[0]["trigger_rule"] == TriggerRule.DELTA_COVERAGE_FLOOR
+    assert recs[0]["proposed_ticket"]["action"] == "sell_shares"

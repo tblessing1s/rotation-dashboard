@@ -277,10 +277,15 @@ function ticketSummary(t) {
   const legs = (t.legs || [])
     .map((l) => {
       const when = l.expiration ? ` exp ${l.expiration}` : l.dte != null ? ` ${l.dte} DTE` : "";
-      return `${(l.instruction || "").replaceAll("_", " ")} ${fmt(l.strike, 2)}${when}`;
+      // A shares leg has no strike — its size IS the leg (100 shares, delta 1.0).
+      const what = l.role === "shares" ? `${fmt(l.quantity, 0)} shares` : fmt(l.strike, 2);
+      return `${(l.instruction || "").replaceAll("_", " ")} ${what}${when}`;
     })
     .join(" / ");
-  const net = t.estimates?.net_per_share;
+  // The LEAP exit/roll shapes net per share; the shares exit nets the equity
+  // proceeds against the option buyback, so it carries its own key.
+  const est = t.estimates || {};
+  const net = est.net_per_share != null ? est.net_per_share : est.net_credit_per_share;
   const netStr = net != null
     ? `est ${net < 0 ? "−" : ""}$${Math.abs(Number(net)).toFixed(2)}/sh ${net >= 0 ? "credit" : "debit"}`
     : "unpriced";
@@ -407,8 +412,10 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
           <ul className="mt-1 space-y-0.5">
             {(t.legs || []).map((l, i) => (
               <li key={i}>
-                {(l.instruction || "").replaceAll("_", " ")} {l.quantity != null ? `${l.quantity}× ` : ""}
-                {fmt(l.strike, 2)}
+                {(l.instruction || "").replaceAll("_", " ")}{" "}
+                {l.role === "shares"
+                  ? `${fmt(l.quantity, 0)} shares`
+                  : `${l.quantity != null ? `${l.quantity}× ` : ""}${fmt(l.strike, 2)}`}
                 {l.expiration ? ` exp ${l.expiration}` : ""}{l.dte != null ? ` (${l.dte} DTE)` : ""}
                 {l.role ? <span className="text-slate-500"> · {l.role}</span> : null}
               </li>
@@ -416,7 +423,12 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
           </ul>
           <div className="mt-1 text-slate-400">
             {(t.order_type || "").replaceAll("_", " ")}
-            {" · "}limit {t.limit_price != null ? `$${Number(t.limit_price).toFixed(2)}/sh` : "unpriced"}
+            {/* An EQUITY ticket is two orders (the equity leg plus its option
+                cover), so it carries no single net limit — say that, rather than
+                rendering a priced ticket as "limit unpriced". */}
+            {t.order_type === "EQUITY"
+              ? <> · two orders — the option leg re-prices from the live chain</>
+              : <>{" · "}limit {t.limit_price != null ? `$${Number(t.limit_price).toFixed(2)}/sh` : "unpriced"}</>}
             {t.min_acceptable_net_credit != null && <> · min net ${Number(t.min_acceptable_net_credit).toFixed(2)}/sh</>}
             {t.max_slippage_pct_of_mid != null && <> · max slip {t.max_slippage_pct_of_mid}% of mid</>}
             {t.price_source && <> · priced from {t.price_source}</>}
