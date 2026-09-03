@@ -265,6 +265,25 @@ def test_enter_emitted_when_every_gate_clear():
     assert ticket["covering_short"]["action"] == "sell_short"
 
 
+def test_enter_ticket_covering_short_prices_sanely_against_realistic_vol():
+    """The same _bs_premium call site as the roll ticket, so the same bug applied
+    here: at higher realized vol the bogus premium (~= spot) nearly canceled the
+    share cost, so net_debit_per_share could read as low as $0.00/sh — a
+    covered-call entry that LOOKS FREE, which is a more dangerous failure than
+    the roll ticket's obviously-impossible number."""
+    tk = dict(_healthy_tk(price=224.18), atr=6.0, hist_vol=60.0)
+    ticket = engine._enter_ticket({"ticker": "AVGO", "contracts": 1},
+                                  _market({"AVGO": tk}))
+    premium = ticket["estimates"]["short_premium_per_share"]
+    net_debit = ticket["estimates"]["net_debit_per_share"]
+    assert premium is not None and 0 < premium < 30, (
+        f"a 5 DTE weekly premium should be a few dollars, got {premium}")
+    # The share cost itself (224.18) minus a sane premium must stay a REAL debit —
+    # not collapse toward zero the way the bug made it look.
+    assert net_debit == pytest.approx(224.18 - premium, abs=0.01)
+    assert net_debit > 150, f"a covered-call entry debit should be near the share cost, got {net_debit}"
+
+
 @pytest.mark.parametrize("candidate,regime", [
     (_candidate(verdict="CAUTION"), "green"),      # scorecard worst signal
     (_candidate(verdict="AVOID"), "green"),
