@@ -53,9 +53,15 @@ def _position(ticker="AAPL", short_strike=180.0, short_dte=4, leap_dte=170,
 def _healthy_tk(price=182.0):
     # Slightly ITM vs the default 180 short strike, with the short's mark (4.5)
     # comfortably above intrinsic (2.0) so no extrinsic-collapse trigger fires.
+    # hist_vol is indicators.hist_vol()'s real convention -- annualized PERCENT
+    # (30.0 meaning 30%), not a 0-1 fraction. Fabricating it as a fraction here
+    # once masked the _bs_premium vol-units bug (recommendation_engine.py):
+    # every existing test's hand-built snapshot happened to cancel the bug
+    # rather than exercise it, so 24 passing tests coexisted with every live
+    # roll/entry ticket pricing its new leg at roughly spot price.
     bars = _frame([170 + i * 0.25 for i in range(90)])
     return {
-        "price": price, "last_close": price - 0.3, "atr": 3.0, "hist_vol": 0.30,
+        "price": price, "last_close": price - 0.3, "atr": 3.0, "hist_vol": 30.0,
         "rs3m_vs_spy": 8.0, "rs3m_vs_sector": 4.0, "q": 0.0,
         "bars": bars, "spy_bars": _frame([100.0] * 90),
         "earnings": {"date": None, "warning": False}, "juice": {"inadequate": False},
@@ -322,7 +328,7 @@ def test_xlk_july6_snapshot_blocking_verdict_and_no_enter(monkeypatch):
 
     as_of = datetime(2026, 7, 6, 20, 15, tzinfo=timezone.utc)
     tk = {"price": float(xlk["Close"].iloc[-1]), "last_close": float(xlk["Close"].iloc[-1]),
-          "atr": 4.0, "hist_vol": 0.35, "rs3m_vs_spy": None, "rs3m_vs_sector": None,
+          "atr": 4.0, "hist_vol": 35.0, "rs3m_vs_spy": None, "rs3m_vs_sector": None,
           "q": 0.0, "bars": xlk, "spy_bars": spy}
     candidate = {"ticker": "XLK", "verdict": verdict,
                  "level5": {"pass": True, "blocking_failures": []},
@@ -482,3 +488,46 @@ def test_exit_triggers_still_outrank_the_juice_hurdle():
     recs = engine.evaluate(_market({"AAPL": tk}), _state([_shares_position()]), NOW)
     assert recs[0]["trigger_rule"] == TriggerRule.KILL_RS_SPY_CONFIRMED
     assert TriggerRule.JUICE_HURDLE_FAIL in recs[0]["input_snapshot"]["secondary_triggers"]
+
+
+# ---------------------------------------------------------------------------
+# _bs_premium vol units — found from a live SPCX case: a staged ROLL_OUT
+# proposed a $139.28/sh net credit rolling a $147.73 stock's weekly call.
+# `vol` was passed straight through instead of divided by 100 like every other
+# caller of _bs_call_price in the codebase (account_gate, leap_policy,
+# position_manager, alerts), so sigma landed at 30-150 instead of 0.30-1.50 —
+# large enough that N(d1)->1, N(d2)->0, and the BS price collapses to ~= spot
+# regardless of strike or DTE.
+# ---------------------------------------------------------------------------
+def test_bs_premium_treats_vol_as_a_percent_not_a_fraction():
+    """indicators.hist_vol() returns an annualized PERCENT (e.g. 30.0 meaning
+    30%) — the same convention _bs_premium must divide by 100, matching every
+    other _bs_call_price caller. Passed raw, sigma is enormous and the price
+    saturates to spot; divided correctly it prices like a real weekly option."""
+    price, strike, dte = 147.73, 141.5, 15
+    broken_would_be = round(price, 2)  # what the bug collapsed every vol to
+    for vol_pct in (30.0, 60.0, 90.0, 120.0):
+        premium = engine._bs_premium(price, strike, dte, vol_pct, 0.0)
+        assert premium is not None
+        assert premium != pytest.approx(broken_would_be, abs=0.5), (
+            f"vol={vol_pct}: premium {premium} collapsed to ~spot — the units bug is back")
+        assert 0 < premium < price, "a 15 DTE call must price well under the stock itself"
+        # Higher realized vol should price the same strike/DTE higher, not saturate.
+    prem_30 = engine._bs_premium(price, strike, dte, 30.0, 0.0)
+    prem_90 = engine._bs_premium(price, strike, dte, 90.0, 0.0)
+    assert prem_90 > prem_30
+
+
+def test_roll_ticket_new_leg_prices_sanely_against_realistic_vol():
+    """End to end through _roll_ticket: the exact SPCX shape (spot ~147.73,
+    138C ITM being rolled to 141.5, 15 DTE, realistic hist_vol) must not
+    produce a net credit anywhere near spot price."""
+    position = _position(ticker="SPCX", short_strike=138.0, short_dte=8,
+                         current_bid=10.78)
+    sc = position["short_calls"][0]
+    tk = dict(_healthy_tk(price=147.73), hist_vol=70.0)
+    ticket = engine._roll_ticket(position, sc, tk, new_strike=141.5, roll_dte=15,
+                                 roll_reason="defend", q=0.0)
+    net = ticket["estimates"]["net_per_share"]
+    assert net is not None
+    assert -20 < net < 20, f"a weekly-strike roll's net credit should be single digits, got {net}"

@@ -89,13 +89,32 @@ def _tk(market: dict, ticker: str) -> dict:
 def _bs_premium(price, strike, dte_days, vol, q) -> float | None:
     """Best-effort Black-Scholes premium estimate for ticket net math. Any
     missing input returns None — proposed tickets may carry null estimates
-    (price_source records it); the staged order re-prices from the live chain."""
+    (price_source records it); the staged order re-prices from the live chain.
+
+    ``vol`` is ``indicators.hist_vol()``'s ANNUALIZED-PERCENT convention (e.g.
+    45.2 meaning 45.2%), matching every other caller in the codebase
+    (account_gate.juice_estimate, leap_policy, position_manager, alerts all do
+    ``sigma = hv / 100.0`` before pricing) — ``_bs_call_price`` itself wants the
+    decimal fraction. This one call site passed the raw percentage straight
+    through: with sigma=45 instead of 0.45, sigma*sqrt(T) is so large that
+    N(d1)->1 and N(d2)->0, collapsing the BS price to ~= spot regardless of
+    strike or DTE. Every proposed ROLL_OUT/DEFEND ticket's NEW leg (there is
+    never a current_bid to fall back to for a leg that doesn't exist yet) and
+    every ENTER ticket's covering-short premium priced at roughly the full
+    stock price instead of a real weekly premium — invisible in this module's
+    own tests, whose hand-built snapshots fabricate hist_vol as an already-
+    divided fraction (0.30), which happens to cancel the bug rather than
+    exercise it. Confirmed against a live case: SPCX spot 147.73, a 141.5
+    strike 15 DTE roll priced at $147.73/sh (~spot) instead of the correct
+    ~$10-20/sh range for any realistic vol, inflating the proposed net credit
+    to $139/sh."""
     try:
         if None in (price, strike, vol) or dte_days is None or dte_days <= 0 or vol <= 0:
             return None
         t_years = max(float(dte_days), 1.0) / 365.0
+        sigma = float(vol) / 100.0
         return round(indicators._bs_call_price(float(price), float(strike), t_years,
-                                               config.RISK_FREE_RATE, float(vol), q or 0.0), 2)
+                                               config.RISK_FREE_RATE, sigma, q or 0.0), 2)
     except (TypeError, ValueError):
         return None
 
