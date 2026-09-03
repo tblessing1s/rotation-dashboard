@@ -486,6 +486,44 @@ def test_called_away_and_put_assignment_are_mechanical_not_operator_actions():
     assert acts[0]["execution_ids"] == ["e1"] and acts[1]["execution_ids"] == ["e4"]
 
 
+def _adjustment_exec(eid, delta, ticker="AAPL", at=None, instrument_type="EQUITY", **extra):
+    return {"id": eid, "ticker": ticker, "action": "adjustment",
+            "instrument_type": instrument_type, "quantity_delta": delta,
+            "date": _iso(at or NOW), "reason": "reconciliation correction", **extra}
+
+
+def test_equity_adjustment_moves_the_share_balance():
+    """The real gap this pins: a buy_shares voided the same day by a reconciliation
+    adjustment (quantity_delta -100, "Trade never happened") must not leave a
+    phantom balance — the case that surfaced in production on SPCX."""
+    t0 = NOW - timedelta(days=3)
+    execs = [
+        _shares_exec("exec_001", "buy_shares", t0, qty=100),
+        _adjustment_exec("exec_002", -100, at=t0 + timedelta(hours=2)),
+        _shares_exec("exec_004", "buy_shares", t0 + timedelta(days=1), qty=100),
+    ]
+    acts = trust_derive.map_actions(_state(execs=execs))
+    # BOTH buys are fresh ENTERs — the voided one (still a real, immutable
+    # execution) and the real one that followed. Neither reads as a scale-in.
+    assert [a["action_type"] for a in acts] == [ActionType.ENTER, ActionType.ENTER]
+    assert acts[0]["execution_ids"] == ["exec_001"]
+    assert acts[1]["execution_ids"] == ["exec_004"]
+
+
+def test_option_leg_adjustment_never_touches_the_share_balance():
+    """An adjustment correcting a short/LEAP contract count must not perturb
+    shares — only instrument_type EQUITY does."""
+    t0 = NOW - timedelta(days=3)
+    execs = [
+        _shares_exec("e1", "buy_shares", t0, qty=100),
+        _adjustment_exec("e2", -1, at=t0 + timedelta(hours=1), instrument_type="OPTION",
+                         strike=185.0),
+        _shares_exec("e3", "sell_shares", NOW - timedelta(hours=2), qty=100),
+    ]
+    acts = trust_derive.map_actions(_state(execs=execs))
+    assert [a["action_type"] for a in acts] == [ActionType.ENTER, ActionType.EXIT]
+
+
 def test_shares_entry_and_exit_resolve_against_their_recommendations():
     """The whole point: an emitted ENTER/EXIT on a shares position now resolves
     EXECUTED_MATCHED instead of silently expiring."""
