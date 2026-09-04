@@ -694,3 +694,26 @@ def test_sector_size_suggestion_scales_by_strength(monkeypatch):
     monkeypatch.setattr(screening, "sectors", lambda: {"XLK": {"strong": False, "deteriorating": True, "status": "red"}})
     minimal = account_gate.sector_size_suggestion("NVDA", full_contracts=1)
     assert minimal["suggested_contracts"] == 1 and minimal["deteriorating"] is True
+
+
+def test_juice_estimate_is_a_full_week_and_names_the_first_call(monkeypatch):
+    """The weekly % is priced on one FULL Friday-to-Friday week (7 calendar days)
+    for every name; the first call actually proposed is the earliest full-week
+    expiration, priced at its own DTE."""
+    import indicators
+    df = _noisy_frame(sigma=0.02)
+    est = account_gate.juice_estimate("XYZ", df)
+    S = float(df["Close"].iloc[-1])
+    k = indicators.short_strike(S, indicators.atr(df))
+    sigma = indicators.hist_vol(df) / 100.0
+    full_week = indicators._bs_call_price(S, k, config.JUICE_WEEK_CALENDAR_DAYS / 365.0,
+                                          config.RISK_FREE_RATE, sigma)
+    assert est["juice_basis"] == "full_week" and est["juice_week_days"] == 7
+    assert est["weekly_extrinsic_per_share"] == pytest.approx(
+        max(full_week - max(S - k, 0.0), 0.0), abs=0.01)
+    five_day = indicators._bs_call_price(S, k, 5 / 365.0, config.RISK_FREE_RATE, sigma)
+    five_day_extr = max(five_day - max(S - k, 0.0), 0.0)
+    assert est["weekly_extrinsic_per_share"] > five_day_extr  # more time value than the old 5-day basis
+    assert est["first_call_expiration"] and est["first_call_dte"] >= 4
+    assert est["first_call_sessions"] >= config.FULL_WEEK_MIN_SESSIONS
+    assert est["first_call_premium_per_share"] > 0 and est["first_call_pct_to_expiry"] > 0

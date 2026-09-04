@@ -87,9 +87,19 @@ def juice_estimate(ticker: str, df=None) -> dict:
     shares_mode = config.LEGACY_LEAP_READONLY
 
     k_short = indicators.short_strike(S, atr_val)
-    t_week = 5 / 365.0
+    # One FULL week (Friday to Friday) — the comparison basis for every name.
+    t_week = config.JUICE_WEEK_CALENDAR_DAYS / 365.0
     price_w = indicators._bs_call_price(S, k_short, t_week, r, sigma)
     extr_w = max(price_w - max(S - k_short, 0.0), 0.0)
+    # The FIRST call actually proposed on entry: the earliest full-week
+    # expiration from today, priced at its own DTE, with its own %-to-expiry —
+    # so the operator sees both the like-for-like weekly rate and the real
+    # first trade.
+    import market_calendar
+    from datetime import date as _date
+    fc = market_calendar.earliest_full_week_expiration(_date.today())
+    fc_price = indicators._bs_call_price(S, k_short, max(fc["calendar_dte"], 1) / 365.0, r, sigma)
+    fc_extr = max(fc_price - max(S - k_short, 0.0), 0.0)
 
     # LEAP economics — best-effort. Required to price the LEGACY yield; in shares
     # mode it only backfills leap_* for a legacy position's gate and never blocks.
@@ -125,6 +135,14 @@ def juice_estimate(ticker: str, df=None) -> dict:
 
     return {
         "ticker": ticker,
+        "juice_basis": "full_week",
+        "juice_week_days": config.JUICE_WEEK_CALENDAR_DAYS,
+        "first_call_expiration": fc["expiration"].isoformat(),
+        "first_call_dte": fc["calendar_dte"],
+        "first_call_sessions": fc["sessions"],
+        "first_call_premium_per_share": round(fc_price, 2),
+        "first_call_extrinsic_per_share": round(fc_extr, 2),
+        "first_call_pct_to_expiry": round(fc_extr / S * 100, 2) if S else None,
         "stock_price": round(S, 2),
         "short_strike": k_short,
         "weekly_extrinsic_per_share": round(extr_w, 3),

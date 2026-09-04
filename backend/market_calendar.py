@@ -14,6 +14,8 @@ day after Thanksgiving) still settle options normally and are not modelled.
 from __future__ import annotations
 
 import calendar
+
+import config
 import threading
 from datetime import date, timedelta
 
@@ -104,3 +106,41 @@ def is_market_holiday(d: date) -> bool:
 def is_trading_day(d: date) -> bool:
     """True if `d` is a weekday the market is open (not a weekend or holiday)."""
     return d.weekday() < calendar.SATURDAY and not is_market_holiday(d)
+
+
+def weekly_expiration_on_or_after(d: date) -> date:
+    """The weekly option expiration for the week containing/after ``d``: that
+    week's Friday, or the last trading day before it when Friday is a holiday
+    (the OCC rule — a Good Friday / July 4th week expires Thursday)."""
+    friday = d + timedelta(days=(calendar.FRIDAY - d.weekday()) % 7)
+    exp = friday
+    while not is_trading_day(exp):
+        exp -= timedelta(days=1)
+    return exp
+
+
+def earliest_full_week_expiration(today: date, min_sessions: int | None = None) -> dict:
+    """The first weekly expiration that gives a FULL week of covered-call time —
+    at least ``min_sessions`` trading sessions from ``today`` (inclusive, when
+    today trades) through expiry (inclusive). This is the call an operator
+    actually sells on entry: a Monday entry sells this Friday (5 sessions); a
+    Tuesday entry skips this Friday's partial week (4 sessions) for next
+    Friday's; a Friday entry sells next Friday's. Returns
+    ``{"expiration": date, "calendar_dte": int, "sessions": int}``.
+
+    The weekly JUICE PERCENTAGE the scan compares names on is a separate,
+    fixed full-week basis (config.JUICE_WEEK_CALENDAR_DAYS) so every name is
+    judged on the same week regardless of which weekday the scan runs; this
+    function names the expiration the first call is proposed at."""
+    min_sessions = int(min_sessions if min_sessions is not None else config.FULL_WEEK_MIN_SESSIONS)
+    friday = today + timedelta(days=(calendar.FRIDAY - today.weekday()) % 7)
+    exp = friday
+    for _ in range(8):  # never more than a few weeks out, whatever the holidays
+        exp = weekly_expiration_on_or_after(friday)
+        if exp >= today:
+            sessions = sum(1 for i in range((exp - today).days + 1)
+                           if is_trading_day(today + timedelta(days=i)))
+            if sessions >= min_sessions:
+                return {"expiration": exp, "calendar_dte": (exp - today).days, "sessions": sessions}
+        friday += timedelta(days=7)
+    return {"expiration": exp, "calendar_dte": (exp - today).days, "sessions": min_sessions}

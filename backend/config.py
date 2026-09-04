@@ -896,6 +896,15 @@ ROLL_READY_ITM_FLOOR_PCT = 3.0  # % ITM cushion below which the strike itself is
 # Distinct from the 75% rule (BUYBACK_DECAY_PCT reads TOTAL premium decay, which
 # an ITM short's intrinsic drags down; this reads the extrinsic alone).
 ROLL_EXTRINSIC_CAPTURED_PCT = ROLL_READY_DECAY_PCT
+# The weekly-juice BASIS (account_gate.juice_estimate): the model weekly call is
+# priced on one FULL Friday-to-Friday week — 7 calendar days — so every name is
+# compared on the same week whatever weekday the scan runs. (The old 5/365 was a
+# 5-calendar-day option: ~15% under a real weekly.) A first call is PROPOSED at
+# the earliest expiration with at least FULL_WEEK_MIN_SESSIONS trading sessions
+# left (market_calendar.earliest_full_week_expiration): a partial week is never
+# the first call.
+JUICE_WEEK_CALENDAR_DAYS = 7    # PROPOSED_DEFAULT — full-week basis for the juice %
+FULL_WEEK_MIN_SESSIONS = 5      # PROPOSED_DEFAULT — sessions that make a week "full"
 
 # HARD_CFM_RULE — coverage floor: a LEAP below 0.50 delta no longer behaves like
 # stock, so the short call is effectively uncovered risk.

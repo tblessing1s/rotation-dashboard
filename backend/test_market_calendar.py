@@ -46,3 +46,33 @@ def test_is_trading_day():
     assert mc.is_trading_day(date(2026, 7, 7)) is True    # ordinary Tuesday
     assert mc.is_trading_day(date(2026, 7, 4)) is False    # Saturday
     assert mc.is_trading_day(date(2026, 4, 3)) is False    # Good Friday
+
+
+# ---- earliest full-week weekly expiration ----------------------------------
+def test_earliest_full_week_expiration_by_weekday():
+    from datetime import date
+    import market_calendar as mc
+    # 2026-07-06 is a Monday. Mon -> this Friday (5 sessions); Tue -> next
+    # Friday (this Friday would be a 4-session partial week); Fri -> next
+    # Friday; Saturday -> next Friday (a clean 5-session week).
+    assert mc.earliest_full_week_expiration(date(2026, 7, 6)) == {
+        "expiration": date(2026, 7, 10), "calendar_dte": 4, "sessions": 5}
+    assert mc.earliest_full_week_expiration(date(2026, 7, 7)) == {
+        "expiration": date(2026, 7, 17), "calendar_dte": 10, "sessions": 9}
+    assert mc.earliest_full_week_expiration(date(2026, 7, 10)) == {
+        "expiration": date(2026, 7, 17), "calendar_dte": 7, "sessions": 6}
+    assert mc.earliest_full_week_expiration(date(2026, 7, 11)) == {
+        "expiration": date(2026, 7, 17), "calendar_dte": 6, "sessions": 5}
+
+
+def test_earliest_full_week_expiration_skips_a_holiday_short_week():
+    from datetime import date
+    import market_calendar as mc
+    # Week of 2026-06-29: July 4th is observed Friday 07-03, so the weekly
+    # expires Thursday 07-02 (4 sessions from Monday) — not a full week; the
+    # first full week is 07-10.
+    assert mc.weekly_expiration_on_or_after(date(2026, 6, 29)) == date(2026, 7, 2)
+    assert mc.earliest_full_week_expiration(date(2026, 6, 29)) == {
+        "expiration": date(2026, 7, 10), "calendar_dte": 11, "sessions": 9}
+    # Asked ON the holiday itself: this week's expiration is behind us.
+    assert mc.earliest_full_week_expiration(date(2026, 7, 3))["expiration"] == date(2026, 7, 10)

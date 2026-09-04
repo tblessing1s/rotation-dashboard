@@ -163,6 +163,10 @@ def _entry_candidates(market: dict, spy_bars) -> list[dict]:
                 "ticker": t, "verdict": r.get("suitability"),
                 "level5": level5.get(t),
                 "juice_weekly_pct": r.get("juice_weekly_pct"),
+                "lot_cost": r.get("lot_cost"),
+                "first_call_expiration": r.get("first_call_expiration"),
+                "first_call_dte": r.get("first_call_dte"),
+                "first_call_pct_to_expiry": r.get("first_call_pct_to_expiry"),
                 "blockers": [],
             })
         return out
@@ -186,6 +190,17 @@ def build_market_snapshot(state: dict, include_entry: bool = True) -> dict:
         "posture": strike_policy.get_posture(state),
         "tickers": {},
     }
+    # The account's dry powder, frozen with the pass: an ENTER is only proposed
+    # when one lot fits it (recommendation_engine._entry_blocked). Same
+    # capital_summary the Overview's barrel and the scan's affordability bar read.
+    try:
+        import position_manager
+        cap = position_manager.capital_summary(state)
+        market["capital"] = {k: cap.get(k) for k in
+                             ("deployable", "max_lot_cost", "per_position_cap", "operating_cash",
+                              "operating_cash_source", "capital_headroom", "cash_above_reserve")}
+    except Exception:  # noqa: BLE001 — an unreadable book means the check is inactive, not a block
+        market["capital"] = None
     spy_bars = None
     try:
         spy_bars = data_handler.get_daily(config.BENCHMARK)

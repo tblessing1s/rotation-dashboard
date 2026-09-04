@@ -710,3 +710,49 @@ def test_snapshot_live_mark_overrides_the_stored_mark():
     assert recs[0]["input_snapshot"]["trigger_detail"]["decay_pct"] == 77.0
     # The roll's buyback leg is priced off the live mark, not the stale 4.5.
     assert recs[0]["proposed_ticket"]["estimates"]["buyback_per_share"] == 1.15
+
+
+# ---------------------------------------------------------------------------
+# ENTER: dry powder + the first call's full-week expiration
+# ---------------------------------------------------------------------------
+def test_enter_blocked_when_one_lot_exceeds_dry_powder():
+    tk = _healthy_tk(price=182.0)            # one lot = $18,200
+    m = _market({"MSFT": tk}, candidates=[_candidate()])
+    m["capital"] = {"deployable": 10000.0, "max_lot_cost": 10000.0}
+    assert engine._entry_blocked(_candidate(), m) == ["lot $18,200 exceeds dry powder $10,000"]
+    assert not [r for r in engine.evaluate(m, _state([]), NOW, []) if r["action_type"] == ActionType.ENTER]
+    # Enough dry powder: proposed, and the snapshot says what would be left.
+    m["capital"] = {"deployable": 20000.0, "max_lot_cost": 20000.0}
+    recs = [r for r in engine.evaluate(m, _state([]), NOW, []) if r["action_type"] == ActionType.ENTER]
+    snap = recs[0]["input_snapshot"]
+    assert snap["lot_cost"] == 18200.0 and snap["deployable"] == 20000.0
+    assert snap["dry_powder_after"] == 1800.0 and snap["juice_basis"] == "full_week"
+    # The scan row's own lot cost wins over spot x 100 when carried.
+    assert engine._entry_blocked(dict(_candidate(), lot_cost=25000.0), m) == [
+        "lot $25,000 exceeds dry powder $20,000"]
+
+
+def test_enter_dry_powder_check_is_inactive_when_cash_is_unknown():
+    tk = _healthy_tk(price=182.0)
+    m = _market({"MSFT": tk}, candidates=[_candidate()])
+    m["capital"] = {"deployable": 0.0, "max_lot_cost": None}   # operating cash never configured
+    assert engine._entry_blocked(_candidate(), m) == []
+    m["capital"] = None
+    assert engine._entry_blocked(_candidate(), m) == []
+
+
+def test_enter_first_call_is_the_earliest_full_week_expiration():
+    # NOW is Friday 2026-07-10: this Friday is a 1-session stub, so the first
+    # call is next Friday (7 calendar days, 6 sessions).
+    ticket = engine._enter_ticket({"ticker": "MSFT", "contracts": 1},
+                                  _market({"MSFT": _healthy_tk()}))
+    short = next(l for l in ticket["legs"] if l["role"] == "short")
+    assert short["expiration"] == "2026-07-17" and short["dte"] == 7
+    assert ticket["covering_short"]["expiration"] == "2026-07-17"
+    assert ticket["covering_short"]["sessions"] == 6
+    assert ticket["estimates"]["first_call_pct_to_expiry"] > 0
+    # A Tuesday snapshot skips the partial week for next Friday.
+    m = _market({"MSFT": _healthy_tk()})
+    m["as_of"] = "2026-07-07T14:00:00Z"
+    short = next(l for l in engine._enter_ticket({"ticker": "MSFT"}, m)["legs"] if l["role"] == "short")
+    assert short["expiration"] == "2026-07-17" and short["dte"] == 10

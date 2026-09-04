@@ -441,6 +441,10 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     row["lot_cost"] = est.get("shares_cost_per_lot")
     row["shares_per_lot"] = config.SHARES_PER_LOT
     row["juice_weekly_pct"] = est["weekly_yield_pct"]
+    row["juice_basis"] = est.get("juice_basis")
+    row["first_call_expiration"] = est.get("first_call_expiration")
+    row["first_call_dte"] = est.get("first_call_dte")
+    row["first_call_pct_to_expiry"] = est.get("first_call_pct_to_expiry")
     # NET juice/week (gross minus LEAP model burn, with slippage) — the ranking
     # key. Kept alongside gross so the panel can show both; ranking sorts on net.
     row["net_juice_weekly_pct"] = est.get("net_weekly_yield_pct")
