@@ -10,6 +10,18 @@ reconciliation is `NOT_YET_IMPLEMENTED`, **no action type can be eligible**.
 
 ## What you'll see
 
+**ENTER recommendations** clear two more gates than the scan's verdict: one
+100-share lot must be **≤ the dry powder** deployable right now (the tighter
+of the capital-cap headroom and cash above the defensive reserve — the same
+figure the Overview's barrel shows; inactive only while operating cash was
+never configured), and the weekly juice is judged on one **full
+Friday-to-Friday week** (`JUICE_WEEK_CALENDAR_DAYS`) so every name is compared
+on the same basis whatever weekday the scan runs. The proposed first call is
+sold at the **earliest full-week expiration** (≥ `FULL_WEEK_MIN_SESSIONS`
+sessions; a Tuesday entry skips this Friday's partial week), priced at its
+own DTE; the card shows lot vs dry powder, the full-week %, and the first
+call's expiration, DTE and %-to-expiry.
+
 **Recommendation cards** on each position (Positions tab). Every scheduled
 alert slot (08:30 → 16:15 ET) runs a recommendation pass, and so does an
 **event**: during market hours the tiered quote poller (2-minute Tier 0

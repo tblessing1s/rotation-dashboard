@@ -138,11 +138,24 @@ export function explainRec(rec) {
       why = `The long leg is at ${num(d.leap_dte, 0)} DTE, at or under the planned exit of ${num(d.planned_exit_dte, 0)}. Holding past this is drift, not strategy.`;
       numbers.push({ k: "DTE", v: num(d.leap_dte, 0) }, { k: "planned exit", v: num(d.planned_exit_dte, 0) });
       break;
-    case "GATE_ALL_PASS":
-      why = `Every entry gate passed${snap.regime ? ` in a ${String(snap.regime).toUpperCase()} regime` : ""}${snap.juice_weekly_pct != null ? `, with the first weekly call paying about ${num(snap.juice_weekly_pct, 2)}% of the lot per week` : ""}.`;
-      if (snap.juice_weekly_pct != null) numbers.push({ k: "weekly juice", v: `${num(snap.juice_weekly_pct, 2)}%` });
+    case "GATE_ALL_PASS": {
+      const t = rec.proposed_ticket || {};
+      const cs = t.covering_short || {};
+      const est = t.estimates || {};
+      const fit = snap.lot_cost != null && snap.deployable != null
+        ? ` One lot costs ${money(snap.lot_cost)} against ${money(snap.deployable)} of dry powder${snap.dry_powder_after != null ? `, leaving ${money(snap.dry_powder_after)}` : ""}.`
+        : "";
+      const first = cs.expiration
+        ? ` First call: exp ${cs.expiration} (${cs.dte} DTE, the earliest full week)${est.short_premium_per_share != null ? `, est ${dollars(est.short_premium_per_share)}/sh` : ""}${est.first_call_pct_to_expiry != null ? ` ≈ ${num(est.first_call_pct_to_expiry, 2)}% to expiry` : ""}.`
+        : "";
+      why = `Every entry gate passed${snap.regime ? ` in a ${String(snap.regime).toUpperCase()} regime` : ""}${snap.juice_weekly_pct != null ? `, with the weekly call paying about ${num(snap.juice_weekly_pct, 2)}% of the lot per full week` : ""}.${fit}${first}`;
+      if (snap.juice_weekly_pct != null) numbers.push({ k: "juice / full wk", v: `${num(snap.juice_weekly_pct, 2)}%` });
+      if (snap.lot_cost != null) numbers.push({ k: "lot", v: money(snap.lot_cost) });
+      if (snap.deployable != null) numbers.push({ k: "dry powder", v: money(snap.deployable) });
+      if (cs.expiration) numbers.push({ k: "first call", v: `${cs.expiration.slice(5)} · ${cs.dte} DTE` });
       if (snap.regime) numbers.push({ k: "regime", v: String(snap.regime) });
       break;
+    }
     case "ALL_CLEAR":
       why = "Nothing on this position needs a move.";
       break;

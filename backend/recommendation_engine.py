@@ -337,13 +337,18 @@ def _enter_ticket(candidate: dict, market: dict) -> dict:
     short = (strike_policy.suggest_strike(price, atr_value, regime, posture)
              if price is not None and atr_value is not None else {})
     q = tk.get("q") or 0.0
-    short_premium = _bs_premium(price, short.get("strike"), 5, tk.get("hist_vol"), q)
+    # The first call is sold at the earliest FULL-week expiration (never a
+    # partial week), priced at its own DTE.
+    fc = _first_call_expiration(market)
+    short_premium = _bs_premium(price, short.get("strike"), fc["calendar_dte"], tk.get("hist_vol"), q)
     contracts = int(candidate.get("contracts") or 1)
     qty = contracts * config.SHARES_PER_LOT   # shares that cover `contracts` short calls
     share_cost = round(float(price), 2) if price is not None else None
     notional = round(float(price) * qty, 2) if price is not None else None
     net_debit_ps = (round(float(price) - short_premium, 2)
                     if price is not None and short_premium is not None else None)
+    first_call_pct = (round(short_premium / float(price) * 100, 2)
+                      if short_premium is not None and price else None)
     return {
         "action": "buy_shares",
         "ticker": candidate.get("ticker"),
@@ -352,18 +357,45 @@ def _enter_ticket(candidate: dict, market: dict) -> dict:
         "legs": [
             {"instruction": "BUY", "role": "shares", "quantity": qty, "target_delta": 1.0},
             {"instruction": "SELL_TO_OPEN", "role": "short", "strike": short.get("strike"),
-             "dte": 5, "quantity": contracts},
+             "expiration": fc["expiration"], "dte": fc["calendar_dte"], "quantity": contracts},
         ],
         "order_type": "EQUITY",
         "covering_short": {"action": "sell_short", "strike": short.get("strike"),
-                           "dte": 5, "contracts": contracts,
+                           "expiration": fc["expiration"], "dte": fc["calendar_dte"],
+                           "sessions": fc["sessions"], "contracts": contracts,
                            "premium_per_share": short_premium},
         "max_slippage_pct_of_mid": config.REC_MAX_SLIPPAGE_PCT_OF_MID,
         "estimates": {"shares_cost_per_share": share_cost, "shares_notional": notional,
                       "short_premium_per_share": short_premium,
+                      "first_call_pct_to_expiry": first_call_pct,
                       "net_debit_per_share": net_debit_ps, "strike_policy": short or None},
         "price_source": "estimate" if share_cost is not None else "unpriced",
     }
+
+
+def _first_call_expiration(market: dict) -> dict:
+    """The earliest full-week weekly expiration from the snapshot's date, as
+    strings/ints the ticket can carry (see market_calendar)."""
+    import market_calendar
+    from datetime import date as _date
+    as_of = str(market.get("as_of") or "")[:10]
+    try:
+        today = _date.fromisoformat(as_of) if as_of else _date.today()
+    except ValueError:
+        today = _date.today()
+    fc = market_calendar.earliest_full_week_expiration(today)
+    return {"expiration": fc["expiration"].isoformat(), "calendar_dte": int(fc["calendar_dte"]),
+            "sessions": int(fc["sessions"])}
+
+
+def _lot_cost(candidate: dict, market: dict) -> float | None:
+    """What one 100-share lot costs: the scan row's figure when carried, else
+    spot x SHARES_PER_LOT off the snapshot."""
+    if candidate.get("lot_cost") is not None:
+        return float(candidate["lot_cost"])
+    tk = _tk(market, candidate.get("ticker", ""))
+    price = tk.get("price") or tk.get("last_close")
+    return round(float(price) * config.SHARES_PER_LOT, 2) if price is not None else None
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +683,16 @@ def _enter_rec(candidate: dict, market: dict, now: datetime) -> dict:
             "level5": candidate.get("level5"),
             "regime": (market.get("regime") or {}).get("status"),
             "juice_weekly_pct": candidate.get("juice_weekly_pct"),
+            "juice_basis": "full_week",
+            "juice_week_days": config.JUICE_WEEK_CALENDAR_DAYS,
+            # The dry-powder read the ENTER cleared: what the lot costs against
+            # what is deployable, and what would be left.
+            "lot_cost": _lot_cost(candidate, market),
+            "deployable": (market.get("capital") or {}).get("deployable"),
+            "dry_powder_after": (
+                round(float((market.get("capital") or {}).get("deployable")) - _lot_cost(candidate, market), 2)
+                if (market.get("capital") or {}).get("deployable") is not None
+                and _lot_cost(candidate, market) is not None else None),
             "blockers": candidate.get("blockers") or [],
         },
         "valid_until": _valid_until(ActionType.ENTER, now),
@@ -675,6 +717,17 @@ def _entry_blocked(candidate: dict, market: dict) -> list[str]:
     l5 = candidate.get("level5") or {}
     for f in l5.get("blocking_failures") or []:
         blockers.append(f"Level 5 {f.get('id') or f}" if isinstance(f, dict) else f"Level 5 {f}")
+    # Dry powder: one lot must fit what is deployable RIGHT NOW (the tighter of
+    # the capital-cap headroom and cash above the defensive reserve — the same
+    # figure the Overview's barrel shows). Inactive when operating cash was never
+    # configured (max_lot_cost is None): an unknown balance must not read as
+    # "nothing is affordable".
+    cap = market.get("capital") or {}
+    lot = _lot_cost(candidate, market)
+    deployable = cap.get("deployable")
+    if cap.get("max_lot_cost") is not None and lot is not None and deployable is not None \
+            and lot > float(deployable):
+        blockers.append(f"lot ${lot:,.0f} exceeds dry powder ${float(deployable):,.0f}")
     return blockers
 
 
