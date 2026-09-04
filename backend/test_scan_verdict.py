@@ -160,8 +160,8 @@ def test_compose_is_deterministic_across_runs():
 # ---------------------------------------------------------------------------
 # Entry route selection (§1.6) — advisory only
 # ---------------------------------------------------------------------------
-_NEAR = config.SPOT_ATR_EXTENSION_MAX - 0.5
-_EXTENDED = config.SPOT_ATR_EXTENSION_MAX + 0.5
+_NEAR = config.CSP_ROUTE_ATR_EXTENSION_MAX - 0.5
+_EXTENDED = config.CSP_ROUTE_ATR_EXTENSION_MAX + 0.5
 
 
 def test_a_name_near_ma21_routes_to_shares():
@@ -194,10 +194,12 @@ def test_unmeasurable_extension_takes_the_route_that_commits_nothing_forward():
     assert sv.route(extension_atr=None, regime_color="green")["route"] == sv.SHARES
 
 
-def test_the_route_threshold_is_the_old_level_4_veto_bar():
-    """No constant of its own: what used to BLOCK an entry now SELECTS its route."""
+def test_the_route_threshold_is_its_own_dedicated_constant():
+    """Split from the old Level-4 veto bar so the route can be loosened without
+    also loosening the unrelated chart-structure shadow display."""
     assert (sv.route(extension_atr=0.0)["detail"]["threshold"]
-            == config.SPOT_ATR_EXTENSION_MAX)
+            == config.CSP_ROUTE_ATR_EXTENSION_MAX)
+    assert config.CSP_ROUTE_ATR_EXTENSION_MAX < config.SPOT_ATR_EXTENSION_MAX
 
 
 # ---------------------------------------------------------------------------

@@ -236,15 +236,18 @@ def route(*, extension_atr: float | None, regime_color: str | None = None,
     Keyed off ``extension_atr`` — the SAME volatility-normalized extension the
     ranker consumes (``scan_score._extension_sub``), so the route and the rank can
     never disagree about how extended a name is. The threshold is
-    ``config.SPOT_ATR_EXTENSION_MAX``, which is exactly the old Level-4 right-spot
-    veto bar: **what used to block an entry now selects its route.** That is why
-    this needs no constant of its own.
+    ``config.CSP_ROUTE_ATR_EXTENSION_MAX``, its own constant, deliberately lower
+    than (and no longer borrowed from) ``config.SPOT_ATR_EXTENSION_MAX`` — the old
+    Level-4 right-spot veto bar. Splitting them means the put route can be
+    loosened as an operator preference without also loosening the unrelated
+    (shadow, no-authority) chart-structure extension display in
+    ``chart_structure.py``.
 
     An unmeasurable extension routes to SHARES: the put route is the one that
     commits capital forward on a chart read, so an absent read takes the route that
     does not. PURE — no clock, no chain, no I/O.
     """
-    threshold = config.SPOT_ATR_EXTENSION_MAX
+    threshold = config.CSP_ROUTE_ATR_EXTENSION_MAX
     if regime_color == "red":
         return {"route": None, "reason": "regime_red",
                 "detail": {"regime_color": regime_color}}
