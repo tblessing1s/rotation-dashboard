@@ -4,7 +4,7 @@ import { Card, Stat, Light, Pill, Meter, Modal, Loading, ErrorState, money, fmt,
 import AccountsRollup from "./AccountsRollup.jsx";
 import ProcessRibbon from "./ProcessRibbon.jsx";
 import ReadyToEnter from "./ReadyToEnter.jsx";
-import { explainRec } from "../recWhy.js";
+import { explainRec, ticketSummary } from "../recWhy.js";
 
 // The dashboard landing tab: one screen that answers "where does everything
 // stand and what needs me today." It leans entirely on existing endpoints
@@ -49,7 +49,7 @@ function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
     recTickers.add(`${r.ticker}:${r.action_type}`);
     push(sev, r.ticker, head + detail,
       () => (r.action_type === "ENTER" ? nav.enter(r.ticker, r.rec_id) : nav.focus(r.ticker)),
-      { rec: true });
+      { rec: r, why: x });
   }
 
   if (capital && capital.reserve_ok === false) {
@@ -97,7 +97,58 @@ function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
   return items;
 }
 
+// A REC row expands in place: the full sentence, what the action does, the
+// numbers, and the proposed ticket — everything the position card shows,
+// minus Execute / Dismiss, which stay on the card (the "Go" button). Other
+// rows navigate on tap, as before.
+function RecExpander({ it, onGo }) {
+  const x = it.why;
+  const rec = it.rec;
+  const valid = (rec.valid_until || "").slice(0, 16).replace("T", " ");
+  return (
+    <div className="mt-1 rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs">
+      {x?.why && <p className="leading-relaxed text-slate-200">{x.why}</p>}
+      {x?.effect && (
+        <p className="mt-1 text-emerald-300/90">
+          <span className="font-semibold">{x.action}:</span> {x.effect}
+        </p>
+      )}
+      {(x?.numbers?.length > 0 || x?.also?.length > 0) && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {x.numbers.map((n, i) => (
+            <span key={i} className="rounded-full border border-slate-700 bg-slate-950/60 px-2 py-0.5 text-[10px] text-slate-300">
+              <span className="text-slate-500">{n.k} </span>
+              <span className="font-semibold text-slate-100">{n.v}</span>
+            </span>
+          ))}
+          {x.also.length > 0 && (
+            <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-200"
+                  title="Other rules that fired on the same pass; the recommendation acts on the dominant one">
+              also: {x.also.join(", ")}
+            </span>
+          )}
+        </div>
+      )}
+      <p className="mt-1.5 text-slate-400">
+        <span className="uppercase tracking-wide text-slate-500">ticket</span> · {ticketSummary(rec.proposed_ticket)}
+      </p>
+      <div className="mt-2 flex items-center gap-3">
+        <button
+          onClick={onGo}
+          className="rounded-full border border-emerald-600/50 bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20"
+        >
+          {rec.action_type === "ENTER" ? "Open entry ticket →" : "Go to position →"}
+        </button>
+        <span className="text-[11px] text-slate-500">Execute / Dismiss live there.</span>
+        {valid && <span className="ml-auto text-[11px] text-slate-600" title={`valid until ${rec.valid_until}`}>valid until {valid}Z</span>}
+      </div>
+    </div>
+  );
+}
+
 function ActionItems({ items }) {
+  // Which REC row is expanded (keyed by rec_id so a refetch keeps it open).
+  const [openId, setOpenId] = React.useState(null);
   if (items.length === 0) {
     return (
       <Card title="Needs attention">
@@ -108,28 +159,34 @@ function ActionItems({ items }) {
   return (
     <Card title={`Needs attention — ${items.length}`}>
       <ul className="space-y-2">
-        {items.map((it, i) => (
-          <li key={i}>
-            <button
-              onClick={it.go}
-              className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm transition hover:brightness-125 ${
-                SEV_TONE[it.severity] || SEV_TONE.low
-              }`}
-            >
-              <Pill status={SEV_PILL[it.severity]}>{it.severity}</Pill>
-              <span className="min-w-0 flex-1 text-slate-100">
-                {it.rec && (
-                  <span className="mr-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300"
-                        title="Engine recommendation — Execute / Dismiss on the position card">
-                    rec
-                  </span>
-                )}
-                {it.label}
-              </span>
-              <span className="shrink-0 text-xs opacity-70">→</span>
-            </button>
-          </li>
-        ))}
+        {items.map((it, i) => {
+          const recId = it.rec?.rec_id;
+          const open = !!recId && openId === recId;
+          return (
+            <li key={recId || i}>
+              <button
+                onClick={it.rec ? () => setOpenId(open ? null : recId) : it.go}
+                aria-expanded={it.rec ? open : undefined}
+                className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm transition hover:brightness-125 ${
+                  SEV_TONE[it.severity] || SEV_TONE.low
+                }`}
+              >
+                <Pill status={SEV_PILL[it.severity]}>{it.severity}</Pill>
+                <span className="min-w-0 flex-1 text-slate-100">
+                  {it.rec && (
+                    <span className="mr-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300"
+                          title="Engine recommendation — tap to see why">
+                      rec
+                    </span>
+                  )}
+                  {it.label}
+                </span>
+                <span className="shrink-0 text-xs opacity-70">{it.rec ? (open ? "▲" : "▼") : "→"}</span>
+              </button>
+              {open && <RecExpander it={it} onGo={it.go} />}
+            </li>
+          );
+        })}
       </ul>
     </Card>
   );

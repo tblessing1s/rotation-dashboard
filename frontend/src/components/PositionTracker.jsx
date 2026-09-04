@@ -4,7 +4,7 @@ import { Card, Meter, Loading, Modal, Light, ChartLink, SleeveBadge, money, fmt,
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { useToast } from "./Toast.jsx";
-import { explainRec } from "../recWhy.js";
+import { explainRec, ticketSummary } from "../recWhy.js";
 import { submitOrder } from "../orderFlow.js";
 
 // Reconciliation review panel — shown when the position has open diffs against
@@ -270,38 +270,6 @@ function settleInfo(settle, now) {
     preApproved: !!settle.pre_approved,
     reason: SETTLE_REASON_LABEL[settle.reason] || settle.reason,
   };
-}
-
-// One-line ticket read: legs (instruction + strike + expiry) · order type · est net.
-function ticketSummary(t) {
-  if (!t) return "no ticket attached";
-  const legs = (t.legs || [])
-    .map((l) => {
-      const when = l.expiration ? ` exp ${l.expiration}` : l.dte != null ? ` ${l.dte} DTE` : "";
-      // A shares leg has no strike — its size IS the leg (100 shares, delta 1.0).
-      const what = l.role === "shares" ? `${fmt(l.quantity, 0)} shares` : fmt(l.strike, 2);
-      return `${(l.instruction || "").replaceAll("_", " ")} ${what}${when}`;
-    })
-    .join(" / ");
-  // Each ticket shape nets under its own key: the LEAP exit/roll per share, the
-  // shares exit as equity proceeds less the option buyback, the shares ENTRY as
-  // a debit (share cost less the premium collected) — negated here so the
-  // credit/debit wording below reads off one signed number.
-  const est = t.estimates || {};
-  const net = est.net_per_share != null ? est.net_per_share
-    : est.net_credit_per_share != null ? est.net_credit_per_share
-    : est.net_debit_per_share != null ? -Math.abs(est.net_debit_per_share)
-    : null;
-  const netStr = net != null
-    ? `est ${net < 0 ? "−" : ""}$${Math.abs(Number(net)).toFixed(2)}/sh ${net >= 0 ? "credit" : "debit"}`
-    : "unpriced";
-  // What the lot actually COSTS — the number an entry decision turns on, and the
-  // one thing a per-share figure hides (a $220/sh name and a $960/sh name read
-  // alike until you see $22k next to $96k).
-  const lot = t.estimates?.shares_notional;
-  const lotStr = lot != null ? `${money(lot)} lot` : null;
-  return [legs, (t.order_type || "").replaceAll("_", " "), lotStr, netStr]
-    .filter(Boolean).join(" · ");
 }
 
 // Dismissal modal: one coded reason is mandatory; OTHER additionally demands a

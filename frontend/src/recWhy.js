@@ -12,6 +12,9 @@ const num = (n, d = 1) =>
 const dteStr = (dte) => (dte == null ? "" : ` with ${dte} DTE left`);
 const shortStr = (s) => (s?.strike != null ? `the ${num(s.strike, 2)} call` : "the short call");
 
+const fmt = (n, d = 2) => num(n, d);
+const money = (n) => (n == null ? "—" : "$" + Number(n).toLocaleString(undefined, { maximumFractionDigits: 0 }));
+
 // Human names for the trigger rules (the raw code stays as a tooltip).
 export const RULE_LABELS = {
   KILL_RS_SPY_CONFIRMED: "Kill switch — losing to SPY",
@@ -163,4 +166,36 @@ export function recHeadline(rec) {
   const x = explainRec(rec);
   if (!x) return "";
   return `${rec.ticker} — ${x.action}: ${x.label.toLowerCase()}`;
+}
+
+// One-line ticket read: legs (instruction + strike + expiry) · order type · est net.
+export function ticketSummary(t) {
+  if (!t) return "no ticket attached";
+  const legs = (t.legs || [])
+    .map((l) => {
+      const when = l.expiration ? ` exp ${l.expiration}` : l.dte != null ? ` ${l.dte} DTE` : "";
+      // A shares leg has no strike — its size IS the leg (100 shares, delta 1.0).
+      const what = l.role === "shares" ? `${fmt(l.quantity, 0)} shares` : fmt(l.strike, 2);
+      return `${(l.instruction || "").replaceAll("_", " ")} ${what}${when}`;
+    })
+    .join(" / ");
+  // Each ticket shape nets under its own key: the LEAP exit/roll per share, the
+  // shares exit as equity proceeds less the option buyback, the shares ENTRY as
+  // a debit (share cost less the premium collected) — negated here so the
+  // credit/debit wording below reads off one signed number.
+  const est = t.estimates || {};
+  const net = est.net_per_share != null ? est.net_per_share
+    : est.net_credit_per_share != null ? est.net_credit_per_share
+    : est.net_debit_per_share != null ? -Math.abs(est.net_debit_per_share)
+    : null;
+  const netStr = net != null
+    ? `est ${net < 0 ? "−" : ""}$${Math.abs(Number(net)).toFixed(2)}/sh ${net >= 0 ? "credit" : "debit"}`
+    : "unpriced";
+  // What the lot actually COSTS — the number an entry decision turns on, and the
+  // one thing a per-share figure hides (a $220/sh name and a $960/sh name read
+  // alike until you see $22k next to $96k).
+  const lot = t.estimates?.shares_notional;
+  const lotStr = lot != null ? `${money(lot)} lot` : null;
+  return [legs, (t.order_type || "").replaceAll("_", " "), lotStr, netStr]
+    .filter(Boolean).join(" · ");
 }
