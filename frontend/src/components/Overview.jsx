@@ -149,7 +149,8 @@ function RecExpander({ it, onGo }) {
 // Event keys from backend/event_runner.py, in the operator's words.
 const EVENT_LABEL = {
   roll_75: "75% captured", extrinsic_captured: "juice banked",
-  assignment_risk: "assignment risk", defense: "defense level", market: "move",
+  dividend_risk: "dividend assignment risk", assignment_risk: "extrinsic collapsed",
+  earnings: "earnings window", defense: "defense level", market: "move",
 };
 
 // "engine ran 12 min ago" — with the freeze called out when the pass was

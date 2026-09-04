@@ -58,6 +58,43 @@ def test_unpolled_and_closed_positions_are_silent():
     assert set(er.detect_signals(st, {"AAPL": {"price": 90.0}, "MSFT": {"price": 90.0}})) == {"AAPL"}
 
 
+def test_earnings_window_is_an_event_for_a_name_with_a_short(monkeypatch):
+    import earnings
+    st = _state([_short(current_bid=1.0)])
+    monkeypatch.setattr(earnings, "cached_earnings",
+                        lambda t: {"date": "2026-07-14", "days_until": 6, "warning": True})
+    assert er.EARNINGS in er.detect_signals(st, {"AAPL": {"price": 90.0}})["AAPL"]
+    # Outside the window: nothing.
+    monkeypatch.setattr(earnings, "cached_earnings",
+                        lambda t: {"date": "2026-08-30", "days_until": 53, "warning": False})
+    assert er.EARNINGS not in er.detect_signals(st, {"AAPL": {"price": 90.0}})["AAPL"]
+    # No short call -> nothing for the engine's per-leg rule to act on.
+    monkeypatch.setattr(earnings, "cached_earnings", lambda t: {"warning": True})
+    bare = {"positions": [{"ticker": "AAPL", "status": "active", "short_calls": []}]}
+    assert er.detect_signals(bare, {"AAPL": {"price": 90.0}}) == {"AAPL": set()}
+    # A broken cache read never sinks the cycle; the price signals still run.
+    monkeypatch.setattr(earnings, "cached_earnings",
+                        lambda t: (_ for _ in ()).throw(RuntimeError("cache")))
+    st2 = _state([_short(sold=2.0, entry_extrinsic=2.0, current_bid=0.4, dte=5)])
+    sig = er.detect_signals(st2, {"AAPL": {"price": 90.0}})["AAPL"]
+    assert er.ROLL_75 in sig and er.EARNINGS not in sig
+
+
+def test_dividend_and_extrinsic_assignment_risks_are_distinct_events():
+    from datetime import date
+    # ITM short at 100 with the stock at 103: bid 3.05 -> extrinsic 0.05.
+    sc = _short(strike=100.0, dte=5, sold=2.0, entry_extrinsic=2.0, current_bid=3.05)
+    # Ex-div inside the leg's life and above the extrinsic -> the DIVIDEND variant.
+    st = _state([sc])
+    st["positions"][0]["dividend"] = {"ex_date": "2026-07-10", "amount": 0.50}
+    sig = er.detect_signals(st, {"AAPL": {"price": 103.0}}, today=date(2026, 7, 8))["AAPL"]
+    assert er.DIVIDEND_RISK in sig and er.ASSIGNMENT_RISK not in sig
+    # No dividend: the same collapsed extrinsic is the plain assignment variant.
+    st["positions"][0]["dividend"] = None
+    sig = er.detect_signals(st, {"AAPL": {"price": 103.0}}, today=date(2026, 7, 8))["AAPL"]
+    assert er.ASSIGNMENT_RISK in sig and er.DIVIDEND_RISK not in sig
+
+
 # --- gating ------------------------------------------------------------------
 def test_first_cycle_primes_and_runs_nothing():
     g = er.EventGate()
