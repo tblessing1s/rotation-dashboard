@@ -132,9 +132,17 @@ def _bs_premium(price, strike, dte_days, vol, q) -> float | None:
         return None
 
 
+def _live_mark(sc: dict, tk: dict) -> float | None:
+    """The snapshot's live mark for this leg (poller cache), else None."""
+    return (tk.get("short_marks") or {}).get((sc.get("strike"), sc.get("expiration")))
+
+
 def _short_mark(sc: dict, tk: dict, q: float) -> float | None:
-    """Current per-share value of an open short: the stored/polled mark when
-    present, else a BS estimate off the snapshot's price + trailing vol."""
+    """Current per-share value of an open short: the snapshot's live mark, else
+    the stored mark, else a BS estimate off the snapshot's price + trailing vol."""
+    live = _live_mark(sc, tk)
+    if live is not None:
+        return float(live)
     if sc.get("current_bid") is not None:
         return float(sc["current_bid"])
     return _bs_premium(tk.get("price") or tk.get("last_close"), sc.get("strike"),
@@ -457,7 +465,8 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
     # Short-leg triggers — shared enrich_short signals per open short.
     for sc in position.get("short_calls", []):
         es = position_manager.enrich_short(sc, price if price is not None else last_close,
-                                           position.get("dividend"), today=today)
+                                           position.get("dividend"),
+                                           live_mark=_live_mark(sc, tk), today=today)
         key = {"strike": sc.get("strike"), "expiration": sc.get("expiration"),
                "contracts": sc.get("contracts")}
         below = (last_close is not None and sc.get("strike") is not None
@@ -517,7 +526,7 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
                    for sc in position.get("short_calls", [])
                    for _es in (position_manager.enrich_short(
                        sc, price if price is not None else last_close,
-                       position.get("dividend"), today=today),)],
+                       position.get("dividend"), live_mark=_live_mark(sc, tk), today=today),)],
         "kill_switch_status": ks["status"],
     }
     return {"triggers": triggers, "features": features}

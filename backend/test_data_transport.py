@@ -242,3 +242,32 @@ def test_intraday_move_pct():
     df = _bars([100.0, 100.0, 100.0])
     assert dt.intraday_move_pct(101.0, df) == pytest.approx(1.0)
     assert dt.intraday_move_pct(None, df) == 0.0
+
+
+# ---- Option legs in the batch: carried through, never sent to a stock fallback
+
+def test_option_symbols_carry_marks_and_skip_fallbacks(monkeypatch):
+    occ = "AAPL  260717C00090000"
+    seen = {}
+
+    def fake_batch(syms):
+        seen["syms"] = list(syms)
+        return {"AAPL": _node(100.0), occ: {"last": 0.40, "mark": 0.42, "bid": 0.40, "ask": 0.44}}
+
+    monkeypatch.setattr(dt, "_schwab_batch", fake_batch)
+    monkeypatch.setattr(dt, "_av_quote", lambda s: pytest.fail(f"AV asked for {s}"))
+    monkeypatch.setattr(dt, "_cached_close", lambda s: pytest.fail(f"cache asked for {s}"))
+    res = dt.fetch_quotes_batched({"AAPL": Tier.T0, occ: Tier.T0}, sleep=lambda s: None)
+    assert res["quotes"][occ]["mark"] == 0.42 and res["quotes"][occ]["bid"] == 0.40
+    assert res["quotes"]["AAPL"]["price"] == 100.0
+    assert data_cache.record("AAPL", QUOTE) is not None and data_cache.record(occ, QUOTE) is None
+
+
+def test_missing_option_quote_is_not_a_degraded_tier0(monkeypatch):
+    occ = "AAPL  260717C00090000"
+    monkeypatch.setattr(dt, "_schwab_batch", lambda syms: {"AAPL": _node(100.0), occ: None})
+    monkeypatch.setattr(dt, "_av_quote", lambda s: pytest.fail(f"AV asked for {s}"))
+    monkeypatch.setattr(dt, "_cached_close", lambda s: pytest.fail(f"cache asked for {s}"))
+    res = dt.fetch_quotes_batched({"AAPL": Tier.T0, occ: Tier.T0}, sleep=lambda s: None)
+    assert occ not in res["quotes"]
+    assert res["degraded"] == [] and res["tier0_degraded"] == []

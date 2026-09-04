@@ -758,6 +758,11 @@ function TieredScheduler({ data }) {
                 {poll.event_runs.last_run_at ? ` (last ${String(poll.event_runs.last_run_at).slice(11, 16)})` : ""}
               </span>
             )}
+            {poll.short_marks && (
+              <span title="Live short-call marks: each open short rides its stock's batched quote; a mark older than the max age is ignored">
+                {" · "}short marks {poll.short_marks.fresh}/{poll.short_marks.cached} live
+              </span>
+            )}
           </>
         ) : "Scheduler idle"}
       </p>

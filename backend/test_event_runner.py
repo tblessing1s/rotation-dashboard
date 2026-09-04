@@ -162,3 +162,15 @@ def test_runner_stamps_the_trigger_on_its_summary(tmp_path, monkeypatch):
     assert runner.run(notify=False, trigger=trig)["trigger"] == trig
     assert runner.run(notify=False)["trigger"] == "scheduled"
     assert runner.last_run()["trigger"] == "scheduled"
+
+
+def test_live_option_mark_drives_the_75_rule_without_a_stock_move():
+    import option_marks
+    option_marks.reset()
+    # Stored mark says 50% decayed; the poller's live mark says 85%.
+    sc = _short(strike=100.0, dte=5, sold=2.0, entry_extrinsic=2.0, current_bid=1.0)
+    st = _state([sc])
+    assert er.ROLL_75 not in er.detect_signals(st, {"AAPL": {"price": 90.0}})["AAPL"]
+    option_marks.remember(option_marks.symbol_for("AAPL", sc), {"mark": 0.30})
+    assert er.ROLL_75 in er.detect_signals(st, {"AAPL": {"price": 90.0}})["AAPL"]
+    option_marks.reset()

@@ -63,6 +63,7 @@ def detect_signals(state: dict, quotes: dict, today=None) -> dict[str, set[str]]
     Only tickers present in ``quotes`` are reported — a name that was not polled
     this cycle has nothing new to say, and the gate keeps its previous read.
     """
+    import option_marks
     import position_manager
     out: dict[str, set[str]] = {}
     for pos in state.get("positions", []) or []:
@@ -77,6 +78,7 @@ def detect_signals(state: dict, quotes: dict, today=None) -> dict[str, set[str]]
         for sc in pos.get("short_calls", []) or []:
             try:
                 es = position_manager.enrich_short(sc, float(price), pos.get("dividend"),
+                                                   live_mark=option_marks.mark_for(t, sc),
                                                    today=today,
                                                    position_type=pos.get("position_type"))
             except Exception as e:  # noqa: BLE001 — one leg must not sink the cycle

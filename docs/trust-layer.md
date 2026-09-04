@@ -20,6 +20,13 @@ at once when a roll-family signal flips true for a name on the fresh quote
 level breached, SPY / a held sector moving hard). Edges only, never "still
 true"; one run per name per `EVENT_RUN_COOLDOWN_SECONDS` (15 min) and never
 two inside `EVENT_RUN_MIN_GAP_SECONDS` (2 min); a restart primes silently.
+Each open short call rides its underlying's batched quote on every poll (one
+request either way), so its live mark is as fresh as the stock's: the 75% rule
+and the extrinsic-captured threshold react to the option's own price intraday,
+the engine's snapshot freezes the same marks (`short_marks`), and the Positions
+view is served from that cache instead of quoting on its own. A mark older
+than `OPTION_MARK_MAX_AGE_SECONDS` is ignored and the stored entry mark is used,
+exactly as before.
 The scheduled slots remain the floor, and close-only rules (kill switch,
 circuit breaker) read the same daily bars an intraday slot would. The
 Overview's "engine ran" line says what triggered the last pass.

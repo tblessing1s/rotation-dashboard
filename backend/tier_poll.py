@@ -29,6 +29,7 @@ import data_budget
 import data_cache
 import data_transport as transport
 import market_scheduler as ms
+import option_marks
 import queue_state
 from market_scheduler import QUOTE, EscalationTracker, ListAlertSink, Tier
 
@@ -53,6 +54,7 @@ def reset() -> None:
         event_runner.reset()
     except Exception:  # noqa: BLE001
         pass
+    option_marks.reset()
 
 
 def _now() -> datetime:
@@ -203,11 +205,27 @@ def run_cycle(now: datetime | None = None, sleep=time.sleep) -> dict | None:
 
     summary = {"market_open": True, "due": sorted(due), "quotes": {},
                "escalations": [], "escalation_symbols": [], "market_escalation": None,
-               "degraded": [], "killswitch_refreshed": False, "engine_run": None}
+               "degraded": [], "killswitch_refreshed": False, "engine_run": None,
+               "short_marks": {}}
     if due:
         try:
-            fetched = transport.fetch_quotes_batched(due, sleep=sleep)
-            summary["quotes"] = fetched["quotes"]
+            # Every open short call of a due Tier-0 name rides the SAME batched
+            # request as its underlying (one call either way), so its live mark
+            # is as fresh as the stock's — the 75% / extrinsic-captured signals
+            # then read the option's own price, not only the stock's.
+            batch = dict(due)
+            short_syms = {s: meta for s, meta in option_marks.short_symbols(state).items()
+                          if meta[0] in due and due[meta[0]] == Tier.T0}
+            for s in short_syms:
+                batch[s] = Tier.T0
+            fetched = transport.fetch_quotes_batched(batch, sleep=sleep)
+            for s, meta in short_syms.items():
+                node = fetched["quotes"].get(s)
+                if node:
+                    m = option_marks.remember(s, node, at=now)
+                    if m is not None:
+                        summary["short_marks"][s] = m
+            summary["quotes"] = {s: q for s, q in fetched["quotes"].items() if s not in short_syms}
             summary["degraded"] = fetched["degraded"]
             for sym in due:
                 _last_quote_at[sym] = now
@@ -249,6 +267,7 @@ def status(now: datetime | None = None) -> dict:
         "killswitch_runs_today": _killswitch_runs["count"] if _killswitch_runs["day"] == now.date() else 0,
         "killswitch_target": config.REFRESH_KILLSWITCH_PER_DAY,
         "event_runs": _event_run_status(),
+        "short_marks": option_marks.status(),
     }
 
 

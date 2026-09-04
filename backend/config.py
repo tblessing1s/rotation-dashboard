@@ -435,6 +435,9 @@ ESCALATION_DECAY_MINUTES = 60    # PROPOSED_DEFAULT — an escalation decays aft
 # top of the scheduled slots. Bounded per name and globally.
 EVENT_RUN_COOLDOWN_SECONDS = 900   # PROPOSED_DEFAULT — one event run per name per 15 min
 EVENT_RUN_MIN_GAP_SECONDS = 120    # PROPOSED_DEFAULT — never two event runs inside 2 min
+# Live short-call marks (option_marks): each open short rides its underlying's
+# batched quote; a mark older than this is treated as absent (stored mark used).
+OPTION_MARK_MAX_AGE_SECONDS = 600  # PROPOSED_DEFAULT — 5 Tier-0 cycles
 EOD_BATCH_TIME_ET = "16:30"      # PROPOSED_DEFAULT — the once-daily EOD bar batch fires after this ET time
 BUDGET_SOFT_LIMIT_PCT = 80       # PROPOSED_DEFAULT — shed when a provider crosses this % of its configured daily limit
 TIER0_NEVER_SHED = True          # HARD_CFM_RULE — open-position monitoring is never sacrificed

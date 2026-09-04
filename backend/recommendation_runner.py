@@ -64,6 +64,15 @@ def _ticker_snapshot(ticker: str, position: dict | None, q_pair, price, bars,
     except Exception:  # noqa: BLE001
         pass
     tk["price"] = price
+    # Live per-share marks of the position's short calls from the poller's
+    # cache (fresh only; never a fetch) — frozen here so the pass reads the
+    # same marks the event that triggered it was detected on.
+    if position is not None:
+        try:
+            import option_marks
+            tk["short_marks"] = option_marks.marks_for(ticker, position.get("short_calls") or [])
+        except Exception:  # noqa: BLE001
+            tk["short_marks"] = {}
     try:
         rs_spy = q_pair if q_pair is not None else kill_switch._rs_spy(ticker)
         tk["rs3m_vs_spy"] = rs_spy
