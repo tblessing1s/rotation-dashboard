@@ -146,18 +146,57 @@ function RecExpander({ it, onGo }) {
   );
 }
 
-function ActionItems({ items }) {
+// "engine ran 12 min ago" — with the freeze called out when the pass was
+// skipped, because "no recommendations" and "the engine refused to look" are
+// different situations and only this line tells them apart.
+function EngineRunLine({ run }) {
+  const now = useNow();
+  if (run === null) return null;                       // still loading / older backend
+  if (!run?.at) {
+    return <span className="text-xs text-slate-500" title="No recommendation pass recorded yet">engine hasn't run yet</span>;
+  }
+  const t = Date.parse(run.at);
+  const mins = Number.isNaN(t) ? null : Math.max(0, Math.round((now - t) / 60000));
+  const ago = mins == null ? String(run.at).slice(0, 16).replace("T", " ") + "Z"
+    : mins < 1 ? "just now"
+    : mins < 60 ? `${mins} min ago`
+    : mins < 48 * 60 ? `${Math.round(mins / 60)}h ago`
+    : `${Math.round(mins / 1440)}d ago`;
+  const frozen = !!run.reconcile_frozen;
+  return (
+    <span className={`text-xs ${frozen ? "text-amber-300" : "text-slate-500"}`}
+          title={`Last recommendation pass: ${run.at}${frozen ? ` — skipped: ${run.freeze_reason || "reconciliation freeze"}` : ""}`}>
+      engine ran {ago}
+      {frozen && (
+        <> · <span className="font-semibold">skipped</span> — reconciliation freeze
+          {run.frozen_tickers?.length ? ` (${run.frozen_tickers.join(", ")})` : ""}</>
+      )}
+    </span>
+  );
+}
+
+// Minute tick for the relative "ago" readout.
+function useNow(intervalMs = 60000) {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+function ActionItems({ items, engineRun }) {
   // Which REC row is expanded (keyed by rec_id so a refetch keeps it open).
   const [openId, setOpenId] = React.useState(null);
   if (items.length === 0) {
     return (
-      <Card title="Needs attention">
+      <Card title="Needs attention" right={<EngineRunLine run={engineRun} />}>
         <p className="text-sm text-emerald-300">All clear — nothing needs action right now.</p>
       </Card>
     );
   }
   return (
-    <Card title={`Needs attention — ${items.length}`}>
+    <Card title={`Needs attention — ${items.length}`} right={<EngineRunLine run={engineRun} />}>
       <ul className="space-y-2">
         {items.map((it, i) => {
           const recId = it.rec?.rec_id;
@@ -523,11 +562,18 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
   // overview load on the same cadence, and deliberately best-effort: a failed
   // call just leaves the digest without the item.
   const [openRecs, setOpenRecs] = React.useState(null);
+  // The engine's last pass summary (when it ran; whether it was skipped by the
+  // reconciliation freeze) — the "is this list fresh?" line on the digest.
+  const [engineRun, setEngineRun] = React.useState(null);
   React.useEffect(() => {
     let stop = false;
     const poll = () =>
       api.recommendations()
-        .then((r) => { if (!stop) setOpenRecs(r.open_actionable || []); })
+        .then((r) => {
+          if (stop) return;
+          setOpenRecs(r.open_actionable || []);
+          setEngineRun(r.last_run || null);
+        })
         .catch(() => {});
     poll();
     const id = setInterval(poll, 5 * 60 * 1000);
@@ -629,7 +675,7 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
       {ov.data?.positions?.error ? (
         <Card title="Needs attention"><ErrorState error={ov.data.positions.error} onRetry={ov.reload} /></Card>
       ) : (
-        <ActionItems items={actionItems} />
+        <ActionItems items={actionItems} engineRun={engineRun} />
       )}
 
       {/* This month's estimated payout at a glance → full detail on Payouts. */}

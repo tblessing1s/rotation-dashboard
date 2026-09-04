@@ -146,3 +146,34 @@ def test_enter_alerts_deep_link_to_the_entry_ticket():
     exit_url = runner._rec_action_url({"action_type": "EXIT", "rec_id": "rec_2"}, "MSFT")
     assert exit_url == "/?action=focus&ticker=MSFT&rec_id=rec_2"
     assert runner._rec_action_url({"action_type": "ENTER"}, "") is None
+
+
+def test_last_run_survives_a_restart(tmp_path, monkeypatch):
+    """The 'engine last ran at' readout is persisted with the pass, so a fresh
+    process (in-memory summary gone) still reports when — and why — the last
+    pass happened. The freeze path is used here because it needs no market."""
+    monkeypatch.setattr(config, "active_state_path",
+                        lambda: str(tmp_path / "state.json"))
+    import logging_handler as log
+    import reconcile
+    import recommendation_runner as runner
+
+    log.save_state(log.load_state())
+    monkeypatch.setattr(runner, "_last_run", None)
+    assert runner.last_run() is None  # never ran
+
+    monkeypatch.setattr(reconcile, "freeze_status",
+                        lambda st: {"frozen": True, "tickers": ["PG"], "reason": "diverges"})
+    monkeypatch.setattr(runner, "release_pending",
+                        lambda **kw: {"released": 0, "executed": 0, "expired": 0, "self_canceled": 0})
+    summary = runner.run(notify=False)
+    assert summary["reconcile_frozen"] is True and summary["at"]
+    assert runner.last_run() == summary
+
+    monkeypatch.setattr(runner, "_last_run", None)  # simulate a restart
+    again = runner.last_run()
+    assert again is not None
+    assert again["at"] == summary["at"]
+    assert again["frozen_tickers"] == ["PG"]
+    # Persisted as a readout, not a recommendation record.
+    assert log.load_state()["recommendations"] == []

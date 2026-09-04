@@ -544,7 +544,7 @@ def run(notify: bool = True, include_entry: bool = True,
         import reconcile
         freeze = reconcile.freeze_status(state)
         if freeze["frozen"]:
-            _last_run = {
+            _last_run = _remember_run({
                 "at": log.utcnow(),
                 "positions_evaluated": 0,
                 "emitted": 0, "emitted_ids": [],
@@ -552,7 +552,7 @@ def run(notify: bool = True, include_entry: bool = True,
                 "frozen_tickers": freeze["tickers"],
                 "freeze_reason": freeze["reason"],
                 "released": release_summary,
-            }
+            })
             logger.warning("recommendation pass SKIPPED — reconciliation freeze: %s",
                            freeze["tickers"])
             return _last_run
@@ -565,7 +565,7 @@ def run(notify: bool = True, include_entry: bool = True,
         # 4) Notify actionable recs, settle-aware (staged ones say "executable …").
         if notify and stored:
             _notify(stored, staged, state, dry_run)
-        _last_run = {
+        _last_run = _remember_run({
             "at": log.utcnow(),
             "positions_evaluated": sum(1 for p in state.get("positions", [])
                                        if p.get("status") != "closed"),
@@ -575,10 +575,32 @@ def run(notify: bool = True, include_entry: bool = True,
             "emitted_ids": [r.get("rec_id") for r in stored],
             "staged_pending": len(staged),
             "released": release_summary,
-        }
+        })
         logger.info("recommendation pass: %s", _last_run)
         return _last_run
 
 
+# The last pass summary is a small operational readout (the UI's "engine last
+# ran at" line). It is persisted to state so a restart — Fly machines stop
+# between scheduled slots — doesn't make the dashboard read "never ran" until
+# the next pass. It is NOT a recommendation record and carries no authority.
+_LAST_RUN_KEY = "recommendation_last_run"
+
+
+def _remember_run(summary: dict) -> dict:
+    try:
+        log.mutate_state(lambda st: st.__setitem__(_LAST_RUN_KEY, summary))
+    except Exception as e:  # noqa: BLE001 — a readout must never fail the pass
+        logger.warning("could not persist recommendation last_run: %s", e)
+    return summary
+
+
 def last_run() -> dict | None:
-    return _last_run
+    """The most recent pass summary: in-memory if this process ran one, else
+    the persisted copy from the last process, else None (never ran)."""
+    if _last_run is not None:
+        return _last_run
+    try:
+        return log.load_state().get(_LAST_RUN_KEY)
+    except Exception:  # noqa: BLE001
+        return None
