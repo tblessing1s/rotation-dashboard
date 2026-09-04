@@ -1353,6 +1353,16 @@ def api_alerts_ack():
         return _err(e)
 
 
+@app.route("/api/alerts/ack-all", methods=["POST"])
+def api_alerts_ack_all():
+    """Mark every active alert seen — clears the bell without touching the
+    conditions themselves (they still auto-resolve when they clear)."""
+    try:
+        return jsonify(alerts.acknowledge_all())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/alerts/settings", methods=["POST"])
 def api_alerts_settings():
     payload = request.get_json(silent=True) or {}

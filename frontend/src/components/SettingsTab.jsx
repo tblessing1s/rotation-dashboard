@@ -2,14 +2,16 @@ import React from "react";
 import { api } from "../api.js";
 import { Card } from "./ui.jsx";
 import LiveTradingSwitch from "./LiveTradingSwitch.jsx";
-import AlertsPanel from "./AlertsPanel.jsx";
+import { AlertSettings } from "./AlertsPanel.jsx";
 import TrustScoreboard from "./TrustScoreboard.jsx";
 import DataHealth from "./DataHealth.jsx";
 import AccountsPanel from "./AccountsPanel.jsx";
 
-// Low-frequency controls and admin surfaces, gathered off the trading tabs:
-// data source (demo/live), strike posture, live-trading switch, alert config,
-// and the data-health/universe admin console.
+// Settings, in the order they matter on a trading day: the two switches that
+// change what the app DOES (posture, live trading) are always in view; the
+// admin surfaces (accounts, notification plumbing, engine diagnostics, data
+// health) sit behind one-line section headers so the page reads as four
+// choices, not a console. Each section remembers whether you left it open.
 
 function ToggleRow({ title, desc, on, busy, onToggle, onLabel, offLabel, onTone, offTone, trackOn }) {
   return (
@@ -32,6 +34,35 @@ function ToggleRow({ title, desc, on, busy, onToggle, onLabel, offLabel, onTone,
   );
 }
 
+// A collapsible section. `defaultOpen` seeds the first visit; after that the
+// operator's last choice wins (kept per section in localStorage — a per-device
+// convenience, so every read is guarded).
+function Section({ id, title, summary, defaultOpen = false, children }) {
+  const key = `cfm.settings.${id}`;
+  const [open, setOpen] = React.useState(() => {
+    try {
+      const v = localStorage.getItem(key);
+      return v == null ? defaultOpen : v === "1";
+    } catch { return defaultOpen; }
+  });
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    try { localStorage.setItem(key, next ? "1" : "0"); } catch { /* ignore */ }
+  };
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-900/40">
+      <button onClick={toggle}
+              className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-slate-900/70">
+        <span className={`text-xs text-slate-500 transition ${open ? "rotate-90" : ""}`}>▶</span>
+        <span className="text-sm font-semibold text-slate-200">{title}</span>
+        {summary && <span className="ml-auto truncate text-xs text-slate-500">{summary}</span>}
+      </button>
+      {open && <div className="grid gap-4 border-t border-slate-800 p-4">{children}</div>}
+    </div>
+  );
+}
+
 export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, postureBusy,
                                      onTogglePosture, accountRegistry, accountId,
                                      onSelectAccount, onAccountsChanged }) {
@@ -40,15 +71,19 @@ export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, pos
     api.accountsSummary(true).then(setSummary).catch(() => setSummary(null));
   }, [accountRegistry, accountId]);
 
+  const accounts = accountRegistry?.accounts || [];
+  const activeLabel = accounts.find((a) => a.id === accountId)?.label || accountId || "";
+  const accountSummary = accounts.length > 1
+    ? `${accounts.length} accounts · viewing ${activeLabel}`
+    : activeLabel ? `1 account · ${activeLabel}` : undefined;
+
   return (
     <div className="grid gap-4">
-      <AccountsPanel registry={accountRegistry} summary={summary} activeId={accountId}
-                     onSelect={onSelectAccount} onChanged={onAccountsChanged} />
-      <Card title="Trading preferences">
+      <Card title="Trading">
         <div className="divide-y divide-slate-800">
           <ToggleRow
             title="Strike posture"
-            desc="Aggressive = thinner ATR/ITM% floor on weekly-short strikes (more juice, less protection). Conservative = wider floor."
+            desc="Aggressive sells weekly calls closer to the stock (more juice, less room). Conservative sells further out (less juice, more protection)."
             on={posture === "aggressive"}
             busy={postureBusy || !posture}
             onToggle={onTogglePosture}
@@ -60,7 +95,7 @@ export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, pos
           />
           <ToggleRow
             title="Data source"
-            desc="Demo mode points every tab at a seeded demo store; live mode reads your real state. Switching reloads the app. This is the DATA source only — it does not send orders to Schwab; that is the Live trading switch below."
+            desc="Demo shows a seeded practice book; Live reads your real book. This only picks the data — sending orders to Schwab is the Live trading switch below. Switching reloads the app."
             on={demo}
             busy={modeBusy}
             onToggle={onToggleDemo}
@@ -73,9 +108,27 @@ export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, pos
         </div>
       </Card>
       <LiveTradingSwitch />
-      <AlertsPanel />
-      <TrustScoreboard />
-      <DataHealth />
+
+      <Section id="accounts" title="Accounts & Schwab connection" summary={accountSummary}
+               defaultOpen={accounts.length > 1}>
+        <AccountsPanel registry={accountRegistry} summary={summary} activeId={accountId}
+                       onSelect={onSelectAccount} onChanged={onAccountsChanged} />
+      </Section>
+
+      <Section id="notifications" title="Notifications"
+               summary="push · email · which alerts fire">
+        <AlertSettings />
+      </Section>
+
+      <Section id="diagnostics" title="Diagnostics"
+               summary="engine trust scoreboard · data sources · universe">
+        <p className="text-xs text-slate-500">
+          Read-only instruments for checking on the machine. Nothing here changes what the
+          engine recommends or what the gates allow.
+        </p>
+        <TrustScoreboard />
+        <DataHealth />
+      </Section>
     </div>
   );
 }

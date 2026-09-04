@@ -4,6 +4,7 @@ import { Card, Meter, Loading, Modal, Light, ChartLink, SleeveBadge, money, fmt,
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { useToast } from "./Toast.jsx";
+import { explainRec } from "../recWhy.js";
 import { submitOrder } from "../orderFlow.js";
 
 // Reconciliation review panel — shown when the position has open diffs against
@@ -389,6 +390,9 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
   const badge = REC_BADGE[rec.action_type] || "border-slate-600 bg-slate-800/60 text-slate-300";
   const s = settleInfo(rec.settle, now);
   const pending = s?.status === "PENDING_SETTLE";
+  // The plain-English read: which rule fired, what it saw (with the numbers),
+  // and what taking the action does. Derived from the rec's frozen snapshot.
+  const why = explainRec(rec);
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -401,13 +405,42 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
         <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${badge}`}>
           {(rec.action_type || "").replaceAll("_", " ")}
         </span>
-        <span className="font-mono text-xs text-slate-400" title="Trigger rule">{rec.trigger_rule}</span>
+        <span className="text-xs font-medium text-slate-300" title={`Trigger rule: ${rec.trigger_rule}`}>
+          {why?.label || rec.trigger_rule}
+        </span>
         {v && (
           <span className={`ml-auto text-xs ${v.tone}`} title={`valid until ${rec.valid_until}`}>
             {v.text}
           </span>
         )}
       </div>
+      {why?.why && (
+        <div className="mt-1.5 rounded-md border border-slate-800 bg-slate-900/50 px-2.5 py-1.5">
+          <p className="text-xs leading-relaxed text-slate-200">{why.why}</p>
+          {why.effect && (
+            <p className="mt-1 text-[11px] text-emerald-300/90">
+              <span className="font-semibold">{why.action}:</span> {why.effect}
+            </p>
+          )}
+          {(why.numbers.length > 0 || why.also.length > 0) && (
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {why.numbers.map((n, i) => (
+                <span key={i}
+                      className="rounded-full border border-slate-700 bg-slate-950/60 px-2 py-0.5 text-[10px] text-slate-300">
+                  <span className="text-slate-500">{n.k} </span>
+                  <span className="font-semibold text-slate-100">{n.v}</span>
+                </span>
+              ))}
+              {why.also.length > 0 && (
+                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-200"
+                      title="Other rules that fired on the same pass; the card acts on the dominant one">
+                  also: {why.also.join(", ")}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {pending && (
         <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
           <span title="The market-settle gate deferred the order; the alert already fired.">

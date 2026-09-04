@@ -4,6 +4,7 @@ import { Card, Stat, Light, Pill, Meter, Modal, Loading, ErrorState, money, fmt,
 import AccountsRollup from "./AccountsRollup.jsx";
 import ProcessRibbon from "./ProcessRibbon.jsx";
 import ReadyToEnter from "./ReadyToEnter.jsx";
+import { explainRec } from "../recWhy.js";
 
 // The dashboard landing tab: one screen that answers "where does everything
 // stand and what needs me today." It leans entirely on existing endpoints
@@ -30,16 +31,25 @@ const SEV_PILL = { critical: "red", high: "yellow", medium: "unknown", low: "unk
 // things to act on. Each item carries a go() that routes into the owning tab.
 function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
   const items = [];
-  const push = (severity, ticker, label, go) => items.push({ severity, ticker, label, go });
+  const push = (severity, ticker, label, go, extra = {}) =>
+    items.push({ severity, ticker, label, go, ...extra });
 
-  // Open actionable engine recommendations (trust layer) — the cards live on
-  // the Positions tab; this is the digest pointer. EXIT/DEFEND anywhere in the
-  // set bumps the whole item to high.
-  if (openRecs && openRecs.length > 0) {
-    const hot = openRecs.some((r) => r.action_type === "EXIT" || r.action_type === "DEFEND");
-    push(hot ? "high" : "medium", null,
-      `${openRecs.length} open recommendation${openRecs.length === 1 ? "" : "s"} — review on Positions`,
-      () => nav.tab("Positions"));
+  // Open actionable engine recommendations (trust layer): one row EACH, in the
+  // engine's own words, so the landing page says what the move is and why
+  // without a trip to Positions. The row lands on that position's card (or the
+  // entry ticket for an ENTER), where Execute / Dismiss live.
+  const recTickers = new Set();
+  for (const r of openRecs || []) {
+    const x = explainRec(r);
+    const sev = r.action_type === "EXIT" ? "critical"
+      : r.action_type === "DEFEND" ? "high" : "medium";
+    const head = `${r.ticker} — ${x?.action || r.action_type}: ${x?.label || r.trigger_rule}`;
+    const detail = x?.numbers?.length
+      ? ` (${x.numbers.slice(0, 3).map((n) => `${n.k} ${n.v}`).join(" · ")})` : "";
+    recTickers.add(`${r.ticker}:${r.action_type}`);
+    push(sev, r.ticker, head + detail,
+      () => (r.action_type === "ENTER" ? nav.enter(r.ticker, r.rec_id) : nav.focus(r.ticker)),
+      { rec: true });
   }
 
   if (capital && capital.reserve_ok === false) {
@@ -54,7 +64,7 @@ function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
       push("critical", t, `${t} — state diverged from the broker; resolve before trading`,
         () => nav.focus(t));
     }
-    if (p.defend) {
+    if (p.defend && !recTickers.has(`${t}:DEFEND`)) {
       push("high", t, `${t} — stock below the short strike; stage a defensive roll`,
         () => nav.roll(t, "defend"));
     }
@@ -65,6 +75,7 @@ function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
         () => nav.focus(t));
     }
     for (const sc of p.short_calls || []) {
+      if (recTickers.has(`${t}:ROLL_OUT`)) break; // the engine's row already says it
       if (sc.dte != null && sc.dte <= 2) {
         push("high", t, `${t} — short ${fmt(sc.strike, 0)}C expiring (${sc.dte} DTE); roll it`,
           () => nav.roll(t, "expiring"));
@@ -106,7 +117,15 @@ function ActionItems({ items }) {
               }`}
             >
               <Pill status={SEV_PILL[it.severity]}>{it.severity}</Pill>
-              <span className="min-w-0 flex-1 text-slate-100">{it.label}</span>
+              <span className="min-w-0 flex-1 text-slate-100">
+                {it.rec && (
+                  <span className="mr-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300"
+                        title="Engine recommendation — Execute / Dismiss on the position card">
+                    rec
+                  </span>
+                )}
+                {it.label}
+              </span>
               <span className="shrink-0 text-xs opacity-70">→</span>
             </button>
           </li>
@@ -467,7 +486,7 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
     tab: (t) => onNavigate?.(t),
     focus: (ticker) => onAction?.("focus", ticker),
     roll: (ticker, reason) => onAction?.("roll", ticker, reason),
-    enter: (ticker) => onSelectStock?.(ticker),
+    enter: (ticker, recId) => onSelectStock?.(ticker, recId),
     detail: (key) => setDetail(key),
   }), [onNavigate, onAction, onSelectStock]);
 
