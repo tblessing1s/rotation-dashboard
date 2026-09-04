@@ -71,6 +71,38 @@ def test_recommendations_hides_enter_recs_over_current_dry_powder(client):
     assert "rec_over_budget" not in actionable_ids
 
 
+def test_recommendations_hides_legacy_rec_missing_input_snapshot_lot_cost(client):
+    # Regression: rec_00162 (GDX, emitted 2026-09-04T12:30:09Z) predates the
+    # input_snapshot.lot_cost/deployable fields (added by PR #293, merged
+    # 2026-09-04T15:06:49Z) but still an open, unresolved, unexpired rec with
+    # a fully priced proposed_ticket. Reading the missing key as "unpriced,
+    # let it through" left a $9,735 lot on the board against $6,300 of dry
+    # powder. The lot cost must come from proposed_ticket.estimates.shares_
+    # notional when input_snapshot doesn't carry it.
+    now = datetime.now(timezone.utc)
+    st = log.load_state()
+    # deployable = min(cap - deployed, operating_cash - reserve)
+    #            = min(38000 - 0, 19300 - 13000) = 6300
+    st["metadata"]["operating_cash"] = 19300.0
+    st["metadata"]["reserve_required"] = 13000.0
+    st["recommendations"] = [{
+        "rec_id": "rec_00162", "action_type": "ENTER", "ticker": "GDX",
+        "emitted_at": _iso(now - timedelta(hours=2)),
+        "valid_until": _iso(now + timedelta(hours=22)),
+        "trigger_rule": "GATE_ALL_PASS",
+        # No lot_cost / deployable keys — the pre-PR#293 shape.
+        "input_snapshot": {"blockers": [], "verdict": "GO", "regime": "green"},
+        "proposed_ticket": {"action": "buy_shares", "ticker": "GDX",
+                            "legs": [], "estimates": {"shares_notional": 9735.0}},
+    }]
+    log.save_state(st)
+
+    r = client.get("/api/recommendations")
+    assert r.status_code == 200
+    ids = {rec["rec_id"] for rec in r.get_json()["open"]}
+    assert "rec_00162" not in ids
+
+
 def test_recommendations_keeps_non_enter_recs_regardless_of_dry_powder(client):
     now = datetime.now(timezone.utc)
     st = log.load_state()

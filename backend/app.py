@@ -1401,7 +1401,17 @@ def api_recommendations():
             def _fits_dry_powder(r):
                 if r.get("action_type") != "ENTER":
                     return True
-                lot = (r.get("input_snapshot") or {}).get("lot_cost")
+                snap = r.get("input_snapshot") or {}
+                lot = snap.get("lot_cost")
+                if lot is None:
+                    # Recs emitted before input_snapshot carried lot_cost
+                    # (pre-schema, still legally "open") still price the lot
+                    # on the ticket itself — fall back there rather than
+                    # reading a merely-absent key as "can't judge, let it
+                    # through", which is the reading only a truly unpriced
+                    # candidate (no chain data at all) should get.
+                    estimates = (r.get("proposed_ticket") or {}).get("estimates") or {}
+                    lot = estimates.get("shares_notional")
                 return lot is None or lot <= deployable
             open_recs = [r for r in open_recs if _fits_dry_powder(r)]
         # Bars are snapshot working data, not payload — strip anything
