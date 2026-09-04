@@ -53,6 +53,9 @@ _last_interval_reconcile: datetime | None = None
 # just after the close (scan_cache.SCAN_ROLL_ET), so the first tick past the roll
 # finds an empty cache and runs it on that session's final bars.
 _last_warm_scan_day: str | None = None
+# The scan day this process has already run the dry-powder shadow sweep for
+# (csp_dry_powder.py). Same once-per-day cadence as the warm scan above.
+_last_dry_powder_scan_day: str | None = None
 
 
 def enabled() -> bool:
@@ -70,6 +73,14 @@ def recommendations_enabled() -> bool:
     """Scheduled recommendation passes on by default; CFM_RECOMMENDATIONS=0
     turns them off (tests, one-off scripts). Manual runs via the API still work."""
     return os.environ.get("CFM_RECOMMENDATIONS", "1").strip() not in ("0", "false", "no")
+
+
+def dry_powder_scan_enabled() -> bool:
+    """Dry-powder CSP shadow sweep (csp_dry_powder.py) on by default;
+    CFM_DRY_POWDER_SCAN=0 turns it off (tests, or a deployment that wants to
+    skip the extra live options-chain traffic). SHADOW ONLY: this flag gates
+    nothing but the logging sweep — it never places an order regardless."""
+    return os.environ.get("CFM_DRY_POWDER_SCAN", "1").strip() not in ("0", "false", "no")
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +190,64 @@ def _maybe_warm_scan(now: datetime) -> None:
         return
     _last_warm_scan_day = day
     _warm_scan()
+
+
+def _dry_powder_scan() -> None:
+    """Run the day's dry-powder shadow sweep (csp_dry_powder.scan) — SHADOW
+    ONLY, logs candidates/would-be trades, never places an order.
+
+    Per account, via `for_each_account`: eligibility (already-held / chain
+    selection) doesn't depend on account state, but sizing does (leftover
+    cash from THAT book's capital_summary), so — unlike `_warm_scan`, which
+    is genuinely account-agnostic and stays a single pass — a book running
+    several accounts re-fetches the options universe once per account here.
+    Acceptable for a shadow-only sweep at today's account counts; if that
+    ever becomes the bottleneck, split candidate selection (market-wide, once)
+    from sizing (per account) the way this module could but does not yet.
+    Best-effort: logged, never fatal to the tick."""
+    if not dry_powder_scan_enabled():
+        return
+    try:
+        import csp_dry_powder
+        import logging_handler as log
+        import sector_data
+        tickers = sector_data.all_tickers()
+    except Exception as e:  # noqa: BLE001 — a setup failure must not kill the tick
+        logger.warning("dry-powder shadow scan setup failed: %s", e)
+        return
+
+    def _sweep(account_id):
+        try:
+            result = csp_dry_powder.scan(tickers, state=log.load_state())
+            also_resolved = csp_dry_powder.resolve_outcomes(state=log.load_state())
+            logger.info("dry-powder shadow scan (account %s): %d candidates, "
+                       "%d shadow trades, %d outcomes resolved",
+                       _account_label(account_id), len(result["candidates"]),
+                       len(result["shadow_trades"]), len(also_resolved))
+        except Exception as e:  # noqa: BLE001 — shadow-only: never fatal to the tick
+            logger.warning("dry-powder shadow scan failed for account %s: %s",
+                           _account_label(account_id), e)
+
+    for_each_account("dry-powder shadow scan", _sweep)
+
+
+def _maybe_dry_powder_scan(now: datetime) -> None:
+    """Ensure the CURRENT scan day has a dry-powder shadow sweep — at most one
+    per day, same cadence as `_maybe_warm_scan` (the scan day rolls just after
+    the close). Best-effort: logged, never fatal to the tick."""
+    global _last_dry_powder_scan_day
+    if not dry_powder_scan_enabled():
+        return
+    try:
+        import scan_cache
+        day = scan_cache.scan_day(now)
+    except Exception as e:  # noqa: BLE001 — never break the tick on a clock/calendar read
+        logger.warning("could not resolve the scan day for the dry-powder sweep: %s", e)
+        return
+    if not warm_scan_due(now, _last_dry_powder_scan_day, day):
+        return
+    _last_dry_powder_scan_day = day
+    _dry_powder_scan()
 
 
 def _market_hours(now: datetime) -> bool:
@@ -411,6 +480,7 @@ def _tick() -> None:
     _maybe_tier_poll(now)
     _maybe_interval_reconcile(now)
     _maybe_warm_scan(now)  # keep the full-universe scan cache warm between slots
+    _maybe_dry_powder_scan(now)  # dry-powder CSP shadow sweep — logs only, never places an order
     # Mandatory date-specific put expiry check. Runs every tick (its own date gate
     # decides), so it must sit BEFORE the slot-based early return below — a put
     # expiring today must be evaluated even on a day no recurring slot is due.
