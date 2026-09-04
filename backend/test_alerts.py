@@ -587,6 +587,40 @@ def test_acknowledge_and_settings(isolated_state, monkeypatch):
     assert alerts.evaluate(log.load_state()) == []
 
 
+def test_acknowledge_all_clears_the_bell_but_keeps_conditions(isolated_state, monkeypatch):
+    monkeypatch.setattr(alerts, "EVALUATORS", [lambda s: [
+        alerts._alert("BUYBACK_75", "AMD", "m", "a", {}, key="k"),
+        alerts._alert("EXPIRY_FRIDAY", "NVDA", "m", "a", {}, key="k"),
+        alerts._alert("DEFEND_POSITION", "TSLA", "m", "a", {}, key="k"),
+    ]])
+    monkeypatch.setattr(alerts.notifier, "dispatch", lambda *a, **k: [])
+    r = alerts.run()
+    assert alerts.view()["unacknowledged_count"] == 3
+
+    # One read by hand: it drops out of the unseen count and sorts under the
+    # unseen ones, but stays active.
+    alerts.acknowledge(r["fired"][0]["id"])
+    v = alerts.view()
+    assert v["unacknowledged_count"] == 2
+    assert len(v["active"]) == 3
+    assert [a["acknowledged"] for a in v["active"]] == [False, False, True]
+
+    # Mark-all flips only the rest; a second call is a no-op with no write.
+    res = alerts.acknowledge_all()
+    assert res["acknowledged"] == 2 and res["active_count"] == 3
+    v = alerts.view()
+    assert v["unacknowledged_count"] == 0
+    assert all(a["acknowledged"] for a in v["active"])
+    assert all(a["acknowledged"] for a in v["log"])
+    assert alerts.acknowledge_all()["acknowledged"] == 0
+
+    # The conditions are untouched: the next run still dedups against them
+    # (nothing re-fires) and they keep their seen flag.
+    r2 = alerts.run()
+    assert r2["fired"] == [] and r2["active_count"] == 3
+    assert alerts.view()["unacknowledged_count"] == 0
+
+
 def test_dispatch_dry_run_and_fallback(monkeypatch):
     calls = []
 

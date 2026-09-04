@@ -484,8 +484,16 @@ function RawData() {
                   </td>
                 )}
                 {EXEC_COLS.map((c) => (
-                  <td key={c} className={`py-1.5 pr-3 ${c === "source" && e[c] === "broker_manual" ? "text-amber-300" : ""}`}>
-                    {c === "stock_price_source"
+                  <td key={c} className={`py-1.5 pr-3 ${c === "source" && e[c] === "broker_manual" ? "text-amber-300" : c === "source" && e.source_rec_id ? "text-emerald-300" : ""}`}>
+                    {c === "source"
+                      // Who made the move: the engine's card (execution carries
+                      // the rec id), Schwab by hand (adopted), or the app by hand.
+                      ? <span title={e.source_rec_id ? `staged from ${e.source_rec_id}` : e.source || "app"}>
+                          {e.source === "broker_manual" ? "schwab (manual)"
+                            : e.source_rec_id ? "engine card"
+                            : e.source ? cell(e.source) : "app (manual)"}
+                        </span>
+                      : c === "stock_price_source"
                       ? <SpotSource source={e.stock_price_source} atPlacement={e.stock_price_at_placement}
                                     atFill={e.stock_price_at_fill} fillTime={e.fill_time} />
                       : c === "fill_time" && e.fill_time

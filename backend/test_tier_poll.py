@@ -165,3 +165,61 @@ def test_scheduler_wrapper_swallows_errors(monkeypatch):
                         lambda now: (_ for _ in ()).throw(RuntimeError("boom")))
     # must not raise — a poll failure can never break the tick
     alert_scheduler._maybe_tier_poll(OPEN)
+
+
+def test_cycle_hands_prints_and_escalations_to_the_event_runner(monkeypatch):
+    """The poller is where events surface; every cycle with a batch offers its
+    quotes + escalations to event_runner, which decides whether the engine runs."""
+    import event_runner
+    seen = {}
+    monkeypatch.setattr(event_runner, "maybe_run",
+                        lambda state, quotes, esc, market, now: seen.update(
+                            quotes=quotes, esc=esc, market=market) or {"emitted": 0})
+    state = _state(("AAPL",))
+    tiers = {"AAPL": Tier.T0}
+    _wire(monkeypatch, state, tiers, {"AAPL": 60.0, "SPY": 100.0, "XLK": 100.0})  # 60 < circuit breaker 70
+    res = tier_poll.run_cycle(OPEN)
+    assert res["engine_run"] == {"emitted": 0}
+    assert seen["quotes"]["AAPL"]["price"] == 60.0
+    assert "AAPL" in seen["esc"] and res["escalation_symbols"] == ["AAPL"]
+    assert seen["market"] is False
+
+
+def test_event_runner_failure_never_breaks_the_cycle(monkeypatch):
+    import event_runner
+    monkeypatch.setattr(event_runner, "maybe_run",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    _wire(monkeypatch, _state(("AAPL",)), {"AAPL": Tier.T0}, {"AAPL": 100.0})
+    res = tier_poll.run_cycle(OPEN)
+    assert res["quotes"]["AAPL"]["price"] == 100.0 and res["engine_run"] is None
+
+
+def _state_with_short(sym="AAPL", strike=90.0, exp="2026-07-17"):
+    st = _state((sym,))
+    st["positions"][0]["short_calls"] = [{"strike": strike, "expiration": exp, "contracts": 1,
+                                         "entry_premium_total": 200.0, "current_bid": 1.0}]
+    return st
+
+
+def test_open_shorts_ride_the_underlyings_batch_and_land_in_the_mark_cache(monkeypatch):
+    import option_marks
+    state = _state_with_short()
+    occ = "AAPL  260717C00090000"
+    calls = _wire(monkeypatch, state, {"AAPL": Tier.T0}, {"AAPL": 100.0, occ: 0.42})
+    res = tier_poll.run_cycle(OPEN)
+    assert calls["n"] == 1 and occ in calls["syms"] and "AAPL" in calls["syms"]
+    assert res["short_marks"] == {occ: 0.42}
+    assert option_marks.mark_for("AAPL", state["positions"][0]["short_calls"][0], now=OPEN) == 0.42
+    # The stock-quote view the escalation + event paths read is stocks only.
+    assert set(res["quotes"]) == {"AAPL", "SPY", "XLK"}
+    assert not res["degraded"]
+
+
+def test_short_of_a_name_not_due_is_not_quoted(monkeypatch):
+    state = _state_with_short()
+    occ = "AAPL  260717C00090000"
+    calls = _wire(monkeypatch, state, {"AAPL": Tier.T0}, {"AAPL": 100.0, occ: 0.42})
+    tier_poll.run_cycle(OPEN)
+    calls2 = _wire(monkeypatch, state, {"AAPL": Tier.T0}, {"AAPL": 100.0, occ: 0.42})
+    res = tier_poll.run_cycle(OPEN + timedelta(seconds=30))   # AAPL inside its cadence
+    assert res["short_marks"] == {} and (calls2["syms"] is None or occ not in calls2["syms"])

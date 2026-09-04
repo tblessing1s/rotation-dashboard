@@ -1579,6 +1579,9 @@ def test_delivery() -> dict:
 
 
 def acknowledge(alert_id: str) -> dict:
+    """Mark one alert SEEN. The condition stays active (and keeps refreshing its
+    numbers) until it clears on its own; acknowledging only says the operator
+    has read it, so it leaves the bell count and the unseen list."""
     state = log.load_state()
     alerts_state = state.setdefault("alerts", {})
     hit = None
@@ -1594,6 +1597,27 @@ def acknowledge(alert_id: str) -> dict:
         raise ValueError(f"unknown alert id '{alert_id}'")
     log.save_state(state)
     return hit
+
+
+def acknowledge_all() -> dict:
+    """Mark every active alert SEEN in one write — the "I've read the bell" tap.
+    Returns how many flipped; already-seen alerts are left alone."""
+    state = log.load_state()
+    alerts_state = state.setdefault("alerts", {})
+    flipped = []
+    for rec in alerts_state.get("active", {}).values():
+        if not rec.get("acknowledged"):
+            rec["acknowledged"] = True
+            flipped.append(rec.get("id"))
+    if flipped:
+        ids = set(flipped)
+        for rec in alerts_state.get("log", []):
+            if rec.get("id") in ids:
+                rec["acknowledged"] = True
+        log.save_state(state)
+    return {"acknowledged": len(flipped), "ids": flipped,
+            "unacknowledged_count": 0,
+            "active_count": len(alerts_state.get("active", {}))}
 
 
 def update_settings(patch: dict) -> dict:
@@ -1615,11 +1639,18 @@ def update_settings(patch: dict) -> dict:
 def view(state: dict | None = None) -> dict:
     state = state or log.load_state()
     alerts_state = state.get("alerts") or {}
+    # Unseen first, then by severity, then oldest first — the list reads as
+    # "what's new" on top and "still true, already read" underneath.
     active = sorted(alerts_state.get("active", {}).values(),
-                    key=lambda a: (notifier.SEVERITY_ORDER.get(a.get("severity"), 9),
+                    key=lambda a: (bool(a.get("acknowledged")),
+                                   notifier.SEVERITY_ORDER.get(a.get("severity"), 9),
                                    a.get("first_seen", "")))
     return {
         "active": active,
+        # The bell badge counts only what the operator has NOT read yet; an
+        # acknowledged condition that is still true stays in `active` but no
+        # longer demands attention.
+        "unacknowledged_count": sum(1 for a in active if not a.get("acknowledged")),
         "log": list(reversed(alerts_state.get("log", []))),  # newest first for the UI
         "settings": get_settings(state),
         "last_run": alerts_state.get("last_run"),

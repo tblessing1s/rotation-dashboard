@@ -694,3 +694,19 @@ def test_extrinsic_captured_unmeasurable_never_fires():
     del p["short_calls"][0]["entry_extrinsic_per_share"]
     recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
     assert [r["trigger_rule"] for r in recs] == [TriggerRule.ALL_CLEAR]
+
+
+def test_snapshot_live_mark_overrides_the_stored_mark():
+    """The poller's live mark travels in the frozen snapshot (tk.short_marks);
+    the engine reads it ahead of the stored entry mark, for the 75% rule and
+    for pricing the roll's buyback leg alike."""
+    # Stored mark 4.5 (10% decayed) says nothing; the live mark 1.15 says 77%.
+    p = _position("AAPL", current_bid=4.5, entry_premium_total=500.0, short_dte=4)
+    tk = _healthy_tk(price=181.0)
+    assert engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])[0]["action_type"] == ActionType.NO_ACTION
+    tk["short_marks"] = {(180.0, "2026-07-17"): 1.15}
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
+    assert recs[0]["trigger_rule"] == TriggerRule.ROLL_75PCT
+    assert recs[0]["input_snapshot"]["trigger_detail"]["decay_pct"] == 77.0
+    # The roll's buyback leg is priced off the live mark, not the stale 4.5.
+    assert recs[0]["proposed_ticket"]["estimates"]["buyback_per_share"] == 1.15

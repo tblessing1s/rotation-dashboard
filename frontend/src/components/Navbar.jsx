@@ -7,7 +7,7 @@ function AlertBell({ count, onClick }) {
   return (
     <button
       onClick={onClick}
-      title={hot ? `${count} active alert(s) — open the Alerts panel` : "No active alerts"}
+      title={hot ? `${count} new alert${count === 1 ? "" : "s"} — open alerts` : "Alerts — nothing new"}
       className={`relative flex items-center rounded-full border px-2.5 py-1.5 text-xs font-semibold transition ${
         hot
           ? "border-rose-500/50 bg-rose-500/10 text-rose-300 hover:bg-rose-500/20"

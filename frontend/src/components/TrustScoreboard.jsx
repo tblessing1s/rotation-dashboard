@@ -10,6 +10,8 @@ import { useToast } from "./Toast.jsx";
 // panel (or anywhere else) places an order from a recommendation.
 
 const ACTION_ORDER = ["ENTER", "ROLL_OUT", "ROLL_DOWN", "DEFEND", "EXIT"];
+// How a matched move was taken (trust_derive resolution `source`).
+const SOURCE_LABEL = { engine_card: "from the card", app_manual: "app by hand", broker_manual: "Schwab by hand" };
 
 const rate = (r) => (r == null ? "—" : `${Math.round(r * 100)}%`);
 const ts = (s) => (s ? `${String(s).slice(0, 16).replace("T", " ")}Z` : "—");
@@ -80,10 +82,18 @@ function ActionTypeCard({ actionType, m }) {
           sub={`${fid.passed ?? 0}/${fid.graded ?? 0} graded orders passed`}
         />
       </div>
-      {breakdown.length > 0 && (
+      {(prec.matched_by_source && Object.keys(prec.matched_by_source).length > 0) && (
         <div className="mt-2 text-[11px] text-slate-500">
+          taken:{" "}
+          {Object.entries(prec.matched_by_source)
+            .map(([src, n]) => `${SOURCE_LABEL[src] || src} ×${n}`).join(" · ")}
+          {prec.matched_diverged > 0 && ` · ${prec.matched_diverged} as a different roll`}
+        </div>
+      )}
+      {breakdown.length > 0 && (
+        <div className="mt-1 text-[11px] text-slate-500">
           overrides:{" "}
-          {breakdown.map(([code, n]) => `${code} ×${n}`).join(" · ")}
+          {breakdown.map(([code, n]) => `${code === "ACTED_DIFFERENTLY" ? "acted differently" : code} ×${n}`).join(" · ")}
         </div>
       )}
       {grad.window_weeks != null && (

@@ -1353,6 +1353,16 @@ def api_alerts_ack():
         return _err(e)
 
 
+@app.route("/api/alerts/ack-all", methods=["POST"])
+def api_alerts_ack_all():
+    """Mark every active alert seen — clears the bell without touching the
+    conditions themselves (they still auto-resolve when they clear)."""
+    try:
+        return jsonify(alerts.acknowledge_all())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/alerts/settings", methods=["POST"])
 def api_alerts_settings():
     payload = request.get_json(silent=True) or {}
@@ -1388,6 +1398,10 @@ def api_recommendations():
             # live countdown and a pre-approve toggle (the gate deferred the order;
             # the alert already fired).
             "pending_settle": settle.pending(state),
+            # How the last two weeks of engine calls were closed out — matched by
+            # a move (from the card, by hand, or at Schwab) or overridden by
+            # acting differently — so a position card can show the connection.
+            "recent_resolutions": trust_derive.recent_resolutions(state, now),
             "gate_enforced": config.market_settle_gate_enabled(),
             "last_run": recommendation_runner.last_run(),
             "total": len(state.get("recommendations", [])),
@@ -1402,7 +1416,7 @@ def api_recommendations_run():
     import recommendation_runner
     payload = request.get_json(silent=True) or {}
     try:
-        return jsonify(recommendation_runner.run(
+        return jsonify(recommendation_runner.run(trigger="manual",
             notify=bool(payload.get("notify", True)),
             include_entry=bool(payload.get("include_entry", True)),
             dry_run=payload.get("dry_run")))

@@ -1,6 +1,7 @@
 import React from "react";
 import { api, setActiveAccount } from "./api.js";
-import { ErrorBoundary } from "./components/ui.jsx";
+import { ErrorBoundary, Modal } from "./components/ui.jsx";
+import AlertsPanel from "./components/AlertsPanel.jsx";
 import Navbar from "./components/Navbar.jsx";
 import TickerStrip from "./components/TickerStrip.jsx";
 import GateTelemetry from "./components/GateTelemetry.jsx";
@@ -43,7 +44,12 @@ export default function App() {
   const [postureBusy, setPostureBusy] = React.useState(false);
   // null = still checking, true = signed in (or auth disabled), false = show login.
   const [authed, setAuthed] = React.useState(null);
+  // Navbar bell: the number of alerts the operator has NOT read yet. Seen
+  // alerts stay active server-side until their condition clears, but they no
+  // longer count here — the bell means "something new", not "something true".
   const [alertCount, setAlertCount] = React.useState(0);
+  // The alerts drawer (a modal over whatever tab is open) — the bell opens it.
+  const [alertsOpen, setAlertsOpen] = React.useState(false);
   // Deep-link intent for the Positions tab: {action:"roll"|"focus", ticker, reason, id}.
   // Set from the ?action=…&ticker=… URL (a tapped push notification) or an
   // in-app "Act" click, so an alert lands you on the prefilled ticket, not a tab.
@@ -59,16 +65,23 @@ export default function App() {
   // /api/version endpoint is open, so this works before/without a session too.
   const [version, setVersion] = React.useState(null);
 
-  // Navbar bell badge: poll the active-alert count once a minute.
+  // Navbar bell badge: poll the unseen-alert count once a minute. An older
+  // backend without unacknowledged_count falls back to counting the flags.
+  const pollAlerts = React.useCallback(() =>
+    api.alerts().then((a) => {
+      const n = a.unacknowledged_count != null
+        ? a.unacknowledged_count
+        : (a.active || []).filter((x) => !x.acknowledged).length;
+      setAlertCount(n);
+    }).catch(() => {}), []);
   React.useEffect(() => {
     if (authed !== true) return;
     let stop = false;
-    const poll = () =>
-      api.alerts().then((a) => !stop && setAlertCount((a.active || []).length)).catch(() => {});
+    const poll = () => { if (!stop) pollAlerts(); };
     poll();
     const id = setInterval(poll, 60000);
     return () => { stop = true; clearInterval(id); };
-  }, [authed, execNonce, accountNonce]);
+  }, [authed, execNonce, accountNonce, pollAlerts]);
 
   React.useEffect(() => {
     api.version().then(setVersion).catch(() => {});
@@ -137,9 +150,18 @@ export default function App() {
     // Execute buttons, which additionally carry rec_id) dispatch this event.
     const onAction = (e) =>
       goToAction(e.detail?.action, e.detail?.ticker, e.detail?.reason, e.detail?.rec_id);
+    // A tab-targeted alert (payout ready, scan transition) asks for a tab.
+    const onNavigate = (e) => {
+      const t = e.detail?.tab;
+      if (t && TABS.includes(t)) goToTab(t);
+    };
     window.addEventListener("cfm-action", onAction);
-    return () => window.removeEventListener("cfm-action", onAction);
-  }, [authed, goToAction]);
+    window.addEventListener("cfm-navigate", onNavigate);
+    return () => {
+      window.removeEventListener("cfm-action", onAction);
+      window.removeEventListener("cfm-navigate", onNavigate);
+    };
+  }, [authed, goToAction, goToTab]);
 
   React.useEffect(() => {
     if (authed !== true) return;
@@ -250,7 +272,7 @@ export default function App() {
     <div className="min-h-full bg-slate-950 text-slate-100">
       <Navbar tabs={TABS} active={tab} onChange={goToTab} regimeStatus={regimeStatus}
               onLogout={logout} alertCount={alertCount}
-              onAlertsClick={() => goToTab("Settings")}
+              onAlertsClick={() => setAlertsOpen(true)}
               accounts={accountRegistry?.accounts}
               accountId={accountId} accountBusy={accountBusy}
               onSelectAccount={switchAccount}
@@ -258,6 +280,15 @@ export default function App() {
         {/* Keyed on the account and on fills so it refetches when either changes. */}
         <TickerStrip key={`${accountNonce}:${execNonce}`} />
       </Navbar>
+      {alertsOpen && (
+        <Modal onClose={() => setAlertsOpen(false)} maxWidth="max-w-3xl">
+          {/* The list can run long on a busy day — scroll inside the drawer so
+              the header (count, Mark all seen) stays reachable. */}
+          <div className="max-h-[85vh] overflow-y-auto rounded-xl">
+            <AlertsPanel onChanged={pollAlerts} onNavigate={() => setAlertsOpen(false)} />
+          </div>
+        </Modal>
+      )}
       <main className="mx-auto max-w-7xl px-3 py-4 sm:px-4 sm:py-6">
         <SchwabStatus demo={demo} />
         {/* One boundary around the tab content, keyed on the view: a render throw

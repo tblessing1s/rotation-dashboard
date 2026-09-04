@@ -4,6 +4,7 @@ import { Card, Stat, Light, Pill, Meter, Modal, Loading, ErrorState, money, fmt,
 import AccountsRollup from "./AccountsRollup.jsx";
 import ProcessRibbon from "./ProcessRibbon.jsx";
 import ReadyToEnter from "./ReadyToEnter.jsx";
+import { explainRec, ticketSummary } from "../recWhy.js";
 
 // The dashboard landing tab: one screen that answers "where does everything
 // stand and what needs me today." It leans entirely on existing endpoints
@@ -30,16 +31,25 @@ const SEV_PILL = { critical: "red", high: "yellow", medium: "unknown", low: "unk
 // things to act on. Each item carries a go() that routes into the owning tab.
 function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
   const items = [];
-  const push = (severity, ticker, label, go) => items.push({ severity, ticker, label, go });
+  const push = (severity, ticker, label, go, extra = {}) =>
+    items.push({ severity, ticker, label, go, ...extra });
 
-  // Open actionable engine recommendations (trust layer) — the cards live on
-  // the Positions tab; this is the digest pointer. EXIT/DEFEND anywhere in the
-  // set bumps the whole item to high.
-  if (openRecs && openRecs.length > 0) {
-    const hot = openRecs.some((r) => r.action_type === "EXIT" || r.action_type === "DEFEND");
-    push(hot ? "high" : "medium", null,
-      `${openRecs.length} open recommendation${openRecs.length === 1 ? "" : "s"} — review on Positions`,
-      () => nav.tab("Positions"));
+  // Open actionable engine recommendations (trust layer): one row EACH, in the
+  // engine's own words, so the landing page says what the move is and why
+  // without a trip to Positions. The row lands on that position's card (or the
+  // entry ticket for an ENTER), where Execute / Dismiss live.
+  const recTickers = new Set();
+  for (const r of openRecs || []) {
+    const x = explainRec(r);
+    const sev = r.action_type === "EXIT" ? "critical"
+      : r.action_type === "DEFEND" ? "high" : "medium";
+    const head = `${r.ticker} — ${x?.action || r.action_type}: ${x?.label || r.trigger_rule}`;
+    const detail = x?.numbers?.length
+      ? ` (${x.numbers.slice(0, 3).map((n) => `${n.k} ${n.v}`).join(" · ")})` : "";
+    recTickers.add(`${r.ticker}:${r.action_type}`);
+    push(sev, r.ticker, head + detail,
+      () => (r.action_type === "ENTER" ? nav.enter(r.ticker, r.rec_id) : nav.focus(r.ticker)),
+      { rec: r, why: x });
   }
 
   if (capital && capital.reserve_ok === false) {
@@ -54,7 +64,7 @@ function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
       push("critical", t, `${t} — state diverged from the broker; resolve before trading`,
         () => nav.focus(t));
     }
-    if (p.defend) {
+    if (p.defend && !recTickers.has(`${t}:DEFEND`)) {
       push("high", t, `${t} — stock below the short strike; stage a defensive roll`,
         () => nav.roll(t, "defend"));
     }
@@ -65,6 +75,7 @@ function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
         () => nav.focus(t));
     }
     for (const sc of p.short_calls || []) {
+      if (recTickers.has(`${t}:ROLL_OUT`)) break; // the engine's row already says it
       if (sc.dte != null && sc.dte <= 2) {
         push("high", t, `${t} — short ${fmt(sc.strike, 0)}C expiring (${sc.dte} DTE); roll it`,
           () => nav.roll(t, "expiring"));
@@ -86,31 +97,151 @@ function buildActionItems({ positions, capital, killSwitch, openRecs }, nav) {
   return items;
 }
 
-function ActionItems({ items }) {
+// A REC row expands in place: the full sentence, what the action does, the
+// numbers, and the proposed ticket — everything the position card shows,
+// minus Execute / Dismiss, which stay on the card (the "Go" button). Other
+// rows navigate on tap, as before.
+function RecExpander({ it, onGo }) {
+  const x = it.why;
+  const rec = it.rec;
+  const valid = (rec.valid_until || "").slice(0, 16).replace("T", " ");
+  return (
+    <div className="mt-1 rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs">
+      {x?.why && <p className="leading-relaxed text-slate-200">{x.why}</p>}
+      {x?.effect && (
+        <p className="mt-1 text-emerald-300/90">
+          <span className="font-semibold">{x.action}:</span> {x.effect}
+        </p>
+      )}
+      {(x?.numbers?.length > 0 || x?.also?.length > 0) && (
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {x.numbers.map((n, i) => (
+            <span key={i} className="rounded-full border border-slate-700 bg-slate-950/60 px-2 py-0.5 text-[10px] text-slate-300">
+              <span className="text-slate-500">{n.k} </span>
+              <span className="font-semibold text-slate-100">{n.v}</span>
+            </span>
+          ))}
+          {x.also.length > 0 && (
+            <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-200"
+                  title="Other rules that fired on the same pass; the recommendation acts on the dominant one">
+              also: {x.also.join(", ")}
+            </span>
+          )}
+        </div>
+      )}
+      <p className="mt-1.5 text-slate-400">
+        <span className="uppercase tracking-wide text-slate-500">ticket</span> · {ticketSummary(rec.proposed_ticket)}
+      </p>
+      <div className="mt-2 flex items-center gap-3">
+        <button
+          onClick={onGo}
+          className="rounded-full border border-emerald-600/50 bg-emerald-500/10 px-2.5 py-0.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20"
+        >
+          {rec.action_type === "ENTER" ? "Open entry ticket →" : "Go to position →"}
+        </button>
+        <span className="text-[11px] text-slate-500">Execute / Dismiss live there.</span>
+        {valid && <span className="ml-auto text-[11px] text-slate-600" title={`valid until ${rec.valid_until}`}>valid until {valid}Z</span>}
+      </div>
+    </div>
+  );
+}
+
+// Event keys from backend/event_runner.py, in the operator's words.
+const EVENT_LABEL = {
+  roll_75: "75% captured", extrinsic_captured: "juice banked",
+  assignment_risk: "assignment risk", defense: "defense level", market: "move",
+};
+
+// "engine ran 12 min ago" — with the freeze called out when the pass was
+// skipped, because "no recommendations" and "the engine refused to look" are
+// different situations and only this line tells them apart.
+function EngineRunLine({ run }) {
+  const now = useNow();
+  if (run === null) return null;                       // still loading / older backend
+  if (!run?.at) {
+    return <span className="text-xs text-slate-500" title="No recommendation pass recorded yet">engine hasn't run yet</span>;
+  }
+  const t = Date.parse(run.at);
+  const mins = Number.isNaN(t) ? null : Math.max(0, Math.round((now - t) / 60000));
+  const ago = mins == null ? String(run.at).slice(0, 16).replace("T", " ") + "Z"
+    : mins < 1 ? "just now"
+    : mins < 60 ? `${mins} min ago`
+    : mins < 48 * 60 ? `${Math.round(mins / 60)}h ago`
+    : `${Math.round(mins / 1440)}d ago`;
+  const frozen = !!run.reconcile_frozen;
+  // Why it ran: a slot, the button, or an event the quote poller saw flip.
+  const trig = run.trigger;
+  const reasons = trig && typeof trig === "object" && trig.kind === "event"
+    ? (trig.reasons || []).map((r) => {
+        const [t, s] = String(r).split(":");
+        return `${t === "MARKET" ? "market" : t} ${EVENT_LABEL[s] || s}`;
+      })
+    : null;
+  const why = reasons ? ` on ${reasons.slice(0, 2).join(", ")}${reasons.length > 2 ? ` +${reasons.length - 2}` : ""}`
+    : trig === "manual" ? " (manual)" : "";
+  return (
+    <span className={`text-xs ${frozen ? "text-amber-300" : "text-slate-500"}`}
+          title={`Last recommendation pass: ${run.at}${reasons ? ` — event-driven: ${reasons.join(", ")}` : trig ? ` — ${trig}` : ""}${frozen ? ` — skipped: ${run.freeze_reason || "reconciliation freeze"}` : ""}`}>
+      engine ran {ago}{why}
+      {frozen && (
+        <> · <span className="font-semibold">skipped</span> — reconciliation freeze
+          {run.frozen_tickers?.length ? ` (${run.frozen_tickers.join(", ")})` : ""}</>
+      )}
+    </span>
+  );
+}
+
+// Minute tick for the relative "ago" readout.
+function useNow(intervalMs = 60000) {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
+
+function ActionItems({ items, engineRun }) {
+  // Which REC row is expanded (keyed by rec_id so a refetch keeps it open).
+  const [openId, setOpenId] = React.useState(null);
   if (items.length === 0) {
     return (
-      <Card title="Needs attention">
+      <Card title="Needs attention" right={<EngineRunLine run={engineRun} />}>
         <p className="text-sm text-emerald-300">All clear — nothing needs action right now.</p>
       </Card>
     );
   }
   return (
-    <Card title={`Needs attention — ${items.length}`}>
+    <Card title={`Needs attention — ${items.length}`} right={<EngineRunLine run={engineRun} />}>
       <ul className="space-y-2">
-        {items.map((it, i) => (
-          <li key={i}>
-            <button
-              onClick={it.go}
-              className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm transition hover:brightness-125 ${
-                SEV_TONE[it.severity] || SEV_TONE.low
-              }`}
-            >
-              <Pill status={SEV_PILL[it.severity]}>{it.severity}</Pill>
-              <span className="min-w-0 flex-1 text-slate-100">{it.label}</span>
-              <span className="shrink-0 text-xs opacity-70">→</span>
-            </button>
-          </li>
-        ))}
+        {items.map((it, i) => {
+          const recId = it.rec?.rec_id;
+          const open = !!recId && openId === recId;
+          return (
+            <li key={recId || i}>
+              <button
+                onClick={it.rec ? () => setOpenId(open ? null : recId) : it.go}
+                aria-expanded={it.rec ? open : undefined}
+                className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm transition hover:brightness-125 ${
+                  SEV_TONE[it.severity] || SEV_TONE.low
+                }`}
+              >
+                <Pill status={SEV_PILL[it.severity]}>{it.severity}</Pill>
+                <span className="min-w-0 flex-1 text-slate-100">
+                  {it.rec && (
+                    <span className="mr-1.5 rounded-full border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-emerald-300"
+                          title="Engine recommendation — tap to see why">
+                      rec
+                    </span>
+                  )}
+                  {it.label}
+                </span>
+                <span className="shrink-0 text-xs opacity-70">{it.rec ? (open ? "▲" : "▼") : "→"}</span>
+              </button>
+              {open && <RecExpander it={it} onGo={it.go} />}
+            </li>
+          );
+        })}
       </ul>
     </Card>
   );
@@ -447,11 +578,18 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
   // overview load on the same cadence, and deliberately best-effort: a failed
   // call just leaves the digest without the item.
   const [openRecs, setOpenRecs] = React.useState(null);
+  // The engine's last pass summary (when it ran; whether it was skipped by the
+  // reconciliation freeze) — the "is this list fresh?" line on the digest.
+  const [engineRun, setEngineRun] = React.useState(null);
   React.useEffect(() => {
     let stop = false;
     const poll = () =>
       api.recommendations()
-        .then((r) => { if (!stop) setOpenRecs(r.open_actionable || []); })
+        .then((r) => {
+          if (stop) return;
+          setOpenRecs(r.open_actionable || []);
+          setEngineRun(r.last_run || null);
+        })
         .catch(() => {});
     poll();
     const id = setInterval(poll, 5 * 60 * 1000);
@@ -467,7 +605,7 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
     tab: (t) => onNavigate?.(t),
     focus: (ticker) => onAction?.("focus", ticker),
     roll: (ticker, reason) => onAction?.("roll", ticker, reason),
-    enter: (ticker) => onSelectStock?.(ticker),
+    enter: (ticker, recId) => onSelectStock?.(ticker, recId),
     detail: (key) => setDetail(key),
   }), [onNavigate, onAction, onSelectStock]);
 
@@ -553,7 +691,7 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
       {ov.data?.positions?.error ? (
         <Card title="Needs attention"><ErrorState error={ov.data.positions.error} onRetry={ov.reload} /></Card>
       ) : (
-        <ActionItems items={actionItems} />
+        <ActionItems items={actionItems} engineRun={engineRun} />
       )}
 
       {/* This month's estimated payout at a glance → full detail on Payouts. */}

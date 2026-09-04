@@ -4,6 +4,7 @@ import { Card, Meter, Loading, Modal, Light, ChartLink, SleeveBadge, money, fmt,
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { useToast } from "./Toast.jsx";
+import { explainRec, explainResolution, ticketSummary } from "../recWhy.js";
 import { submitOrder } from "../orderFlow.js";
 
 // Reconciliation review panel — shown when the position has open diffs against
@@ -271,38 +272,6 @@ function settleInfo(settle, now) {
   };
 }
 
-// One-line ticket read: legs (instruction + strike + expiry) · order type · est net.
-function ticketSummary(t) {
-  if (!t) return "no ticket attached";
-  const legs = (t.legs || [])
-    .map((l) => {
-      const when = l.expiration ? ` exp ${l.expiration}` : l.dte != null ? ` ${l.dte} DTE` : "";
-      // A shares leg has no strike — its size IS the leg (100 shares, delta 1.0).
-      const what = l.role === "shares" ? `${fmt(l.quantity, 0)} shares` : fmt(l.strike, 2);
-      return `${(l.instruction || "").replaceAll("_", " ")} ${what}${when}`;
-    })
-    .join(" / ");
-  // Each ticket shape nets under its own key: the LEAP exit/roll per share, the
-  // shares exit as equity proceeds less the option buyback, the shares ENTRY as
-  // a debit (share cost less the premium collected) — negated here so the
-  // credit/debit wording below reads off one signed number.
-  const est = t.estimates || {};
-  const net = est.net_per_share != null ? est.net_per_share
-    : est.net_credit_per_share != null ? est.net_credit_per_share
-    : est.net_debit_per_share != null ? -Math.abs(est.net_debit_per_share)
-    : null;
-  const netStr = net != null
-    ? `est ${net < 0 ? "−" : ""}$${Math.abs(Number(net)).toFixed(2)}/sh ${net >= 0 ? "credit" : "debit"}`
-    : "unpriced";
-  // What the lot actually COSTS — the number an entry decision turns on, and the
-  // one thing a per-share figure hides (a $220/sh name and a $960/sh name read
-  // alike until you see $22k next to $96k).
-  const lot = t.estimates?.shares_notional;
-  const lotStr = lot != null ? `${money(lot)} lot` : null;
-  return [legs, (t.order_type || "").replaceAll("_", " "), lotStr, netStr]
-    .filter(Boolean).join(" · ");
-}
-
 // Dismissal modal: one coded reason is mandatory; OTHER additionally demands a
 // typed note (the backend 400s without one — the submit stays disabled until then).
 function DismissRecModal({ rec, onClose, onDismissed }) {
@@ -389,6 +358,9 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
   const badge = REC_BADGE[rec.action_type] || "border-slate-600 bg-slate-800/60 text-slate-300";
   const s = settleInfo(rec.settle, now);
   const pending = s?.status === "PENDING_SETTLE";
+  // The plain-English read: which rule fired, what it saw (with the numbers),
+  // and what taking the action does. Derived from the rec's frozen snapshot.
+  const why = explainRec(rec);
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm">
       <div className="flex flex-wrap items-center gap-2">
@@ -401,13 +373,42 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
         <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${badge}`}>
           {(rec.action_type || "").replaceAll("_", " ")}
         </span>
-        <span className="font-mono text-xs text-slate-400" title="Trigger rule">{rec.trigger_rule}</span>
+        <span className="text-xs font-medium text-slate-300" title={`Trigger rule: ${rec.trigger_rule}`}>
+          {why?.label || rec.trigger_rule}
+        </span>
         {v && (
           <span className={`ml-auto text-xs ${v.tone}`} title={`valid until ${rec.valid_until}`}>
             {v.text}
           </span>
         )}
       </div>
+      {why?.why && (
+        <div className="mt-1.5 rounded-md border border-slate-800 bg-slate-900/50 px-2.5 py-1.5">
+          <p className="text-xs leading-relaxed text-slate-200">{why.why}</p>
+          {why.effect && (
+            <p className="mt-1 text-[11px] text-emerald-300/90">
+              <span className="font-semibold">{why.action}:</span> {why.effect}
+            </p>
+          )}
+          {(why.numbers.length > 0 || why.also.length > 0) && (
+            <div className="mt-1.5 flex flex-wrap gap-1.5">
+              {why.numbers.map((n, i) => (
+                <span key={i}
+                      className="rounded-full border border-slate-700 bg-slate-950/60 px-2 py-0.5 text-[10px] text-slate-300">
+                  <span className="text-slate-500">{n.k} </span>
+                  <span className="font-semibold text-slate-100">{n.v}</span>
+                </span>
+              ))}
+              {why.also.length > 0 && (
+                <span className="rounded-full border border-amber-500/30 bg-amber-500/10 px-2 py-0.5 text-[10px] text-amber-200"
+                      title="Other rules that fired on the same pass; the card acts on the dominant one">
+                  also: {why.also.join(", ")}
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      )}
       {pending && (
         <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
           <span title="The market-settle gate deferred the order; the alert already fired.">
@@ -561,20 +562,51 @@ function ProposedEntries({ recs, onRecsChanged, onEnter }) {
 // The recommendation strip under a position's header. Actionable recs (never
 // NO_ACTION) render as cards; when the ONLY open rec is an ALL_CLEAR/NO_ACTION,
 // a single muted line says so with the valid-until time.
-function RecSection({ p, recs, onRecsChanged, focusCard }) {
+// "engine called DEFEND · you took it by hand at Schwab · strike +0.50 vs
+// proposed" — how this position's last engine call was closed out by the
+// operator's own move (matched, or overridden by acting differently). Derived
+// by trust_derive from the immutable logs; nothing here is entered by hand.
+function ResolvedLine({ res, now }) {
+  const x = explainResolution(res);
+  if (!x) return null;
+  const t = Date.parse(res.at || "");
+  const hrs = Number.isNaN(t) ? null : Math.round((now - t) / 3600000);
+  const ago = hrs == null ? "" : hrs < 1 ? "just now" : hrs < 48 ? `${hrs}h ago` : `${Math.round(hrs / 24)}d ago`;
+  return (
+    <div className="text-[11px] text-slate-500" title={`rec ${res.rec_id} · ${res.status}${res.reason ? ` (${res.reason})` : ""}`}>
+      engine called <span className="font-semibold text-slate-300">{x.called}</span>
+      {x.rule && <span className="text-slate-600"> ({x.rule.toLowerCase()})</span>}
+      {" · "}<span className={`font-medium ${x.tone}`}>{x.verdict}</span>
+      {x.where && <span> {x.where}</span>}
+      {x.detail && <span className="text-slate-600"> · {x.detail}</span>}
+      {ago && <span className="text-slate-600"> · {ago}</span>}
+    </div>
+  );
+}
+
+function RecSection({ p, recs, resolved, onRecsChanged, focusCard }) {
   const now = useNow();
   const toast = useToast();
   const [dismissing, setDismissing] = React.useState(null); // rec being dismissed
   const [detailId, setDetailId] = React.useState(null); // rec_id with ticket expanded
   const list = recs || [];
   const actionable = list.filter((r) => r.action_type !== "NO_ACTION");
-  if (list.length === 0) return null;
+  // The most recent closed-out call on this position (last two weeks), shown
+  // whenever there is no open action so the operator can see that their own
+  // move — from the card, by hand, or at Schwab — resolved the engine's call.
+  const last = (resolved || [])[0] || null;
+  if (list.length === 0 && !last) return null;
 
   if (actionable.length === 0) {
     const r = list[list.length - 1];
     return (
-      <div className="px-4 pb-2 text-[11px] text-slate-600">
-        engine: all clear · valid until {(r.valid_until || "").slice(0, 16).replace("T", " ")}Z
+      <div className="space-y-0.5 px-4 pb-2">
+        {last && <ResolvedLine res={last} now={now} />}
+        {r && (
+          <div className="text-[11px] text-slate-600">
+            engine: all clear · valid until {(r.valid_until || "").slice(0, 16).replace("T", " ")}Z
+          </div>
+        )}
       </div>
     );
   }
@@ -1372,7 +1404,7 @@ function BookSummary({ positions, diffsByTicker, risk }) {
 // the share base, covered-lot capacity, short-call capture. Expanded: those in
 // full (share block, short list, accrual), plus any active safety alert
 // (reconciliation, defend, whipsaw) which also auto-opens the row.
-function PositionRow({ p, diffs, recs, onRecsChanged, focusCard, focused, setRolling, onOpenTicket, afterResolve }) {
+function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focused, setRolling, onOpenTicket, afterResolve }) {
   const shorts = p.short_calls || [];
   const hasAlert = !!(p.needs_review || p.defend || p.whipsaw?.tripped || (diffs && diffs.length));
   // Collapsed by default for a clean, scannable list; a tapped-alert deep link
@@ -1457,7 +1489,7 @@ function PositionRow({ p, diffs, recs, onRecsChanged, focusCard, focused, setRol
 
       {/* Engine recommendations stay visible even when the row is collapsed —
           they're the "act now" layer, not detail. */}
-      <RecSection p={p} recs={recs} onRecsChanged={onRecsChanged} focusCard={focusCard} />
+      <RecSection p={p} recs={recs} resolved={resolved} onRecsChanged={onRecsChanged} focusCard={focusCard} />
 
       {open && (
         <div className="border-t border-slate-800 p-4">
@@ -1549,6 +1581,17 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
     return out;
   }, [recsData]);
 
+  // Recently closed-out calls per ticker (newest first) — the "your move
+  // resolved this" line under a position with no open action.
+  const resolvedByTicker = React.useMemo(() => {
+    const out = {};
+    for (const r of recsData?.recent_resolutions || []) {
+      const t = (r.ticker || "").toUpperCase();
+      if (t) (out[t] ||= []).push(r);
+    }
+    return out;
+  }, [recsData]);
+
   const enterRecs = React.useMemo(
     () => (recsData?.open || []).filter((r) => r.action_type === "ENTER"),
     [recsData]);
@@ -1597,6 +1640,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
             p={p}
             diffs={openDiffsByTicker[p.ticker]}
             recs={recsByTicker[(p.ticker || "").toUpperCase()]}
+            resolved={resolvedByTicker[(p.ticker || "").toUpperCase()]}
             onRecsChanged={reloadRecs}
             focusCard={focusCard}
             focused={focusedTicker === p.ticker}

@@ -163,13 +163,162 @@ def test_roll_reason_scopes_action_type():
     rec = _rec("rec_00001", action=ActionType.ROLL_OUT, trigger=TriggerRule.ROLL_75PCT)
     state = _state(recs=[rec], execs=_roll_pair(reason="75%-rule"))
     res = trust_derive.resolve(state, NOW)
-    assert [r for r in res if r["status"] == Resolution.EXECUTED_MATCHED]
-    # a defend rec must NOT match a scheduled roll
-    rec2 = _rec("rec_00002", action=ActionType.DEFEND,
-                trigger=TriggerRule.DEFEND_BELOW_STRIKE)
-    state2 = _state(recs=[rec2], execs=_roll_pair(gid="roll2", reason="scheduled"))
+    m = [r for r in res if r["status"] == Resolution.EXECUTED_MATCHED]
+    assert m and m[0]["deltas"]["action_delta"] is None
+    assert m[0]["source"] == "app_manual"
+
+
+def test_a_roll_is_a_roll_defend_rec_matches_a_scheduled_roll_with_action_delta():
+    """The operator picked a different roll reason than the engine's call. The
+    move IS the engine's roll being taken: the rec resolves as matched (graded
+    under the REC's action type) and the divergence rides in action_delta —
+    it is not left open, and no coverage miss is synthesized."""
+    rec = _rec("rec_00001", action=ActionType.DEFEND, strike=175.5,
+               trigger=TriggerRule.DEFEND_BELOW_STRIKE)
+    state = _state(recs=[rec], execs=_roll_pair(reason="scheduled", new_strike=176.0))
+    res = trust_derive.resolve(state, NOW)
+    m = [r for r in res if r["status"] == Resolution.EXECUTED_MATCHED]
+    assert len(m) == 1 and m[0]["rec_id"] == "rec_00001"
+    assert m[0]["action_type"] == ActionType.DEFEND
+    assert m[0]["executed_action_type"] == ActionType.ROLL_OUT
+    assert m[0]["deltas"]["action_delta"] == "DEFEND->ROLL_OUT"
+    assert m[0]["deltas"]["strike_delta"] == 0.5
+    assert not [r for r in res if r["status"] == Resolution.COVERAGE_MISS]
+    board = trust_derive.scoreboard(state, res, {}, NOW)
+    p = board["by_action_type"][ActionType.DEFEND]["precision"]
+    assert p["matched_diverged"] == 1 and p["matched_by_source"] == {"app_manual": 1}
+
+
+def test_exact_action_type_is_preferred_over_a_family_match():
+    defend = _rec("rec_00001", action=ActionType.DEFEND, emitted=NOW - timedelta(hours=8),
+                  trigger=TriggerRule.DEFEND_BELOW_STRIKE)
+    roll = _rec("rec_00002", action=ActionType.ROLL_OUT, emitted=NOW - timedelta(hours=9),
+                trigger=TriggerRule.ROLL_75PCT)
+    state = _state(recs=[defend, roll], execs=_roll_pair(reason="75%-rule"))
+    by = {r["rec_id"]: r for r in trust_derive.resolve(state, NOW) if r.get("rec_id")}
+    assert by["rec_00002"]["status"] == Resolution.EXECUTED_MATCHED  # exact, though older
+    assert "rec_00001" not in by                                     # still open
+
+
+def _broker_roll(gid="adopt1", ticker="AAPL", at=NOW - timedelta(hours=2), new_strike=176.0):
+    """A roll done by hand at Schwab and adopted from the transaction feed —
+    executor.adopt_broker_trade stamps roll_reason broker_manual_roll + source."""
+    pair = _roll_pair(gid=gid, ticker=ticker, at=at, reason="broker_manual_roll",
+                      new_strike=new_strike, live=True)
+    for e in pair:
+        e["source"] = "broker_manual"
+    return pair
+
+
+def test_a_roll_done_at_schwab_resolves_the_open_recommendation():
+    rec = _rec("rec_00001", action=ActionType.DEFEND, strike=175.5,
+               trigger=TriggerRule.DEFEND_BELOW_STRIKE)
+    state = _state(recs=[rec], execs=_broker_roll())
+    res = trust_derive.resolve(state, NOW)
+    m = [r for r in res if r["status"] == Resolution.EXECUTED_MATCHED]
+    assert len(m) == 1 and m[0]["rec_id"] == "rec_00001"
+    assert m[0]["source"] == "broker_manual" and m[0]["live"] is True
+    assert m[0]["roll_reason"] == "broker_manual_roll"
+    assert m[0]["deltas"]["action_delta"] == "DEFEND->ROLL_OUT"
+    assert not [r for r in res if r["status"] == Resolution.COVERAGE_MISS]
+
+
+def test_a_roll_done_at_schwab_with_no_recommendation_is_a_coverage_miss():
+    state = _state(execs=_broker_roll())
+    res = trust_derive.resolve(state, NOW)
+    misses = [r for r in res if r["status"] == Resolution.COVERAGE_MISS]
+    assert len(misses) == 1 and misses[0]["action_type"] == ActionType.ROLL_OUT
+    assert misses[0]["snapshot"]["roll_reason"] == "broker_manual_roll"
+
+
+def test_rec_superseded_by_all_clear_after_the_move_still_matches():
+    """The broker-side roll is only adopted after the next pass has seen the new
+    short and emitted ALL_CLEAR (superseding the rec). The fill predates the
+    all-clear, so the rec is the move's claim: matched, not a miss."""
+    rec = _rec("rec_00001", action=ActionType.DEFEND, emitted=NOW - timedelta(hours=10),
+               trigger=TriggerRule.DEFEND_BELOW_STRIKE)
+    clear = _rec("rec_00002", action=ActionType.NO_ACTION, trigger=TriggerRule.ALL_CLEAR,
+                 emitted=NOW - timedelta(hours=3), supersedes="rec_00001")
+    state = _state(recs=[rec, clear], execs=_broker_roll(at=NOW - timedelta(hours=5)))
+    by = {r["rec_id"]: r for r in trust_derive.resolve(state, NOW) if r.get("rec_id")}
+    assert by["rec_00001"]["status"] == Resolution.EXECUTED_MATCHED
+    # ...but a move AFTER the all-clear is not the rec's: it stays superseded
+    # and the late move is a miss (the engine had withdrawn its claim).
+    state2 = _state(recs=[rec, clear], execs=_broker_roll(at=NOW - timedelta(hours=1)))
     res2 = trust_derive.resolve(state2, NOW)
+    by2 = {r["rec_id"]: r for r in res2 if r.get("rec_id")}
+    assert by2["rec_00001"]["status"] == Resolution.SUPERSEDED
     assert [r for r in res2 if r["status"] == Resolution.COVERAGE_MISS]
+
+
+def test_rec_superseded_by_another_action_rec_never_matches():
+    r1 = _rec("rec_00001", action=ActionType.DEFEND, emitted=NOW - timedelta(hours=10),
+              trigger=TriggerRule.DEFEND_BELOW_STRIKE)
+    r2 = _rec("rec_00002", action=ActionType.DEFEND, emitted=NOW - timedelta(hours=1),
+              trigger=TriggerRule.DEFEND_BELOW_STRIKE, supersedes="rec_00001")
+    state = _state(recs=[r1, r2], execs=_broker_roll(at=NOW - timedelta(hours=5)))
+    by = {r["rec_id"]: r for r in trust_derive.resolve(state, NOW) if r.get("rec_id")}
+    assert by["rec_00001"]["status"] == Resolution.SUPERSEDED
+    # the successor was emitted after the move, so it cannot match either
+    assert "rec_00002" not in by
+    assert [r for r in trust_derive.resolve(state, NOW) if r["status"] == Resolution.COVERAGE_MISS]
+
+
+def test_rolling_when_told_to_exit_is_a_derived_override_not_a_miss():
+    exit_rec = _rec("rec_00001", action=ActionType.EXIT, trigger=TriggerRule.KILL_RS_SPY_CONFIRMED)
+    state = _state(recs=[exit_rec], execs=_roll_pair(reason="defend"))
+    res = trust_derive.resolve(state, NOW)
+    by = {r["rec_id"]: r for r in res if r.get("rec_id")}
+    ov = by["rec_00001"]
+    assert ov["status"] == Resolution.OVERRIDDEN
+    assert ov["reason"] == "ACTED_DIFFERENTLY" and ov["derived"] is True
+    assert ov["executed_action_type"] == ActionType.DEFEND
+    assert ov["execution_ids"] == ["roll1_c", "roll1_s"]
+    assert not [r for r in res if r["status"] == Resolution.COVERAGE_MISS]
+    board = trust_derive.scoreboard(state, res, {}, NOW)
+    p = board["by_action_type"][ActionType.EXIT]["precision"]
+    assert p["overridden"] == 1 and p["override_breakdown"] == {"ACTED_DIFFERENTLY": 1}
+
+
+def test_exiting_when_told_to_roll_is_a_derived_override_not_a_miss():
+    roll_rec = _rec("rec_00001", action=ActionType.ROLL_OUT, trigger=TriggerRule.ROLL_75PCT)
+    state = _state(recs=[roll_rec], execs=[_exit_exec()])
+    res = trust_derive.resolve(state, NOW)
+    by = {r["rec_id"]: r for r in res if r.get("rec_id")}
+    assert by["rec_00001"]["status"] == Resolution.OVERRIDDEN
+    assert by["rec_00001"]["reason"] == "ACTED_DIFFERENTLY"
+    assert not [r for r in res if r["status"] == Resolution.COVERAGE_MISS]
+
+
+def test_operator_dismissal_wins_over_the_derived_override():
+    exit_rec = _rec("rec_00001", action=ActionType.EXIT, trigger=TriggerRule.KILL_RS_SPY_CONFIRMED)
+    ov = {"id": "rov_00001", "rec_id": "rec_00001", "reason": "EXTERNAL_INFO",
+          "at": _iso(NOW - timedelta(hours=3))}
+    state = _state(recs=[exit_rec], overrides=[ov], execs=_roll_pair(reason="defend"))
+    res = trust_derive.resolve(state, NOW)
+    by = {r["rec_id"]: r for r in res if r.get("rec_id")}
+    assert by["rec_00001"]["reason"] == "EXTERNAL_INFO"
+    # the dismissed rec is no longer a claim, so the roll is an unrecommended move
+    assert [r for r in res if r["status"] == Resolution.COVERAGE_MISS]
+
+
+def test_derived_override_reason_is_refused_by_the_dismiss_gate():
+    import rec_types
+    assert not rec_types.is_override_reason("ACTED_DIFFERENTLY")
+    assert "ACTED_DIFFERENTLY" in rec_types.DERIVED_OVERRIDE_REASONS
+
+
+def test_recent_resolutions_join_the_rec_for_the_position_card():
+    rec = _rec("rec_00001", action=ActionType.DEFEND, strike=175.5,
+               trigger=TriggerRule.DEFEND_BELOW_STRIKE)
+    state = _state(recs=[rec], execs=_broker_roll())
+    trust_derive.recompute(state, NOW)
+    recent = trust_derive.recent_resolutions(state, NOW)
+    assert len(recent) == 1
+    r = recent[0]
+    assert r["rec_id"] == "rec_00001" and r["trigger_rule"] == TriggerRule.DEFEND_BELOW_STRIKE
+    assert r["proposed_strike"] == 175.5 and r["source"] == "broker_manual"
+    assert trust_derive.recent_resolutions(state, NOW + timedelta(days=20)) == []
 
 
 def test_out_of_scope_executions_never_miss():

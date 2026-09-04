@@ -108,13 +108,25 @@ def _schwab_with_backoff(symbols: list[str], rep_tier: Tier, *, sleep, day=None)
 
 
 def _accept(symbol: str, price: float, source: str, tier: Tier,
-            out: dict, fetched_at: float | None) -> None:
+            out: dict, fetched_at: float | None, node: dict | None = None) -> None:
     out[symbol] = {"price": float(price), "source": source, "tier": int(tier)}
+    # An option leg's quote carries its own bid/ask/mark — the per-share mark the
+    # position math reads. Kept on the row so the poller can cache it.
+    if node:
+        for k in ("bid", "ask", "mark", "last"):
+            if node.get(k) is not None:
+                out[symbol][k] = node[k]
     # Only genuine live quotes update the staleness store. A cache fallback is
     # returned for display but NOT marked fresh — the staleness layer must keep
     # reporting that we couldn't get a live quote (unknown-fresh blocks action).
-    if source in ("schwab", "alphavantage"):
+    # Option legs are not tracked there: their freshness lives in option_marks.
+    if source in ("schwab", "alphavantage") and not _is_option(symbol):
         data_cache.put(symbol, QUOTE, price, source, tier, fetched_at=fetched_at)
+
+
+def _is_option(symbol: str) -> bool:
+    import option_marks
+    return option_marks.is_option_symbol(symbol)
 
 
 def fetch_quotes_batched(symbols_by_tier: dict[str, Tier], *, fetched_at: float | None = None,
@@ -144,10 +156,17 @@ def fetch_quotes_batched(symbols_by_tier: dict[str, Tier], *, fetched_at: float 
             for s in syms:
                 price = _price_from_node(nodes.get(s))
                 if price is not None:
-                    _accept(s, price, "schwab", tiers[s], out, fetched_at)
+                    _accept(s, price, "schwab", tiers[s], out, fetched_at, node=nodes.get(s))
                     remaining.discard(s)
         except Exception as e:  # noqa: BLE001 — degrade to fallbacks, never raise
             logger.warning("schwab batch quote failed after backoff: %s", e)
+
+    # Option legs have no fallback: Alpha Vantage does not quote them and a
+    # "cached close" of an OCC symbol would be a daily-bar fetch of nonsense.
+    # A missing leg mark simply stays missing (the stored mark is used) and is
+    # not a degraded STOCK quote, so it never trips Tier-0 degradation.
+    option_syms = {s for s in syms if _is_option(s)}
+    remaining -= option_syms
 
     # Alpha Vantage fallback, per remaining symbol.
     if remaining and _av_configured():
@@ -170,6 +189,8 @@ def fetch_quotes_batched(symbols_by_tier: dict[str, Tier], *, fetched_at: float 
 
     degraded, tier0_degraded = [], []
     for s in syms:
+        if s in option_syms:
+            continue
         src = out.get(s, {}).get("source")
         if src != "schwab":
             info = {"symbol": s, "tier": int(tiers[s]), "source": src or "unresolved"}

@@ -455,7 +455,7 @@ def _tick() -> None:
         def _recommendation_pass(account_id):
             try:
                 import recommendation_runner
-                summary = recommendation_runner.run()
+                summary = recommendation_runner.run(trigger="scheduled")
                 logger.info("scheduled recommendation pass (%s ET, account %s): %d emitted",
                             "+".join(due), _account_label(account_id), summary.get("emitted", 0))
             except Exception as e:  # noqa: BLE001

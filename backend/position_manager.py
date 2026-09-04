@@ -19,6 +19,7 @@ def _live_short_marks(ticker: str, shorts: list[dict]) -> dict[tuple, float]:
     expiration). One batched Schwab quote for all legs; best-effort — off-hours,
     in demo, without Schwab, or on any error it returns {} and callers fall back
     to the stored entry mark. Only legs carrying an expiration can be quoted."""
+    import option_marks
     import schwab_api
     if config.demo_enabled() or not schwab_api.market_configured():
         return {}
@@ -32,18 +33,21 @@ def _live_short_marks(ticker: str, shorts: list[dict]) -> dict[tuple, float]:
                 continue
     if not syms:
         return {}
+    # The poller's cache first: during market hours every open short is quoted
+    # alongside its stock every cycle, so the view usually costs no call here.
+    out: dict[tuple, float] = option_marks.marks_for(ticker, shorts)
+    missing = [sym for sym, key in syms.items() if key not in out]
+    if not missing:
+        return out
     try:
-        quotes = data_handler.client().get_quotes(list(syms))
+        quotes = data_handler.client().get_quotes(missing)
     except Exception:  # noqa: BLE001 — a marks fetch never blocks the positions view
-        return {}
-    out: dict[tuple, float] = {}
-    for sym, key in syms.items():
+        return out
+    for sym in missing:
         node = quotes.get(sym) or {}
-        mark = node.get("mark")
-        if mark is None:
-            mark = node.get("bid")  # mid preferred; bid is the conservative fallback
+        mark = option_marks.remember(sym, node)   # mid preferred; bid the fallback
         if mark is not None:
-            out[key] = float(mark)
+            out[syms[sym]] = mark
     return out
 
 

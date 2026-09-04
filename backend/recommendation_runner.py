@@ -64,6 +64,15 @@ def _ticker_snapshot(ticker: str, position: dict | None, q_pair, price, bars,
     except Exception:  # noqa: BLE001
         pass
     tk["price"] = price
+    # Live per-share marks of the position's short calls from the poller's
+    # cache (fresh only; never a fetch) — frozen here so the pass reads the
+    # same marks the event that triggered it was detected on.
+    if position is not None:
+        try:
+            import option_marks
+            tk["short_marks"] = option_marks.marks_for(ticker, position.get("short_calls") or [])
+        except Exception:  # noqa: BLE001
+            tk["short_marks"] = {}
     try:
         rs_spy = q_pair if q_pair is not None else kill_switch._rs_spy(ticker)
         tk["rs3m_vs_spy"] = rs_spy
@@ -523,10 +532,14 @@ def _notify_settle(events: list[tuple[dict, str]], state: dict,
 
 
 def run(notify: bool = True, include_entry: bool = True,
-        dry_run: bool | None = None, now: datetime | None = None) -> dict:
-    """One scheduled/manual evaluation pass. Returns a summary; the emitted
-    records live in state.recommendations (append-only). ``now`` is injectable for
-    tests; production defaults to the wall clock."""
+        dry_run: bool | None = None, now: datetime | None = None,
+        trigger: str | dict = "scheduled") -> dict:
+    """One evaluation pass. Returns a summary; the emitted records live in
+    state.recommendations (append-only). ``now`` is injectable for tests;
+    production defaults to the wall clock. ``trigger`` says what asked for the
+    pass — "scheduled" (a slot), "manual" (the button / API), or
+    {"kind": "event", "reasons": [...]} (event_runner) — and rides on the
+    summary so the dashboard can say why the engine last ran."""
     global _last_run
     with _run_lock:
         now = _coerce_now(now)
@@ -544,15 +557,16 @@ def run(notify: bool = True, include_entry: bool = True,
         import reconcile
         freeze = reconcile.freeze_status(state)
         if freeze["frozen"]:
-            _last_run = {
+            _last_run = _remember_run({
                 "at": log.utcnow(),
+                "trigger": trigger,
                 "positions_evaluated": 0,
                 "emitted": 0, "emitted_ids": [],
                 "reconcile_frozen": True,
                 "frozen_tickers": freeze["tickers"],
                 "freeze_reason": freeze["reason"],
                 "released": release_summary,
-            }
+            })
             logger.warning("recommendation pass SKIPPED — reconciliation freeze: %s",
                            freeze["tickers"])
             return _last_run
@@ -565,8 +579,9 @@ def run(notify: bool = True, include_entry: bool = True,
         # 4) Notify actionable recs, settle-aware (staged ones say "executable …").
         if notify and stored:
             _notify(stored, staged, state, dry_run)
-        _last_run = {
+        _last_run = _remember_run({
             "at": log.utcnow(),
+            "trigger": trigger,
             "positions_evaluated": sum(1 for p in state.get("positions", [])
                                        if p.get("status") != "closed"),
             "entry_candidates": len(market.get("entry_candidates") or []),
@@ -575,10 +590,32 @@ def run(notify: bool = True, include_entry: bool = True,
             "emitted_ids": [r.get("rec_id") for r in stored],
             "staged_pending": len(staged),
             "released": release_summary,
-        }
+        })
         logger.info("recommendation pass: %s", _last_run)
         return _last_run
 
 
+# The last pass summary is a small operational readout (the UI's "engine last
+# ran at" line). It is persisted to state so a restart — Fly machines stop
+# between scheduled slots — doesn't make the dashboard read "never ran" until
+# the next pass. It is NOT a recommendation record and carries no authority.
+_LAST_RUN_KEY = "recommendation_last_run"
+
+
+def _remember_run(summary: dict) -> dict:
+    try:
+        log.mutate_state(lambda st: st.__setitem__(_LAST_RUN_KEY, summary))
+    except Exception as e:  # noqa: BLE001 — a readout must never fail the pass
+        logger.warning("could not persist recommendation last_run: %s", e)
+    return summary
+
+
 def last_run() -> dict | None:
-    return _last_run
+    """The most recent pass summary: in-memory if this process ran one, else
+    the persisted copy from the last process, else None (never ran)."""
+    if _last_run is not None:
+        return _last_run
+    try:
+        return log.load_state().get(_LAST_RUN_KEY)
+    except Exception:  # noqa: BLE001
+        return None
