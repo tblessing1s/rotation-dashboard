@@ -100,6 +100,12 @@ OVERRIDE_REASONS = frozenset({
 
 OVERRIDE_NOTE_REQUIRED = frozenset({OverrideReason.OTHER})
 
+# DERIVED override reason (trust_derive.ACTED_DIFFERENTLY): the engine committed
+# to one move and the operator made a different one on the same position. It is
+# written by resolution matching only — deliberately NOT in OVERRIDE_REASONS, so
+# the dismiss endpoint refuses it and no one can hand-enter it.
+DERIVED_OVERRIDE_REASONS = frozenset({"ACTED_DIFFERENTLY"})
+
 
 class MissAckReason:
     """Coded reason the operator records against a COVERAGE_MISS — the mirror

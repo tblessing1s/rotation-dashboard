@@ -4,7 +4,7 @@ import { Card, Meter, Loading, Modal, Light, ChartLink, SleeveBadge, money, fmt,
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { useToast } from "./Toast.jsx";
-import { explainRec, ticketSummary } from "../recWhy.js";
+import { explainRec, explainResolution, ticketSummary } from "../recWhy.js";
 import { submitOrder } from "../orderFlow.js";
 
 // Reconciliation review panel — shown when the position has open diffs against
@@ -562,20 +562,51 @@ function ProposedEntries({ recs, onRecsChanged, onEnter }) {
 // The recommendation strip under a position's header. Actionable recs (never
 // NO_ACTION) render as cards; when the ONLY open rec is an ALL_CLEAR/NO_ACTION,
 // a single muted line says so with the valid-until time.
-function RecSection({ p, recs, onRecsChanged, focusCard }) {
+// "engine called DEFEND · you took it by hand at Schwab · strike +0.50 vs
+// proposed" — how this position's last engine call was closed out by the
+// operator's own move (matched, or overridden by acting differently). Derived
+// by trust_derive from the immutable logs; nothing here is entered by hand.
+function ResolvedLine({ res, now }) {
+  const x = explainResolution(res);
+  if (!x) return null;
+  const t = Date.parse(res.at || "");
+  const hrs = Number.isNaN(t) ? null : Math.round((now - t) / 3600000);
+  const ago = hrs == null ? "" : hrs < 1 ? "just now" : hrs < 48 ? `${hrs}h ago` : `${Math.round(hrs / 24)}d ago`;
+  return (
+    <div className="text-[11px] text-slate-500" title={`rec ${res.rec_id} · ${res.status}${res.reason ? ` (${res.reason})` : ""}`}>
+      engine called <span className="font-semibold text-slate-300">{x.called}</span>
+      {x.rule && <span className="text-slate-600"> ({x.rule.toLowerCase()})</span>}
+      {" · "}<span className={`font-medium ${x.tone}`}>{x.verdict}</span>
+      {x.where && <span> {x.where}</span>}
+      {x.detail && <span className="text-slate-600"> · {x.detail}</span>}
+      {ago && <span className="text-slate-600"> · {ago}</span>}
+    </div>
+  );
+}
+
+function RecSection({ p, recs, resolved, onRecsChanged, focusCard }) {
   const now = useNow();
   const toast = useToast();
   const [dismissing, setDismissing] = React.useState(null); // rec being dismissed
   const [detailId, setDetailId] = React.useState(null); // rec_id with ticket expanded
   const list = recs || [];
   const actionable = list.filter((r) => r.action_type !== "NO_ACTION");
-  if (list.length === 0) return null;
+  // The most recent closed-out call on this position (last two weeks), shown
+  // whenever there is no open action so the operator can see that their own
+  // move — from the card, by hand, or at Schwab — resolved the engine's call.
+  const last = (resolved || [])[0] || null;
+  if (list.length === 0 && !last) return null;
 
   if (actionable.length === 0) {
     const r = list[list.length - 1];
     return (
-      <div className="px-4 pb-2 text-[11px] text-slate-600">
-        engine: all clear · valid until {(r.valid_until || "").slice(0, 16).replace("T", " ")}Z
+      <div className="space-y-0.5 px-4 pb-2">
+        {last && <ResolvedLine res={last} now={now} />}
+        {r && (
+          <div className="text-[11px] text-slate-600">
+            engine: all clear · valid until {(r.valid_until || "").slice(0, 16).replace("T", " ")}Z
+          </div>
+        )}
       </div>
     );
   }
@@ -1373,7 +1404,7 @@ function BookSummary({ positions, diffsByTicker, risk }) {
 // the share base, covered-lot capacity, short-call capture. Expanded: those in
 // full (share block, short list, accrual), plus any active safety alert
 // (reconciliation, defend, whipsaw) which also auto-opens the row.
-function PositionRow({ p, diffs, recs, onRecsChanged, focusCard, focused, setRolling, onOpenTicket, afterResolve }) {
+function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focused, setRolling, onOpenTicket, afterResolve }) {
   const shorts = p.short_calls || [];
   const hasAlert = !!(p.needs_review || p.defend || p.whipsaw?.tripped || (diffs && diffs.length));
   // Collapsed by default for a clean, scannable list; a tapped-alert deep link
@@ -1458,7 +1489,7 @@ function PositionRow({ p, diffs, recs, onRecsChanged, focusCard, focused, setRol
 
       {/* Engine recommendations stay visible even when the row is collapsed —
           they're the "act now" layer, not detail. */}
-      <RecSection p={p} recs={recs} onRecsChanged={onRecsChanged} focusCard={focusCard} />
+      <RecSection p={p} recs={recs} resolved={resolved} onRecsChanged={onRecsChanged} focusCard={focusCard} />
 
       {open && (
         <div className="border-t border-slate-800 p-4">
@@ -1550,6 +1581,17 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
     return out;
   }, [recsData]);
 
+  // Recently closed-out calls per ticker (newest first) — the "your move
+  // resolved this" line under a position with no open action.
+  const resolvedByTicker = React.useMemo(() => {
+    const out = {};
+    for (const r of recsData?.recent_resolutions || []) {
+      const t = (r.ticker || "").toUpperCase();
+      if (t) (out[t] ||= []).push(r);
+    }
+    return out;
+  }, [recsData]);
+
   const enterRecs = React.useMemo(
     () => (recsData?.open || []).filter((r) => r.action_type === "ENTER"),
     [recsData]);
@@ -1598,6 +1640,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
             p={p}
             diffs={openDiffsByTicker[p.ticker]}
             recs={recsByTicker[(p.ticker || "").toUpperCase()]}
+            resolved={resolvedByTicker[(p.ticker || "").toUpperCase()]}
             onRecsChanged={reloadRecs}
             focusCard={focusCard}
             focused={focusedTicker === p.ticker}

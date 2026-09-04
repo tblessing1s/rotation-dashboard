@@ -1398,6 +1398,10 @@ def api_recommendations():
             # live countdown and a pre-approve toggle (the gate deferred the order;
             # the alert already fired).
             "pending_settle": settle.pending(state),
+            # How the last two weeks of engine calls were closed out — matched by
+            # a move (from the card, by hand, or at Schwab) or overridden by
+            # acting differently — so a position card can show the connection.
+            "recent_resolutions": trust_derive.recent_resolutions(state, now),
             "gate_enforced": config.market_settle_gate_enabled(),
             "last_run": recommendation_runner.last_run(),
             "total": len(state.get("recommendations", [])),

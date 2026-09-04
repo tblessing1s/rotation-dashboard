@@ -51,10 +51,49 @@ _ROLL_REASON_ACTION = {
     "extrinsic-captured": ActionType.ROLL_OUT,   # ROLL_EXTRINSIC_CAPTURED early roll
     "earnings": ActionType.ROLL_OUT,
     "defend": ActionType.DEFEND,
+    # A roll adopted from the broker feed (done by hand at Schwab) carries no
+    # sub-type — the operator never picked "defend" vs "scheduled" in a modal.
+    # It is graded as the generic roll and matches ANY open roll-family rec on
+    # the position (see _family); the resolution records what it really was.
+    "broker_manual_roll": ActionType.ROLL_OUT,
     # kill-switch-exit rolls are part of an exit in progress — the close_leap
     # carries the EXIT; grading the roll leg separately would double-count.
     "kill-switch-exit": None,
 }
+
+# Action FAMILY — the move the operator actually made, coarser than the graded
+# action type. A roll is a roll whether the engine called it DEFEND, ROLL_OUT or
+# ROLL_DOWN; the operator choosing a different roll reason (or rolling by hand
+# at Schwab, where there is no reason to choose) is still the engine's roll
+# being taken, and the resolution carries the difference as ``action_delta``
+# rather than leaving the rec open AND synthesizing a coverage miss.
+_FAMILY = {
+    ActionType.ROLL_OUT: "ROLL", ActionType.ROLL_DOWN: "ROLL", ActionType.DEFEND: "ROLL",
+    ActionType.EXIT: "EXIT", ActionType.ENTER: "ENTER",
+}
+
+# The derived override reason: the engine had committed to one move on a
+# position and the operator made a DIFFERENT one (rolled when told to exit,
+# exited when told to roll). Never operator-supplied — the dismiss endpoint
+# rejects it — and never a coverage miss (the engine did commit; the operator
+# disagreed with their hands instead of the Dismiss button).
+ACTED_DIFFERENTLY = "ACTED_DIFFERENTLY"
+
+
+def _family(action_type) -> str | None:
+    return _FAMILY.get(action_type)
+
+
+def _action_source(inst: dict, executions_by_id: dict) -> str:
+    """Where the move came from: the engine's card (source_rec_id), the app's
+    own modal/ticket by hand, or adopted from the broker feed (done at Schwab)."""
+    if inst.get("source_rec_id"):
+        return "engine_card"
+    for eid in inst.get("execution_ids") or []:
+        e = executions_by_id.get(eid) or {}
+        if e.get("source") == "broker_manual":
+            return "broker_manual"
+    return "app_manual"
 
 # Order ACTION -> graded action type. Keyed on the bare action (see
 # _order_action): an order event's ``intent`` is the per-position lock KEY,
@@ -304,14 +343,16 @@ def map_actions(state: dict) -> list[dict]:
             continue
         inst.pop("_leap_close", None)
         out.append(inst)
+    by_id = {e.get("id"): e for e in state.get("executions", [])}
     for inst in out:
         # source_rec_id passthrough: an execution staged from a recommendation
         # card carries the rec id; the anchor exec's value wins.
-        ids = set(inst["execution_ids"])
-        for e in state.get("executions", []):
-            if e.get("id") in ids and e.get("source_rec_id"):
+        for eid in inst["execution_ids"]:
+            e = by_id.get(eid) or {}
+            if e.get("source_rec_id"):
                 inst["source_rec_id"] = e["source_rec_id"]
                 break
+        inst["source"] = _action_source(inst, by_id)
     out.sort(key=lambda i: i["at"])
     return out
 
@@ -350,31 +391,71 @@ def resolve(state: dict, now: datetime) -> list[dict]:
 
     actions = map_actions(state)
     matched: dict[str, dict] = {}     # rec_id -> match detail
+    acted_differently: dict[str, dict] = {}  # rec_id -> derived override detail
     matched_actions: set[int] = set()
 
-    def _matchable(r: dict, inst: dict) -> bool:
-        if r.get("action_type") != inst["action_type"]:
-            return False
+    def _still_claimable(r: dict, inst: dict) -> bool:
+        """The rec is a live claim on this ticker at the instant of the action:
+        same ticker, not already resolved, inside its validity window. A rec
+        superseded by an ALL_CLEAR stays claimable for an action that happened
+        BEFORE that all-clear was emitted — the engine cleared because the
+        operator had already acted (a roll done at Schwab is only adopted after
+        the next pass has seen the new short), and that is a match, not a miss.
+        A rec replaced by another ACTION rec never matches (the successor is
+        the claim)."""
         if (r.get("ticker") or "").upper() != inst["ticker"]:
             return False
-        if r.get("rec_id") in matched:
+        rid = str(r.get("rec_id"))
+        if r.get("rec_id") in matched or rid in acted_differently or rid in overrides:
             return False
-        if str(r.get("rec_id")) in superseded_by or str(r.get("rec_id")) in overrides:
-            return False
+        if rid in superseded_by:
+            successor = by_id.get(superseded_by[rid]) or {}
+            succ_at = _parse_ts(successor.get("emitted_at"))
+            if (successor.get("action_type") != ActionType.NO_ACTION
+                    or succ_at is None or inst["at"] > succ_at):
+                return False
         emitted = _parse_ts(r.get("emitted_at"))
         valid = _parse_ts(r.get("valid_until"))
         return (emitted is not None and valid is not None
                 and emitted <= inst["at"] <= valid)
 
+    def _latest(rs):
+        return max(rs, key=lambda r: r.get("emitted_at") or "") if rs else None
+
     for idx, inst in enumerate(actions):
-        candidates = [r for r in recs if _matchable(r, inst)]
+        fam = _family(inst["action_type"])
+        live = [r for r in recs if r.get("action_type") != ActionType.NO_ACTION
+                and _still_claimable(r, inst)]
+        exact = [r for r in live if r.get("action_type") == inst["action_type"]]
+        same_family = [r for r in live if r not in exact and _family(r.get("action_type")) == fam]
         chosen = None
         src = inst.get("source_rec_id")
-        if src and any(r.get("rec_id") == src for r in candidates):
-            chosen = by_id[src]
-        elif candidates:
-            chosen = max(candidates, key=lambda r: r.get("emitted_at") or "")
+        if src and any(r.get("rec_id") == src for r in live):
+            chosen = by_id[src]           # the card the operator tapped, exactly
+        elif exact:
+            chosen = _latest(exact)
+        elif same_family:
+            chosen = _latest(same_family)  # a roll is a roll — noted as action_delta
         if chosen is None:
+            # The engine had committed to a DIFFERENT move on this position (an
+            # EXIT while the operator rolled, or vice versa): the rec resolves as
+            # an override the operator made with their hands, and the action is
+            # covered — the engine did not stay silent.
+            other = _latest([r for r in live
+                             if fam in ("ROLL", "EXIT") and _family(r.get("action_type")) in ("ROLL", "EXIT")])
+            if other is not None:
+                acted_differently[other["rec_id"]] = {
+                    "rec_id": other["rec_id"], "status": Resolution.OVERRIDDEN,
+                    "action_type": other.get("action_type"), "ticker": inst["ticker"],
+                    "reason": ACTED_DIFFERENTLY, "derived": True,
+                    "note": (f"operator executed {inst['action_type']} instead of "
+                             f"{other.get('action_type')}"),
+                    "executed_action_type": inst["action_type"],
+                    "execution_ids": inst["execution_ids"], "source": inst.get("source"),
+                    "live": inst["live"], "executed_at": _iso(inst["at"]),
+                    "at": _iso(inst["at"]),
+                }
+                matched_actions.add(idx)
             continue
         emitted = _parse_ts(chosen.get("emitted_at"))
         ticket = chosen.get("proposed_ticket") or {}
@@ -396,14 +477,22 @@ def resolve(state: dict, now: datetime) -> list[dict]:
                 credit_delta = round(float(inst["net"]) - float(floor), 2)
             except (TypeError, ValueError):
                 credit_delta = None
+        # The resolution is keyed on the REC's action type (that is what the
+        # scoreboard grades); what the operator actually did rides alongside.
+        action_delta = (None if chosen.get("action_type") == inst["action_type"]
+                        else f"{chosen.get('action_type')}->{inst['action_type']}")
         matched[chosen["rec_id"]] = {
             "rec_id": chosen["rec_id"], "status": Resolution.EXECUTED_MATCHED,
-            "action_type": inst["action_type"], "ticker": inst["ticker"],
+            "action_type": chosen.get("action_type"), "ticker": inst["ticker"],
+            "executed_action_type": inst["action_type"],
+            "roll_reason": inst.get("roll_reason"),
+            "source": inst.get("source"),
             "execution_ids": inst["execution_ids"], "live": inst["live"],
             "executed_at": _iso(inst["at"]),
             "deltas": {
                 "strike_delta": strike_delta,
                 "credit_delta_vs_min": credit_delta,
+                "action_delta": action_delta,
                 "hours_from_emission": (round((inst["at"] - emitted).total_seconds() / 3600, 2)
                                         if emitted else None),
             },
@@ -425,6 +514,9 @@ def resolve(state: dict, now: datetime) -> list[dict]:
                 "reason": ov.get("reason"), "note": ov.get("note"),
                 "live": None, "at": ov.get("at"),
             })
+            continue
+        if rid in acted_differently:
+            resolutions.append(acted_differently[rid])
             continue
         if str(rid) in superseded_by:
             successor = by_id.get(superseded_by[str(rid)]) or {}
@@ -466,6 +558,33 @@ def resolve(state: dict, now: datetime) -> list[dict]:
                                     "note": ack.get("note"), "at": ack.get("at")}
         resolutions.append(miss)
     return resolutions
+
+
+def recent_resolutions(state: dict, now: datetime, days: int = 14) -> list[dict]:
+    """Resolutions that connect an operator MOVE to an engine call (matched, or
+    overridden by acting differently), newest first, within ``days`` — joined
+    with the rec's trigger rule and proposed strike so a position card can say
+    "engine called X on Tuesday; you did Y" without a second lookup."""
+    by_id = {r.get("rec_id"): r for r in state.get("recommendations", []) or []}
+    cutoff = now - timedelta(days=days)
+    out = []
+    for res in state.get("recommendation_resolutions", []) or []:
+        if res.get("status") not in (Resolution.EXECUTED_MATCHED, Resolution.OVERRIDDEN):
+            continue
+        at = _parse_ts(res.get("at"))
+        if at is None or at < cutoff:
+            continue
+        rec = by_id.get(res.get("rec_id")) or {}
+        proposed_strike = None
+        for leg in (rec.get("proposed_ticket") or {}).get("legs") or []:
+            if leg.get("instruction") in ("SELL_TO_OPEN", "BUY_TO_OPEN"):
+                proposed_strike = leg.get("strike")
+                break
+        out.append({**res, "trigger_rule": rec.get("trigger_rule"),
+                    "emitted_at": rec.get("emitted_at"),
+                    "proposed_strike": proposed_strike})
+    out.sort(key=lambda r: r.get("at") or "", reverse=True)
+    return out
 
 
 def open_recommendations(state: dict, now: datetime) -> list[dict]:
@@ -844,6 +963,14 @@ def scoreboard(state: dict, resolutions: list[dict], fidelity_map: dict,
         for r in overridden:
             override_breakdown[r.get("reason") or "?"] = \
                 override_breakdown.get(r.get("reason") or "?", 0) + 1
+        # Where the matched moves came from (the card, the app by hand, or
+        # Schwab by hand) and how many took a different roll than proposed —
+        # "did I agree" split by how the agreement was expressed.
+        matched_by_source: dict[str, int] = {}
+        for r in matched:
+            src = r.get("source") or "app_manual"
+            matched_by_source[src] = matched_by_source.get(src, 0) + 1
+        matched_diverged = sum(1 for r in matched if (r.get("deltas") or {}).get("action_delta"))
         fid_t = [f for f in fidelity if f.get("action_type") == at]
         fid_graded = [f for f in fid_t if f.get("pass") is not None]
         fid_pass = [f for f in fid_graded if f["pass"]]
@@ -861,6 +988,8 @@ def scoreboard(state: dict, resolutions: list[dict], fidelity_map: dict,
                 "executed_matched": len(matched), "overridden": len(overridden),
                 "rate": round(len(matched) / decided, 3) if decided else None,
                 "override_breakdown": override_breakdown,
+                "matched_by_source": matched_by_source,
+                "matched_diverged": matched_diverged,
             },
             "fidelity": {
                 "graded": len(fid_graded), "passed": len(fid_pass),

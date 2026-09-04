@@ -34,12 +34,42 @@ not a valid output: if you act and no recommendation existed, that becomes a
 - Recommendations expire (`valid_until`). A stale recommendation never matches
   a later action — acting late counts as a miss, on purpose.
 
+**Moves you make yourself resolve the open recommendation** — you never have to
+dismiss a card for something you already did. Matching connects an operator
+MOVE to the engine's call on that position, wherever the move came from:
+
+| You did it… | Execution carries | Resolution `source` |
+|---|---|---|
+| from the card's **Execute** | `source_rec_id` | `engine_card` |
+| by hand in the app (roll modal / order ticket) | nothing special | `app_manual` |
+| by hand **at Schwab**, adopted from the transaction feed | `source: broker_manual`, `roll_reason: broker_manual_roll` | `broker_manual` |
+
+- **A roll is a roll.** A roll of any reason (or a broker-adopted roll, which has
+  no reason) matches the open roll-family recommendation — ROLL_OUT, ROLL_DOWN
+  or DEFEND — on that position. An exact action-type match is preferred; a
+  family match records the difference as `deltas.action_delta`
+  (e.g. `DEFEND->ROLL_OUT`) and counts on the scoreboard as `matched_diverged`.
+- **Acting differently is an override, not a miss.** If the engine said EXIT
+  and you rolled (or said ROLL and you exited), the recommendation resolves as
+  `OVERRIDDEN` with the derived reason `ACTED_DIFFERENTLY` — you disagreed with
+  your hands instead of the Dismiss button. It counts against precision like
+  any override; it is never a coverage miss, because the engine did commit.
+  The reason is derived-only: the dismiss endpoint refuses it.
+- **A recommendation withdrawn by an ALL_CLEAR still matches a move made
+  before the all-clear.** A roll done at Schwab is adopted only after the next
+  pass has seen the new short and cleared the position; the fill predates the
+  all-clear, so it is the recommendation's match, not a miss. A move made
+  AFTER the all-clear is late, and a miss.
+- Your explicit dismissal always wins over a derived override.
+- Each position card shows how its last engine call was closed out ("engine
+  called DEFEND · you rolled at Schwab to 176, +0.5 vs proposed") for two weeks.
+
 **The Trust Scoreboard** (Settings tab), per action type:
 
 | Metric | Question it answers | Math (all derived in `recompute_derived`) |
 |---|---|---|
 | **Coverage** | When I acted, had the engine already committed? | matched ÷ (matched + coverage misses) |
-| **Precision** | When the engine committed, did I agree? | matched ÷ (matched + overridden) |
+| **Precision** | When the engine committed, did I agree? | matched ÷ (matched + overridden); `matched_by_source` splits matches by card / app by hand / Schwab by hand, `matched_diverged` counts roll-family matches of a different type |
 | **Timeliness** | How long after the condition turned true did it commit? | emission lag per rec; "late after action" flags |
 | **Fidelity** | Did live order lifecycles behave exactly as specified? | per-ticket pass rate (below) |
 | **Graduation** | Is this action type automation-eligible? | ALL criteria below over the trailing window |

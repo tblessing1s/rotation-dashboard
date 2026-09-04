@@ -161,6 +161,51 @@ export function explainRec(rec) {
   };
 }
 
+// How a past engine call was closed out by the operator's own move — the line
+// a position card shows under "engine called X": who did it, what they did,
+// and how far it landed from the proposal. Reads a trust_derive resolution
+// (EXECUTED_MATCHED / OVERRIDDEN) joined with its rec (recent_resolutions).
+const SOURCE_LABEL = {
+  engine_card: "from the card",
+  app_manual: "by hand in the app",
+  broker_manual: "by hand at Schwab",
+};
+
+export function explainResolution(res) {
+  if (!res) return null;
+  const called = ACTION_LABELS[res.action_type] || res.action_type;
+  const rule = RULE_LABELS[res.trigger_rule] || res.trigger_rule || "";
+  const did = ACTION_LABELS[res.executed_action_type] || res.executed_action_type || "";
+  const where = SOURCE_LABEL[res.source] || "";
+  const d = res.deltas || {};
+  const parts = [];
+  let verdict, tone;
+  if (res.status === "EXECUTED_MATCHED") {
+    verdict = d.action_delta ? `you took it as a ${did.toLowerCase()}` : "you took it";
+    tone = "text-emerald-300";
+    if (d.strike_delta != null && d.strike_delta !== 0) {
+      parts.push(`strike ${d.strike_delta > 0 ? "+" : ""}${Number(d.strike_delta).toFixed(2)} vs proposed`);
+    } else if (d.strike_delta === 0) {
+      parts.push("at the proposed strike");
+    }
+    if (d.credit_delta_vs_min != null) {
+      parts.push(`credit ${d.credit_delta_vs_min >= 0 ? "+" : "−"}$${Math.abs(Number(d.credit_delta_vs_min)).toFixed(2)} vs floor`);
+    }
+    if (d.hours_from_emission != null) parts.push(`${Math.round(d.hours_from_emission)}h after the call`);
+  } else if (res.status === "OVERRIDDEN" && res.reason === "ACTED_DIFFERENTLY") {
+    verdict = `you ${did.toLowerCase() === "exit" ? "exited" : "rolled"} instead`;
+    tone = "text-amber-300";
+    parts.push("logged as an override");
+  } else if (res.status === "OVERRIDDEN") {
+    verdict = "you dismissed it";
+    tone = "text-slate-400";
+    if (res.reason) parts.push(String(res.reason).replaceAll("_", " ").toLowerCase());
+  } else {
+    return null;
+  }
+  return { called, rule, verdict, where, tone, detail: parts.join(" · "), at: res.at };
+}
+
 // One line for a digest row: "NVDA — Roll out: 78% of the premium captured".
 export function recHeadline(rec) {
   const x = explainRec(rec);
