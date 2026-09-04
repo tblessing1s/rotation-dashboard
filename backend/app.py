@@ -1383,11 +1383,27 @@ def api_recommendations():
     import recommendation_runner
     import recommendation_settle as settle
     import trust_derive
+    import position_manager
     from datetime import datetime, timezone
     try:
         state = log.load_state()
         now = datetime.now(timezone.utc)
         open_recs = trust_derive.open_recommendations(state, now)
+        # ENTER recs are frozen at the pass that emitted them: `input_snapshot`
+        # carries the dry powder available AT THAT TIME. Capital moves after
+        # (a later ENTER gets executed, cash changes) without pruning the ones
+        # already on the board, so a lot that fit when proposed can stop
+        # fitting before it's acted on. Re-check against CURRENT deployable
+        # capital here — display-only, the persisted rec is untouched, so it
+        # reappears the moment dry powder frees back up (a close, a cash top-up).
+        deployable = position_manager.capital_summary(state).get("deployable")
+        if deployable is not None:
+            def _fits_dry_powder(r):
+                if r.get("action_type") != "ENTER":
+                    return True
+                lot = (r.get("input_snapshot") or {}).get("lot_cost")
+                return lot is None or lot <= deployable
+            open_recs = [r for r in open_recs if _fits_dry_powder(r)]
         # Bars are snapshot working data, not payload — strip anything
         # non-JSON-serializable defensively (records themselves never carry
         # DataFrames, but keep the endpoint robust to engine additions).
