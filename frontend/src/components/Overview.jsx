@@ -146,6 +146,12 @@ function RecExpander({ it, onGo }) {
   );
 }
 
+// Event keys from backend/event_runner.py, in the operator's words.
+const EVENT_LABEL = {
+  roll_75: "75% captured", extrinsic_captured: "juice banked",
+  assignment_risk: "assignment risk", defense: "defense level", market: "move",
+};
+
 // "engine ran 12 min ago" — with the freeze called out when the pass was
 // skipped, because "no recommendations" and "the engine refused to look" are
 // different situations and only this line tells them apart.
@@ -163,10 +169,20 @@ function EngineRunLine({ run }) {
     : mins < 48 * 60 ? `${Math.round(mins / 60)}h ago`
     : `${Math.round(mins / 1440)}d ago`;
   const frozen = !!run.reconcile_frozen;
+  // Why it ran: a slot, the button, or an event the quote poller saw flip.
+  const trig = run.trigger;
+  const reasons = trig && typeof trig === "object" && trig.kind === "event"
+    ? (trig.reasons || []).map((r) => {
+        const [t, s] = String(r).split(":");
+        return `${t === "MARKET" ? "market" : t} ${EVENT_LABEL[s] || s}`;
+      })
+    : null;
+  const why = reasons ? ` on ${reasons.slice(0, 2).join(", ")}${reasons.length > 2 ? ` +${reasons.length - 2}` : ""}`
+    : trig === "manual" ? " (manual)" : "";
   return (
     <span className={`text-xs ${frozen ? "text-amber-300" : "text-slate-500"}`}
-          title={`Last recommendation pass: ${run.at}${frozen ? ` — skipped: ${run.freeze_reason || "reconciliation freeze"}` : ""}`}>
-      engine ran {ago}
+          title={`Last recommendation pass: ${run.at}${reasons ? ` — event-driven: ${reasons.join(", ")}` : trig ? ` — ${trig}` : ""}${frozen ? ` — skipped: ${run.freeze_reason || "reconciliation freeze"}` : ""}`}>
+      engine ran {ago}{why}
       {frozen && (
         <> · <span className="font-semibold">skipped</span> — reconciliation freeze
           {run.frozen_tickers?.length ? ` (${run.frozen_tickers.join(", ")})` : ""}</>

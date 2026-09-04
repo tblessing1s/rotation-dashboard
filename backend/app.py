@@ -1416,7 +1416,7 @@ def api_recommendations_run():
     import recommendation_runner
     payload = request.get_json(silent=True) or {}
     try:
-        return jsonify(recommendation_runner.run(
+        return jsonify(recommendation_runner.run(trigger="manual",
             notify=bool(payload.get("notify", True)),
             include_entry=bool(payload.get("include_entry", True)),
             dry_run=payload.get("dry_run")))

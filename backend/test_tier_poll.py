@@ -165,3 +165,30 @@ def test_scheduler_wrapper_swallows_errors(monkeypatch):
                         lambda now: (_ for _ in ()).throw(RuntimeError("boom")))
     # must not raise — a poll failure can never break the tick
     alert_scheduler._maybe_tier_poll(OPEN)
+
+
+def test_cycle_hands_prints_and_escalations_to_the_event_runner(monkeypatch):
+    """The poller is where events surface; every cycle with a batch offers its
+    quotes + escalations to event_runner, which decides whether the engine runs."""
+    import event_runner
+    seen = {}
+    monkeypatch.setattr(event_runner, "maybe_run",
+                        lambda state, quotes, esc, market, now: seen.update(
+                            quotes=quotes, esc=esc, market=market) or {"emitted": 0})
+    state = _state(("AAPL",))
+    tiers = {"AAPL": Tier.T0}
+    _wire(monkeypatch, state, tiers, {"AAPL": 60.0, "SPY": 100.0, "XLK": 100.0})  # 60 < circuit breaker 70
+    res = tier_poll.run_cycle(OPEN)
+    assert res["engine_run"] == {"emitted": 0}
+    assert seen["quotes"]["AAPL"]["price"] == 60.0
+    assert "AAPL" in seen["esc"] and res["escalation_symbols"] == ["AAPL"]
+    assert seen["market"] is False
+
+
+def test_event_runner_failure_never_breaks_the_cycle(monkeypatch):
+    import event_runner
+    monkeypatch.setattr(event_runner, "maybe_run",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    _wire(monkeypatch, _state(("AAPL",)), {"AAPL": Tier.T0}, {"AAPL": 100.0})
+    res = tier_poll.run_cycle(OPEN)
+    assert res["quotes"]["AAPL"]["price"] == 100.0 and res["engine_run"] is None

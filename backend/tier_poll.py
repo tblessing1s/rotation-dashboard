@@ -48,6 +48,11 @@ def reset() -> None:
     _last_quote_at.clear()
     _tracker = EscalationTracker(sink=ListAlertSink())
     _killswitch_runs.update(day=None, count=0, last=None)
+    try:
+        import event_runner
+        event_runner.reset()
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _now() -> datetime:
@@ -197,8 +202,8 @@ def run_cycle(now: datetime | None = None, sleep=time.sleep) -> dict | None:
     due = _due_quotes(poll_tiers, market_open, now)
 
     summary = {"market_open": True, "due": sorted(due), "quotes": {},
-               "escalations": [], "market_escalation": None, "degraded": [],
-               "killswitch_refreshed": False}
+               "escalations": [], "escalation_symbols": [], "market_escalation": None,
+               "degraded": [], "killswitch_refreshed": False, "engine_run": None}
     if due:
         try:
             fetched = transport.fetch_quotes_batched(due, sleep=sleep)
@@ -207,10 +212,22 @@ def run_cycle(now: datetime | None = None, sleep=time.sleep) -> dict | None:
             for sym in due:
                 _last_quote_at[sym] = now
             summary["escalations"] = _run_defense_escalations(state, tiers, fetched["quotes"], now)
+            summary["escalation_symbols"] = sorted({d.split(" ", 1)[0].rstrip(":").upper()
+                                                    for d in summary["escalations"] if d})
             alert = _run_market_escalation(state, fetched["quotes"], now)
             summary["market_escalation"] = alert.detail if alert else None
         except Exception as e:  # noqa: BLE001
             logger.warning("quote cycle failed: %s", e)
+        # Event-driven engine pass: the fresh prints + this cycle's escalations
+        # decide whether a condition just flipped for a name; if so the engine
+        # runs now instead of at the next slot (event_runner bounds the cost).
+        try:
+            import event_runner
+            summary["engine_run"] = event_runner.maybe_run(
+                state, summary["quotes"], summary["escalation_symbols"],
+                bool(summary["market_escalation"]), now)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("event-driven engine hook failed: %s", e)
 
     summary["killswitch_refreshed"] = _maybe_killswitch_refresh(state, now)
     return summary
@@ -231,7 +248,16 @@ def status(now: datetime | None = None) -> dict:
         "polled_symbols": len(_last_quote_at),
         "killswitch_runs_today": _killswitch_runs["count"] if _killswitch_runs["day"] == now.date() else 0,
         "killswitch_target": config.REFRESH_KILLSWITCH_PER_DAY,
+        "event_runs": _event_run_status(),
     }
+
+
+def _event_run_status() -> dict | None:
+    try:
+        import event_runner
+        return event_runner.status()
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def recent_alerts(limit: int = 20) -> list[dict]:

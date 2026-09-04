@@ -752,6 +752,12 @@ function TieredScheduler({ data }) {
           <>
             {poll.polled_symbols || 0} name(s) polled · kill-switch RS3M {poll.killswitch_runs_today || 0}/{poll.killswitch_target} today
             {poll.escalated_symbols?.length ? ` · escalated: ${poll.escalated_symbols.join(", ")}` : ""}
+            {poll.event_runs && (
+              <span title="Event-driven engine passes: the engine runs when a roll signal flips on a fresh quote or the poller escalates (CFM_EVENT_RUNS)">
+                {" · "}event runs {poll.event_runs.enabled ? "on" : "off"}
+                {poll.event_runs.last_run_at ? ` (last ${String(poll.event_runs.last_run_at).slice(11, 16)})` : ""}
+              </span>
+            )}
           </>
         ) : "Scheduler idle"}
       </p>

@@ -523,10 +523,14 @@ def _notify_settle(events: list[tuple[dict, str]], state: dict,
 
 
 def run(notify: bool = True, include_entry: bool = True,
-        dry_run: bool | None = None, now: datetime | None = None) -> dict:
-    """One scheduled/manual evaluation pass. Returns a summary; the emitted
-    records live in state.recommendations (append-only). ``now`` is injectable for
-    tests; production defaults to the wall clock."""
+        dry_run: bool | None = None, now: datetime | None = None,
+        trigger: str | dict = "scheduled") -> dict:
+    """One evaluation pass. Returns a summary; the emitted records live in
+    state.recommendations (append-only). ``now`` is injectable for tests;
+    production defaults to the wall clock. ``trigger`` says what asked for the
+    pass — "scheduled" (a slot), "manual" (the button / API), or
+    {"kind": "event", "reasons": [...]} (event_runner) — and rides on the
+    summary so the dashboard can say why the engine last ran."""
     global _last_run
     with _run_lock:
         now = _coerce_now(now)
@@ -546,6 +550,7 @@ def run(notify: bool = True, include_entry: bool = True,
         if freeze["frozen"]:
             _last_run = _remember_run({
                 "at": log.utcnow(),
+                "trigger": trigger,
                 "positions_evaluated": 0,
                 "emitted": 0, "emitted_ids": [],
                 "reconcile_frozen": True,
@@ -567,6 +572,7 @@ def run(notify: bool = True, include_entry: bool = True,
             _notify(stored, staged, state, dry_run)
         _last_run = _remember_run({
             "at": log.utcnow(),
+            "trigger": trigger,
             "positions_evaluated": sum(1 for p in state.get("positions", [])
                                        if p.get("status") != "closed"),
             "entry_candidates": len(market.get("entry_candidates") or []),

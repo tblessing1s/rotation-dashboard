@@ -430,6 +430,11 @@ SLOT_HORIZON_DAYS = 14           # PROPOSED_DEFAULT — a slot opening within th
 REFRESH_KILLSWITCH_PER_DAY = 3   # PROPOSED_DEFAULT — intraday RS3M (vs SPY / vs Sector) recomputes/day
 ESCALATION_INDEX_MOVE_PCT = 1.0  # PROPOSED_DEFAULT — SPY / held-sector intraday move that triggers a market escalation (%)
 ESCALATION_DECAY_MINUTES = 60    # PROPOSED_DEFAULT — an escalation decays after this long without re-trigger
+# Event-driven recommendation passes (event_runner): the engine runs when a
+# roll-family signal flips true on a fresh quote or the poller escalates, on
+# top of the scheduled slots. Bounded per name and globally.
+EVENT_RUN_COOLDOWN_SECONDS = 900   # PROPOSED_DEFAULT — one event run per name per 15 min
+EVENT_RUN_MIN_GAP_SECONDS = 120    # PROPOSED_DEFAULT — never two event runs inside 2 min
 EOD_BATCH_TIME_ET = "16:30"      # PROPOSED_DEFAULT — the once-daily EOD bar batch fires after this ET time
 BUDGET_SOFT_LIMIT_PCT = 80       # PROPOSED_DEFAULT — shed when a provider crosses this % of its configured daily limit
 TIER0_NEVER_SHED = True          # HARD_CFM_RULE — open-position monitoring is never sacrificed

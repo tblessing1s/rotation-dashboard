@@ -11,7 +11,19 @@ reconciliation is `NOT_YET_IMPLEMENTED`, **no action type can be eligible**.
 ## What you'll see
 
 **Recommendation cards** on each position (Positions tab). Every scheduled
-alert slot (08:30 → 16:15 ET) also runs a recommendation pass. For each open
+alert slot (08:30 → 16:15 ET) runs a recommendation pass, and so does an
+**event**: during market hours the tiered quote poller (2-minute Tier 0
+cadence) hands each cycle's prints to `event_runner`, which runs the engine
+at once when a roll-family signal flips true for a name on the fresh quote
+(75% buyback rule, extrinsic-captured threshold, assignment risk — the same
+`enrich_short` signals the engine reads) or the poller escalates (a defense
+level breached, SPY / a held sector moving hard). Edges only, never "still
+true"; one run per name per `EVENT_RUN_COOLDOWN_SECONDS` (15 min) and never
+two inside `EVENT_RUN_MIN_GAP_SECONDS` (2 min); a restart primes silently.
+The scheduled slots remain the floor, and close-only rules (kill switch,
+circuit breaker) read the same daily bars an intraday slot would. The
+Overview's "engine ran" line says what triggered the last pass.
+`CFM_EVENT_RUNS=0` turns event runs off. For each open
 position it either emits an actionable recommendation — EXIT, DEFEND, ROLL_OUT
 — with a concrete proposed ticket (legs, strikes, net limit, minimum
 acceptable net credit, max slippage), or an explicit **ALL_CLEAR**. ROLL_OUT
