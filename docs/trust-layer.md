@@ -15,9 +15,14 @@ alert slot (08:30 → 16:15 ET) runs a recommendation pass, and so does an
 **event**: during market hours the tiered quote poller (2-minute Tier 0
 cadence) hands each cycle's prints to `event_runner`, which runs the engine
 at once when a roll-family signal flips true for a name on the fresh quote
-(75% buyback rule, extrinsic-captured threshold, assignment risk — the same
-`enrich_short` signals the engine reads) or the poller escalates (a defense
-level breached, SPY / a held sector moving hard). Edges only, never "still
+(75% buyback rule, extrinsic-captured threshold, the dividend and plain
+assignment-risk variants — the same `enrich_short` signals the engine reads),
+when a date-driven trigger flips for a name holding a short (an earnings
+report entering the `EARNINGS_WARN_DAYS` window, read from the same
+cache-only `earnings.cached_earnings` the snapshot uses — so a date landed by
+the nightly or hot refresh raises the card on the next poll, not the next
+slot), or the poller escalates (a defense level breached, SPY / a held sector
+moving hard). Edges only, never "still
 true"; one run per name per `EVENT_RUN_COOLDOWN_SECONDS` (15 min) and never
 two inside `EVENT_RUN_MIN_GAP_SECONDS` (2 min); a restart primes silently.
 Each open short call rides its underlying's batched quote on every poll (one

@@ -45,7 +45,9 @@ logger = logging.getLogger("cfm.eventrun")
 # Signal keys, per ticker. Named for the engine rule they lead to.
 ROLL_75 = "roll_75"                         # -> ROLL_75PCT
 EXTRINSIC_CAPTURED = "extrinsic_captured"   # -> ROLL_EXTRINSIC_CAPTURED
-ASSIGNMENT_RISK = "assignment_risk"         # -> DIVIDEND_ASSIGNMENT_RISK
+DIVIDEND_RISK = "dividend_risk"             # -> DIVIDEND_ASSIGNMENT_RISK (extrinsic below the coming dividend)
+ASSIGNMENT_RISK = "assignment_risk"         # -> DIVIDEND_ASSIGNMENT_RISK (extrinsic collapsed while deep ITM)
+EARNINGS = "earnings"                       # -> EARNINGS_WINDOW (report inside the warn window)
 DEFENSE = "defense"                         # poller defense escalation (level breached)
 MARKET = "market"                           # poller market escalation (SPY / sector move)
 
@@ -62,7 +64,18 @@ def detect_signals(state: dict, quotes: dict, today=None) -> dict[str, set[str]]
 
     Only tickers present in ``quotes`` are reported — a name that was not polled
     this cycle has nothing new to say, and the gate keeps its previous read.
+
+    Two of the signals are date-driven rather than price-driven — an earnings
+    report entering the warn window, an ex-dividend date the short's extrinsic
+    no longer covers — so they flip on a day boundary or when the nightly /
+    hot refresh lands a new date in the cache. Reading them here means the
+    card goes up on the first poll after the flip instead of at the next slot.
+    Both read the SAME cache-only sources the engine's snapshot reads
+    (earnings.cached_earnings, the position's stored dividend), never a
+    provider, and only when the position has a short call to act on — the
+    engine's rules are per short leg.
     """
+    import earnings as earnings_mod
     import option_marks
     import position_manager
     out: dict[str, set[str]] = {}
@@ -75,7 +88,14 @@ def detect_signals(state: dict, quotes: dict, today=None) -> dict[str, set[str]]
         if not t or price is None:
             continue
         sig: set[str] = set()
-        for sc in pos.get("short_calls", []) or []:
+        shorts = pos.get("short_calls", []) or []
+        if shorts:
+            try:
+                if (earnings_mod.cached_earnings(t) or {}).get("warning"):
+                    sig.add(EARNINGS)
+            except Exception as e:  # noqa: BLE001 — a cache read must not sink the cycle
+                logger.debug("earnings read failed for %s: %s", t, e)
+        for sc in shorts:
             try:
                 es = position_manager.enrich_short(sc, float(price), pos.get("dividend"),
                                                    live_mark=option_marks.mark_for(t, sc),
@@ -91,8 +111,9 @@ def detect_signals(state: dict, quotes: dict, today=None) -> dict[str, set[str]]
             if (captured is not None and dte is not None and int(dte) >= 1
                     and float(captured) >= config.ROLL_EXTRINSIC_CAPTURED_PCT):
                 sig.add(EXTRINSIC_CAPTURED)
-            if es.get("assignment_risk"):
-                sig.add(ASSIGNMENT_RISK)
+            ar = es.get("assignment_risk")
+            if ar:
+                sig.add(DIVIDEND_RISK if ar.get("trigger") == "dividend" else ASSIGNMENT_RISK)
         out[t] = sig
     return out
 
