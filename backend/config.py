@@ -596,6 +596,20 @@ TRADEABILITY_MAX_SPREAD_PCT = 15.0
 # carries NO veto authority, and no switch exists to give it any.
 PUT_JUICE_FLOOR_PCT = 0.50
 
+# ---- CSP route threshold (scan_verdict.route) ------------------------------
+# DELIBERATELY its own constant, lower than SPOT_ATR_EXTENSION_MAX above.
+#
+# route() used to reuse SPOT_ATR_EXTENSION_MAX outright — the same bar the old
+# Level-4 right-spot veto used to BLOCK an entry now SELECTED its route, on the
+# reasoning that "no constant of its own" was needed. That coupling meant the
+# route could only be loosened by also loosening the (shadow, no-authority)
+# chart-structure extension display, which nobody asked for. Splitting them
+# lets the put route trigger earlier — more ELIGIBLE names get "sell a weekly
+# put instead of buying shares" as their route — without touching
+# chart_structure.py's unrelated metric. PROPOSED_DEFAULT — operator preference,
+# not a veto: routing is advisory-only (see scan_verdict.route docstring).
+CSP_ROUTE_ATR_EXTENSION_MAX = 1.0
+
 # ---- Cash-secured put ORDER PLACEMENT (CSP Stage 3) ------------------------
 # DEFAULT FALSE, and the default is the point.
 #
