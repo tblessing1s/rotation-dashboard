@@ -1044,6 +1044,75 @@ def test_ticket_quotes_the_bid_not_the_midpoint(monkeypatch):
     assert row["delta_abs"] == 0.25                   # magnitude, not -0.25
 
 
+def test_quality_filter_never_suggests_a_strike_wider_than_the_tradeability_floor():
+    """THE IBIT LESSON: every strike here has a >15% bid/ask spread — the
+    executor would reject any of them, so none should be starred, and the
+    caller should be told no tradeable strike exists rather than getting a
+    silently-chosen bad one."""
+    import option_chain
+    strikes = [{"strike": k, "bid": 0.03, "ask": 0.05, "dte": 6}
+              for k in (40.0, 40.5, 41.0, 41.5, 42.0)]
+    annotated, no_tradeable = option_chain._apply_put_quality_filter(strikes, target=40.95)
+    assert no_tradeable is True
+    assert all(r["tradeable"] is False for r in annotated)
+    assert not any(r["suggested"] for r in annotated)
+
+
+def test_quality_filter_prefers_a_strike_that_clears_the_juice_floor_over_a_closer_one():
+    """A strike sitting exactly ON the MA21 target but paying too little to
+    clear the juice floor loses to a slightly farther strike that does — the
+    floor matters more than raw proximity once a strike is already tradeable."""
+    import option_chain
+    strikes = [
+        {"strike": 95.0, "bid": 0.05, "ask": 0.09, "dte": 7},   # spread 57% -> untradeable
+        {"strike": 96.0, "bid": 0.30, "ask": 0.34, "dte": 7},   # tradeable, AT target, thin juice
+        {"strike": 97.0, "bid": 0.55, "ask": 0.60, "dte": 7},   # tradeable, off target, clears floor
+    ]
+    annotated, no_tradeable = option_chain._apply_put_quality_filter(strikes, target=96.0)
+    assert no_tradeable is False
+    by_strike = {r["strike"]: r for r in annotated}
+    assert by_strike[95.0]["tradeable"] is False
+    assert by_strike[96.0]["clears_juice_floor"] is False
+    assert by_strike[97.0]["clears_juice_floor"] is True
+    assert by_strike[97.0]["suggested"] is True
+    assert by_strike[96.0]["suggested"] is False
+
+
+def test_quality_filter_falls_back_to_closest_tradeable_strike_when_none_clear_the_floor():
+    """Thin juice still beats no suggestion at all, once a strike is tradeable —
+    but it must say so rather than implying it cleared a bar it didn't."""
+    import option_chain
+    strikes = [
+        {"strike": 95.0, "bid": 0.05, "ask": 0.055, "dte": 7},
+        {"strike": 97.0, "bid": 0.08, "ask": 0.088, "dte": 7},   # closer to target
+    ]
+    annotated, no_tradeable = option_chain._apply_put_quality_filter(strikes, target=96.5)
+    assert no_tradeable is False
+    by_strike = {r["strike"]: r for r in annotated}
+    assert all(r["clears_juice_floor"] is False for r in annotated)
+    assert by_strike[97.0]["suggested"] is True
+    assert by_strike[95.0]["suggested"] is False
+
+
+def test_put_chain_flags_no_tradeable_strike_end_to_end(monkeypatch):
+    """The IBIT case through the real put_chain() wiring, not just the pure
+    filter: every offered strike is too wide to trade, so the group says so
+    and stars nothing."""
+    import option_chain
+    wide = {40.0: (0.03, 0.05), 40.5: (0.03, 0.05), 41.0: (0.04, 0.065),
+           41.5: (0.05, 0.075), 42.0: (0.06, 0.10)}
+    monkeypatch.setattr(option_chain, "_fetch_chain",
+                        lambda t, refresh=False: _chain_payload(underlying=45.23, strikes=wide))
+    monkeypatch.setattr(option_chain.screening, "entry_gate",
+                        lambda t: {"verdict": "ELIGIBLE", "blocked_by": [],
+                                  "route": {"route": "CASH_SECURED_PUT"}})
+    monkeypatch.setattr(option_chain.data_handler, "get_daily", lambda s, force=False: None)
+    monkeypatch.setattr(option_chain.data_handler, "latest_quote", lambda s: {"price": 45.23})
+    group = option_chain.put_chain("IBIT")["expirations"][0]
+    assert group["no_tradeable_strike"] is True
+    assert not any(r["suggested"] for r in group["strikes"])
+
+
 def test_ticket_collateral_and_juice_come_from_the_shared_helpers():
     """A second formula in the ticket is how it ends up disagreeing with the
     position it creates."""

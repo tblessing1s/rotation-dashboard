@@ -866,10 +866,14 @@ def put_chain(ticker: str, refresh: bool = False) -> dict:
         exp_contracts = [c for c in weekly_only if c["expiration"] == exp]
         strikes = indicators.get_nearby_strikes(exp_contracts, target, underlying,
                                                 count=5, put=True)
+        strikes, no_tradeable_strike = _apply_put_quality_filter(strikes, target)
         exp_groups.append({
             "expiration": exp,
             "dte": exp_contracts[0]["dte"] if exp_contracts else None,
             "strikes": [_put_strike_view(s) for s in strikes],
+            # True only when EVERY nearby strike failed the tradeability floor —
+            # see _apply_put_quality_filter.
+            "no_tradeable_strike": no_tradeable_strike,
         })
 
     gate = screening.entry_gate(ticker)
@@ -888,6 +892,51 @@ def put_chain(ticker: str, refresh: bool = False) -> dict:
         "max_dte": config.PUT_MAX_DTE,
         "placement": placement_status(),
     }
+
+
+def _apply_put_quality_filter(strikes: list[dict], target: float | None) -> tuple[list[dict], bool]:
+    """Re-picks which strike (if any) is `suggested`, on top of
+    `indicators.get_nearby_strikes`'s pure price-proximity pick.
+
+    THE IBIT LESSON: proximity to the MA21 target alone starred a strike with
+    a 22% bid/ask spread and juice far under the floor — a pick the executor
+    would reject anyway, and one not worth the collateral even if it filled.
+    So a strike whose spread exceeds the tradeability floor is NEVER
+    suggested; among the strikes that ARE tradeable, the one closest to the
+    target that also clears the put juice floor wins, preserving the "price
+    you actually want to pay" anchor while refusing to star a thin one over a
+    qualifying one. When none of the tradeable strikes clear the floor, the
+    closest tradeable strike is still suggested (thin juice beats no
+    suggestion) but carries `clears_juice_floor: False` so the ticket can say
+    so rather than implying it cleared a bar it didn't.
+
+    Juice and spread are computed on the BID, same as `_put_strike_view` —
+    selling to open hits the bid, never the midpoint (see that docstring).
+
+    Returns (strikes annotated with `tradeable` / `clears_juice_floor` /
+    `suggested`, no_tradeable_strike). The second value is True only when
+    EVERY strike here failed the spread floor, so the caller can say "no
+    tradeable strike" instead of silently starring the least-bad one.
+    """
+    import scan_verdict
+    annotated = []
+    for s in strikes:
+        spread = indicators.spread_pct(s.get("bid"), s.get("ask"))
+        tradeable = spread is not None and spread <= config.TRADEABILITY_MAX_SPREAD_PCT
+        juice = scan_verdict.put_juice_pct(s.get("bid"), s.get("strike"))
+        clears_floor = juice is not None and juice >= config.PUT_JUICE_FLOOR_PCT
+        annotated.append({**s, "tradeable": tradeable,
+                          "clears_juice_floor": clears_floor, "suggested": False})
+
+    tradeable_rows = [r for r in annotated if r["tradeable"]]
+    if not tradeable_rows:
+        return annotated, True
+
+    qualifying = [r for r in tradeable_rows if r["clears_juice_floor"]]
+    pool = qualifying or tradeable_rows
+    winner = min(pool, key=lambda r: abs(r["strike"] - target)) if target is not None else pool[0]
+    winner["suggested"] = True
+    return annotated, False
 
 
 def _put_strike_view(row: dict) -> dict:
