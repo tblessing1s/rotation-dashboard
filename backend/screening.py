@@ -693,7 +693,8 @@ def entry_gate(ticker: str, profile: str | None = None) -> dict:
         # from this; it tells the operator whether today's entry is shares or a
         # weekly put struck at the MA21 zone.
         "route": scan_verdict.route(extension_atr=extension_atr,
-                                    regime_color=regime_color, ma21=ma21),
+                                    regime_color=regime_color, ma21=ma21,
+                                    entrability=entrability),
         "regime_color": regime_color,
         # The three provenance blocks `entry_context` freezes onto the immutable
         # execution. A READ of what was already computed above — the snapshot has

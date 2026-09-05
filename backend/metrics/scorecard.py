@@ -580,7 +580,7 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # extension the ranker consumes, so route and rank cannot disagree.
     row["route"] = (gate or {}).get("route") or scan_verdict.route(
         extension_atr=row.get("atr_extension"), regime_color=regime_color,
-        ma21=None)
+        ma21=None, entrability=entrability)
 
     # ---- Per-gate evaluation telemetry (READ-ONLY OBSERVABILITY) -------------
     # TRAVIS_EXTENSION. A purely ADDITIVE row key. `gate_results` is one

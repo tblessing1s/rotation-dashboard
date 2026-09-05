@@ -203,6 +203,65 @@ def test_the_route_threshold_is_its_own_dedicated_constant():
 
 
 # ---------------------------------------------------------------------------
+# Entry route selection — structure gate (the IBIT lesson).
+#
+# A put is a bet that the name is worth owning at the lower strike later; a
+# BLOCKED structure (TOPPING/DECLINING/INSUFFICIENT_DATA base, or DISTRIBUTING
+# flow) is exactly the "fresh bounce off a downtrend" case that bet does not
+# have. Deliberately narrower than the ranker's use of the same signal:
+# WATCH/CAUTION/READY are unaffected, only the tier that used to be a hard
+# veto before the 2026 scan redesign.
+# ---------------------------------------------------------------------------
+import structure_classifier as sclf
+
+
+def test_a_blocked_structure_routes_to_shares_instead_of_a_put():
+    r = sv.route(extension_atr=_EXTENDED, regime_color="green",
+                 entrability=sclf.Entrability.BLOCKED)
+    assert r["route"] == sv.SHARES
+    assert r["reason"] == "structure_blocked_shares_only"
+    assert r["detail"]["entrability"] == sclf.Entrability.BLOCKED
+
+
+def test_watch_entrability_does_not_suppress_the_put_route():
+    """WATCH is "valid setup, not yet entrable" — not bad enough to force
+    shares; only BLOCKED (the old hard-veto tier) does that."""
+    r = sv.route(extension_atr=_EXTENDED, regime_color="green",
+                 entrability=sclf.Entrability.WATCH)
+    assert r["route"] == sv.CASH_SECURED_PUT
+
+
+def test_ready_and_caution_entrability_still_route_to_a_put():
+    for tier in (sclf.Entrability.READY, sclf.Entrability.CAUTION):
+        r = sv.route(extension_atr=_EXTENDED, regime_color="green", entrability=tier)
+        assert r["route"] == sv.CASH_SECURED_PUT
+
+
+def test_unknown_entrability_is_not_treated_as_blocked():
+    """A caller that has not computed entrability passes None — an absent
+    read must not silently become a block, same fail-open principle as the
+    unmeasurable-extension case."""
+    r = sv.route(extension_atr=_EXTENDED, regime_color="green", entrability=None)
+    assert r["route"] == sv.CASH_SECURED_PUT
+
+
+def test_a_blocked_structure_near_ma21_still_routes_to_shares_for_its_own_reason():
+    """A name near MA21 already routes to shares regardless of structure — the
+    structure gate must not override or relabel that with its own reason."""
+    r = sv.route(extension_atr=_NEAR, regime_color="green",
+                 entrability=sclf.Entrability.BLOCKED)
+    assert r["route"] == sv.SHARES
+    assert r["reason"] == "near_or_below_ma21"
+
+
+def test_red_regime_still_offers_no_route_regardless_of_structure():
+    r = sv.route(extension_atr=_EXTENDED, regime_color="red",
+                 entrability=sclf.Entrability.READY)
+    assert r["route"] is None
+    assert r["reason"] == "regime_red"
+
+
+# ---------------------------------------------------------------------------
 # Put collateral, the collateral-denominated floor, and re-gating (§1.6)
 # ---------------------------------------------------------------------------
 def test_put_collateral_is_strike_times_a_round_lot():
