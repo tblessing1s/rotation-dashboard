@@ -56,6 +56,7 @@ for the chart values, ``account_gate.evaluate`` for the account overlay,
 from __future__ import annotations
 
 import config
+import structure_classifier as sclf
 
 # ---------------------------------------------------------------------------
 # Verdict vocabulary — TWO states.
@@ -218,7 +219,7 @@ CASH_SECURED_PUT = "CASH_SECURED_PUT"
 
 
 def route(*, extension_atr: float | None, regime_color: str | None = None,
-          ma21: float | None = None) -> dict:
+          ma21: float | None = None, entrability: str | None = None) -> dict:
     """Which route enters an ELIGIBLE name: buy the shares, or sell a weekly put.
 
     The put is NOT a way to rescue an ineligible name — an ineligible name is
@@ -231,6 +232,14 @@ def route(*, extension_atr: float | None, regime_color: str | None = None,
                                        strategy would rather pay.
       * regime YELLOW               -> shares only. A put commits capital a week
                                        out on a tape that is already wobbling.
+      * structure BLOCKED           -> shares only. A put is a bet that the name
+                                       is worth owning at the lower strike later;
+                                       a name whose base is TOPPING/DECLINING, or
+                                       is under DISTRIBUTING volume, is exactly the
+                                       chart-quality case that bet requires and
+                                       does not have (the "fresh bounce off a
+                                       year-long downtrend" case — see the entry
+                                       route audit this branch adds a gate for).
       * regime RED                  -> the name is BLOCKED; no route is offered.
 
     Keyed off ``extension_atr`` — the SAME volatility-normalized extension the
@@ -242,6 +251,18 @@ def route(*, extension_atr: float | None, regime_color: str | None = None,
     loosened as an operator preference without also loosening the unrelated
     (shadow, no-authority) chart-structure extension display in
     ``chart_structure.py``.
+
+    ``entrability`` is ``structure_classifier.structure_entrability``'s output.
+    Only its BLOCKED tier (TOPPING/DECLINING/INSUFFICIENT_DATA base, or
+    DISTRIBUTING flow — the exact severity that was a hard veto before the 2026
+    scan redesign demoted it to ranking-only) suppresses the put route here;
+    WATCH/CAUTION/READY are unaffected, and this is deliberately narrower than
+    the ranker's use of the same signal — route() is choosing an entry
+    MECHANISM, not scoring quality, so it only steps in for the cases the old
+    veto would have refused outright. ``None`` (a caller that has not computed
+    it) is NOT treated as BLOCKED: this is advisory ranking input elsewhere in
+    the app, never a block, so an absent read must not silently become one here
+    either — same fail-open principle as the unmeasurable-extension case below.
 
     An unmeasurable extension routes to SHARES: the put route is the one that
     commits capital forward on a chart read, so an absent read takes the route that
@@ -259,6 +280,10 @@ def route(*, extension_atr: float | None, regime_color: str | None = None,
         return {"route": SHARES, "reason": "regime_yellow_shares_only",
                 "detail": {"extension_atr": extension_atr, "threshold": threshold,
                            "regime_color": regime_color}}
+    if extended and entrability == sclf.Entrability.BLOCKED:
+        return {"route": SHARES, "reason": "structure_blocked_shares_only",
+                "detail": {"extension_atr": extension_atr, "threshold": threshold,
+                           "entrability": entrability}}
     if extended:
         return {"route": CASH_SECURED_PUT, "reason": "extended_above_ma21",
                 "detail": {"extension_atr": extension_atr, "threshold": threshold,
