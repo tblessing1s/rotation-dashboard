@@ -655,6 +655,55 @@ EQUITY_ORDER_PLACEMENT_ENABLED = (
 # one's clothes — lower premium per week, across a window you cannot re-check.
 PUT_MAX_DTE = 10
 
+# ---- Dry-powder cash-secured-put sleeve (TRAVIS_EXTENSION) -----------------
+# A SECOND, DISTINCT use of the put instrument from the CSP ENTRY mechanism
+# above (scan_verdict.route / CSP_ROUTE_ATR_EXTENSION_MAX). That one is a
+# TIMING delay on an entry the strategy already wants to make — assignment is
+# the accepted, even hoped-for, outcome. This one is short-duration premium
+# collection on capital that cannot support a new full position — assignment
+# is an ACCIDENT to be flagged for review, never the goal. Same instrument,
+# opposite risk posture: kept in its own module (csp_dry_powder.py) with its
+# own config block so neither can drift into sharing a constant that would
+# silently mean two different things.
+#
+# SHADOW-ONLY. Nothing here touches state.json or migrations.py — see
+# csp_dry_powder.py's storage docstring for why its log is a side channel
+# (gate_telemetry.py's pattern) rather than a schema-versioned store. There is
+# no live order path for this sleeve in this change, and none is scoped.
+
+# "Extended" for THIS sleeve: price above both EMAs, and the fast/slow EMA gap
+# (as % of price) at or above this bar. Deliberately a DIFFERENT "extended"
+# than the CSP-entry route's ATR-normalized MA21 distance — different EMAs,
+# different intuition (a momentum-spread screen, not an entry-timing signal).
+# PROPOSED_DEFAULT — needs calibration once shadow data exists.
+DRY_POWDER_EMA_FAST = 8
+DRY_POWDER_EMA_SLOW = 21
+DRY_POWDER_EMA_GAP_MIN_PCT = 2.0
+
+# OTM put delta band scanned for a qualifying strike. The FURTHEST-OTM (lowest
+# delta) strike inside this band that still clears the yield floor is chosen —
+# safety-first, not premium-first. PROPOSED_DEFAULT.
+DRY_POWDER_PUT_DELTA_MIN = 0.10
+DRY_POWDER_PUT_DELTA_MAX = 0.25
+
+# Annualized weekly-equivalent yield floor on COLLATERAL (strike x 100) — the
+# bar a candidate strike must clear before it is ever selected. Its OWN
+# constant: not PUT_JUICE_FLOOR_PCT (unannualized, and belongs to the CSP
+# ENTRY mechanism's ranking, not this sleeve's selection) and not
+# SHARES_JUICE_FLOOR_PCT. PROPOSED_DEFAULT — needs calibration once shadow
+# data exists.
+DRY_POWDER_YIELD_FLOOR_ANNUALIZED_PCT = 15.0
+
+# When the 1-week and the 2-week-normalized-to-weekly yield are within this
+# many percentage points of each other, prefer the SHORTER duration — it
+# preserves the weekly reassessment option. PROPOSED_DEFAULT.
+DRY_POWDER_DURATION_TIE_TOLERANCE_PCT = 0.5
+
+# Retention for the dry-powder shadow log, same rationale as
+# GATE_TELEMETRY_RETENTION_DAYS above (one file per scan day; retention is a
+# file unlink, never a rewrite).
+DRY_POWDER_LOG_RETENTION_DAYS = 180
+
 # ---- Dividend income profile (schema v21) ---------------------------------
 # TRAVIS_EXTENSION — NOT a CFM rule. The CFM source prefers volatile names for
 # their juice and warns against "safe" low-vol stocks; the dividend sleeve is an

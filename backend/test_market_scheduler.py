@@ -321,3 +321,77 @@ def test_warm_scan_day_rolls_after_the_close_not_during_the_session():
     assert scan_cache.scan_day(datetime(2026, 7, 8, 12, 0, tzinfo=ET)) == "2026-07-07"
     # ...and after the close, Wednesday's own.
     assert scan_cache.scan_day(datetime(2026, 7, 8, 16, 30, tzinfo=ET)) == "2026-07-08"
+
+
+# --- Dry-powder CSP shadow sweep wiring (csp_dry_powder.py) -----------------
+def test_dry_powder_scan_enabled_defaults_true_and_respects_env(monkeypatch):
+    import alert_scheduler as sched
+    monkeypatch.delenv("CFM_DRY_POWDER_SCAN", raising=False)
+    assert sched.dry_powder_scan_enabled() is True
+    monkeypatch.setenv("CFM_DRY_POWDER_SCAN", "0")
+    assert sched.dry_powder_scan_enabled() is False
+
+
+def test_maybe_dry_powder_scan_runs_once_per_scan_day(monkeypatch):
+    """Same once-per-day cadence gate as the warm scan (`warm_scan_due`)."""
+    import alert_scheduler as sched
+    monkeypatch.setenv("CFM_DRY_POWDER_SCAN", "1")
+    monkeypatch.setattr(sched, "_last_dry_powder_scan_day", None)
+    calls = []
+    monkeypatch.setattr(sched, "_dry_powder_scan", lambda: calls.append(1))
+
+    noon = datetime(2026, 7, 8, 12, 0, tzinfo=ET)
+    sched._maybe_dry_powder_scan(noon)
+    assert len(calls) == 1
+    sched._maybe_dry_powder_scan(noon)   # same scan day again -> no-op
+    assert len(calls) == 1
+
+    after_close = datetime(2026, 7, 8, 16, 30, tzinfo=ET)   # rolls to a new scan day
+    sched._maybe_dry_powder_scan(after_close)
+    assert len(calls) == 2
+
+
+def test_maybe_dry_powder_scan_noop_when_disabled(monkeypatch):
+    import alert_scheduler as sched
+    monkeypatch.setenv("CFM_DRY_POWDER_SCAN", "0")
+    monkeypatch.setattr(sched, "_last_dry_powder_scan_day", None)
+    calls = []
+    monkeypatch.setattr(sched, "_dry_powder_scan", lambda: calls.append(1))
+    sched._maybe_dry_powder_scan(datetime(2026, 7, 8, 12, 0, tzinfo=ET))
+    assert calls == []
+
+
+def test_dry_powder_scan_invokes_csp_dry_powder_over_the_full_universe(monkeypatch):
+    import alert_scheduler as sched
+    import csp_dry_powder
+    import logging_handler as log
+    import sector_data
+
+    monkeypatch.setenv("CFM_DRY_POWDER_SCAN", "1")
+    monkeypatch.setattr(sector_data, "all_tickers", lambda: ["AAA", "BBB"])
+    monkeypatch.setattr(log, "load_state", lambda: {"positions": [], "metadata": {}})
+
+    seen_tickers = []
+    monkeypatch.setattr(csp_dry_powder, "scan", lambda tickers, state=None: (
+        seen_tickers.extend(tickers),
+        {"candidates": [], "shadow_trades": []})[1])
+    monkeypatch.setattr(csp_dry_powder, "resolve_outcomes", lambda state=None: [])
+
+    sched._dry_powder_scan()
+    assert seen_tickers == ["AAA", "BBB"]
+
+
+def test_dry_powder_scan_failure_is_swallowed_not_fatal(monkeypatch):
+    """SHADOW ONLY: a broken sweep must never take down the scheduler tick."""
+    import alert_scheduler as sched
+    import csp_dry_powder
+    import sector_data
+
+    monkeypatch.setenv("CFM_DRY_POWDER_SCAN", "1")
+    monkeypatch.setattr(sector_data, "all_tickers", lambda: ["AAA"])
+
+    def _boom(tickers, state=None):
+        raise RuntimeError("chain fetch exploded")
+    monkeypatch.setattr(csp_dry_powder, "scan", _boom)
+
+    sched._dry_powder_scan()   # must not raise

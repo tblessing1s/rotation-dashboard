@@ -615,6 +615,36 @@ def call_greeks(S: float | None, K: float | None, dte: int | None, mark: float |
     return (round(d, 4) if d is not None else None, round(iv * 100, 2))
 
 
+def bs_put_delta(S: float, K: float, T: float, r: float, sigma: float,
+                 q: float = 0.0) -> float | None:
+    """Black–Scholes–Merton put delta = −e^(−qT)·N(−d1). NEGATIVE, matching the
+    sign convention `schwab_api.parse_put_chain` documents for Schwab's own
+    put deltas — a caller that wants "how far out of the money" reads the
+    magnitude, same as it does for the raw chain field."""
+    if not (S and S > 0 and K and K > 0 and T and T > 0 and sigma and sigma > 0):
+        return None
+    return -math.exp(-q * T) * _norm_cdf(-_d1(S, K, T, r, sigma, q))
+
+
+def put_greeks(S: float | None, K: float | None, dte: int | None, mark: float | None,
+               reported_iv: float | None = None,
+               r: float = config.RISK_FREE_RATE, q: float = 0.0) -> tuple[float | None, float | None]:
+    """(delta, iv_pct) for a PUT via Black–Scholes–Merton — the put-side twin of
+    `call_greeks`, recomputed the same way (imply vol, then BSM) rather than
+    trusted from Schwab's raw chain field, for the same TOS-matching reason.
+    Returns (None, None) when inputs are insufficient."""
+    T = (dte or 0) / 365.0
+    if not (S and K and T > 0):
+        return None, None
+    iv = (reported_iv / 100.0) if reported_iv else None
+    if iv is None and mark:
+        iv = implied_vol_put(mark, S, K, T, r, q)
+    if not iv or iv <= 0:
+        return None, None
+    d = bs_put_delta(S, K, T, r, iv, q)
+    return (round(d, 4) if d is not None else None, round(iv * 100, 2))
+
+
 # ---------------------------------------------------------------------------
 # Option-chain helpers
 # ---------------------------------------------------------------------------
