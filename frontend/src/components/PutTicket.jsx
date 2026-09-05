@@ -38,7 +38,7 @@ function StrikeRow({ row, selected, onSelect, spot }) {
         {row.premium_per_share != null ? `$${fmt(row.premium_per_share, 2)}` : "—"}
         <span className="text-slate-600"> bid</span>
       </span>
-      <span className="w-16 text-emerald-300">
+      <span className={`w-16 ${row.clears_juice_floor === false ? "text-amber-400" : "text-emerald-300"}`}>
         {row.juice_pct != null ? `${fmt(row.juice_pct, 2)}%` : "—"}
       </span>
       <span className="w-20 text-slate-400">
@@ -48,7 +48,7 @@ function StrikeRow({ row, selected, onSelect, spot }) {
         {row.delta_abs != null ? fmt(row.delta_abs, 2) : "—"}
         <span className="text-slate-600">Δ</span>
       </span>
-      <span className={`w-14 ${row.spread_pct > 15 ? "text-rose-400" : "text-slate-500"}`}>
+      <span className={`w-14 ${row.tradeable === false ? "text-rose-400" : "text-slate-500"}`}>
         {row.spread_pct != null ? `${fmt(row.spread_pct, 1)}%` : "—"}
       </span>
       {/* An ITM put is already in assignment territory — worth flagging, not
@@ -174,6 +174,15 @@ export default function PutTicket({ ticker, onExecuted }) {
               <span className="font-semibold">The entry rules refuse this name right now:</span>{" "}
               {chain.blocked_by.join(", ")}. A put is a synthetic long position and gets
               no exemption for being an option — the executor will reject the ticket.
+            </p>
+          )}
+
+          {!blocked && group?.no_tradeable_strike && (
+            <p className="rounded-lg border border-rose-800 bg-rose-500/5 px-3 py-2 text-xs text-rose-300">
+              <span className="font-semibold">No tradeable strike in this expiration.</span>{" "}
+              Every strike's bid/ask spread is too wide to trade — none is suggested, and
+              the executor will reject a ticket built from any of them regardless of which
+              one you pick.
             </p>
           )}
 
