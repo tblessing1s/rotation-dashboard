@@ -1147,7 +1147,15 @@ def test_entry_gate_level4_is_the_right_spot_gate(monkeypatch):
 
     n = 260
     spy = _frame([100.0] * n)
-    breakout = _frame([100 + i * 0.5 for i in range(n)])   # steep -> green lights, but extended
+    # Steep uptrend -> green lights, but extended. A little sinusoidal noise on
+    # top of the ramp (rather than a perfectly monotonic line) gives it real
+    # up/down days: a perfectly monotonic series has ZERO down-days, which
+    # degenerates the structure classifier's up/down-volume ratio to
+    # unmeasurable (InstFlow -> INSUFFICIENT_DATA -> entrability BLOCKED),
+    # which would make route() route to shares for a reason unrelated to what
+    # this test is actually exercising.
+    import math
+    breakout = _frame([100 + i * 0.7 + 3 * math.sin(i / 3.0) for i in range(n)])
 
     def fake_get_daily(symbol, force=False):
         return spy if symbol.upper() == "SPY" else breakout
