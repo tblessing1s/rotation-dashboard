@@ -111,6 +111,12 @@ export const api = {
     const qs = q.toString();
     return request(`/api/scan/gate-telemetry${qs ? `?${qs}` : ""}`);
   },
+  // Dry-powder CSP shadow sleeve (csp_dry_powder.py) — a second, distinct
+  // income sweep run nightly on idle cash. SHADOW ONLY: never places an
+  // order. Read-only rollup; optional days= bounds it to the N most recent
+  // stored scan days.
+  cspDryPowderSummary: (days) =>
+    request(`/api/csp-dry-powder/summary${days ? `?days=${days}` : ""}`),
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
   // they can clear the STALE_BLOCKS_GO gate on the next scan.
   refreshReadyQuote: (tickers) =>
