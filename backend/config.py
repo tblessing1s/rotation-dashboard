@@ -1223,6 +1223,21 @@ MAX_RESUBMIT_ATTEMPTS = 3
 # illiquid names, lower it to get back to the old behaviour.
 ORDER_FILL_WAIT_SECONDS = float(os.environ.get("ORDER_FILL_WAIT_SECONDS") or 15.0)
 
+# Server-side backstop for the fill-wait-then-cancel behaviour above. The
+# frontend's own cancel-if-unfilled logic (orderFlow.js) only runs while the
+# browser tab that placed the order is open and its poll loop keeps ticking —
+# a locked phone, a closed tab, or a dropped connection during that window
+# leaves a WORKING order at the broker with nothing left to cancel it, and the
+# operator only discovers it later at the broker itself. The scheduler sweep
+# (alert_scheduler._maybe_cancel_stale_orders) cancels any pending order still
+# WORKING past this age, independent of any browser tab. Deliberately well
+# above ORDER_FILL_WAIT_SECONDS so it never races the client's own cancel —
+# it exists purely to catch the case where that never ran. All orders are DAY
+# orders (schwab_api ROLL_ORDER_DURATION / build_*_order), so this is strictly
+# earlier than the exchange's own end-of-day expiration, never a substitute
+# for a duration policy.
+PENDING_ORDER_STALE_SECONDS = float(os.environ.get("PENDING_ORDER_STALE_SECONDS") or 120.0)
+
 # How close to the broker's fill timestamp a fresh underlying quote must be taken
 # to count as "the spot at the fill". The extrinsic split of a filled short is
 # premium − max(spot − strike, 0), so the spot has to belong to the instant the

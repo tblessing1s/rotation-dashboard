@@ -955,9 +955,24 @@ def _strike_eq(a, b) -> bool:
         return False
 
 
+def _adjustable_option_leg(position: dict, strike) -> bool:
+    """True when an OPTION adjustment at ``strike`` has an existing leg to act
+    on (a short call matched by strike, or — when strike is None — any LEAP).
+    An adjustment can only correct a leg the position already tracks; it can
+    never invent one, so a broker leg state has ZERO record of (an
+    UNEXPECTED_AT_BROKER diff with no matching position leg) is not this
+    tool's job — that is what ``rebuild_position_from_broker`` is for."""
+    for sc in position.get("short_calls") or []:
+        if strike is not None and _strike_eq(sc.get("strike"), strike):
+            return True
+    legs = log.leap_legs(position)
+    return any(strike is None or _strike_eq(l.get("strike"), strike) for l in legs)
+
+
 def _apply_adjustment(position: dict, itype: str, strike, qty_delta: int) -> None:
     """Apply a compensating quantity_delta (signed) to the identified leg. This
-    is the operator committing truth forward — never auto-correction."""
+    is the operator committing truth forward — never auto-correction. The
+    caller (``_adjustment``) has already verified a target leg exists."""
     if itype == "EQUITY":
         shares = position.setdefault("shares", {"count": 0, "cap": config.SHARE_CAP})
         shares["count"] = int(shares.get("count") or 0) + qty_delta
@@ -988,8 +1003,8 @@ def _apply_adjustment(position: dict, itype: str, strike, qty_delta: int) -> Non
             else:
                 leap["contracts"] = new
             return
-    # Unrecognized leg: the immutable adjustment record still stands; the operator
-    # can follow with another adjustment. Nothing is silently invented.
+    # Unreachable given the caller's pre-check, but never silently invent a leg.
+    raise ValueError(f"adjustment found no {itype} leg at strike {strike!r} to correct")
 
 
 def _adjustment(payload: dict, ticker: str) -> dict:
@@ -1012,6 +1027,26 @@ def _adjustment(payload: dict, ticker: str) -> dict:
     strike = payload.get("strike")
     price = payload.get("price")
     linked = payload.get("linked_diff_id")
+
+    # Validate BEFORE appending the immutable execution record: an adjustment
+    # only corrects a leg the position already tracks (toward zero). A broker
+    # leg state has no record of at all (an UNEXPECTED_AT_BROKER diff with
+    # nothing to match) can't be created this way — silently marking such a
+    # diff "resolved" without actually adding the leg would leave real broker
+    # risk untracked. Refuse up front rather than leave an orphan log entry
+    # that claims a correction which never touched the position.
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if position is None:
+        raise ValueError(f"no {ticker} position in state to adjust — for a leg the "
+                         "broker holds that state has no record of at all, use "
+                         "reconcile/rebuild-position instead of an adjustment")
+    if itype == "OPTION" and not _adjustable_option_leg(position, strike):
+        raise ValueError(f"no existing {ticker} OPTION leg at strike {strike!r} to adjust — "
+                         "an adjustment can only correct a leg already tracked; a leg the "
+                         "broker holds that state doesn't track needs reconcile/rebuild-position, "
+                         "not an adjustment")
+
     mode = "live" if live_transmit() else "logged"
     execution = {
         "ticker": ticker, "action": "adjustment",
@@ -1333,7 +1368,8 @@ def record_manual_roll(ticker: str, from_strike, buyback_per_share, to_strike,
 
 def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
                                  legs: list | None = None, dry_run: bool = False,
-                                 reason: str | None = None) -> dict:
+                                 reason: str | None = None,
+                                 diff_ids: list | None = None) -> dict:
     """Reconciliation repair: REPLACE a position's derived short_calls + leap_legs
     with the broker's actual holdings (ground truth), restoring each leg's
     economics (entry extrinsic / cost basis) from the immutable execution log —
@@ -1344,7 +1380,11 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
     ``position_rebuild`` marker for audit; derived ledgers then recompute.
 
     ``broker_legs`` may be supplied (offline tests / a captured view); otherwise
-    the live broker positions are fetched for ``ticker``."""
+    the live broker positions are fetched for ``ticker``. ``diff_ids`` (confirm
+    step only) marks the named reconciliation diffs resolved once the rebuilt
+    legs are saved — since a rebuild replaces the whole leg set (rather than a
+    single compensating quantity_delta) it doesn't correspond to one linked
+    diff the way ``adjustment`` does, so the caller names every diff it clears."""
     import reconcile
 
     ticker = (ticker or "").upper()
@@ -1363,7 +1403,14 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
                         else reconcile.data_handler_client_accounts())
             broker_legs = [i for i in reconcile.parse_broker_positions(accounts)
                            if (i.get("underlying") or "").upper() == ticker]
-        if not broker_legs:
+        if not broker_legs and not diff_ids:
+            # No diff_ids means this is exploratory (an operator browsing a dry
+            # run, not resolving a specific diff the report already confirmed) —
+            # fail closed rather than risk an empty result from a broker/network
+            # glitch reading as "broker holds nothing, wipe the position." With
+            # diff_ids the caller already has a reconciliation report saying the
+            # broker holds nothing for this ticker; an empty proposal here is the
+            # correct rebuild (fully closed at the broker), not a data problem.
             raise ValueError(f"broker holds no {ticker} legs — nothing to rebuild "
                              "(if you expected legs, confirm Schwab is connected)")
         proposal = []
@@ -1445,6 +1492,12 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
     position["leap"] = new_leaps[0] if new_leaps else None
     log.recompute_derived(state)
     import reconcile as _rec
+    for diff_id in (diff_ids or []):
+        try:
+            _rec.mark_diff_resolved(state, diff_id, "position_rebuild",
+                                    {"execution_id": None})
+        except ValueError:
+            pass  # diff already rolled off the latest report — the rebuild still stands
     _rec.reevaluate_freezes(state)
     log.save_state(state)
     return {"success": True, "status": "rebuilt", "ticker": ticker,
@@ -3673,6 +3726,52 @@ def repoll_pending_orders() -> dict:
         results.append(row)
     return {"polled": len(results), "settled": settled, "results": results,
             "remaining": len(log.list_pending_orders())}
+
+
+def cancel_stale_pending_orders(now: datetime | None = None) -> dict:
+    """Server-side backstop for the fill-wait-then-cancel policy: an order that
+    hasn't filled quickly is meant to be cancelled and repriced, never left
+    resting indefinitely (frontend/src/orderFlow.js). But that logic only runs
+    while the browser tab that placed the order stays open and its poll loop
+    keeps ticking — a locked phone, a closed tab, or a dropped connection during
+    that window leaves nothing to cancel a WORKING order, and it just sits there
+    until someone notices and cancels it by hand at the broker.
+
+    Cancels every pending order older than config.PENDING_ORDER_STALE_SECONDS —
+    deliberately well past ORDER_FILL_WAIT_SECONDS so this never races a live
+    client's own cancel; it only catches the case where that one never ran.
+    Called from the scheduler tick (alert_scheduler), independent of any
+    browser tab. Best-effort per order: cancel_order already handles a fill
+    that slipped in and an already-terminal order; one failure (broker
+    unreachable, a stubborn WORKING) never blocks the rest. Safe no-op when no
+    live broker is configured."""
+    if not schwab_api.configured():
+        return {"checked": 0, "canceled": 0, "errors": []}
+    if now is None:
+        now = datetime.now(timezone.utc)
+    threshold = config.PENDING_ORDER_STALE_SECONDS
+    checked = 0
+    canceled = 0
+    errors = []
+    for order_id, rec in log.list_pending_orders().items():
+        placed_at = rec.get("placed_at")
+        if not placed_at:
+            continue
+        try:
+            placed = datetime.strptime(str(placed_at), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+        if (now - placed).total_seconds() < threshold:
+            continue
+        checked += 1
+        try:
+            res = cancel_order(order_id)
+            if res.get("status") in ("canceled", "rejected", "filled"):
+                canceled += 1
+        except Exception as e:  # noqa: BLE001 — one bad order never blocks the sweep
+            log.logger.warning("stale-order sweep: cancel of %s failed (%s)", order_id, e)
+            errors.append({"order_id": str(order_id), "error": str(e)})
+    return {"checked": checked, "canceled": canceled, "errors": errors}
 
 
 def _capture_entry_context(ticker: str, payload: dict) -> dict | None:

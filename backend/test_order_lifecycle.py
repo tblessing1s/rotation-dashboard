@@ -6,6 +6,7 @@ the ten fixture-driven lifecycle branches from the implementation spec.
 """
 import os
 import tempfile
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -419,3 +420,57 @@ def test_live_order_refused_on_one_sided_quote(live):
     with pytest.raises(executor.StaleQuoteError):
         executor.execute(_sell_payload())
     assert not log.load_state().get("pending_orders")
+
+
+# ===========================================================================
+# Server-side stale-order backstop (executor.cancel_stale_pending_orders)
+#
+# The frontend's own fill-wait-then-cancel loop (orderFlow.js) only runs while
+# the browser tab that placed the order stays open. This sweep is what catches
+# a WORKING order left behind when that tab closed, backgrounded, or lost the
+# connection before its own cancel ran — the exact incident that motivated it:
+# an operator having to cancel a stuck roll leg by hand at the broker because
+# nothing on the app side ever followed up.
+# ===========================================================================
+def _backdate_only_pending_order(seconds_ago: float):
+    state = log.load_state()
+    pending = state["pending_orders"]
+    assert len(pending) == 1
+    order_id = next(iter(pending))
+    placed = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+    pending[order_id]["placed_at"] = placed.strftime("%Y-%m-%dT%H:%M:%SZ")
+    log.save_state(state)
+    return order_id
+
+
+def test_stale_order_sweep_cancels_past_the_threshold(live):
+    fake = live(FakeSchwab(status="WORKING"))
+    executor.execute(_sell_payload())
+    order_id = _backdate_only_pending_order(config.PENDING_ORDER_STALE_SECONDS + 30)
+
+    res = executor.cancel_stale_pending_orders(now=datetime.now(timezone.utc))
+    assert res == {"checked": 1, "canceled": 1, "errors": []}
+    assert fake.canceled == [("HASH", order_id)]
+    assert order_id not in log.load_state()["pending_orders"]
+
+
+def test_stale_order_sweep_leaves_fresh_orders_alone(live):
+    fake = live(FakeSchwab(status="WORKING"))
+    executor.execute(_sell_payload())
+    order_id = _backdate_only_pending_order(config.PENDING_ORDER_STALE_SECONDS / 2)
+
+    res = executor.cancel_stale_pending_orders(now=datetime.now(timezone.utc))
+    assert res == {"checked": 0, "canceled": 0, "errors": []}
+    assert fake.canceled == []
+    assert order_id in log.load_state()["pending_orders"]
+
+
+def test_stale_order_sweep_is_a_noop_without_a_broker(live, monkeypatch):
+    live(FakeSchwab(status="WORKING"))
+    executor.execute(_sell_payload())
+    _backdate_only_pending_order(config.PENDING_ORDER_STALE_SECONDS + 30)
+    monkeypatch.setattr(schwab_api, "configured", lambda: False)
+
+    res = executor.cancel_stale_pending_orders(now=datetime.now(timezone.utc))
+    assert res == {"checked": 0, "canceled": 0, "errors": []}
+    assert log.load_state()["pending_orders"]  # untouched

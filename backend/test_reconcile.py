@@ -328,6 +328,50 @@ def test_adjustment_requires_typed_reason(store):
                           "instrument_type": "EQUITY", "quantity_delta": 500, "reason": ""})
 
 
+def test_adjustment_refuses_to_invent_a_leg_it_does_not_track(store):
+    # UNEXPECTED_AT_BROKER: the broker holds a leg state has NO record of at
+    # all (not even at a different quantity) — an adjustment can only shrink an
+    # EXISTING leg toward broker truth, it can never create one. Before the
+    # fix, this silently appended an "adjustment" execution and marked the diff
+    # resolved (banner gone) while the position stayed exactly as wrong as
+    # before — a real short call left completely untracked.
+    pos = {
+        "ticker": "SPCX", "status": "active", "needs_review": True,
+        "review": {"summary": "138 call unexpected at broker", "diff_ids": ["diff_002"]},
+        "shares": {"count": 100, "cap": 100},
+        "short_calls": [],  # state tracks NOTHING at strike 138 — nothing to shrink
+    }
+    state = log.load_state()
+    state["positions"] = [pos]
+    state["reconciliation"] = {"last": _report_with({
+        "id": "diff_002", "classification": reconcile.UNEXPECTED_AT_BROKER, "ticker": "SPCX",
+        "instrument_type": "OPTION", "strike": 138.0, "expiry": "2026-09-11",
+        "expected_qty": None, "broker_qty": -1, "summary": "138 call exp 09-11 unexpected"}),
+        "history": [], "last_success": "2026-09-08T13:00:00Z"}
+    log.save_state(state)
+
+    before = log.load_state()
+    with pytest.raises(ValueError, match="no existing SPCX OPTION leg"):
+        executor.execute({
+            "action": "adjustment", "ticker": "SPCX", "instrument_type": "OPTION",
+            "strike": 138.0, "quantity_delta": -1, "reason": "add the 9/11 short back",
+            "linked_diff_id": "diff_002"})
+
+    # Nothing changed: no orphan execution logged, diff still open, position untouched.
+    after = log.load_state()
+    assert len(after["executions"]) == len(before["executions"])
+    d = after["reconciliation"]["last"]["diffs"][0]
+    assert "resolution" not in d or d.get("resolution") is None
+    assert log.find_position(after, "SPCX")["short_calls"] == pos["short_calls"]
+    assert log.find_position(after, "SPCX")["needs_review"] is True
+
+
+def test_adjustment_requires_an_existing_position(store):
+    with pytest.raises(ValueError, match="no XOM position"):
+        executor.execute({"action": "adjustment", "ticker": "XOM", "instrument_type": "EQUITY",
+                          "quantity_delta": 100, "reason": "phantom shares"})
+
+
 def test_resolving_a_missing_leap_by_closing_lifts_the_freeze(store):
     # A phantom LEAP marked in state but not held at the broker (MISSING_AT_BROKER)
     # freezes the position. Resolving it by adjusting the LEAP to zero closes the

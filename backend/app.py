@@ -1796,7 +1796,8 @@ def api_rebuild_position():
     try:
         return jsonify(executor.rebuild_position_from_broker(
             ticker, broker_legs=payload.get("broker_legs"), legs=payload.get("legs"),
-            dry_run=bool(payload.get("dry_run")), reason=payload.get("reason")))
+            dry_run=bool(payload.get("dry_run")), reason=payload.get("reason"),
+            diff_ids=payload.get("diff_ids")))
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001
