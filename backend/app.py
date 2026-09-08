@@ -859,6 +859,30 @@ def api_positions():
         return _err(e)
 
 
+@app.route("/api/positions/refresh-quote", methods=["POST"])
+def api_positions_refresh_quote():
+    """Force a live quote for one position's stock + its open short-call legs
+    right now, bypassing the caches that otherwise back the Positions view
+    (up to config.QUOTE_CACHE_SECONDS for the stock, config.
+    OPTION_MARK_MAX_AGE_SECONDS for each option leg). The on-demand 'this
+    number might be stale' path outside the Roll ticket, which already
+    fetches fresh because it's about to build an order."""
+    payload = request.get_json(silent=True) or {}
+    ticker = (payload.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        state = log.load_state()
+        position = log.find_position(state, ticker)
+        if position is None:
+            return jsonify({"error": f"no {ticker} position"}), 404
+        return jsonify(position_manager.refresh_quote(ticker, position))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/theta-ledger")
 def api_theta_ledger():
     ticker = request.args.get("ticker")

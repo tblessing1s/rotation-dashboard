@@ -162,6 +162,11 @@ export const api = {
   // (UNKNOWN stays "confirming", a rejection carries Schwab's verbatim reason).
   submissionStatus: (ref) => request(`/api/order-submission-status?ref=${encodeURIComponent(ref)}`),
   positions: () => request("/api/positions"),
+  // On-demand live quote for one position (stock + its open short-call legs),
+  // bypassing the caches the position card otherwise reads from — the Roll
+  // ticket already gets this implicitly; this is the same pull without opening it.
+  refreshPositionQuote: (ticker) =>
+    request("/api/positions/refresh-quote", { method: "POST", body: JSON.stringify({ ticker }) }),
   // The chrome's ticker strip: spot + distance to each short strike, per open position.
   tickerStrip: () => request("/api/ticker-strip"),
   burn: (ticker) => request(`/api/burn/${ticker}`),

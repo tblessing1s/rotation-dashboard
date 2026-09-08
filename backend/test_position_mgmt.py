@@ -466,3 +466,59 @@ def test_enrich_position_surfaces_symbol_genius(monkeypatch):
     out3 = pm.enrich_position({"ticker": "AAA", "sector": "XLK", "status": "closed",
                                "short_calls": [], "leaps": []})
     assert "symbol_genius" not in out3
+
+
+# ---- On-demand quote refresh (the Positions-card "refresh" button) ----------
+def test_refresh_quote_bypasses_cache_and_updates_option_marks(monkeypatch):
+    """The card otherwise reads the stock from a short quote cache and each
+    short's mark from the poller's cache (up to 10 minutes old) — this forces
+    both live, the same live pull the Roll ticket already gets implicitly."""
+    import data_handler
+    import option_marks
+    import schwab_api
+    option_marks.reset()
+    sym = schwab_api.occ_option_symbol("SPCX", "2026-09-18", 140.0, call=True)
+
+    monkeypatch.setattr(data_handler, "fresh_quote", lambda t: {"price": 153.19, "source": "schwab"})
+
+    class FakeClient:
+        def get_quotes(self, symbols):
+            assert symbols == [sym]
+            return {sym: {"mark": 10.25, "bid": 10.10, "ask": 10.40}}
+    monkeypatch.setattr(data_handler, "client", lambda: FakeClient())
+
+    position = {"ticker": "SPCX", "short_calls": [
+        {"strike": 140.0, "contracts": 1, "expiration": "2026-09-18"}]}
+    res = pm.refresh_quote("SPCX", position)
+    assert res == {"success": True, "ticker": "SPCX", "stock_price": 153.19,
+                   "refreshed_legs": 1, "leg_count": 1}
+    # The option mark landed in the shared cache every other consumer reads from.
+    assert option_marks.mark_for("SPCX", position["short_calls"][0]) == 10.25
+    option_marks.reset()
+
+
+def test_refresh_quote_raises_when_no_live_quote(monkeypatch):
+    import data_handler
+    monkeypatch.setattr(data_handler, "fresh_quote", lambda t: None)
+    with pytest.raises(ValueError, match="no live quote"):
+        pm.refresh_quote("SPCX", {"ticker": "SPCX", "short_calls": []})
+
+
+def test_refresh_quote_still_returns_stock_price_when_option_leg_fetch_fails(monkeypatch):
+    """One bad option quote must never sink the stock refresh that already
+    succeeded."""
+    import data_handler
+    import option_marks
+    option_marks.reset()
+    monkeypatch.setattr(data_handler, "fresh_quote", lambda t: {"price": 153.19, "source": "schwab"})
+
+    class BoomClient:
+        def get_quotes(self, symbols):
+            raise RuntimeError("Schwab 429")
+    monkeypatch.setattr(data_handler, "client", lambda: BoomClient())
+
+    position = {"ticker": "SPCX", "short_calls": [
+        {"strike": 140.0, "contracts": 1, "expiration": "2026-09-18"}]}
+    res = pm.refresh_quote("SPCX", position)
+    assert res["success"] is True and res["stock_price"] == 153.19
+    assert res["refreshed_legs"] == 0
