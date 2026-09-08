@@ -479,6 +479,7 @@ def _tick() -> None:
     _maybe_hot_refresh(now)
     _maybe_tier_poll(now)
     _maybe_interval_reconcile(now)
+    _maybe_cancel_stale_orders(now)  # backstop when the placing tab never got to cancel
     _maybe_warm_scan(now)  # keep the full-universe scan cache warm between slots
     _maybe_dry_powder_scan(now)  # dry-powder CSP shadow sweep — logs only, never places an order
     # Mandatory date-specific put expiry check. Runs every tick (its own date gate
@@ -647,6 +648,27 @@ def _maybe_interval_reconcile(now: datetime) -> None:
             logger.error("interval transaction ingestion failed for account %s: %s", label, e)
 
     for_each_account("interval reconciliation", run)
+
+
+def _maybe_cancel_stale_orders(now: datetime) -> None:
+    """Server-side backstop for the fill-wait-then-cancel policy — see
+    executor.cancel_stale_pending_orders for why this exists (the frontend's own
+    cancel-if-unfilled loop only runs while the browser tab that placed the
+    order is still open). Runs every tick: each pending order carries its own
+    age against config.PENDING_ORDER_STALE_SECONDS, and the common case (no
+    pending orders) is a cheap no-op, so there is no separate cadence gate here."""
+    def run(account_id):
+        try:
+            import executor
+            res = executor.cancel_stale_pending_orders(now)
+            if res.get("checked"):
+                logger.info("stale-order sweep (%s): checked=%d canceled=%d errors=%d",
+                            _account_label(account_id), res["checked"], res["canceled"],
+                            len(res.get("errors") or []))
+        except Exception as e:  # noqa: BLE001 — a failed sweep must not kill the thread
+            logger.error("stale-order sweep failed for account %s: %s", _account_label(account_id), e)
+
+    for_each_account("stale-order sweep", run)
 
 
 def _loop() -> None:

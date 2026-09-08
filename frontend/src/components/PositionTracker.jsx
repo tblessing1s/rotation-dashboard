@@ -12,6 +12,10 @@ import { submitOrder } from "../orderFlow.js";
 // entries/rolls until resolved; closing it is always allowed. Each diff gets its
 // resolution action: one-click expiry booking for the benign carve-out; a
 // compensating adjustment (typed reason) or acknowledgement for everything else.
+// An adjustment can only correct a leg state ALREADY tracks (shrink it toward
+// broker truth) — a leg the broker holds that state has no record of at all
+// (UNEXPECTED_AT_BROKER with nothing to match) needs the "Rebuild from broker"
+// action below instead, which replaces the whole leg set with broker truth.
 function ReviewPanel({ ticker, diffs, onDone }) {
   const toast = useToast();
   if (!diffs || diffs.length === 0) return null;
@@ -22,6 +26,111 @@ function ReviewPanel({ ticker, diffs, onDone }) {
       </div>
       <div className="space-y-2">
         {diffs.map((d) => <DiffRow key={d.id} ticker={ticker} diff={d} toast={toast} onDone={onDone} />)}
+      </div>
+      <RebuildFromBroker ticker={ticker} diffIds={diffs.map((d) => d.id)} toast={toast} onDone={onDone} />
+    </div>
+  );
+}
+
+// Full-position repair: replace short_calls + LEAP legs with what the broker
+// actually holds, pulling each leg's entry economics back from the immutable
+// execution log. The clean way out of a tangle — and the ONLY way to resolve a
+// diff where state has zero record of a leg the broker holds, since an
+// adjustment (above) can only shrink a leg that already exists. Two-step:
+// propose (nothing written) then confirm (operator can correct an entry price
+// the log recorded wrong before anything saves).
+function RebuildFromBroker({ ticker, diffIds, toast, onDone }) {
+  const [open, setOpen] = React.useState(false);
+  const [busy, setBusy] = React.useState(false);
+  const [proposal, setProposal] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+
+  const propose = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const res = await api.rebuildPosition(ticker, { dry_run: true });
+      setProposal(res.legs || []);
+      setOpen(true);
+    } catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+
+  const setEntryPrice = (idx, value) => {
+    setProposal((legs) => legs.map((l, i) => (i === idx ? { ...l, entry_price: value } : l)));
+  };
+
+  const confirm = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const legs = proposal.map((l) => ({
+        ...l, entry_price: l.entry_price === "" ? null : Number(l.entry_price),
+      }));
+      await api.rebuildPosition(ticker, {
+        legs, diff_ids: diffIds,
+        reason: `rebuilt ${ticker} legs from broker truth (reconciliation review)`,
+      });
+      toast.show(`${ticker} legs rebuilt from the broker`, { type: "success" });
+      setOpen(false); setProposal(null);
+      onDone && onDone();
+    } catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+
+  if (!open) {
+    return (
+      <div className="mt-3 border-t border-rose-900/50 pt-2">
+        <button onClick={propose} disabled={busy}
+                title="Replace this position's legs with what the broker actually holds — the only way to add a leg state has no record of at all"
+                className="rounded-lg border border-slate-600 bg-slate-800/60 px-3 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          {busy ? "Reading broker…" : "Rebuild from broker"}
+        </button>
+        {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 rounded-lg border border-slate-600 bg-slate-950/60 p-3">
+      <p className="text-xs text-slate-300">
+        Proposed {ticker} legs from the broker — economics pulled from the execution log.
+        Fix an entry price below if the log has it wrong, then confirm.
+      </p>
+      {(proposal || []).length === 0 && (
+        <p className="mt-2 text-xs text-amber-300">
+          The broker holds no {ticker} legs — confirming will empty this position.
+        </p>
+      )}
+      <div className="mt-2 space-y-1.5">
+        {(proposal || []).map((l, idx) => (
+          <div key={`${l.leg_type}-${l.strike}-${l.expiration}-${idx}`}
+               className="flex flex-wrap items-center gap-2 rounded border border-slate-800 bg-slate-900/60 px-2 py-1 text-xs">
+            <span className="font-semibold uppercase text-slate-300">{l.leg_type}</span>
+            <span className="text-slate-200">{l.strike} × {l.contracts}</span>
+            <span className="text-slate-500">exp {l.expiration || "—"}</span>
+            <span className="text-slate-500">
+              {l.leg_type === "short"
+                ? `premium ${fmt(l.premium_per_share, 2)}/sh`
+                : `cost ${fmt(l.cost_per_contract, 2)}/ct`}
+            </span>
+            <label className="ml-auto flex items-center gap-1 text-[10px] uppercase tracking-wide text-slate-500">
+              entry price
+              <input value={l.entry_price ?? ""} onChange={(e) => setEntryPrice(idx, e.target.value)}
+                     className="w-20 rounded border border-slate-700 bg-slate-900 px-1.5 py-0.5 text-xs text-slate-100" />
+            </label>
+            {l.econ_source && <span className="text-slate-600">src {l.econ_source}</span>}
+          </div>
+        ))}
+      </div>
+      {err && <p className="mt-2 text-xs text-rose-400">{err}</p>}
+      <div className="mt-2 flex gap-2">
+        <button onClick={confirm} disabled={busy}
+                className="rounded-lg border border-emerald-700 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50">
+          {busy ? "Rebuilding…" : "Confirm rebuild"}
+        </button>
+        <button onClick={() => { setOpen(false); setProposal(null); setErr(null); }} disabled={busy}
+                className="rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          Cancel
+        </button>
       </div>
     </div>
   );

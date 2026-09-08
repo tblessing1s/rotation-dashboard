@@ -361,6 +361,34 @@ def test_maybe_dry_powder_scan_noop_when_disabled(monkeypatch):
     assert calls == []
 
 
+def test_maybe_cancel_stale_orders_runs_every_tick(monkeypatch):
+    """No cadence gate of its own (unlike the once-per-day scans above): the
+    scheduler tick runs every 30s and a stale-order sweep is cheap when there
+    are no pending orders, so it just runs on every tick and lets each order's
+    own age (config.PENDING_ORDER_STALE_SECONDS) decide whether to act."""
+    import alert_scheduler as sched
+    import executor
+    calls = []
+    monkeypatch.setattr(executor, "cancel_stale_pending_orders",
+                        lambda now: calls.append(now) or {"checked": 0, "canceled": 0, "errors": []})
+    now = datetime(2026, 7, 8, 12, 0, tzinfo=ET)
+    sched._maybe_cancel_stale_orders(now)
+    assert calls == [now]
+    sched._maybe_cancel_stale_orders(now)   # no gate — runs again immediately
+    assert calls == [now, now]
+
+
+def test_maybe_cancel_stale_orders_survives_one_bad_account(monkeypatch):
+    """for_each_account isolates failures — mirrors every other _maybe_* sweep."""
+    import alert_scheduler as sched
+    import executor
+
+    def boom(now):
+        raise RuntimeError("broker unreachable")
+    monkeypatch.setattr(executor, "cancel_stale_pending_orders", boom)
+    sched._maybe_cancel_stale_orders(datetime(2026, 7, 8, 12, 0, tzinfo=ET))  # must not raise
+
+
 def test_dry_powder_scan_invokes_csp_dry_powder_over_the_full_universe(monkeypatch):
     import alert_scheduler as sched
     import csp_dry_powder

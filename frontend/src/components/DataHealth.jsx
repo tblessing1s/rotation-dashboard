@@ -298,12 +298,25 @@ function PendingOrdersPanel() {
   const [busy, setBusy] = React.useState(false);
   const [result, setResult] = React.useState(null);
   const [err, setErr] = React.useState(null);
+  const [cancelingId, setCancelingId] = React.useState(null);
+  const [cancelErr, setCancelErr] = React.useState(null);
 
   const repoll = async () => {
     setBusy(true); setErr(null); setResult(null);
     try { setResult(await api.repollPendingOrders()); await reload(); }
     catch (e) { setErr(String(e.message || e)); }
     finally { setBusy(false); }
+  };
+
+  // Manual escape hatch for a WORKING order the automatic cancel (client-side
+  // fill-wait, and the server-side stale-order sweep as a backstop) hasn't
+  // caught yet — e.g. still inside the wait window. Broker-confirmed before the
+  // record clears (executor.cancel_order), same as both of those paths.
+  const cancel = async (orderId) => {
+    setCancelingId(orderId); setCancelErr(null);
+    try { await api.cancelOrder(orderId); await reload(); }
+    catch (e) { setCancelErr(String(e.message || e)); }
+    finally { setCancelingId(null); }
   };
 
   const orders = data?.orders || [];
@@ -349,10 +362,18 @@ function PendingOrdersPanel() {
                 {o.lock_state ? ` · ${o.lock_state}` : ""}
                 {o.filled ? ` · ${o.filled} filled so far` : ""}
               </p>
+              <div className="mt-1.5 flex justify-end">
+                <button onClick={() => cancel(o.order_id)} disabled={cancelingId === o.order_id}
+                        title="Cancel this order at the broker (confirmed before the record clears)"
+                        className="rounded-md border border-rose-800/60 px-2 py-0.5 text-[11px] font-semibold text-rose-300 hover:bg-rose-500/10 disabled:opacity-50">
+                  {cancelingId === o.order_id ? "Cancelling…" : "Cancel"}
+                </button>
+              </div>
             </div>
           ))}
         </div>
       )}
+      {cancelErr && <p className="mt-1 text-xs text-rose-400">{cancelErr}</p>}
       {result && (
         <div className="mt-2 rounded-md border border-slate-800 bg-slate-900/40 p-2">
           <p className="text-xs text-slate-300">
