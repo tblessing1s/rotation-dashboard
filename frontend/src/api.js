@@ -189,6 +189,8 @@ export const api = {
   unmarkPayoutPaid: (month) =>
     request("/api/payouts/unmark-paid", { method: "POST", body: JSON.stringify({ month }) }),
   history: () => request("/api/history"),
+  // Daily mark-to-market account-value points for the History tab's value chart.
+  accountValueHistory: () => request("/api/account-value-history"),
   // Raw executions + live position legs, for the History validation table.
   executionsRaw: () => request("/api/executions/raw"),
   // Single-spot position editor: directly set a position's legs.

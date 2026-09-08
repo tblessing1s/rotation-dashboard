@@ -108,6 +108,64 @@ function ThetaLedgerCards({ theta }) {
   );
 }
 
+// Mark-to-market account value over time (position_manager.account_value),
+// one point/day from the nightly maintenance job — see maintenance.
+// snapshot_account_value. There is no way to back-fill history retroactively
+// (no historical option/stock prices are stored), so the line only covers
+// however long tracking has been running; a fresh book just shows a prompt
+// to check back once a few nightly runs have landed.
+function AccountValueChart({ points }) {
+  if (!points || points.length < 2) {
+    return (
+      <p className="text-sm text-slate-500">
+        Not enough history yet — one point is recorded per day by the nightly job.
+        Check back in a few days to see the line.
+      </p>
+    );
+  }
+  const values = points.map((p) => p.total);
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const span = max - min || 1;
+  const H = 100, PAD = 6;
+  const coords = points.map((p, i) => ({
+    x: (i / (points.length - 1)) * 100,
+    y: H - PAD - ((p.total - min) / span) * (H - PAD * 2),
+    p,
+  }));
+  const path = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(2)},${c.y.toFixed(2)}`).join(" ");
+  const first = points[0].total;
+  const last = points[points.length - 1].total;
+  const change = last - first;
+  const changePct = first ? (change / Math.abs(first)) * 100 : null;
+  const up = change >= 0;
+  const stroke = up ? "#34d399" : "#fb7185";
+
+  return (
+    <div>
+      <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
+        <span className="text-2xl font-semibold text-slate-100">{money(last)}</span>
+        <span className={`text-sm font-semibold ${up ? "text-emerald-300" : "text-rose-300"}`}>
+          {money(change)} ({pct(changePct)})
+        </span>
+        <span className="text-xs text-slate-500">since {points[0].date}</span>
+      </div>
+      <svg viewBox={`0 0 100 ${H}`} preserveAspectRatio="none" className="h-32 w-full overflow-visible">
+        <path d={path} fill="none" stroke={stroke} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
+        {coords.map((c, i) => (
+          <circle key={i} cx={c.x} cy={c.y} r="0.9" fill={stroke}>
+            <title>{`${c.p.date}: ${money(c.p.total)}`}</title>
+          </circle>
+        ))}
+      </svg>
+      <div className="mt-1 flex justify-between text-[10px] text-slate-600">
+        <span>{points[0].date}</span>
+        <span>{points[points.length - 1].date}</span>
+      </div>
+    </div>
+  );
+}
+
 function WeeklyJuiceChart({ data }) {
   const weeks = data?.weeks || [];
   if (!weeks.length) return <p className="text-sm text-slate-500">No weekly juice logged yet.</p>;
@@ -525,6 +583,7 @@ function RawData() {
 export default function HistoryTab() {
   const { data, error, loading } = useApi(api.history, [], null);
   const { data: theta } = useApi(api.thetaLedger, [], null);
+  const { data: valueHistory } = useApi(api.accountValueHistory, [], null);
   if (loading && !data) return <Card title="History"><Loading /></Card>;
   if (error) return <Card title="History"><p className="text-sm text-rose-400">{error}</p></Card>;
 
@@ -533,6 +592,10 @@ export default function HistoryTab() {
 
   return (
     <div className="grid gap-4">
+      <Card title="Account value">
+        <AccountValueChart points={valueHistory?.points} />
+      </Card>
+
       <Card
         title="Closed cycles — aggregate"
         right={

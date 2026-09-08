@@ -1000,6 +1000,60 @@ def capital_summary(state: dict) -> dict:
     }
 
 
+def account_value(state: dict) -> dict:
+    """Mark-to-market account value, NOT deployed capital (position_capital /
+    deployed_capital are cost basis — money committed, not what it's worth
+    now): every open position's shares at spot, plus any legacy LEAP long
+    leg's current market value, plus put collateral reserved, plus operating
+    cash, minus the cost to buy back every open short call/put right now.
+
+        total = shares + legacy LEAP value + cash + put collateral − short liability
+
+    Built on positions_view/enrich_position — the SAME per-leg marks the
+    Positions tab itself reads (current_bid for a short call, the BSM
+    mark_per_share for a short put, leap_totals.current_value for a legacy
+    diagonal) — so this can never disagree with what the operator sees there.
+    Best-effort per position: a missing quote drops that position's
+    contribution to 0 rather than raising, the same trade-off enrich_position
+    already makes for a stale/unreachable name.
+    """
+    import account_gate
+    shares_value = 0.0
+    leap_value = 0.0
+    short_liability = 0.0
+    put_collateral = 0.0
+    for p in positions_view(state):
+        if p.get("status") == "closed":
+            continue
+        sh = p.get("shares") or {}
+        count = int(sh.get("count") or 0)
+        price = p.get("stock_price")
+        if count and price is not None:
+            shares_value += float(price) * count
+        leap_value += float((p.get("leap_totals") or {}).get("current_value") or 0)
+        for sc in p.get("short_calls") or []:
+            mark = sc.get("current_bid")
+            contracts = int(sc.get("contracts") or 0)
+            if mark is not None and contracts:
+                short_liability += float(mark) * contracts * 100
+        for sp in p.get("short_puts") or []:
+            mark = sp.get("mark_per_share")
+            contracts = int(sp.get("contracts") or 0)
+            if mark is not None and contracts:
+                short_liability += float(mark) * contracts * 100
+        put_collateral += float(p.get("put_collateral") or 0)
+    cash = account_gate.resolve_operating_cash(state)["amount"]
+    total = round(shares_value + leap_value + cash + put_collateral - short_liability, 2)
+    return {
+        "shares_value": round(shares_value, 2),
+        "leap_value": round(leap_value, 2),
+        "operating_cash": round(cash, 2),
+        "put_collateral": round(put_collateral, 2),
+        "short_liability": round(short_liability, 2),
+        "total": total,
+    }
+
+
 def net_juice_rollup(positions: list[dict]) -> dict:
     """Portfolio income rollup on NET juice/week (juice collected - LEAP theta
     burn with slippage), summed across open positions — NEVER gross (spec §6,

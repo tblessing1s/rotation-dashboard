@@ -1359,6 +1359,12 @@ MAINTENANCE_NEGATIVE_WEEKS = 2
 # maintenance job appends one point/day) to power the delta-velocity warning.
 DELTA_HISTORY_DAYS = 30
 
+# PROPOSED_DEFAULT — days of daily account-value points retained per account (the
+# nightly maintenance job appends one point/day) for the History tab's value-over-
+# time chart. Long horizon on purpose — unlike DELTA_HISTORY_DAYS this feeds a
+# progress chart, not a short-window early-warning signal.
+ACCOUNT_VALUE_HISTORY_DAYS = 1095
+
 # PROPOSED_DEFAULT — delta-velocity early warning: fire when the LEAP delta has
 # fallen by more than this much over DELTA_VELOCITY_WINDOW sessions, while still
 # ABOVE the 0.50 floor (below the floor, DELTA_UNCOVERED owns it). The existing

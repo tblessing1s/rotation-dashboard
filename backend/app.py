@@ -1015,6 +1015,19 @@ def api_history():
         return _err(e)
 
 
+@app.route("/api/account-value-history")
+def api_account_value_history():
+    """Daily mark-to-market account-value points (position_manager.account_value)
+    for this account's History tab chart. Recorded once/day by the nightly
+    maintenance job (maintenance.snapshot_account_value) — there is no way to
+    reconstruct past points on read, so a day the job didn't run has no point."""
+    try:
+        state = log.load_state()
+        return jsonify({"points": state.get("account_value_history", [])})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/positions/set-legs", methods=["POST"])
 def api_set_position_legs():
     """Single-spot position editor: directly set a position's short_calls +
