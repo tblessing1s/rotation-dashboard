@@ -744,10 +744,15 @@ def test_shares_juice_is_denominated_on_share_capital_not_leap_cost(monkeypatch)
     assert h["juice_target_pct"] == config.SHARES_JUICE_FLOOR_PCT
     assert h["weekly_juice_yield_pct"] == pytest.approx(0.75, abs=0.01)
     assert h["juice_adequate"] is True
-    # Thin week -> below the bar.
+    # Thin week -> below the strategy's ambition, but 0.55%/wk still clears
+    # config.INFLATION_JUICE_FLOOR_PCT (~0.21%/wk), so it must not flag.
     thin = leap_policy.leap_health(_shares_pos(trailing=70.0), stock_price=128.0)
     assert thin["weekly_juice_yield_pct"] == pytest.approx(0.55, abs=0.01)
-    assert thin["juice_adequate"] is False
+    assert thin["juice_adequate"] is True
+    # Genuinely thin -> below BOTH bars -> flags.
+    threadbare = leap_policy.leap_health(_shares_pos(trailing=20.0), stock_price=128.0)
+    assert threadbare["weekly_juice_yield_pct"] == pytest.approx(0.16, abs=0.01)
+    assert threadbare["juice_adequate"] is False
 
 
 def test_the_leap_bar_is_never_applied_to_share_capital(monkeypatch):
@@ -789,14 +794,27 @@ def test_fresh_shares_position_with_no_history_is_not_flagged(monkeypatch):
 
 def test_juice_inadequate_alert_reaches_a_shares_position(monkeypatch):
     """The alert used to `continue` on any position with no LEAP leg, which is
-    every position the app can now open."""
+    every position the app can now open. trailing=20 is below BOTH the
+    strategy's income ambition and config.INFLATION_JUICE_FLOOR_PCT."""
+    import data_handler
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
+    out = alerts.check_juice_inadequate(_state(_shares_pos(trailing=20.0)))
+    assert len(out) == 1 and out[0]["type"] == "JUICE_INADEQUATE"
+    assert "share capital" in out[0]["message"]      # not "LEAP capital"
+    assert "inflation-beating floor" in out[0]["message"]
+    assert out[0]["data"]["juice_capital_basis"] == "spot_x_shares"
+    assert out[0]["data"]["juice_capital"] == pytest.approx(12800.0)
+    assert out[0]["data"]["inflation_juice_floor_pct"] == config.INFLATION_JUICE_FLOOR_PCT
+
+
+def test_juice_inadequate_alert_does_not_fire_when_still_beating_inflation(monkeypatch):
+    """The gap this feature closes: a shares position below the strategy's own
+    ambition (0.75%/wk) but still comfortably above a real-inflation estimate
+    must not page the operator."""
     import data_handler
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([128.0] * 60))
     out = alerts.check_juice_inadequate(_state(_shares_pos(trailing=70.0)))
-    assert len(out) == 1 and out[0]["type"] == "JUICE_INADEQUATE"
-    assert "share capital" in out[0]["message"]      # not "LEAP capital"
-    assert out[0]["data"]["juice_capital_basis"] == "spot_x_shares"
-    assert out[0]["data"]["juice_capital"] == pytest.approx(12800.0)
+    assert out == []
 
 
 def test_legacy_leap_juice_arm_is_unchanged(monkeypatch):

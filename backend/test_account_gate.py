@@ -114,9 +114,28 @@ def test_gate_juice_adequacy_is_shadow_and_sized_on_share_cost(isolated_state, m
         est["stock_price"] * config.SHARES_PER_LOT, abs=1.0)
 
 
+def test_juice_estimate_put_side_is_a_distinct_collateral_denominated_yield(monkeypatch):
+    """The put-route estimate is priced at MA21 (route()'s target_strike_zone) and
+    denominated on the put's own collateral (strike), never on share cost — a
+    different strike and a different yield from the covered-call side."""
+    import indicators
+    monkeypatch.setattr(config, "LEGACY_LEAP_READONLY", True)
+    df = _noisy_frame(sigma=0.02)
+    est = account_gate.juice_estimate("XYZ", df)
+    ma21 = indicators.sma(df, config.MA_WINDOW)
+    assert est["put_strike"] == round(ma21 * 2) / 2
+    assert est["put_strike"] != est["short_strike"]
+    assert est["put_weekly_premium_per_share"] > 0
+    assert est["put_weekly_yield_pct"] == pytest.approx(
+        est["put_weekly_premium_per_share"] / est["put_strike"] * 100, abs=0.01)
+    assert est["put_weekly_yield_pct"] != est["weekly_yield_pct"]
+
+
 def test_juice_estimate_missing_data():
     est = account_gate.juice_estimate("XYZ", None)
     assert est["weekly_yield_pct"] is None
+    assert est["put_weekly_yield_pct"] is None
+    assert est["put_strike"] is None
 
 
 def test_weekly_yield_target_is_cycle_floor():

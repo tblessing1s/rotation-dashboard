@@ -711,11 +711,22 @@ def test_shares_trailing_juice_feeds_the_income_hurdle(store, monkeypatch):
     assert h["weekly_juice_yield_pct"] == pytest.approx(0.77, abs=0.01)
     assert h["juice_target_pct"] == config.SHARES_JUICE_FLOOR_PCT
     assert h["juice_adequate"] is True
-    # A thinner premium drops under the floor and flags.
+    # A thinner premium drops under the strategy's own income ambition, but
+    # 0.49%/wk still clears config.INFLATION_JUICE_FLOOR_PCT (~0.21%/wk) — the
+    # operator's actual goal — so this must NOT flag (see leap_policy.leap_health).
     thin = _shares_juice_state(store, weekly_premium=1.00)
     ht = leap_policy.leap_health(thin["positions"][0], stock_price=182.0)
     assert ht["weekly_juice_yield_pct"] == pytest.approx(0.49, abs=0.01)
-    assert ht["juice_adequate"] is False
+    assert ht["juice_adequate"] is True
+    # Set because the inflation floor WAS consulted (missed the strategy's own
+    # ambition first) and is what actually saved this position from flagging.
+    assert ht["inflation_juice_floor_pct"] == config.INFLATION_JUICE_FLOOR_PCT
+    # Genuinely thin: below BOTH the ambition and the inflation floor -> flags.
+    threadbare = _shares_juice_state(store, weekly_premium=0.40)
+    hb = leap_policy.leap_health(threadbare["positions"][0], stock_price=182.0)
+    assert hb["weekly_juice_yield_pct"] == pytest.approx(0.16, abs=0.01)
+    assert hb["juice_adequate"] is False
+    assert hb["inflation_juice_floor_pct"] == config.INFLATION_JUICE_FLOOR_PCT
 
 
 def test_closed_position_keeps_a_null_trailing_juice(store):

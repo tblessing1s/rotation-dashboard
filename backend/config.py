@@ -578,6 +578,33 @@ PER_POSITION_CAP_USD = float(os.environ.get("PER_POSITION_CAP_USD") or 15000)
 # times higher), and the two must never be swapped.
 SHARES_JUICE_FLOOR_PCT = 0.75
 
+# ---- Inflation-beating income floor (shares positions only) ---------------
+# TRAVIS_EXTENSION, operator decision 2026-09. SHARES_JUICE_FLOOR_PCT above is
+# the STRATEGY's own income ambition — 0.75%/wk simple-annualizes to ~39%/yr,
+# a bar for the entry-time ranking and for "is this the best use of the
+# capital" roll/redeploy guidance. It is NOT a statement about what the
+# operator actually needs, and conflating the two turned a healthy position
+# into a page: a shares position running below 0.75%/wk but still comfortably
+# above a real-inflation estimate is not "losing value," it is merely
+# underperforming the strategy's own ambition.
+#
+# This is that second, lower bar — the weekly yield that keeps pace with a
+# conservative (worse-than-official-CPI) inflation estimate, simple-divided
+# across 52 weeks so it is directly comparable to SHARES_JUICE_FLOOR_PCT (same
+# denominator: spot x shares, never LEAP capital, a smaller and different
+# basis — see leap_policy.leap_health).
+#
+# leap_policy.leap_health() treats a SHARES position as `juice_adequate` when
+# it clears EITHER bar, not just the strategy's own ambition — that single
+# flag is what both the JUICE_INADEQUATE alert and the recommendation
+# engine's JUICE_HURDLE_FAIL EXIT trigger read (see SHARES_JUICE_FLOOR_PCT's
+# note above on that shared authority), so this floor changes both: a
+# position that still beats inflation no longer pages the operator, and no
+# longer proposes exiting/redeploying capital that is doing its job fine.
+INFLATION_TARGET_ANNUAL_PCT = 11.0   # PROPOSED_DEFAULT — conservative real-inflation estimate,
+                                     # deliberately above the official ~4% CPI figure
+INFLATION_JUICE_FLOOR_PCT = round(INFLATION_TARGET_ANNUAL_PCT / 52, 4)   # ~0.2115%/week
+
 # ---- Tradeability floor (scan veto) ---------------------------------------
 # PROPOSED_DEFAULT. A hard ACCOUNT constraint, not an opinion about the chart, so
 # it is one of the few things that still vetoes an entry outright: a name whose
