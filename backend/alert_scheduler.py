@@ -40,6 +40,9 @@ _stop = threading.Event()
 _last_run: dict[str, date] = {}
 # Nightly maintenance (earnings/dividends cache refresh) — last date it ran.
 _last_maintenance: date | None = None
+# Weekly (Saturday) / monthly (the 1st) operator summary digest — last date each ran.
+_last_weekly_summary: date | None = None
+_last_monthly_summary: date | None = None
 # Pre-market position reconciliation (state.json vs Schwab) — last date it ran.
 # The morning run is the important one: assignments materialize overnight and
 # pre-market is when the operator can act calmly.
@@ -336,6 +339,24 @@ def maintenance_due(now: datetime, last: date | None) -> bool:
     return now.strftime("%H:%M") >= config.MAINTENANCE_ET and last != now.date()
 
 
+def weekly_summary_due(now: datetime, last: date | None) -> bool:
+    """The weekly digest runs once a week, Saturday morning after
+    WEEKLY_SUMMARY_ET. Saturday is outside the Mon-Fri slots due_slots
+    schedules, so it needs its own gate rather than riding that one."""
+    if now.weekday() != 5:  # Saturday
+        return False
+    return now.strftime("%H:%M") >= config.WEEKLY_SUMMARY_ET and last != now.date()
+
+
+def monthly_summary_due(now: datetime, last: date | None) -> bool:
+    """The monthly digest runs once a month, the morning of the 1st (whatever
+    weekday that lands on) after MONTHLY_SUMMARY_ET, reporting the month that
+    just closed."""
+    if now.day != 1:
+        return False
+    return now.strftime("%H:%M") >= config.MONTHLY_SUMMARY_ET and last != now.date()
+
+
 # ---------------------------------------------------------------------------
 # Mandatory DATE-SPECIFIC checks (schema v22, CSP Stage 2 §2.2)
 #
@@ -445,6 +466,43 @@ def _maybe_expiry_check(now: datetime) -> None:
     for_each_account("expiry-day put check", run)
 
 
+def _maybe_weekly_monthly_summary(now: datetime) -> None:
+    """Run the alert pass for the weekly (Saturday) and/or monthly (the 1st)
+    operator progress digest.
+
+    Both land on days due_slots never fires on its own (due_slots excludes
+    weekends outright; the 1st can itself be a weekend), so this is a second,
+    independent trigger for alerts.run() — same evaluators, same dedup, same
+    notifier as the Mon-Fri pass; only the schedule is different. Informational
+    (like the rest of this daemon's non-mandatory checks): a failure is logged,
+    never fatal to the tick.
+    """
+    global _last_weekly_summary, _last_monthly_summary
+    weekly = weekly_summary_due(now, _last_weekly_summary)
+    monthly = monthly_summary_due(now, _last_monthly_summary)
+    if not (weekly or monthly):
+        return
+    if weekly:
+        _last_weekly_summary = now.date()
+    if monthly:
+        _last_monthly_summary = now.date()
+    label = "+".join(name for name, due in (("weekly", weekly), ("monthly", monthly)) if due)
+
+    import alerts
+
+    def run(account_id):
+        try:
+            result = alerts.run()
+            logger.info("%s summary alert run (account %s): %d fired, %d resolved, %d active",
+                        label, _account_label(account_id), len(result["fired"]),
+                        len(result["resolved"]), result["active_count"])
+        except Exception as e:  # noqa: BLE001 — a failed run must not kill the thread
+            logger.error("%s summary alert run failed for account %s: %s",
+                         label, _account_label(account_id), e)
+
+    for_each_account(f"{label} summary alert run", run)
+
+
 def _tick() -> None:
     import alerts  # local import: keep module import side-effect free
     import heartbeat
@@ -486,6 +544,10 @@ def _tick() -> None:
     # decides), so it must sit BEFORE the slot-based early return below — a put
     # expiring today must be evaluated even on a day no recurring slot is due.
     _maybe_expiry_check(now)
+    # Weekly (Saturday) / monthly (the 1st) digest. Its own gate, own dates —
+    # both fall outside due_slots' Mon-Fri schedule, so this must sit BEFORE
+    # the slot-based early return below, same reasoning as the expiry check.
+    _maybe_weekly_monthly_summary(now)
 
     due = due_slots(now)
     if not due:
