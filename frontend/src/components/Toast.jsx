@@ -43,15 +43,21 @@ export function ToastProvider({ children }) {
     if (duration && duration > 0) timers.current[id] = setTimeout(() => dismiss(id), duration);
   }, [dismiss]);
 
-  const show = React.useCallback((message, { type = "info", duration = 4000 } = {}) => {
+  // `action` ({label, onClick}) puts a button on the toast itself — e.g. Cancel
+  // right where an order's "confirming fill…" progress is shown, so the
+  // operator doesn't have to navigate to the Pending Orders panel to act while
+  // it's still in flight. Not passing `action` on an update clears any
+  // previous one (the button doesn't survive into a toast state it no longer
+  // applies to, like "cancelling…").
+  const show = React.useCallback((message, { type = "info", duration = 4000, action = null } = {}) => {
     const id = ++_seq;
-    setToasts((ts) => [...ts, { id, message, type }]);
+    setToasts((ts) => [...ts, { id, message, type, action }]);
     arm(id, duration);
     return id;
   }, [arm]);
 
-  const update = React.useCallback((id, message, { type, duration = 4000 } = {}) => {
-    setToasts((ts) => ts.map((t) => (t.id === id ? { ...t, message, ...(type ? { type } : {}) } : t)));
+  const update = React.useCallback((id, message, { type, duration = 4000, action = null } = {}) => {
+    setToasts((ts) => ts.map((t) => (t.id === id ? { ...t, message, action, ...(type ? { type } : {}) } : t)));
     arm(id, duration);
   }, [arm]);
 
@@ -83,6 +89,14 @@ function Toaster({ toasts, onDismiss }) {
             {t.type === "pending" ? <Spinner size="h-3.5 w-3.5" /> : <span aria-hidden>{ICON[t.type] || ICON.info}</span>}
           </span>
           <span className="flex-1 leading-snug">{t.message}</span>
+          {t.action && (
+            <button
+              onClick={t.action.onClick}
+              className="-my-0.5 shrink-0 rounded border border-current/40 px-1.5 py-0.5 text-xs font-semibold hover:bg-white/10"
+            >
+              {t.action.label}
+            </button>
+          )}
           <button
             onClick={() => onDismiss(t.id)}
             className="-mr-1 shrink-0 rounded px-1 text-slate-400 hover:text-slate-200"

@@ -147,15 +147,56 @@ export async function submitOrder(api, toast, payload) {
     return res;
   }
 
-  // Live working order — confirm the fill within the window or cancel it.
+  // Live working order — confirm the fill within the window, or cancel it: on
+  // timeout automatically, or the instant the operator clicks the toast's own
+  // Cancel button (below) — no need to leave this screen or find the Pending
+  // Orders panel while the order is still in flight. Both paths report the
+  // same way (reportCancelOutcome) and funnel through the same broker-
+  // confirmed cancel_order call the automatic backstop uses.
   const orderId = res.order_id;
-  toast.update(id, `${label} working — confirming fill…`, { type: "pending", duration: 0 });
+  let cancelRequested = false;
+  let cancelPromise = null;
+  const requestCancel = () => {
+    if (cancelRequested) return;   // one cancel in flight is enough
+    cancelRequested = true;
+    toast.update(id, `${label} — cancelling…`, { type: "pending", duration: 0 });
+    cancelPromise = api.cancelOrder(orderId);
+  };
+  toast.update(id, `${label} working — confirming fill…`, {
+    type: "pending", duration: 0, action: { label: "Cancel", onClick: requestCancel },
+  });
+
+  // A fill can slip in between the last poll/click and the cancel reaching the
+  // broker — the backend commits it and reports "filled" rather than
+  // cancelling a filled order. Only claim CANCELLED once the backend confirms
+  // a terminal state at Schwab (its cancel is async — the request can be
+  // accepted while the order stays working, reported as "pending_cancel");
+  // don't tell the operator it's gone when the broker hasn't confirmed it.
+  const reportCancelOutcome = (cancelled, why) => {
+    if (cancelled.status === "filled") {
+      toast.update(id, `${label} filled & logged.`, { type: "success" });
+      return cancelled;
+    }
+    if (cancelled.status !== "canceled" && cancelled.status !== "rejected") {
+      toast.update(
+        id,
+        `${label} ${why} and the cancel is NOT confirmed — the order may still be working. ` +
+          `Check it in your broker before placing another.`,
+        { type: "error", duration: 0 },
+      );
+      return { ...res, status: "working" };
+    }
+    toast.update(id, `${label} ${why} — order ${cancelled.status}.`, { type: "error", duration: 8000 });
+    return { ...res, status: cancelled.status };
+  };
+
   const waitMs = Number(res.fill_wait_ms) > 0
     ? Number(res.fill_wait_ms) : FILL_TIMEOUT_FALLBACK_MS;
   const deadline = Date.now() + waitMs;
   let pollMs = POLL_FIRST_MS;
-  while (Date.now() < deadline) {
+  while (Date.now() < deadline && !cancelRequested) {
     await sleep(Math.min(pollMs, Math.max(0, deadline - Date.now())));
+    if (cancelRequested) break;
     let st;
     try {
       st = await api.orderStatus(orderId);
@@ -176,10 +217,29 @@ export async function submitOrder(api, toast, payload) {
     }
   }
 
-  // Still unfilled after the window — cancel the resting order. The cancel is
-  // only "done" once the backend confirms it against the broker; if it fails the
-  // order is STILL WORKING at Schwab, so say so plainly rather than claim it was
-  // cancelled — otherwise the operator's next order collides with this one.
+  if (cancelRequested) {
+    // requestCancel() already fired the cancel — wait on that same call
+    // rather than sending a second one.
+    let cancelled;
+    try {
+      cancelled = await cancelPromise;
+    } catch (e) {
+      toast.update(
+        id,
+        `${label} could NOT be cancelled (${e.message}). The order may still be working — ` +
+          `cancel it in your broker before placing another.`,
+        { type: "error", duration: 0 },
+      );
+      return { ...res, status: "working" };
+    }
+    return reportCancelOutcome(cancelled, "cancelled by request");
+  }
+
+  // Still unfilled after the window — cancel the resting order automatically.
+  // The cancel is only "done" once the backend confirms it against the
+  // broker; if it fails the order is STILL WORKING at Schwab, so say so
+  // plainly rather than claim it was cancelled — otherwise the operator's
+  // next order collides with this one.
   let cancelled;
   try {
     cancelled = await api.cancelOrder(orderId);
@@ -193,28 +253,5 @@ export async function submitOrder(api, toast, payload) {
     );
     return { ...res, status: "working" };
   }
-  // A fill can slip in between the last poll and the cancel — the backend commits
-  // it and reports "filled" rather than cancelling a filled order.
-  if (cancelled.status === "filled") {
-    toast.update(id, `${label} filled & logged.`, { type: "success" });
-    return cancelled;
-  }
-  // Only claim it was cancelled once the backend confirmed a terminal state at
-  // Schwab. Schwab's cancel is async — the request can be accepted while the
-  // order stays working (and can still fill), reported here as "pending_cancel".
-  // Don't tell the operator it's gone when the broker hasn't confirmed it.
-  if (cancelled.status !== "canceled" && cancelled.status !== "rejected") {
-    toast.update(
-      id,
-      `${label} didn't fill within 3s and the cancel is NOT confirmed — the order ` +
-        `may still be working. Check it in your broker before placing another.`,
-      { type: "error", duration: 0 },
-    );
-    return { ...res, status: "working" };
-  }
-  toast.update(id,
-    `${label} didn't fill in ${Math.round(waitMs / 1000)}s — order ${cancelled.status}. ` +
-      `Reprice and send it again.`,
-    { type: "error", duration: 8000 });
-  return { ...res, status: cancelled.status };
+  return reportCancelOutcome(cancelled, `didn't fill in ${Math.round(waitMs / 1000)}s`);
 }
