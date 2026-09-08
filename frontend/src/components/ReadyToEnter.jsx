@@ -150,7 +150,9 @@ export default function ReadyToEnter({ onSelectStock, refreshKey, scanRunning })
               <RouteBadge route={r.route} />
               {r.lights ? <StockLights lights={r.lights} size="h-2.5 w-2.5" /> : null}
               <span className="ml-auto text-xs tabular-nums text-slate-400"
-                    title={`Weekly juice on one FULL Friday-to-Friday week — the same basis for every name, whatever day the scan runs.${r.first_call_expiration ? ` First call: exp ${r.first_call_expiration} (${r.first_call_dte} DTE)${r.first_call_pct_to_expiry != null ? `, ≈ ${fmt(r.first_call_pct_to_expiry, 2)}% to expiry` : ""}.` : ""}`}>
+                    title={r.route?.route === "CASH_SECURED_PUT"
+                      ? "Weekly yield on the put's own collateral (strike x 100) if sold at the MA21 zone — an estimate from history, not a live quote. A different basis from the covered-call number a SHARES route shows; the two are not comparable."
+                      : `Weekly juice on one FULL Friday-to-Friday week — the same basis for every name, whatever day the scan runs.${r.first_call_expiration ? ` First call: exp ${r.first_call_expiration} (${r.first_call_dte} DTE)${r.first_call_pct_to_expiry != null ? `, ≈ ${fmt(r.first_call_pct_to_expiry, 2)}% to expiry` : ""}.` : ""}`}>
                 {fmt(r.juice_weekly_pct, 2)}%/wk
               </span>
               <span className="text-xs text-slate-600">{r.sector}</span>

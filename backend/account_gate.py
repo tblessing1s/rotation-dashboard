@@ -79,7 +79,9 @@ def juice_estimate(ticker: str, df=None) -> dict:
     none = {"ticker": ticker, "weekly_extrinsic_per_share": None,
             "leap_strike": None, "leap_cost_per_share": None,
             "shares_cost_per_share": None, "covered_call_yield_pct": None,
-            "weekly_yield_pct": None, "net_weekly_yield_pct": None, "source": "estimate"}
+            "weekly_yield_pct": None, "net_weekly_yield_pct": None,
+            "put_strike": None, "put_weekly_premium_per_share": None,
+            "put_weekly_yield_pct": None, "source": "estimate"}
     if S is None or atr_val is None or not hv:
         return none
     sigma = hv / 100.0
@@ -109,6 +111,24 @@ def juice_estimate(ticker: str, df=None) -> dict:
                  if k_leap is not None else None)
     if not shares_mode and not leap_cost:
         return none  # a legacy candidate we can't price as a LEAP is dropped
+
+    # Put-side estimate, priced the SAME way (history-implied BSM, no chain) at
+    # the MA21 zone — the strike scan_verdict.route() names as the
+    # "target_strike_zone" for a CASH_SECURED_PUT route. A ~550-name sweep
+    # can't afford a live chain per row (see option_chain._fetch_chain, a real
+    # broker call), so this is an estimate exactly like the call side, not a
+    # tradeable strike. Yield is on COLLATERAL (strike, per-share — the x100
+    # lot size cancels the same way it does in scan_verdict.put_juice_pct),
+    # deliberately NOT share cost: sharing the call-side denominator would
+    # make a put row's number mean something it isn't (see
+    # config.PUT_JUICE_FLOOR_PCT's note on this exact mistake).
+    put_strike = put_premium_w = put_yield = None
+    ma21 = indicators.sma(df, config.MA_WINDOW) if df is not None else None
+    if ma21 is not None and ma21 > 0:
+        put_strike = round(ma21 * 2) / 2
+        put_price_w = indicators._bs_put_price(S, put_strike, t_week, r, sigma)
+        put_premium_w = max(put_price_w - max(put_strike - S, 0.0), 0.0)
+        put_yield = round(put_premium_w / put_strike * 100, 2)
 
     if shares_mode:
         # Covered-call yield on a 100-share base: weekly time premium / share cost.
@@ -148,6 +168,12 @@ def juice_estimate(ticker: str, df=None) -> dict:
         "weekly_extrinsic_per_share": round(extr_w, 3),
         "leap_strike": round(k_leap, 1) if k_leap is not None else None,
         "leap_cost_per_share": round(leap_cost, 2) if leap_cost else None,
+        # CASH_SECURED_PUT route estimate — see the comment above where these are
+        # computed. None when MA21 isn't yet computable (short history).
+        "put_strike": put_strike,
+        "put_weekly_premium_per_share": (round(put_premium_w, 3)
+                                         if put_premium_w is not None else None),
+        "put_weekly_yield_pct": put_yield,
         # Shares base: the 100-share lot costs spot x 100; the covered-call yield is
         # the weekly time premium as a % of share cost. Present in both modes so the
         # UI can show the shares number regardless of the ranking basis.

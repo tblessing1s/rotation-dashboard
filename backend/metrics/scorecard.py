@@ -440,7 +440,17 @@ def score_ticker(ticker: str, spy_df: pd.DataFrame | None, sector_etf: str,
     # COMPARISON happens at the API boundary, where the account context lives.
     row["lot_cost"] = est.get("shares_cost_per_lot")
     row["shares_per_lot"] = config.SHARES_PER_LOT
-    row["juice_weekly_pct"] = est["weekly_yield_pct"]
+    # The route this name would actually enter on (gate already computed it —
+    # see scan_verdict.route). A CASH_SECURED_PUT row shows the PUT's yield on
+    # collateral, not the covered-call yield on share cost the SHARES route
+    # would earn: two different trades with two different denominators, and
+    # showing the wrong one is how a put row's percent misleads on what
+    # selling that put actually pays (see account_gate.juice_estimate's note
+    # on why the put estimate is priced and denominated separately).
+    entry_route = ((gate or {}).get("route") or {}).get("route")
+    row["juice_weekly_pct"] = (est.get("put_weekly_yield_pct")
+                               if entry_route == scan_verdict.CASH_SECURED_PUT
+                               else est["weekly_yield_pct"])
     row["juice_basis"] = est.get("juice_basis")
     row["first_call_expiration"] = est.get("first_call_expiration")
     row["first_call_dte"] = est.get("first_call_dte")

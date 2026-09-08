@@ -355,6 +355,39 @@ def test_score_ticker_market_regime_fail_does_not_blanket_avoid(monkeypatch):
     assert sc.compute_verdict(row)["verdict"] == row["suitability"]
 
 
+def test_score_ticker_shows_the_put_yield_on_a_cash_secured_put_route(monkeypatch):
+    """A CASH_SECURED_PUT route row must show what the PUT actually pays (yield on
+    collateral, priced at the MA21 strike) — not the covered-call yield on share
+    cost the SHARES route would earn. Two different trades, two different %s."""
+    import account_gate
+    import data_handler
+    df = _frame(100 + np.cumsum(np.random.RandomState(3).normal(0, 1, 260)))
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    est = account_gate.juice_estimate("AAPL", df)
+    gate = {"verdict": "ELIGIBLE", "blocks": [],
+            "route": {"route": "CASH_SECURED_PUT", "reason": "extended_above_ma21"}}
+    row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
+    assert row["juice_weekly_pct"] == est["put_weekly_yield_pct"]
+    assert row["juice_weekly_pct"] != est["weekly_yield_pct"]
+
+
+def test_score_ticker_shows_the_covered_call_yield_on_a_shares_route(monkeypatch):
+    """The default (SHARES route, or no route computed yet) keeps showing the
+    covered-call yield — unchanged from before this route-aware split existed."""
+    import account_gate
+    import data_handler
+    df = _frame(100 + np.cumsum(np.random.RandomState(3).normal(0, 1, 260)))
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
+    est = account_gate.juice_estimate("AAPL", df)
+    gate = {"verdict": "ELIGIBLE", "blocks": [],
+            "route": {"route": "SHARES", "reason": "near_or_below_ma21"}}
+    row = sc.score_ticker("AAPL", df, "XLK", df, gate=gate)
+    assert row["juice_weekly_pct"] == est["weekly_yield_pct"]
+    # No gate at all -> same default (route unknown reads as SHARES, never a put).
+    row_no_gate = sc.score_ticker("AAPL", df, "XLK", df, gate=None)
+    assert row_no_gate["juice_weekly_pct"] == est["weekly_yield_pct"]
+
+
 def test_score_ticker_weak_sector_does_not_gate(monkeypatch):
     # Level 2 (sector strength) is NOT part of the stock verdict — only the stock's
     # own legs (L3/L4) gate. With a lagging sector but L3/L4 passing, the row is
