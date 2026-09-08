@@ -1399,9 +1399,17 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
         proposal = [dict(s) for s in legs]
     else:
         if broker_legs is None:
-            accounts = (reconcile._demo_broker_accounts() if config.demo_enabled()
-                        else reconcile.data_handler_client_accounts())
-            broker_legs = [i for i in reconcile.parse_broker_positions(accounts)
+            demo = config.demo_enabled()
+            accounts = reconcile._demo_broker_accounts() if demo else reconcile.data_handler_client_accounts()
+            # Scope to THIS book's own bound Schwab account, exactly like
+            # run_reconciliation does — parse_broker_positions with no account
+            # number reads the FIRST node in the login's response, which on a
+            # multi-account login can be a DIFFERENT account than the one this
+            # book trades. Hit live: a rebuild on one book pulled a sibling
+            # account's leg (a different strike entirely) instead of this
+            # book's own position.
+            account_number = None if demo else schwab_api.bound_account_number()
+            broker_legs = [i for i in reconcile.parse_broker_positions(accounts, account_number)
                            if (i.get("underlying") or "").upper() == ticker]
         if not broker_legs and not diff_ids:
             # No diff_ids means this is exploratory (an operator browsing a dry

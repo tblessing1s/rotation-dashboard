@@ -262,6 +262,41 @@ def test_reconcile_reads_only_the_bound_accounts_positions(store):
             reconcile.parse_broker_positions(response, "33334444")] == ["MSFT"]
 
 
+def test_rebuild_from_broker_reads_only_the_bound_accounts_positions(store, monkeypatch):
+    # Same invariant as reconciliation itself, hit live: rebuild_position_from_
+    # broker's fetch called parse_broker_positions with no account number, so on
+    # a multi-account login it rebuilt this book's SPCX position from a SIBLING
+    # account's 138 short — a completely different strike than the 143 this
+    # book (bound to account ...3344) actually holds.
+    import executor
+    import reconcile
+    import schwab_api
+    accounts.create("IRA", broker_account_number="33334444")
+    response = [
+        {"securitiesAccount": {"accountNumber": "11112222", "positions": [
+            {"shortQuantity": 1, "averagePrice": 4.10, "instrument": {
+                "assetType": "OPTION",
+                "symbol": schwab_api.occ_option_symbol("SPCX", "2026-09-18", 138.0)}}]}},
+        {"securitiesAccount": {"accountNumber": "33334444", "positions": [
+            {"shortQuantity": 1, "averagePrice": 9.78, "instrument": {
+                "assetType": "OPTION",
+                "symbol": schwab_api.occ_option_symbol("SPCX", "2026-09-11", 143.0)}}]}},
+    ]
+    monkeypatch.setattr(reconcile, "data_handler_client_accounts", lambda: response)
+
+    with accounts.use("ira"):
+        state = log.load_state()
+        state["positions"].append({"ticker": "SPCX", "status": "active",
+                                   "shares": {"count": 100, "cap": 100}, "short_calls": []})
+        state["executions"].append({
+            "id": "exec_1", "action": "sell_short", "ticker": "SPCX", "strike": 143.0,
+            "contracts": 1, "premium_per_share": 9.78, "stock_price": 146.0, "mode": "live"})
+        log.save_state(state)
+
+        prop = executor.rebuild_position_from_broker("SPCX", dry_run=True)
+    assert [(l["strike"], l["expiration"]) for l in prop["legs"]] == [(143.0, "2026-09-11")]
+
+
 # ---------------------------------------------------------------------------
 # 4b. Its own Schwab login — when the account is under a different credential
 # ---------------------------------------------------------------------------
