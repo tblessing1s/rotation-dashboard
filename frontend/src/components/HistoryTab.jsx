@@ -435,16 +435,25 @@ function RawData() {
 
   const voidExec = async (e) => {
     const isVoided = !!e.excluded;
-    if (!window.confirm(isVoided
-      ? `Restore ${e.id} back into the history and ledgers?`
-      : `Void ${e.id} (${e.action} ${e.strike ?? ""})? It drops out of history + derived ledgers `
-        + `but stays on the immutable log. Use for pre-trading/test entries.`)) return;
+    if (isVoided) {
+      if (!window.confirm(`Restore ${e.id} back into the history and ledgers?`)) return;
+      setMsg(null);
+      try { await api.restoreExecutions([e.id]); await reload(); }
+      catch (err) { setMsg(String(err.message || err)); }
+      return;
+    }
+    // A typed reason, not a fixed string — this drops a real (immutable, but
+    // now ledger-invisible) execution out of every derived number (theta
+    // ledger, weekly/monthly juice, Payouts), so "why" belongs on the record
+    // for anyone reading the audit trail later, same as an adjustment or an
+    // acknowledged reconciliation diff.
+    const reason = window.prompt(
+      `Void ${e.id} (${e.action} ${e.strike ?? ""})? It drops out of history + derived ledgers ` +
+        `but stays on the immutable log. Why? (required, logged):`);
+    if (!reason || !reason.trim()) return;
     setMsg(null);
-    try {
-      if (isVoided) await api.restoreExecutions([e.id]);
-      else await api.voidExecutions([e.id], "pruned pre-trading/test entry");
-      await reload();
-    } catch (err) { setMsg(String(err.message || err)); }
+    try { await api.voidExecutions([e.id], reason.trim()); await reload(); }
+    catch (err) { setMsg(String(err.message || err)); }
   };
 
   return (
