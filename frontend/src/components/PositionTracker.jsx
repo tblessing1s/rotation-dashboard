@@ -1416,6 +1416,70 @@ function PutBase({ p }) {
   );
 }
 
+// A pre-shares-rewrite diagonal (deep-ITM LEAP long + short call). Tagged
+// LEAP_PMCC_LEGACY by the v19->v20 migration backfill for every position that
+// predates the shares rewrite — read-only: LEGACY_LEAP_READONLY blocks
+// buy_leap/roll_leap/open_position_atomic, but the execution log is
+// append-only, so an already-open one still has to be shown correctly, not
+// mistaken for an empty shares base.
+function LegacyLeapBase({ p }) {
+  const legs = p.leap_legs || [];
+  const totals = p.leap_totals || {};
+  if (!legs.length) {
+    return <div className="text-xs text-slate-500">Legacy LEAP position — no open legs.</div>;
+  }
+  return (
+    <div>
+      <div className="mb-2 flex flex-wrap items-baseline gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide text-sky-300">
+          Legacy LEAP diagonal
+        </span>
+        <span className="text-xs text-slate-500">
+          read-only — the shares base has replaced this structure; no new LEAP may be opened or rolled
+        </span>
+      </div>
+      {legs.map((l, i) => (
+        <div key={i} className="flex flex-wrap items-baseline gap-x-4 gap-y-1 text-sm">
+          <span className="font-semibold text-slate-100">
+            {l.contracts}× {fmt(l.strike, 2)}C {String(l.expiration || "").slice(5)}
+          </span>
+          <span className="text-slate-400">
+            cost basis <span className="tabular-nums text-slate-200">{money(l.cost_basis)}</span>
+          </span>
+          <span className="text-slate-400">
+            value <span className="tabular-nums text-slate-200">
+              {l.current_bid == null ? "—" : money(l.current_bid)}
+            </span>
+          </span>
+          <span className="text-slate-400">
+            intrinsic <span className="tabular-nums text-slate-200">
+              {l.intrinsic == null ? "—" : money(l.intrinsic)}
+            </span>
+          </span>
+          <span className="text-slate-400">
+            extrinsic <span className="tabular-nums text-slate-200">
+              {l.extrinsic == null ? "—" : money(l.extrinsic)}
+            </span>
+          </span>
+          {l.cost_basis_suspect && (
+            <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase text-amber-300">
+              cost basis looks mis-scaled — repair needed
+            </span>
+          )}
+        </div>
+      ))}
+      <div className="mt-2 text-xs text-slate-500">
+        {p.leap_dte != null && (
+          <>DTE <span className="tabular-nums text-slate-300">{p.leap_dte}</span>
+          {p.planned_exit_dte != null && <> (planned exit {p.planned_exit_dte})</>} · </>
+        )}
+        total cost <span className="tabular-nums">{money(totals.cost_basis)}</span> · total value{" "}
+        <span className="tabular-nums">{money(totals.current_value)}</span>
+      </div>
+    </div>
+  );
+}
+
 function EmptyPositionNotice({ ticker, onCleared }) {
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState(null);
@@ -1721,10 +1785,11 @@ function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focus
             </div>
           )}
 
-          {/* (1) the base the engine sits on — shares, or a put's collateral */}
+          {/* (1) the base the engine sits on — shares, a put's collateral, or a
+              legacy LEAP diagonal still open from before the shares rewrite */}
           <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-4">
-            {p.position_type === "CASH_SECURED_PUT"
-              ? <PutBase p={p} />
+            {p.position_type === "CASH_SECURED_PUT" ? <PutBase p={p} />
+              : p.position_type === "LEAP_PMCC_LEGACY" ? <LegacyLeapBase p={p} />
               : <SharesBase p={p} onCleared={afterResolve} />}
           </div>
 
