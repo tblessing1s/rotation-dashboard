@@ -45,7 +45,8 @@ function newOrderRef() {
   return `cor_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-export default function RollModal({ ticker, reason = "scheduled", sourceRecId, onExecute, onClose }) {
+export default function RollModal({ ticker, reason = "scheduled", sourceRecId,
+                                    hasOpenRecommendation, onExecute, onClose }) {
   const [data, setData] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
@@ -55,6 +56,12 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
   const [qty, setQty] = React.useState("");
   const [busy, setBusy] = React.useState(false);
   const [execErr, setExecErr] = React.useState(null);
+  // Trust layer: a move with no recommendation behind it (not staged from a
+  // card, and none currently open on this position) becomes a coverage miss —
+  // log the reason NOW, at the move, instead of discovering it later on the
+  // scoreboard and acknowledging it after the fact.
+  const needsManualReason = !sourceRecId && !hasOpenRecommendation;
+  const [manualReason, setManualReason] = React.useState("");
   const tradeMode = useTradeMode(); // "paper" | "live" | null — is this roll routed to Schwab?
   const [pendingLive, setPendingLive] = React.useState(null); // live roll awaiting explicit confirm
 
@@ -227,7 +234,8 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
     && quoteAgeSeconds > data.quote_stale_after_seconds;
 
   const canExecute = qtyNum > 0 && cur && chosen && selectedExp
-    && !(sameStrike && sameWeek); // rolling to the exact same leg is a no-op
+    && !(sameStrike && sameWeek) // rolling to the exact same leg is a no-op
+    && (!needsManualReason || manualReason.trim().length > 0);
 
   function buildPayload() {
     const chosenRow = strikeRows.find((s) => s.strike === chosen?.strike);
@@ -246,6 +254,7 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
       roll_reason: reason, // whipsaw-ledger key: scheduled | 75%-rule | defend | earnings | kill-switch-exit
       client_order_ref: clientOrderRef.current, // idempotency key — one order per staged roll
       ...(sourceRecId ? { source_rec_id: sourceRecId } : {}),
+      ...(needsManualReason && manualReason.trim() ? { manual_reason: manualReason.trim() } : {}),
       // ROLL_STRIKE_CHOICE (§1.6, telemetry-only) — what was recommended vs.
       // what was actually chosen; logged on the open leg's execution, never
       // consumed by the theta/accrual ledgers (see executor._sell_short).
@@ -551,6 +560,19 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId, o
                 <p className="mt-1 text-[11px] text-amber-300/90">
                   Paper mode — logged to your ledger only; no order reaches Schwab.
                 </p>
+              )}
+              {needsManualReason && (
+                <label className="mt-3 block text-xs text-amber-200">
+                  No recommendation is behind this roll — log why you're rolling now
+                  (feeds the trust layer so the rules can learn from it):
+                  <textarea
+                    value={manualReason}
+                    onChange={(e) => setManualReason(e.target.value)}
+                    placeholder="e.g. IV was collapsing faster than the weekly cadence"
+                    rows={2}
+                    className="mt-1 w-full rounded-lg border border-amber-700 bg-slate-950 px-3 py-1.5 text-sm text-slate-100"
+                  />
+                </label>
               )}
               <div className="mt-3 flex items-center justify-end gap-2">
                 <button onClick={onClose} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">

@@ -752,6 +752,39 @@ def test_first_acknowledgement_wins():
     assert miss["acknowledged"]["reason"] == "RULE_GAP"
 
 
+def test_manual_reason_on_the_execution_acknowledges_the_miss_inline():
+    """A reason logged AT THE MOVE (executor._stamp_manual_reason writes
+    execution['manual_reason']) acknowledges the coverage miss it becomes
+    without a separate acknowledge-miss call — same shape as a formal ack,
+    just sourced from the execution instead of state['coverage_miss_acks']."""
+    pair = _roll_pair(gid="roll1", reason="scheduled")
+    pair[0]["manual_reason"] = "IV was collapsing faster than the weekly cadence"
+    state = _state(execs=pair)
+    res = trust_derive.resolve(state, NOW)
+    miss = [r for r in res if r["status"] == Resolution.COVERAGE_MISS][0]
+    assert miss["acknowledged"]["reason"] == "OPERATOR_DISCRETION"
+    assert miss["acknowledged"]["note"] == "IV was collapsing faster than the weekly cadence"
+    assert miss["acknowledged"]["inline"] is True
+    assert miss["acknowledged"]["id"] is None
+    # still counts against coverage/graduation exactly like a formal ack
+    board = trust_derive.scoreboard(state, res, {}, NOW)
+    assert board["totals"]["coverage_misses"] == 1
+    assert board["totals"]["coverage_misses_acknowledged"] == 1
+
+
+def test_formal_ack_wins_over_a_later_manual_reason_on_the_same_miss():
+    pair = _roll_pair(gid="roll1", reason="scheduled")
+    pair[0]["manual_reason"] = "should be shadowed by the formal ack below"
+    state = _state(execs=pair)
+    state["coverage_miss_acks"] = [_ack(["roll1_c", "roll1_s"], reason="RULE_GAP",
+                                        note="a real rule gap")]
+    res = trust_derive.resolve(state, NOW)
+    miss = [r for r in res if r["status"] == Resolution.COVERAGE_MISS][0]
+    assert miss["acknowledged"]["reason"] == "RULE_GAP"
+    assert miss["acknowledged"]["note"] == "a real rule gap"
+    assert "inline" not in miss["acknowledged"]
+
+
 def test_acknowledged_miss_still_counts_and_still_blocks_graduation():
     # A clean history that would otherwise clear the cycle bar, plus one
     # acknowledged miss: coverage, the miss total, and graduation all read the

@@ -2351,6 +2351,7 @@ def _commit(payload, ticker, action, contracts, strike, stock_price, price_sourc
     # its payload so the roll ledger treats the pair identically to an atomic roll.
     _stamp_roll_linkage(execution, payload)
     _stamp_source_rec(execution, payload)
+    _stamp_manual_reason(execution, payload)
     stored = log.append_execution(execution)
     # Reflect the assigned id back onto the builder's execution dict so an apply()
     # closure that references it (e.g. buy_shares' acquisition_record) can stamp it.
@@ -2973,6 +2974,18 @@ def _stamp_source_rec(execution: dict, source: dict) -> None:
     rid = source.get("source_rec_id")
     if rid:
         execution["source_rec_id"] = str(rid)
+
+
+def _stamp_manual_reason(execution: dict, source: dict) -> None:
+    """Passive trust-layer annotation, the mirror of _stamp_source_rec: when the
+    operator is making this move WITHOUT a recommendation behind it, the payload
+    may carry a free-text reason — copying it onto the immutable execution lets
+    trust_derive.resolve() log it inline on the coverage miss it becomes,
+    instead of the operator having to acknowledge the miss after the fact on the
+    scoreboard. Never gates or blocks the order; no-op when absent."""
+    reason = source.get("manual_reason")
+    if reason and str(reason).strip():
+        execution["manual_reason"] = str(reason).strip()
 
 
 def _limit_price(action, payload):
@@ -4874,6 +4887,8 @@ def _commit_roll(payload, ticker, contracts, stock_price, mode, price_source,
 
     _stamp_source_rec(close_exec, payload)
     _stamp_source_rec(sell_exec, payload)
+    _stamp_manual_reason(close_exec, payload)
+    _stamp_manual_reason(sell_exec, payload)
     stored_close = log.append_execution(close_exec)
     stored_sell = log.append_execution(sell_exec)
 
@@ -4959,6 +4974,8 @@ def _commit_open(payload, ticker, contracts, stock_price, mode, price_source):
     # state (leap sets up the position; short appends its call).
     _stamp_source_rec(leap_exec, payload)
     _stamp_source_rec(short_exec, payload)
+    _stamp_manual_reason(leap_exec, payload)
+    _stamp_manual_reason(short_exec, payload)
     stored_leap = log.append_execution(leap_exec)
     stored_short = log.append_execution(short_exec)
 
@@ -5155,7 +5172,9 @@ def _commit_exit(payload, ticker, stock_price, mode, price_source):
     # long". Apply all mutations on the freshly written state, once.
     for se, _ in shorts:
         _stamp_source_rec(se, payload)
+        _stamp_manual_reason(se, payload)
     _stamp_source_rec(leap_exec, payload)
+    _stamp_manual_reason(leap_exec, payload)
     stored = [log.append_execution(se) for se, _ in shorts]
     stored_leap = log.append_execution(leap_exec)
 
