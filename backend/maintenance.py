@@ -126,6 +126,32 @@ def snapshot_iv(tickers: list[str]) -> list[dict]:
     return out
 
 
+def snapshot_account_value(today: str | None = None) -> dict | None:
+    """Append today's mark-to-market account value (position_manager.account_value)
+    to state.account_value_history — the History tab's value-over-time chart.
+    Retains the most recent ACCOUNT_VALUE_HISTORY_DAYS points. Idempotent per
+    day: a second run on the same date overwrites that day's point rather than
+    duplicating it (a mid-day restart re-runs the nightly slot), same pattern
+    as snapshot_leap_deltas. This is the ONE place a per-day value point gets
+    recorded — there is no way to reconstruct past account value from the
+    execution log (it holds no historical market prices), so a day the job
+    doesn't run is a day the chart has no point for."""
+    import position_manager
+
+    day = today or log.utcnow()[:10]
+    state = log.load_state()
+    value = position_manager.account_value(state)
+    point = {"date": day, **value}
+    hist = state.setdefault("account_value_history", [])
+    if hist and hist[-1].get("date") == day:
+        hist[-1] = point            # same-day re-run: overwrite
+    else:
+        hist.append(point)
+    del hist[:-config.ACCOUNT_VALUE_HISTORY_DAYS]   # retain the newest N
+    log.save_state(state)
+    return point
+
+
 def nightly_refresh() -> dict:
     """Refresh earnings + dividend caches for every held name and sync each
     position's dividend snapshot. Returns a per-ticker report."""
@@ -165,6 +191,14 @@ def nightly_refresh() -> dict:
         report["delta_snapshots"] = snapshot_leap_deltas()
     except Exception as e:  # noqa: BLE001 — a snapshot failure must not sink the sweep
         report["errors"].append(f"delta_snapshot: {e}")
+
+    # Append today's mark-to-market account value to account_value_history —
+    # the History tab's value-over-time chart. Nowhere else records this, and
+    # it can't be reconstructed after the fact from the execution log.
+    try:
+        report["account_value"] = snapshot_account_value()
+    except Exception as e:  # noqa: BLE001 — a snapshot failure must not sink the sweep
+        report["errors"].append(f"account_value_snapshot: {e}")
 
     # Record today's weekly IV for each held name so IV rank has a daily point
     # even on days the operator never opens a chain (the option-chain view
