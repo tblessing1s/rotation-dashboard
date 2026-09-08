@@ -230,7 +230,8 @@ export const api = {
   testAlert: () => request("/api/alerts/test", { method: "POST" }),
   // Recommendation trust layer: open recs + the derived trust scoreboard.
   recommendations: () => request("/api/recommendations"),
-  runRecommendations: () => request("/api/recommendations/run", { method: "POST", body: JSON.stringify({}) }),
+  runRecommendations: (opts = {}) =>
+    request("/api/recommendations/run", { method: "POST", body: JSON.stringify(opts) }),
   dismissRecommendation: (recId, reason, note) =>
     request("/api/recommendations/dismiss", {
       method: "POST",
