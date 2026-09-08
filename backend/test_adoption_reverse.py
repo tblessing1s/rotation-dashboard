@@ -311,8 +311,13 @@ def test_rebuild_resolves_linked_diffs_and_lifts_freeze(store):
 def test_rebuild_one_shot_with_diff_ids_needs_no_manual_propose_step(store):
     # The "Schwab is correct" one-click path (PositionTracker.jsx WhichIsCorrect):
     # no dry_run, no edited legs — diff_ids alone is enough to compute the
-    # proposal from broker truth AND write it in the same call.
+    # proposal from broker truth AND write it in the same call, PROVIDED the log
+    # has a confident entry price for every leg (see the next test for what
+    # happens when it doesn't).
     state = log.load_state()
+    state["executions"].append({
+        "id": "exec_spcx_1", "action": "sell_short", "ticker": "SPCX", "strike": 138.0,
+        "contracts": 1, "premium_per_share": 4.10, "stock_price": 136.50, "mode": "live"})
     state["positions"].append({
         "ticker": "SPCX", "status": "active", "needs_review": True,
         "review": {"summary": "diverged", "diff_ids": ["diff_002"]},
@@ -337,6 +342,48 @@ def test_rebuild_one_shot_with_diff_ids_needs_no_manual_propose_step(store):
     assert [(s["strike"], s["contracts"]) for s in res["short_calls"]] == [(138.0, 1)]
     pos = log.find_position(log.load_state(), "SPCX")
     assert pos["needs_review"] is False
+
+
+def test_rebuild_one_shot_refuses_when_entry_price_cant_be_confirmed(store):
+    # Without a confident entry price, extrinsic can't be split from intrinsic —
+    # _short_extrinsic degrades to "the whole premium is extrinsic," which badly
+    # overstates it for a leg sold in-the-money. The auto one-shot path (no
+    # review step) must refuse rather than silently save an inflated number;
+    # the reviewable dry-run path may still show it (the operator can supply
+    # the real entry price before confirming).
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "SPCX", "status": "active", "needs_review": True,
+        "review": {"summary": "diverged", "diff_ids": ["diff_002"]},
+        "shares": {"count": 100, "cap": 100}, "short_calls": [],
+    })
+    state["reconciliation"] = {
+        "last": {"as_of": "2026-09-08T13:00:00Z", "status": reconcile.DIRTY, "broker_ok": True,
+                 "error": None, "suggested_resolutions": [],
+                 "diffs": [{"id": "diff_002", "classification": reconcile.UNEXPECTED_AT_BROKER,
+                            "ticker": "SPCX", "instrument_type": "OPTION", "strike": 143.0,
+                            "expiry": "2026-09-11", "expected_qty": None, "broker_qty": -1,
+                            "summary": "143 call unexpected at broker"}]},
+        "history": [], "last_success": "2026-09-08T13:00:00Z"}
+    log.save_state(state)
+
+    # No sell_short execution at strike 143 anywhere in the log — no match.
+    broker_legs = [{"instrument_type": reconcile.OPTION, "strike": 143.0, "quantity": -1,
+                    "expiry": "2026-09-11", "avg_price": 9.48, "underlying": "SPCX"}]
+    with pytest.raises(ValueError, match="no confident entry price"):
+        executor.rebuild_position_from_broker("SPCX", broker_legs=broker_legs, diff_ids=["diff_002"])
+
+    # Refused BEFORE writing anything — the diff is still open, position untouched.
+    state = log.load_state()
+    assert log.find_position(state, "SPCX")["short_calls"] == []
+    assert log.find_position(state, "SPCX")["needs_review"] is True
+
+    # The reviewable dry-run path still shows the (flagged) proposal — the
+    # operator supplies the real entry price there, not blocked entirely.
+    prop = executor.rebuild_position_from_broker("SPCX", broker_legs=broker_legs, dry_run=True)
+    leg = prop["legs"][0]
+    assert leg["entry_price"] is None
+    assert leg["entry_extrinsic_per_share"] == 9.48  # degraded: whole premium, no intrinsic split
 
 
 def test_rebuild_with_diff_ids_empties_a_fully_closed_position(store):
