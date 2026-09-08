@@ -1399,9 +1399,17 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
         proposal = [dict(s) for s in legs]
     else:
         if broker_legs is None:
-            accounts = (reconcile._demo_broker_accounts() if config.demo_enabled()
-                        else reconcile.data_handler_client_accounts())
-            broker_legs = [i for i in reconcile.parse_broker_positions(accounts)
+            demo = config.demo_enabled()
+            accounts = reconcile._demo_broker_accounts() if demo else reconcile.data_handler_client_accounts()
+            # Scope to THIS book's own bound Schwab account, exactly like
+            # run_reconciliation does — parse_broker_positions with no account
+            # number reads the FIRST node in the login's response, which on a
+            # multi-account login can be a DIFFERENT account than the one this
+            # book trades. Hit live: a rebuild on one book pulled a sibling
+            # account's leg (a different strike entirely) instead of this
+            # book's own position.
+            account_number = None if demo else schwab_api.bound_account_number()
+            broker_legs = [i for i in reconcile.parse_broker_positions(accounts, account_number)
                            if (i.get("underlying") or "").upper() == ticker]
         if not broker_legs and not diff_ids:
             # No diff_ids means this is exploratory (an operator browsing a dry
@@ -1439,6 +1447,24 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
                                  "entry_price": entry_price,
                                  "extrinsic_per_contract": _leap_extrinsic_pc(cost_pc, entry_price, strike),
                                  "econ_source": econ.get("source")})
+
+        # With no entry price, _short_extrinsic / _leap_extrinsic_pc can't split
+        # premium from intrinsic and silently degrade to "the whole premium is
+        # extrinsic" — badly overstating it for anything sold/bought in-the-money.
+        # That's a fine ASSUMPTION to show an operator reviewing a dry run (who
+        # can supply the real entry price before confirming), but the auto,
+        # one-shot path (``legs`` not supplied, straight to a write — the
+        # "Schwab is correct" button) has no review step, so it must never save
+        # a silently-inflated number: refuse and point at the reviewable path.
+        if not dry_run:
+            unresolved = [f"{s['leg_type']} {s['strike']}" for s in proposal
+                         if s.get("entry_price") in (None, "")]
+            if unresolved:
+                raise ValueError(
+                    f"can't one-shot rebuild {ticker} — no confident entry price in the log for: "
+                    + ", ".join(unresolved) + "; without it, extrinsic can't be split from intrinsic and "
+                    "would be overstated for any leg sold/bought in-the-money. Use \"Show advanced\" "
+                    "instead — it lets you review and set the entry price before saving.")
 
     # 2) Dry run: return the proposal for the operator to review/correct (e.g. an
     #    entry extrinsic the log recorded wrong). NOTHING is written.
