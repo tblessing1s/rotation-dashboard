@@ -76,12 +76,16 @@ def test_weekly_summary_is_informational_and_registered(monkeypatch):
 # ---------------------------------------------------------------------------
 # check_monthly_summary
 # ---------------------------------------------------------------------------
-def _state_with_closed_month(monkeypatch, net_juice=500.0, burn=100.0):
+def _state_with_closed_month(monkeypatch, net_juice=500.0, burn=0.0):
     """A minimal state whose PREVIOUS month (June 2026, given a July 'now')
     has closed income — enough for payouts.view()'s previous entry to carry a
     payout figure. Mirrors test_payouts.py's _seed(): pins _cur_month and
     stubs the burn-marks read rather than deriving through recompute_derived,
-    which this evaluator (unlike check_weekly_summary) never needs."""
+    which this evaluator (unlike check_weekly_summary) never needs.
+
+    Defaults to burn=0 — the shares-primary strategy holds no LEAP, so a
+    current book's realized burn is zero. A nonzero burn is exercised
+    separately, for the legacy diagonal still winding down on an old book."""
     import payouts
     monkeypatch.setattr(payouts, "_cur_month", lambda: "2026-07")
     monkeypatch.setattr(payouts, "monthly_leap_burn", lambda: {"2026-06": burn})
@@ -112,6 +116,25 @@ def test_monthly_summary_reports_the_month_that_just_closed_not_the_new_one(monk
     a = alerts.check_monthly_summary(_state_with_closed_month(monkeypatch))[0]
     assert a["data"]["month"] == "2026-06"
     assert "payout" in a["message"] and "YTD" in a["message"]
+
+
+def test_monthly_summary_omits_leap_burn_when_zero(monkeypatch):
+    """The shares-primary strategy holds no LEAP, so a current book's realized
+    burn is zero — the message should read the juice/payout straight, not
+    parenthesize a $0.00 LEAP burn nobody needs to see."""
+    _freeze(monkeypatch, datetime(2026, 7, 1, 9, 0, tzinfo=ET))
+    a = alerts.check_monthly_summary(_state_with_closed_month(monkeypatch, burn=0.0))[0]
+    assert "LEAP burn" not in a["message"]
+    assert "$500.00 payout" in a["message"]
+
+
+def test_monthly_summary_shows_leap_burn_when_a_legacy_book_still_carries_it(monkeypatch):
+    """A book still winding down a legacy LEAP diagonal (position_types.
+    LEAP_PMCC_LEGACY) can still realize burn — the breakdown must surface it
+    exactly as check_payout_ready already does."""
+    _freeze(monkeypatch, datetime(2026, 7, 1, 9, 0, tzinfo=ET))
+    a = alerts.check_monthly_summary(_state_with_closed_month(monkeypatch, burn=100.0))[0]
+    assert "$100.00 LEAP burn" in a["message"]
 
 
 def test_monthly_summary_deep_links_to_payouts(monkeypatch):

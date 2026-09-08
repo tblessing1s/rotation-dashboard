@@ -37,7 +37,7 @@ ALERT_TYPES = {
     # day. LOW so it sorts under every real alert in a batched notification.
     "DAILY_OUTLOOK": ("LOW", "Operator digest — the daily read of regime, price, strike distance and DTE. Carries NO rule and demands no action."),
     "WEEKLY_SUMMARY": ("LOW", "Operator digest — Saturday-morning read of the trading week just finished (net juice captured, by ticker). Carries NO rule and demands no action."),
-    "MONTHLY_SUMMARY": ("LOW", "Operator digest — 1st-of-the-month read of the calendar month that just closed (payout, juice, LEAP burn, year-to-date). Carries NO rule and demands no action."),
+    "MONTHLY_SUMMARY": ("LOW", "Operator digest — 1st-of-the-month read of the calendar month that just closed (payout, juice, year-to-date). Carries NO rule and demands no action."),
     "KILL_SWITCH_SPY": ("CRITICAL", "HARD_CFM_RULE: RS3M vs SPY negative on confirmed close -> exit within 1-2 days"),
     "CIRCUIT_BREAKER": ("CRITICAL", "HARD_CFM_RULE: line-in-the-sand exit price stored at entry"),
     "DELTA_UNCOVERED": ("HIGH", "HARD_CFM_RULE: more calls sold than owned 100-share lots (or, on a legacy diagonal, a LEAP that no longer covers the short)"),
@@ -1386,7 +1386,7 @@ def check_weekly_summary(state: dict) -> list[dict]:
 
 def check_monthly_summary(state: dict) -> list[dict]:
     """1st-of-the-month read of the calendar month that just closed: payout,
-    juice, LEAP burn, and year-to-date total.
+    juice, and year-to-date total.
 
     Same digest pattern as check_daily_outlook/check_weekly_summary. Reuses
     payouts.view() rather than re-deriving so this number can never disagree
@@ -1395,6 +1395,12 @@ def check_monthly_summary(state: dict) -> list[dict]:
     `previous` has finished settling (its last short closed, or the month
     simply ran out) but may not be finalized/paid yet. Fingerprint carries the
     month, so it fires once and resolves when the month rolls.
+
+    The juice/burn/intrinsic-repaid breakdown mirrors check_payout_ready's:
+    LEAP burn (and intrinsic repayment) only appear in the message when
+    nonzero. The shares-primary strategy holds no LEAP, so a current book
+    reads $0 burn and the parenthetical simply doesn't mention it — it isn't
+    a stat this strategy needs, not a zero worth stating.
     """
     now = datetime.now(ET)
     if now.day != 1:
@@ -1408,15 +1414,23 @@ def check_monthly_summary(state: dict) -> list[dict]:
     payout = prev.get("payout_amount") or 0
     juice = prev.get("net_juice") or 0
     burn = prev.get("leap_burn") or 0
+    repaid = prev.get("intrinsic_repaid") or 0
     ytd = (view.get("totals") or {}).get("ytd") or 0
-    body = (f"{prev.get('label') or month}: ${payout:,.2f} payout "
-            f"(${juice:,.2f} juice − ${burn:,.2f} LEAP burn) · "
+    parts = []
+    if burn:
+        parts.append(f"${burn:,.2f} LEAP burn")
+    if repaid:
+        parts.append(f"${repaid:,.2f} intrinsic repaid")
+    breakdown = (f" (${juice:,.2f} juice − " + " − ".join(parts) + ")"
+                 if parts else "")
+    body = (f"{prev.get('label') or month}: ${payout:,.2f} payout{breakdown} · "
             f"status {prev.get('status')} · ${ytd:,.2f} YTD")
     a = _alert(
         "MONTHLY_SUMMARY", None, body,
         "Nothing required — this is the monthly read, not a trigger.",
         {"month": month, "payout_amount": payout, "net_juice": juice,
-         "leap_burn": burn, "status": prev.get("status"), "ytd": ytd},
+         "leap_burn": burn, "intrinsic_repaid": repaid,
+         "status": prev.get("status"), "ytd": ytd},
         key=month)
     a["action_url"] = _payout_action_url()
     return [a]
