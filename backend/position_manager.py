@@ -51,6 +51,39 @@ def _live_short_marks(ticker: str, shorts: list[dict]) -> dict[tuple, float]:
     return out
 
 
+def refresh_quote(ticker: str, position: dict) -> dict:
+    """Force a live Schwab quote for this position's stock AND its open short-
+    call legs right now, bypassing both the short quote cache
+    (config.QUOTE_CACHE_SECONDS) and the option-marks poller cache
+    (config.OPTION_MARK_MAX_AGE_SECONDS, 10 minutes) that otherwise back the
+    Positions view. The Roll ticket already gets a live price implicitly (it
+    needs one to build an order) — this is the same pull for the position card
+    itself, on demand, for a fast-moving name the poller's next cycle hasn't
+    caught up to yet. Read-only against the broker (quotes only, never an
+    order); best-effort per option leg so one bad symbol never blocks the rest
+    or the stock quote that already succeeded."""
+    import option_marks
+
+    ticker = (ticker or "").strip().upper()
+    quote = data_handler.fresh_quote(ticker)
+    if quote is None:
+        raise ValueError(f"no live quote available for {ticker}")
+    shorts = position.get("short_calls") or []
+    symbols = [s for s in (option_marks.symbol_for(ticker, sc) for sc in shorts) if s]
+    refreshed_legs = 0
+    if symbols:
+        try:
+            nodes = data_handler.client().get_quotes(symbols)
+        except Exception:  # noqa: BLE001 — the stock quote above still refreshed
+            nodes = {}
+        for sym in symbols:
+            node = nodes.get(sym)
+            if node and option_marks.remember(sym, node) is not None:
+                refreshed_legs += 1
+    return {"success": True, "ticker": ticker, "stock_price": quote.get("price"),
+            "refreshed_legs": refreshed_legs, "leg_count": len(symbols)}
+
+
 def leap_cost_suspect(leg: dict, stock_price: float | None) -> bool:
     """True when a LEAP leg's ``cost_basis`` looks stored PER SHARE instead of the
     full per-contract-total dollars (a ~100× understatement — e.g. 53.05 where

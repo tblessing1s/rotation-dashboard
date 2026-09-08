@@ -1,11 +1,42 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Meter, Loading, Modal, Light, ChartLink, SleeveBadge, money, fmt, useApi } from "./ui.jsx";
+import { Card, Meter, Loading, Modal, Light, ChartLink, SleeveBadge, Spinner, money, fmt, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { useToast } from "./Toast.jsx";
 import { explainRec, explainResolution, ticketSummary } from "../recWhy.js";
 import { submitOrder } from "../orderFlow.js";
+
+// On-demand live quote for one position — the stock price and every open
+// short call's mark otherwise come from caches (a short-lived quote cache for
+// the stock, a poller cache up to 10 minutes old for each option leg) shared
+// across every view so the app isn't re-quoting Schwab on every page load.
+// The Roll ticket bypasses both implicitly (it needs a live price to build an
+// order); this is the same pull for the card itself, on demand, for a
+// fast-moving name the poller hasn't caught up to yet — no order required.
+function RefreshQuoteButton({ ticker, afterResolve }) {
+  const toast = useToast();
+  const [busy, setBusy] = React.useState(false);
+  const refresh = async (e) => {
+    e.stopPropagation();  // sits beside the row's own expand/collapse toggle
+    setBusy(true);
+    try {
+      await api.refreshPositionQuote(ticker);
+      afterResolve && afterResolve();
+    } catch (err) {
+      toast.show(String(err.message || err), { type: "error" });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <button onClick={refresh} disabled={busy}
+            title="Pull a live quote for this position now — the card otherwise reads from a shared cache that can lag a fast-moving name by a few minutes"
+            className="ml-1 rounded p-0.5 text-slate-500 hover:text-slate-200 disabled:opacity-50">
+      {busy ? <Spinner size="h-3 w-3" /> : <span aria-hidden>↻</span>}
+    </button>
+  );
+}
 
 // Reconciliation review panel — shown when the position has open diffs against
 // the broker (state.json vs Schwab). A frozen position (needs_review) blocks new
@@ -1607,6 +1638,7 @@ function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focus
         {/* Candlestick chart link sits outside the toggle button (no <a> nested
             in a <button>); it opens the ticker's external chart in a new tab. */}
         <ChartLink ticker={p.ticker} size="h-4 w-4" className="ml-3" />
+        <RefreshQuoteButton ticker={p.ticker} afterResolve={afterResolve} />
         <button onClick={() => setOpen((v) => !v)} aria-expanded={open}
               className="flex min-w-0 flex-1 items-center justify-between gap-3 py-4 pr-4 pl-2 text-left hover:bg-slate-900/40">
         <span className="flex min-w-0 items-center gap-2">
