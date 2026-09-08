@@ -43,7 +43,7 @@ import config
 import order_lifecycle as olc
 import slippage
 from rec_types import (ActionType, CheckStatus, FidelityCheck, FidelityDefect,
-                       Resolution, TriggerRule)
+                       MissAckReason, Resolution, TriggerRule)
 
 _ROLL_REASON_ACTION = {
     "scheduled": ActionType.ROLL_OUT,
@@ -536,6 +536,7 @@ def resolve(state: dict, now: datetime) -> list[dict]:
             })
         # else: still open — open recommendations carry no resolution record.
 
+    exec_by_id = {e.get("id"): e for e in state.get("executions", []) or []}
     for idx, inst in enumerate(actions):
         if idx in matched_actions:
             continue
@@ -556,6 +557,21 @@ def resolve(state: dict, now: datetime) -> list[dict]:
             # graduation; only the read (and the alert) change.
             miss["acknowledged"] = {"id": ack.get("id"), "reason": ack.get("reason"),
                                     "note": ack.get("note"), "at": ack.get("at")}
+        else:
+            # The operator can log a reason AT THE MOMENT of a move made with no
+            # matching recommendation (stamped on the execution itself as
+            # `manual_reason` — see executor._stamp_manual_reason) instead of
+            # discovering the miss later on the scoreboard and acknowledging it
+            # after the fact. Same classification, same non-excusing rule as a
+            # formal ack — just captured inline, at the source.
+            inline_note = next(
+                (exec_by_id[eid].get("manual_reason") for eid in inst["execution_ids"]
+                 if exec_by_id.get(eid) and exec_by_id[eid].get("manual_reason")), None)
+            if inline_note:
+                miss["acknowledged"] = {
+                    "id": None, "reason": MissAckReason.OPERATOR_DISCRETION,
+                    "note": inline_note, "at": miss["at"], "inline": True,
+                }
         resolutions.append(miss)
     return resolutions
 

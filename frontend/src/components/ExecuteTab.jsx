@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Light, Loading, GENIUS_LIGHT_ORDER, GENIUS_LIGHT_LABELS, fmt } from "./ui.jsx";
+import { Card, Pill, Light, Loading, GENIUS_LIGHT_ORDER, GENIUS_LIGHT_LABELS, fmt, useApi } from "./ui.jsx";
 import OptionChainModal from "./OptionChainModal.jsx";
 import PutTicket from "./PutTicket.jsx";
 import { useToast } from "./Toast.jsx";
@@ -196,6 +196,14 @@ export default function ExecuteTab({ initialTicker, sourceRecId, onExecuted, onB
   const [chainOpen, setChainOpen] = React.useState(false);
   const [gateLoading, setGateLoading] = React.useState(false);
   const tradeMode = useTradeMode(); // "paper" | "live" | null — where do executed orders go?
+  // Trust layer: open engine recommendations, just to know whether one already
+  // covers this ticker — a move made with neither a rec card nor a live rec
+  // behind it becomes a coverage miss, so the ticket asks for a reason up front
+  // instead of leaving it to be discovered on the scoreboard later.
+  const { data: recsData } = useApi(api.recommendations, [], null);
+  const hasOpenRecommendation = !!(recsData?.open || [])
+    .some((r) => (r.ticker || "").toUpperCase() === ticker.toUpperCase());
+  const needsManualReason = !sourceRecId && !hasOpenRecommendation;
 
   React.useEffect(() => { if (initialTicker) setTicker(initialTicker); }, [initialTicker]);
 
@@ -339,6 +347,7 @@ export default function ExecuteTab({ initialTicker, sourceRecId, onExecuted, onB
         <OptionChainModal
           ticker={ticker}
           accountGate={acctGate}
+          needsManualReason={needsManualReason}
           onExecute={runExecute}
           onClose={() => setChainOpen(false)}
         />

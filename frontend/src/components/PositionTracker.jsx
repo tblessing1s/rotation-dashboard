@@ -1934,6 +1934,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
           ticker={rolling.ticker}
           reason={rolling.reason}
           sourceRecId={rolling.recId}
+          hasOpenRecommendation={!!(recsByTicker[(rolling.ticker || "").toUpperCase()] || []).length}
           onExecute={runRoll}
           onClose={() => setRolling(null)}
         />

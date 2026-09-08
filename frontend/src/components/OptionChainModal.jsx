@@ -30,10 +30,11 @@ const ACTION_LABELS = {
  * the share cost. The user typically only sets quantity, then executes straight
  * from the chain (or just fills the form).
  */
-export default function OptionChainModal({ ticker, accountGate, onExecute, onClose }) {
+export default function OptionChainModal({ ticker, accountGate, needsManualReason, onExecute, onClose }) {
   const [chain, setChain] = React.useState(null);
   const [error, setError] = React.useState(null);
   const [loading, setLoading] = React.useState(true);
+  const [manualReason, setManualReason] = React.useState("");
   const [weeklyStrike, setWeeklyStrike] = React.useState(null);
   // The short's expiration is selectable now that the chain offers this week's
   // AND next week's weekly — a strike alone is ambiguous across the two weeks.
@@ -189,6 +190,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
       if (openShort.symbol) base.option_symbol = openShort.symbol;
       if (openShort.current_mark != null) base.close_price_per_share = openShort.current_mark;
     }
+    if (needsManualReason && manualReason.trim()) base.manual_reason = manualReason.trim();
     return base;
   }
 
@@ -197,6 +199,7 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
   const canExecute =
     qtyNum > 0 &&
     (!gateBlocked || overrideReason.trim().length > 0) &&
+    (!needsManualReason || manualReason.trim().length > 0) &&
     ((action === "buy_shares") ||
       (action === "sell_short" && chosenWeekly) ||
       (action === "close_short" && openShort));
@@ -400,6 +403,19 @@ export default function OptionChainModal({ ticker, accountGate, onExecute, onClo
                 </>
               )}
 
+              {needsManualReason && (
+                <label className="mt-3 block text-xs text-amber-200">
+                  No recommendation is behind this move — log why you're acting now
+                  (feeds the trust layer so the rules can learn from it):
+                  <textarea
+                    value={manualReason}
+                    onChange={(e) => setManualReason(e.target.value)}
+                    placeholder="e.g. rotating out ahead of an earnings gap risk"
+                    rows={2}
+                    className="mt-1 w-full rounded-lg border border-amber-700 bg-slate-950 px-3 py-1.5 text-sm text-slate-100"
+                  />
+                </label>
+              )}
               <div className="mt-3 flex items-center justify-end gap-2">
                 <button onClick={onClose} className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800">
                   Cancel
