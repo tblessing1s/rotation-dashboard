@@ -36,6 +36,8 @@ ALERT_TYPES = {
     # true and wants an action; this is a scheduled read of the book, fired once a
     # day. LOW so it sorts under every real alert in a batched notification.
     "DAILY_OUTLOOK": ("LOW", "Operator digest — the daily read of regime, price, strike distance and DTE. Carries NO rule and demands no action."),
+    "WEEKLY_SUMMARY": ("LOW", "Operator digest — Saturday-morning read of the trading week just finished (net juice captured, by ticker). Carries NO rule and demands no action."),
+    "MONTHLY_SUMMARY": ("LOW", "Operator digest — 1st-of-the-month read of the calendar month that just closed (payout, juice, LEAP burn, year-to-date). Carries NO rule and demands no action."),
     "KILL_SWITCH_SPY": ("CRITICAL", "HARD_CFM_RULE: RS3M vs SPY negative on confirmed close -> exit within 1-2 days"),
     "CIRCUIT_BREAKER": ("CRITICAL", "HARD_CFM_RULE: line-in-the-sand exit price stored at entry"),
     "DELTA_UNCOVERED": ("HIGH", "HARD_CFM_RULE: more calls sold than owned 100-share lots (or, on a legacy diagonal, a LEAP that no longer covers the short)"),
@@ -1348,8 +1350,82 @@ def check_daily_outlook(state: dict) -> list[dict]:
         key=today.isoformat())]
 
 
+def check_weekly_summary(state: dict) -> list[dict]:
+    """Saturday-morning read of the trading week that just finished: net juice
+    captured, broken out by ticker.
+
+    Same shape as check_daily_outlook: an informational digest riding the
+    existing dedup rather than a second delivery path. It self-gates on the
+    weekday (Saturday only) because alert_scheduler's Mon-Fri due_slots never
+    calls alerts.run() on a weekend — the scheduler adds its own Saturday
+    trigger (alert_scheduler._maybe_weekly_monthly_summary), but this gate is
+    what keeps the digest from firing on the wrong day if alerts.run() is ever
+    invoked some other way (POST /api/alerts/run, a manual/test call). The
+    fingerprint carries the ISO week, so it fires once per week and resolves
+    when the week rolls.
+    """
+    now = datetime.now(ET)
+    if now.weekday() != 5:  # Saturday only
+        return []
+    y, w, _ = now.isocalendar()
+    week_key = f"{y}-W{w:02d}"
+    ledger = state.get("theta_ledger") or {}
+    week_juice = round(float((ledger.get("totals") or {}).get("this_week") or 0), 2)
+    rows = sorted(
+        (r for r in (ledger.get("weeks") or []) if r.get("week") == week_key),
+        key=lambda r: r.get("net_juice", 0), reverse=True)
+    lines = [f"{r['ticker']} ${r.get('net_juice', 0):,.2f}" for r in rows]
+    body = (f"Week {week_key}: ${week_juice:,.2f} net juice captured"
+            + (" — " + ", ".join(lines) if lines else " — no closes this week."))
+    return [_alert(
+        "WEEKLY_SUMMARY", None, body,
+        "Nothing required — this is the weekly read, not a trigger.",
+        {"week": week_key, "net_juice": week_juice, "closes": len(rows)},
+        key=week_key)]
+
+
+def check_monthly_summary(state: dict) -> list[dict]:
+    """1st-of-the-month read of the calendar month that just closed: payout,
+    juice, LEAP burn, and year-to-date total.
+
+    Same digest pattern as check_daily_outlook/check_weekly_summary. Reuses
+    payouts.view() rather than re-deriving so this number can never disagree
+    with the Payouts tab. Reports ``previous`` — the month that just ended,
+    not the in-progress ``current`` one — since this fires on the 1st, when
+    `previous` has finished settling (its last short closed, or the month
+    simply ran out) but may not be finalized/paid yet. Fingerprint carries the
+    month, so it fires once and resolves when the month rolls.
+    """
+    now = datetime.now(ET)
+    if now.day != 1:
+        return []
+    import payouts
+    view = payouts.view(state)
+    prev = view.get("previous") or {}
+    month = prev.get("month")
+    if not month:
+        return []
+    payout = prev.get("payout_amount") or 0
+    juice = prev.get("net_juice") or 0
+    burn = prev.get("leap_burn") or 0
+    ytd = (view.get("totals") or {}).get("ytd") or 0
+    body = (f"{prev.get('label') or month}: ${payout:,.2f} payout "
+            f"(${juice:,.2f} juice − ${burn:,.2f} LEAP burn) · "
+            f"status {prev.get('status')} · ${ytd:,.2f} YTD")
+    a = _alert(
+        "MONTHLY_SUMMARY", None, body,
+        "Nothing required — this is the monthly read, not a trigger.",
+        {"month": month, "payout_amount": payout, "net_juice": juice,
+         "leap_burn": burn, "status": prev.get("status"), "ytd": ytd},
+        key=month)
+    a["action_url"] = _payout_action_url()
+    return [a]
+
+
 EVALUATORS = [
     check_daily_outlook,
+    check_weekly_summary,
+    check_monthly_summary,
     check_kill_switch,
     check_circuit_breaker,
     check_put_regate,

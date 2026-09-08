@@ -1081,6 +1081,12 @@ ALERT_LOG_MAX = 500            # PROPOSED_DEFAULT — alert history cap in state
 # the earnings/dividend caches for held names and sync position snapshots.
 MAINTENANCE_ET = "17:30"
 
+# PROPOSED_DEFAULT — operator progress digests. Both fall on days ALERT_SCHEDULE_ET
+# never runs on its own (Saturday; the 1st can land on a weekend too), so each gets
+# its own gate in alert_scheduler.py rather than riding the Mon-Fri slot schedule.
+WEEKLY_SUMMARY_ET = "08:30"    # Saturday morning: the trading week just finished
+MONTHLY_SUMMARY_ET = "08:30"   # the 1st: the calendar month that just closed
+
 # ---- Market-settle execution gate (time-of-day order discipline) -----------
 # The first ~30 min after the open and the last ~15 before the close are
 # structurally hostile to this strategy's order types (widest spreads, unreliable
