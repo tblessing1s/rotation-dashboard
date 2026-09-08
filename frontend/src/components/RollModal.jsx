@@ -3,6 +3,18 @@ import { api } from "../api.js";
 import { Pill, Loading, fmt } from "./ui.jsx";
 import { useTradeMode, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
 import { totalDollars } from "../units.js";
+import { explainRec, ACTION_LABELS } from "../recWhy.js";
+
+// Action-type family the trust layer matches on (mirrors backend
+// trust_derive._family): a roll matches a roll regardless of ROLL_OUT vs
+// ROLL_DOWN vs DEFEND; EXIT is its own family. Used only to decide whether
+// the engine's LIVE call for this position actively disagrees with "roll" —
+// never to change what gets sent or how the fill is graded server-side.
+function recFamily(actionType) {
+  if (actionType === "ROLL_OUT" || actionType === "ROLL_DOWN" || actionType === "DEFEND") return "ROLL";
+  if (actionType === "EXIT") return "EXIT";
+  return null;
+}
 
 function dollars(n) {
   if (n === null || n === undefined || Number.isNaN(n)) return "—";
@@ -62,6 +74,41 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId,
   // scoreboard and acknowledging it after the fact.
   const needsManualReason = !sourceRecId && !hasOpenRecommendation;
   const [manualReason, setManualReason] = React.useState("");
+
+  // Live conflict check: re-run the engine right now (fresh quotes, not
+  // whatever the last scheduled/event pass saw) and see what it currently
+  // calls for this position. Skipped when the ticket was staged FROM a
+  // recommendation card — sourceRecId means the operator is already acting on
+  // the engine's own call, so there is nothing to disagree with.
+  const [liveRec, setLiveRec] = React.useState(null);
+  const [recCheckDone, setRecCheckDone] = React.useState(false);
+  const [conflictAck, setConflictAck] = React.useState(false);
+  React.useEffect(() => {
+    if (sourceRecId) { setRecCheckDone(true); return undefined; }
+    let live = true;
+    setRecCheckDone(false);
+    // include_entry:false — a roll only needs this position re-evaluated, not
+    // a fresh universe-wide entry-candidate scan.
+    api.runRecommendations({ notify: false, include_entry: false })
+      .catch(() => {}) // a failed live re-check must never block the ticket
+      .then(() => api.recommendations())
+      .then((d) => {
+        if (!live) return;
+        const rec = (d?.open || []).find((r) =>
+          (r.ticker || "").toUpperCase() === ticker.toUpperCase() && r.action_type !== "NO_ACTION");
+        setLiveRec(rec || null);
+      })
+      .catch(() => { if (live) setLiveRec(null); })
+      .finally(() => { if (live) setRecCheckDone(true); });
+    return () => { live = false; };
+  }, [ticker, sourceRecId]);
+
+  // A conflict is the engine's LIVE call actively disagreeing with "roll" —
+  // e.g. it currently says EXIT this position. Its own family (ROLL_OUT /
+  // ROLL_DOWN / DEFEND) or silence (no open rec) is not a conflict.
+  const conflictRec = liveRec && recFamily(liveRec.action_type)
+    && recFamily(liveRec.action_type) !== "ROLL" ? liveRec : null;
+  const conflictWhy = conflictRec ? explainRec(conflictRec) : null;
   const tradeMode = useTradeMode(); // "paper" | "live" | null — is this roll routed to Schwab?
   const [pendingLive, setPendingLive] = React.useState(null); // live roll awaiting explicit confirm
 
@@ -235,7 +282,9 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId,
 
   const canExecute = qtyNum > 0 && cur && chosen && selectedExp
     && !(sameStrike && sameWeek) // rolling to the exact same leg is a no-op
-    && (!needsManualReason || manualReason.trim().length > 0);
+    && recCheckDone // wait for the live engine re-check before allowing the fill
+    && (!needsManualReason || manualReason.trim().length > 0)
+    && (!conflictRec || conflictAck);
 
   function buildPayload() {
     const chosenRow = strikeRows.find((s) => s.strike === chosen?.strike);
@@ -367,6 +416,28 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId,
                 </div>
               )}
             </div>
+
+            {/* Live engine conflict: re-checked fresh when this ticket opened (not
+               the last scheduled pass) — the one case that gates execution, since
+               it means the engine's CURRENT call for this position disagrees with
+               rolling at all. */}
+            {conflictRec && (
+              <div className="rounded-lg border border-rose-500/50 bg-rose-500/10 p-3 text-sm text-rose-100">
+                <div className="flex items-center gap-2">
+                  <span className="rounded bg-rose-500/20 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-rose-300">
+                    engine says {ACTION_LABELS[conflictRec.action_type] || conflictRec.action_type}
+                  </span>
+                  <span className="font-semibold">The engine's live call disagrees with rolling this position</span>
+                </div>
+                {conflictWhy?.why && <p className="mt-1.5 text-rose-200/90">{conflictWhy.why}</p>}
+                <label className="mt-2 flex items-center gap-2 text-xs text-rose-200">
+                  <input type="checkbox" checked={conflictAck}
+                         onChange={(e) => setConflictAck(e.target.checked)}
+                         className="accent-rose-400" />
+                  Roll anyway — I've seen the engine's current call and want to proceed
+                </label>
+              </div>
+            )}
 
             {/* Roll-timing advisory — informational only, never blocks anything below */}
             {data.roll_readiness && data.roll_readiness.ready !== null && (
@@ -583,7 +654,8 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId,
                   disabled={!canExecute || busy}
                   className="rounded-lg bg-emerald-500/20 px-4 py-2 text-sm font-semibold text-emerald-300 hover:bg-emerald-500/30 disabled:opacity-40"
                 >
-                  {busy ? "Rolling…" : `Roll & log${tradeMode === "paper" ? " (paper)" : ""}`}
+                  {busy ? "Rolling…" : !recCheckDone ? "Checking with the engine…"
+                    : `Roll & log${tradeMode === "paper" ? " (paper)" : ""}`}
                 </button>
               </div>
               {execErr && <p className="mt-2 text-right text-xs text-rose-400">{execErr}</p>}
