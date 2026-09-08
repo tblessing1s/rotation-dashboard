@@ -207,9 +207,17 @@ def leap_health(position: dict, df=None, stock_price: float | None = None,
             juice_capital = leap_cost
             juice_capital_basis = "leap_cost_basis"
             juice_target_pct = account_gate.weekly_yield_target_pct(ticker)
+    inflation_juice_floor_pct = None
     if trailing_juice is not None and juice_capital:
         juice_yield_pct = round(trailing_juice / juice_capital * 100, 2)
         juice_adequate = juice_yield_pct >= juice_target_pct
+        if not juice_adequate and juice_capital_basis == "spot_x_shares":
+            # juice_target_pct is the STRATEGY's income ambition, not what the
+            # operator actually needs — a shares position below it but still
+            # clearing config.INFLATION_JUICE_FLOOR_PCT is genuinely fine and
+            # must not page or propose exiting it (config.py has the full note).
+            inflation_juice_floor_pct = config.INFLATION_JUICE_FLOOR_PCT
+            juice_adequate = juice_yield_pct >= inflation_juice_floor_pct
 
     policy = roll_policy(dte, weeks_remaining)
     return {
@@ -231,6 +239,11 @@ def leap_health(position: dict, df=None, stock_price: float | None = None,
         "extension_preview": extension_preview,
         "weekly_juice_yield_pct": juice_yield_pct,
         "juice_target_pct": juice_target_pct,
+        # Set only when a SHARES position missed juice_target_pct but was saved
+        # by this lower, operator-goal bar (config.INFLATION_JUICE_FLOOR_PCT) —
+        # None otherwise, so a reader can tell "cleared the ambition outright"
+        # from "cleared only the inflation floor" from "not applicable (LEAP)".
+        "inflation_juice_floor_pct": inflation_juice_floor_pct,
         "juice_adequate": juice_adequate,
         # Which capital the yield above is a percentage OF. Carried so a reader
         # (alert copy, UI, a later calibration) can never mistake a share-

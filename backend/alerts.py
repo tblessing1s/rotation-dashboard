@@ -757,14 +757,23 @@ def check_juice_inadequate(state: dict) -> list[dict]:
         # a shares position would be a wrong number with a wrong label.
         capital = ("share capital" if health.get("juice_capital_basis") == "spot_x_shares"
                    else "LEAP capital")
+        # A SHARES position only reaches here (juice_adequate False) by missing
+        # BOTH the strategy's income ambition and the lower inflation floor
+        # (leap_policy.leap_health), so say so — this is a stronger signal than
+        # "below the strategy's target" alone once that floor is set.
+        inflation_floor = health.get("inflation_juice_floor_pct")
+        bar_note = (f"below both the {tgt:g}% income target and the "
+                    f"{inflation_floor:g}% inflation-beating floor" if inflation_floor is not None
+                    else f"below the {tgt:g}% income target")
         out.append(_alert(
             "JUICE_INADEQUATE", t,
-            (f"{t} trailing weekly juice is {yld:g}% of {capital}, below the {tgt:g}% "
-             f"income target (last {config.JUICE_TRAILING_WEEKS} completed weeks)."),
+            (f"{t} trailing weekly juice is {yld:g}% of {capital}, {bar_note} "
+             f"(last {config.JUICE_TRAILING_WEEKS} completed weeks)."),
             ("This position still funds its own decay but no longer clears the strategy's "
              "income target — roll to a better strike/week, or redeploy the capital into a "
              "candidate that pays before it erodes."),
             {"weekly_juice_yield_pct": yld, "juice_target_pct": tgt,
+             "inflation_juice_floor_pct": inflation_floor,
              "juice_capital": health.get("juice_capital"),
              "juice_capital_basis": health.get("juice_capital_basis"),
              "trailing_avg_weekly_juice": health.get("trailing_avg_weekly_juice"),
