@@ -492,11 +492,16 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
         : "The barrel's run dry — no water to spare.";
 
   // ---- 2. Ready to Plant — saplings that clear every level, richest sap first.
+  // /api/scan/ready's field is "eligible" (see ReadyToEnter.jsx) — this used to
+  // read a "ready" key that endpoint never returns, so readyList was always
+  // empty no matter how many names actually cleared the gate.
   const readyList = React.useMemo(
-    () => [...(ready.data?.ready || [])].sort((a, b) => (b.juice_weekly_pct ?? 0) - (a.juice_weekly_pct ?? 0)),
+    () => [...(ready.data?.eligible || [])].sort((a, b) => (b.juice_weekly_pct ?? 0) - (a.juice_weekly_pct ?? 0)),
     [ready.data],
   );
-  const readyLoading = ready.loading && !ready.data;
+  // A sweep still running is a loading state, not "zero eligible" — same
+  // scan_pending check ReadyToEnter.jsx uses, so the two views can't disagree.
+  const readyLoading = (ready.loading && !ready.data) || ready.data?.scan_pending === true;
   const topReady = readyList.slice(0, 4);
   const bestJuice = readyList[0]?.juice_weekly_pct;
   const canPlant = slotsOpen > 0 && deployable > 0;
