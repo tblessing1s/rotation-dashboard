@@ -308,6 +308,79 @@ def test_rebuild_resolves_linked_diffs_and_lifts_freeze(store):
     assert pos["needs_review"] is False and pos.get("review") is None
 
 
+def test_rebuild_one_shot_with_diff_ids_needs_no_manual_propose_step(store):
+    # The "Schwab is correct" one-click path (PositionTracker.jsx WhichIsCorrect):
+    # no dry_run, no edited legs — diff_ids alone is enough to compute the
+    # proposal from broker truth AND write it in the same call.
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "SPCX", "status": "active", "needs_review": True,
+        "review": {"summary": "diverged", "diff_ids": ["diff_002"]},
+        "shares": {"count": 100, "cap": 100}, "short_calls": [],
+    })
+    state["reconciliation"] = {
+        "last": {"as_of": "2026-09-08T13:00:00Z", "status": reconcile.DIRTY, "broker_ok": True,
+                 "error": None, "suggested_resolutions": [],
+                 "diffs": [{"id": "diff_002", "classification": reconcile.UNEXPECTED_AT_BROKER,
+                            "ticker": "SPCX", "instrument_type": "OPTION", "strike": 138.0,
+                            "expiry": "2026-09-11", "expected_qty": None, "broker_qty": -1,
+                            "summary": "138 call unexpected at broker"}]},
+        "history": [], "last_success": "2026-09-08T13:00:00Z"}
+    log.save_state(state)
+
+    broker_legs = [{"instrument_type": reconcile.OPTION, "strike": 138.0, "quantity": -1,
+                    "expiry": "2026-09-11", "avg_price": 4.10, "underlying": "SPCX"}]
+    res = executor.rebuild_position_from_broker(
+        "SPCX", broker_legs=broker_legs, diff_ids=["diff_002"],
+        reason="SPCX aligned to Schwab — broker confirmed correct")
+    assert res["status"] == "rebuilt"
+    assert [(s["strike"], s["contracts"]) for s in res["short_calls"]] == [(138.0, 1)]
+    pos = log.find_position(log.load_state(), "SPCX")
+    assert pos["needs_review"] is False
+
+
+def test_rebuild_with_diff_ids_empties_a_fully_closed_position(store):
+    # The broker holding NOTHING is itself a valid "Schwab is correct" outcome
+    # (a phantom leg state tracks that was, e.g., never actually filled and got
+    # cancelled at the broker) — diff_ids signals this call already came from a
+    # confirmed reconciliation report, so an empty broker read is trusted rather
+    # than treated as a fetch glitch.
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "SPCX", "status": "active", "needs_review": True,
+        "review": {"summary": "phantom short", "diff_ids": ["diff_001"]},
+        "shares": {"count": 100, "cap": 100},
+        "short_calls": [{"strike": 138.0, "contracts": 1, "expiration": "2026-09-18"}],
+    })
+    state["reconciliation"] = {
+        "last": {"as_of": "2026-09-08T13:00:00Z", "status": reconcile.DIRTY, "broker_ok": True,
+                 "error": None, "suggested_resolutions": [],
+                 "diffs": [{"id": "diff_001", "classification": reconcile.MISSING_AT_BROKER,
+                            "ticker": "SPCX", "instrument_type": "OPTION", "strike": 138.0,
+                            "expiry": "2026-09-18", "expected_qty": 1, "broker_qty": 0,
+                            "summary": "138 call missing at broker"}]},
+        "history": [], "last_success": "2026-09-08T13:00:00Z"}
+    log.save_state(state)
+
+    res = executor.rebuild_position_from_broker("SPCX", broker_legs=[], diff_ids=["diff_001"])
+    assert res["status"] == "rebuilt"
+    assert res["short_calls"] == [] and res["leap_legs"] == []
+    pos = log.find_position(log.load_state(), "SPCX")
+    assert pos["short_calls"] == [] and pos["needs_review"] is False
+
+
+def test_rebuild_without_diff_ids_still_refuses_an_empty_broker_read(store):
+    # The exploratory dry-run path (no diff_ids) keeps the fail-closed guard —
+    # an empty broker read here has no report confirming it's real, so it could
+    # just as easily be a fetch glitch.
+    state = log.load_state()
+    state["positions"].append({"ticker": "SPCX", "status": "active",
+                               "shares": {"count": 100, "cap": 100}, "short_calls": []})
+    log.save_state(state)
+    with pytest.raises(ValueError, match="broker holds no SPCX legs"):
+        executor.rebuild_position_from_broker("SPCX", broker_legs=[], dry_run=True)
+
+
 # ---------------------------------------------------------------------------
 # Void / restore pre-trading test executions (append-only soft delete)
 # ---------------------------------------------------------------------------

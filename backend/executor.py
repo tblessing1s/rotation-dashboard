@@ -1403,7 +1403,14 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
                         else reconcile.data_handler_client_accounts())
             broker_legs = [i for i in reconcile.parse_broker_positions(accounts)
                            if (i.get("underlying") or "").upper() == ticker]
-        if not broker_legs:
+        if not broker_legs and not diff_ids:
+            # No diff_ids means this is exploratory (an operator browsing a dry
+            # run, not resolving a specific diff the report already confirmed) —
+            # fail closed rather than risk an empty result from a broker/network
+            # glitch reading as "broker holds nothing, wipe the position." With
+            # diff_ids the caller already has a reconciliation report saying the
+            # broker holds nothing for this ticker; an empty proposal here is the
+            # correct rebuild (fully closed at the broker), not a data problem.
             raise ValueError(f"broker holds no {ticker} legs — nothing to rebuild "
                              "(if you expected legs, confirm Schwab is connected)")
         proposal = []

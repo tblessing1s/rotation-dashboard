@@ -9,36 +9,108 @@ import { submitOrder } from "../orderFlow.js";
 
 // Reconciliation review panel — shown when the position has open diffs against
 // the broker (state.json vs Schwab). A frozen position (needs_review) blocks new
-// entries/rolls until resolved; closing it is always allowed. Each diff gets its
-// resolution action: one-click expiry booking for the benign carve-out; a
-// compensating adjustment (typed reason) or acknowledgement for everything else.
-// An adjustment can only correct a leg state ALREADY tracks (shrink it toward
-// broker truth) — a leg the broker holds that state has no record of at all
-// (UNEXPECTED_AT_BROKER with nothing to match) needs the "Rebuild from broker"
-// action below instead, which replaces the whole leg set with broker truth.
+// entries/rolls until resolved; closing it is always allowed. The DEFAULT path
+// (WhichIsCorrect, below) is a single question — Schwab or Rotation Dashboard? —
+// that aligns everything to whichever answer the operator gives. Per-diff
+// controls stay available underneath for the cases the question doesn't cover
+// (the benign expiry carve-out; the critical short-stock risk, which is not a
+// data disagreement to resolve either way) and as a manual fallback.
 function ReviewPanel({ ticker, diffs, onDone }) {
   const toast = useToast();
+  const [advanced, setAdvanced] = React.useState(false);
   if (!diffs || diffs.length === 0) return null;
   return (
     <div className="mt-4 rounded-lg border border-rose-800 bg-rose-500/10 p-3">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-rose-300">
         Reconciliation review — state.json diverged from the broker
       </div>
-      <div className="space-y-2">
+      <WhichIsCorrect ticker={ticker} diffs={diffs} toast={toast} onDone={onDone} />
+      <div className="mt-2 space-y-2">
         {diffs.map((d) => <DiffRow key={d.id} ticker={ticker} diff={d} toast={toast} onDone={onDone} />)}
       </div>
-      <RebuildFromBroker ticker={ticker} diffIds={diffs.map((d) => d.id)} toast={toast} onDone={onDone} />
+      <button onClick={() => setAdvanced((s) => !s)}
+              className="mt-2 text-[11px] text-slate-500 hover:text-slate-300">
+        {advanced ? "Hide" : "Show"} advanced — edit the broker's legs before saving
+      </button>
+      {advanced && <RebuildFromBroker ticker={ticker} diffIds={diffs.map((d) => d.id)} toast={toast} onDone={onDone} />}
     </div>
   );
 }
 
-// Full-position repair: replace short_calls + LEAP legs with what the broker
-// actually holds, pulling each leg's entry economics back from the immutable
-// execution log. The clean way out of a tangle — and the ONLY way to resolve a
-// diff where state has zero record of a leg the broker holds, since an
-// adjustment (above) can only shrink a leg that already exists. Two-step:
-// propose (nothing written) then confirm (operator can correct an entry price
-// the log recorded wrong before anything saves).
+const WHICH_IS_CORRECT_CLASSES = new Set(["MISSING_AT_BROKER", "UNEXPECTED_AT_BROKER", "QUANTITY_MISMATCH"]);
+
+// The default resolution path: one question, whichever source is right wins.
+// Schwab is the account of record, so "Schwab is correct" is a single call
+// that replaces this position's legs with broker truth (rebuild_position_from_
+// broker, one-shot — no manual proposal/edit step, unlike the advanced tool
+// below). "Rotation Dashboard is correct" means the broker's view is presumed
+// stale or wrong here, so nothing about the position changes — the diffs are
+// acknowledged (typed reason still required and logged) rather than touched.
+// Deliberately excludes SHORT_STOCK_DETECTED (both sources already agree stock
+// is short — that's a real risk to manage, not a data disagreement) and
+// EXPIRED_WORTHLESS_PENDING (both sources already agree it expired worthless —
+// one-click via "Book expiry" in the per-diff row below).
+function WhichIsCorrect({ ticker, diffs, toast, onDone }) {
+  const [busy, setBusy] = React.useState(null); // "schwab" | "dashboard" | null
+  const [err, setErr] = React.useState(null);
+  const ambiguous = diffs.filter((d) => WHICH_IS_CORRECT_CLASSES.has(d.classification));
+  if (ambiguous.length === 0) return null;
+  const ids = ambiguous.map((d) => d.id);
+
+  const schwabIsCorrect = async () => {
+    setBusy("schwab"); setErr(null);
+    try {
+      await api.rebuildPosition(ticker, {
+        diff_ids: ids, reason: `${ticker} aligned to Schwab — broker confirmed correct`,
+      });
+      toast.show(`${ticker} aligned to Schwab`, { type: "success" });
+      onDone && onDone();
+    } catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(null); }
+  };
+
+  const dashboardIsCorrect = async () => {
+    const reason = window.prompt(
+      "Rotation Dashboard is correct — why is the broker's view stale or wrong here? " +
+        "(required, logged against every diff this dismisses):");
+    if (!reason || !reason.trim()) return;
+    setBusy("dashboard"); setErr(null);
+    try {
+      for (const id of ids) await api.acknowledgeDiff(id, reason.trim());
+      toast.show(`${ticker} — dashboard stands, diffs dismissed`, { type: "success" });
+      onDone && onDone();
+    } catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <div className="rounded-lg border border-slate-600 bg-slate-950/60 p-3">
+      <p className="text-xs text-slate-300">
+        {ambiguous.length} diff{ambiguous.length > 1 ? "s" : ""} on {ticker} disagree with the broker.
+        Which is correct?
+      </p>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button onClick={schwabIsCorrect} disabled={busy !== null}
+                title="Replace this position's legs with what the broker actually holds"
+                className="rounded-lg border border-emerald-700 bg-emerald-500/10 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50">
+          {busy === "schwab" ? "Aligning to Schwab…" : "Schwab is correct — align to broker"}
+        </button>
+        <button onClick={dashboardIsCorrect} disabled={busy !== null}
+                title="The broker's view is stale or wrong here — dismiss these diffs, state stands"
+                className="rounded-lg border border-slate-600 bg-slate-800/60 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          {busy === "dashboard" ? "Dismissing…" : "Rotation Dashboard is correct — dismiss"}
+        </button>
+      </div>
+      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
+// Advanced variant of "Schwab is correct" above: same rebuild, but as a
+// two-step propose (nothing written) then confirm, so the operator can correct
+// an entry price the log recorded wrong before anything saves. Reach for this
+// instead of the one-click button when the broker's economics need a fix, not
+// just the legs themselves.
 function RebuildFromBroker({ ticker, diffIds, toast, onDone }) {
   const [open, setOpen] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
