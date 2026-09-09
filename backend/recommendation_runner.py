@@ -32,7 +32,7 @@ import sector_data
 import session as session_model
 import strike_policy
 import trust_derive
-from rec_types import ActionType
+from rec_types import ActionType, TriggerRule
 
 logger = logging.getLogger("cfm.recommendations")
 
@@ -594,6 +594,12 @@ def run(notify: bool = True, include_entry: bool = True,
         # 4) Notify actionable recs, settle-aware (staged ones say "executable …").
         if notify and stored:
             _notify(stored, staged, state, dry_run)
+        # 5) Circuit-breaker auto-exit — opt-in, per-condition (Recommendations
+        #    tab / circuit_breaker.get_auto_exit_permissions). Acts on the SAME
+        #    CIRCUIT_BREAKER rec + ticket a human would otherwise click Execute
+        #    on; with nothing granted (the default) this is one cheap read and
+        #    returns immediately. See _check_circuit_breaker_auto_exit.
+        auto_exit = _check_circuit_breaker_auto_exit(now, dry_run)
         _last_run = _remember_run({
             "at": log.utcnow(),
             "trigger": trigger,
@@ -605,9 +611,91 @@ def run(notify: bool = True, include_entry: bool = True,
             "emitted_ids": [r.get("rec_id") for r in stored],
             "staged_pending": len(staged),
             "released": release_summary,
+            "auto_exit": auto_exit,
         })
         logger.info("recommendation pass: %s", _last_run)
         return _last_run
+
+
+def _check_circuit_breaker_auto_exit(now: datetime, dry_run: bool | None) -> list[dict]:
+    """The one place in this app that ever calls executor.exit_position()
+    without a human clicking anything. Opt-in and per-condition: reads
+    circuit_breaker.get_auto_exit_permissions() (default every condition OFF)
+    and, for each currently OPEN CIRCUIT_BREAKER EXIT recommendation whose
+    tripped_conditions include a GRANTED condition, executes it — reusing the
+    exact rec + proposed_ticket a human would otherwise act on from the
+    Recommendations tab, never a separately-derived signal.
+
+    Deliberately reads open_recommendations fresh (not just this pass's
+    `stored`) so granting a permission acts on a circuit-breaker rec that was
+    already open before the grant, on the very next pass.
+
+    Best-effort per rec: one failure (a leg that could not be priced, a
+    rejected order, a timeout — see executor.exit_position) is recorded and
+    notified, never raised — it must never sink the recommendation pass or
+    stop the next position in the loop from being checked."""
+    import circuit_breaker
+    import executor
+    state = log.load_state()
+    perms = circuit_breaker.get_auto_exit_permissions(state)
+    if not any(perms.values()):
+        return []
+    results = []
+    for rec in trust_derive.open_recommendations(state, now):
+        if (rec.get("action_type") != ActionType.EXIT
+                or rec.get("trigger_rule") != TriggerRule.CIRCUIT_BREAKER):
+            continue
+        detail = (rec.get("input_snapshot") or {}).get("trigger_detail") or {}
+        cb = detail.get("circuit_breaker") or {}
+        granted = [c for c in (cb.get("tripped_conditions") or []) if perms.get(c)]
+        code = detail.get("exit_reason_code")
+        if not granted or not code:
+            continue
+        ticker = rec.get("ticker")
+        try:
+            outcome = executor.exit_position(
+                ticker, exit_reason=code,
+                exit_note=(f"auto-exit — circuit breaker permission granted for "
+                          f"{', '.join(granted)} (rec {rec.get('rec_id')})"),
+                source_rec_id=rec.get("rec_id"), now=now)
+        except Exception as e:  # noqa: BLE001 — one failed auto-exit must never sink the pass
+            logger.exception("circuit-breaker auto-exit raised for %s", ticker)
+            outcome = {"ok": False, "ticker": ticker, "position_closed": False,
+                      "error": str(e), "steps": []}
+        result = {"rec_id": rec.get("rec_id"), "ticker": ticker,
+                  "conditions": granted, **outcome}
+        results.append(result)
+        logger.info("circuit-breaker auto-exit: %s", result)
+        # "already closed" (a harmless re-check racing resolution matching) is
+        # not a failure worth paging on — only a genuine stop is.
+        if not outcome.get("ok") and not outcome.get("position_closed"):
+            _notify_auto_exit_failure(result, state, dry_run)
+    return results
+
+
+def _notify_auto_exit_failure(result: dict, state: dict, dry_run: bool | None) -> None:
+    """A granted circuit-breaker auto-exit did not finish cleanly — this is
+    the loudest alert this module raises: an unattended action stopped
+    partway and needs a human NOW, not at the next scheduled check-in."""
+    import notifier
+    try:
+        settings = (state.get("alerts") or {}).get("settings") or {}
+        if dry_run is None:
+            dry_run = bool(settings.get("dry_run", config.alerts_dry_run_default()))
+        t = result.get("ticker") or ""
+        notifier.dispatch([{
+            "type": "CIRCUIT_BREAKER_AUTO_EXIT_FAILED",
+            "severity": "CRITICAL",
+            "rule": "circuit breaker auto-exit",
+            "ticker": t,
+            "message": f"{t}: auto-exit stopped partway — {result.get('error')}",
+            "action": f"Resolve {t} on the Positions tab immediately.",
+            "data": {"rec_id": result.get("rec_id"), "conditions": result.get("conditions"),
+                     "steps": result.get("steps")},
+            "fingerprint": f"CIRCUIT_BREAKER_AUTO_EXIT_FAILED|{t}|{result.get('rec_id')}",
+        }], settings, dry_run=dry_run)
+    except Exception:  # noqa: BLE001
+        logger.exception("auto-exit failure notification itself failed")
 
 
 # The last pass summary is a small operational readout (the UI's "engine last

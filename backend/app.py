@@ -1466,6 +1466,7 @@ def api_recommendations():
     import recommendation_settle as settle
     import trust_derive
     import position_manager
+    import circuit_breaker
     from datetime import datetime, timezone
     try:
         state = log.load_state()
@@ -1513,7 +1514,27 @@ def api_recommendations():
             "gate_enforced": config.market_settle_gate_enabled(),
             "last_run": recommendation_runner.last_run(),
             "total": len(state.get("recommendations", [])),
+            # Per-condition circuit-breaker auto-exit permissions (default OFF).
+            # See circuit_breaker.py's AUTO-EXIT PERMISSIONS section.
+            "circuit_breaker_auto_exit": circuit_breaker.get_auto_exit_permissions(state),
         })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/recommendations/circuit-breaker-auto-exit", methods=["POST"])
+def api_set_circuit_breaker_auto_exit():
+    """Grant or revoke ONE circuit-breaker condition's permission to close a
+    position UNATTENDED the moment it trips — see circuit_breaker.py's
+    AUTO-EXIT PERMISSIONS section. Every condition defaults OFF; this is the
+    only way any of them turns on. Body: {condition, on}."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        import circuit_breaker
+        return jsonify(circuit_breaker.set_auto_exit_permission(
+            payload.get("condition"), bool(payload.get("on"))))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
