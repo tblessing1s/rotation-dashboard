@@ -4,7 +4,9 @@ This module is the single source of truth for what a position's circuit breaker
 IS. A position is a hard EXIT on WHICHEVER of these trips first:
 
   1. Drawdown    — the underlying has fallen >= CIRCUIT_BREAKER_DROP_PCT (15%)
-                   from the price it was entered at.
+                   from the HIGHEST daily close since entry (a trailing floor
+                   that only ratchets up — see indicators.high_close_since —
+                   never from the entry price itself).
   2. Fast-MA     — CIRCUIT_BREAKER_MA_FAST_CLOSES (3) consecutive daily closes
                    below the CIRCUIT_BREAKER_MA_FAST-day (50) moving average.
   3. Slow-MA     — a single close below the CIRCUIT_BREAKER_MA_SLOW-day (200) MA.
@@ -40,10 +42,11 @@ def _round(v) -> float | None:
 
 
 def entry_price(position: dict) -> float | None:
-    """The underlying's price when the position was opened — the reference the
-    drawdown leg measures against. Stored on the circuit_breaker at entry (and
-    backfilled onto older positions by the state migration). None when it can't
-    be resolved, in which case the drawdown leg simply stays inert."""
+    """The underlying's price when the position was opened. Stored on the
+    circuit_breaker at entry (and backfilled onto older positions by the state
+    migration); carried in evaluate()'s drawdown detail for reference, but the
+    drawdown LINE itself trails the high since entry (indicators.high_close_since),
+    not this price — see the module docstring. None when it can't be resolved."""
     cb = position.get("circuit_breaker") or {}
     ep = cb.get("entry_price")
     return float(ep) if ep is not None else None
@@ -62,16 +65,25 @@ def evaluate(position: dict, df=None) -> dict:
     price = indicators.last(df)
     cb = position.get("circuit_breaker") or {}
 
-    # 1. Drawdown from entry.
+    # 1. Drawdown — TRAILING off the highest close since entry, not the entry
+    # price itself: the floor ratchets UP as the position makes new highs and
+    # never comes back down, so a name that has run up protects the gain
+    # instead of giving back everything down to the original entry price.
     entry = entry_price(position)
-    drop_line = _round(entry * (1 - config.CIRCUIT_BREAKER_DROP_PCT)) if entry else None
-    drop_pct = _round((price - entry) / entry * 100) if entry and price is not None else None
+    # Gated on a resolvable entry price, exactly like before: no recorded
+    # entry means this leg has nothing to trail from and stays fully inert,
+    # even though the LINE itself is computed off the high-water mark below,
+    # not off `entry` directly.
+    high_water = (indicators.high_close_since(df, position.get("entry_date"))
+                 if entry is not None else None)
+    drop_line = _round(high_water * (1 - config.CIRCUIT_BREAKER_DROP_PCT)) if high_water else None
+    drop_pct = _round((price - high_water) / high_water * 100) if high_water and price is not None else None
     drawdown = {
         "id": "drawdown",
-        "label": f"{config.CIRCUIT_BREAKER_DROP_PCT * 100:g}% drop from entry",
+        "label": f"{config.CIRCUIT_BREAKER_DROP_PCT * 100:g}% drop from the high since entry",
         "tripped": bool(drop_line is not None and price is not None and price <= drop_line),
-        "detail": {"entry_price": _round(entry), "line": drop_line,
-                   "price": _round(price), "change_pct": drop_pct},
+        "detail": {"entry_price": _round(entry), "high_since_entry": _round(high_water),
+                   "line": drop_line, "price": _round(price), "change_pct": drop_pct},
     }
 
     # 2. Consecutive closes below the fast MA.

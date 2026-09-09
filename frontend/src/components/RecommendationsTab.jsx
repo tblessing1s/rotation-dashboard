@@ -43,8 +43,8 @@ const SETTLE_REASON_LABEL = {
 // one on requires an explicit confirmation (mirrors LiveTradingSwitch's
 // enable flow), turning one off is immediate.
 const AUTO_EXIT_CONDITIONS = [
-  { id: "drawdown", label: "15% drop from entry",
-    detail: "The stock has fallen 15% from the price this position was entered at." },
+  { id: "drawdown", label: "15% drop from the high since entry",
+    detail: "The stock has fallen 15% from its highest close since this position was entered — a trailing floor that only ratchets up, never back down to the entry price." },
   { id: "ma_fast", label: "3 closes below the 50-day MA",
     detail: "3 consecutive daily closes below the 50-day moving average." },
   { id: "ma_slow", label: "A close below the 200-day MA",
