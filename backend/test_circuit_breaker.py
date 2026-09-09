@@ -100,6 +100,44 @@ def test_whichever_comes_first_reports_every_breached_condition():
     assert {"drawdown", "ma_fast", "ma_slow", "manual_line"} <= _tripped(v)
 
 
+# ---- levels / nearest_trigger — the Positions card's "spot it trips" readout
+def test_levels_and_nearest_trigger_with_only_a_drawdown_line():
+    # Short frame -> the MA legs stay inert (no SMA yet); no manual line set.
+    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([95.0] * 5))
+    assert v["levels"] == {"drawdown": 85.0}
+    assert v["nearest_trigger"] == {"condition": "drawdown", "price": 85.0,
+                                    "label": v["conditions"][0]["label"]}
+
+
+def test_nearest_trigger_is_whichever_level_is_highest():
+    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([100.0] * 250))
+    assert set(v["levels"]) == {"drawdown", "ma_fast", "ma_slow"}
+    top_id = max(v["levels"], key=v["levels"].get)
+    assert v["nearest_trigger"]["condition"] == top_id
+    assert v["nearest_trigger"]["price"] == max(v["levels"].values())
+    # A flat 250-day tape: both MAs equal the flat price, well above the
+    # 15%-off drawdown floor either way.
+    assert v["levels"]["drawdown"] == 85.0
+    assert v["levels"]["ma_fast"] == v["levels"]["ma_slow"] == 100.0
+
+
+def test_manual_line_included_in_levels_when_set():
+    v = circuit_breaker.evaluate(_pos(entry_price=100.0, price=92.0), df=_frame([95.0] * 5))
+    assert v["levels"]["manual_line"] == 92.0
+
+
+def test_no_levels_defined_reports_no_nearest_trigger():
+    # No entry price, no manual line, and too little history for either MA.
+    v = circuit_breaker.evaluate(_pos(), df=_frame([100.0] * 5))
+    assert v["levels"] == {} and v["nearest_trigger"] is None
+
+
+def test_ma_fast_detail_carries_the_actual_ma_value_not_just_the_run_count():
+    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([100.0] * 250))
+    fast_detail = v["conditions"][1]["detail"]
+    assert fast_detail["ma"] == 100.0 and fast_detail["price"] == 100.0
+
+
 def test_evaluate_all_skips_closed_positions():
     state = {"positions": [{"ticker": "AAPL", "status": "closed",
                             "circuit_breaker": {"price": 10.0}}]}

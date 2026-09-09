@@ -410,6 +410,57 @@ function DefendPanel({ ticker, onStage }) {
   );
 }
 
+// The circuit breaker's own price levels (circuit_breaker.py's `levels` /
+// `nearest_trigger`) — recomputed fresh every load, so the 50-/200-day MA
+// lines move day to day exactly as the underlying moves, unlike the
+// drawdown/manual lines which stay fixed once set. `nearest_trigger` is
+// whichever defined level sits highest — the one a falling price reaches
+// first. Read-only: nothing here changes what the breaker does.
+const CB_LEVEL_LABEL = {
+  drawdown: "15% off entry", ma_fast: "50-day MA",
+  ma_slow: "200-day MA", manual_line: "manual line",
+};
+const CB_STATUS_TONE = {
+  red: "border-rose-500/50 bg-rose-500/10 text-rose-200",
+  yellow: "border-amber-500/50 bg-amber-500/10 text-amber-200",
+  green: "border-slate-800 bg-slate-900/40 text-slate-400",
+};
+
+function CircuitBreakerLevel({ cb }) {
+  if (!cb) return null;
+  const nt = cb.nearest_trigger;
+  const levels = cb.levels || {};
+  const others = Object.entries(levels).filter(([id]) => id !== nt?.condition);
+  return (
+    <div className={`mt-3 rounded-lg border px-3 py-2 text-xs ${CB_STATUS_TONE[cb.status] || CB_STATUS_TONE.green}`}>
+      <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
+        <span className="font-semibold uppercase tracking-wide">Circuit breaker</span>
+        {nt ? (
+          <span title={`${CB_LEVEL_LABEL[nt.condition] || nt.label} — ${nt.label}`}>
+            triggers at <span className="font-mono font-semibold">{fmt(nt.price, 2)}</span>
+            {" "}({CB_LEVEL_LABEL[nt.condition] || nt.label})
+            {cb.price != null && <span className="text-slate-500"> · now {fmt(cb.price, 2)}</span>}
+          </span>
+        ) : (
+          <span className="text-slate-500">no level computable yet</span>
+        )}
+      </div>
+      {others.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] opacity-80">
+          {others.map(([id, price]) => (
+            <span key={id}>
+              {CB_LEVEL_LABEL[id] || id}: <span className="font-mono">{fmt(price, 2)}</span>
+            </span>
+          ))}
+        </div>
+      )}
+      {cb.status !== "green" && (
+        <p className="mt-1 text-[11px] opacity-90">{cb.headline}.</p>
+      )}
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Recommendation trust layer — engine-emitted action cards on the position.
 // Display + staging only: Execute routes into the EXISTING roll flow (the same
@@ -1791,6 +1842,7 @@ function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focus
             {p.position_type === "CASH_SECURED_PUT" ? <PutBase p={p} />
               : p.position_type === "LEAP_PMCC_LEGACY" ? <LegacyLeapBase p={p} />
               : <SharesBase p={p} onCleared={afterResolve} />}
+            <CircuitBreakerLevel cb={p.circuit_breaker_status} />
           </div>
 
           {/* (2) weekly covered-call capture */}
