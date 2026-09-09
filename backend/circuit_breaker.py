@@ -76,13 +76,15 @@ def evaluate(position: dict, df=None) -> dict:
 
     # 2. Consecutive closes below the fast MA.
     below = indicators.consecutive_closes_below_sma(df, config.CIRCUIT_BREAKER_MA_FAST)
+    ma_fast_value = indicators.sma(df, config.CIRCUIT_BREAKER_MA_FAST)
     fast = {
         "id": "ma_fast",
         "label": (f"{config.CIRCUIT_BREAKER_MA_FAST_CLOSES} closes below the "
                   f"{config.CIRCUIT_BREAKER_MA_FAST}-day MA"),
         "tripped": bool(below is not None and below >= config.CIRCUIT_BREAKER_MA_FAST_CLOSES),
         "detail": {"consecutive_closes_below": below,
-                   "threshold": config.CIRCUIT_BREAKER_MA_FAST_CLOSES},
+                   "threshold": config.CIRCUIT_BREAKER_MA_FAST_CLOSES,
+                   "price": _round(price), "ma": _round(ma_fast_value)},
     }
 
     # 3. Close below the slow MA.
@@ -130,6 +132,29 @@ def evaluate(position: dict, df=None) -> dict:
         headline = "circuit breaker intact"
         action = "Hold — no circuit-breaker condition tripped."
 
+    # Every condition's PRICE LEVEL, for the Positions card's "the spot where
+    # this trips" readout — not just the pass/fail booleans above. Each is a
+    # floor price recomputed fresh from today's data (the MAs move day to
+    # day; the drawdown/manual lines are fixed once set). `nearest_trigger` is
+    # whichever defined level sits HIGHEST — the level a falling price would
+    # cross FIRST, by construction, since every level here is a floor below
+    # the current price. It names the level, not a promise: ma_fast's line
+    # only STARTS the 3-close clock, it does not trip alone on one touch.
+    levels = {}
+    if drop_line is not None:
+        levels["drawdown"] = drop_line
+    if ma_fast_value is not None:
+        levels["ma_fast"] = _round(ma_fast_value)
+    if ma_slow is not None:
+        levels["ma_slow"] = _round(ma_slow)
+    if line is not None:
+        levels["manual_line"] = _round(float(line))
+    nearest_id = max(levels, key=levels.get) if levels else None
+    by_id = {c["id"]: c for c in conditions}
+    nearest_trigger = ({"condition": nearest_id, "price": levels[nearest_id],
+                        "label": by_id[nearest_id]["label"]}
+                       if nearest_id else None)
+
     return {
         "ticker": ticker,
         "price": _round(price),
@@ -141,6 +166,8 @@ def evaluate(position: dict, df=None) -> dict:
         "approaching": approaching,
         "headline": headline,
         "suggested_action": action,
+        "levels": levels,
+        "nearest_trigger": nearest_trigger,
     }
 
 
