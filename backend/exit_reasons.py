@@ -1,13 +1,15 @@
 """Coded exit reasons — the machine-readable enum that lands on every closed
 cycle so the calibration harness can bucket outcomes by why they ended.
 
-Derived from the ACTUAL exit paths (see docs/entry-context-audit.md §3). No exit
-is automated: kill_switch.py and circuit_breaker.py are advisory evaluators, and
-every close is operator-driven through executor.execute. So the code is set at
-the point the trigger fires — the advisory evaluators expose
-``exit_reason_code`` mappers, the operator/UI carries that code onto the close,
-and it is stored verbatim on the immutable close_leap execution (never inferred
-after the fact).
+Derived from the ACTUAL exit paths (see docs/entry-context-audit.md §3).
+kill_switch.py and circuit_breaker.py are advisory evaluators; every close is
+operator-driven through executor.execute EXCEPT the one opt-in, per-condition
+exception in circuit_breaker.py's AUTO-EXIT PERMISSIONS (default OFF for every
+condition) — see recommendation_runner._check_circuit_breaker_auto_exit. Either
+way the code is set at the point the trigger fires — the advisory evaluators
+expose ``exit_reason_code`` mappers, the operator/UI (or, only when explicitly
+granted, the runner) carries that code onto the close, and it is stored
+verbatim on the immutable execution (never inferred after the fact).
 
 ``OPERATOR_DISCRETION`` REQUIRES a typed note, mirroring the account gate's
 typed-override pattern (executor.py override_reason). ``LEGACY_UNRECORDED`` is

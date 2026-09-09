@@ -859,6 +859,35 @@ def api_positions():
         return _err(e)
 
 
+@app.route("/api/positions/<ticker>/exit", methods=["POST"])
+def api_positions_exit(ticker):
+    """Fully exit a position on ONE call: close every open short, then sell
+    every owned share — executor.exit_position(), the first thing in this app
+    that sequences both legs of a real exit instead of stopping at a
+    recommendation. Manual-trigger only: this endpoint is the human-in-the-
+    loop path (a click), never called by a scheduled pass. Blocks for the
+    duration of the exit (each leg waits for its own fill, live mode included)
+    exactly like the other synchronous "do it now" actions (reconcile, run
+    evaluation pass) — a deliberate, rare action a human is actively waiting on.
+
+    Body: {exit_reason (required, a coded ExitReason), exit_note (required
+    only for OPERATOR_DISCRETION), source_rec_id (optional)}."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = executor.exit_position(
+            ticker, exit_reason=payload.get("exit_reason"),
+            exit_note=payload.get("exit_note"),
+            source_rec_id=payload.get("source_rec_id"))
+        return jsonify(result), (200 if result.get("ok") else 409)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except executor.PositionFrozenError as e:
+        return jsonify({"error": str(e), "frozen": True, "ticker": e.ticker,
+                        "review": e.review}), 409
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/positions/refresh-quote", methods=["POST"])
 def api_positions_refresh_quote():
     """Force a live quote for one position's stock + its open short-call legs
@@ -1437,6 +1466,7 @@ def api_recommendations():
     import recommendation_settle as settle
     import trust_derive
     import position_manager
+    import circuit_breaker
     from datetime import datetime, timezone
     try:
         state = log.load_state()
@@ -1484,7 +1514,27 @@ def api_recommendations():
             "gate_enforced": config.market_settle_gate_enabled(),
             "last_run": recommendation_runner.last_run(),
             "total": len(state.get("recommendations", [])),
+            # Per-condition circuit-breaker auto-exit permissions (default OFF).
+            # See circuit_breaker.py's AUTO-EXIT PERMISSIONS section.
+            "circuit_breaker_auto_exit": circuit_breaker.get_auto_exit_permissions(state),
         })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/recommendations/circuit-breaker-auto-exit", methods=["POST"])
+def api_set_circuit_breaker_auto_exit():
+    """Grant or revoke ONE circuit-breaker condition's permission to close a
+    position UNATTENDED the moment it trips — see circuit_breaker.py's
+    AUTO-EXIT PERMISSIONS section. Every condition defaults OFF; this is the
+    only way any of them turns on. Body: {condition, on}."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        import circuit_breaker
+        return jsonify(circuit_breaker.set_auto_exit_permission(
+            payload.get("condition"), bool(payload.get("on"))))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

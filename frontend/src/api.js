@@ -251,6 +251,14 @@ export const api = {
       body: JSON.stringify({ rec_id: recId, approve }),
     }),
   trustScoreboard: () => request("/api/trust-scoreboard"),
+  // Circuit-breaker auto-exit permission — per condition (drawdown / ma_fast /
+  // ma_slow), default OFF. Granting one lets the engine close the position
+  // UNATTENDED the moment that specific condition trips (still through the
+  // normal Paper/Live gate). See circuit_breaker.py's AUTO-EXIT PERMISSIONS.
+  setCircuitBreakerAutoExit: (condition, on) =>
+    request("/api/recommendations/circuit-breaker-auto-exit", {
+      method: "POST", body: JSON.stringify({ condition, on }),
+    }),
   // Classify a coverage miss with a coded reason. The miss stays counted (and
   // still blocks graduation); it stops re-paging and reads as acknowledged.
   acknowledgeMiss: (executionIds, reason, note) =>

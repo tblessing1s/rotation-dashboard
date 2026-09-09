@@ -492,6 +492,34 @@ def test_resolve_outcomes_skips_trades_not_yet_expired(store, monkeypatch):
     assert resolved == []
 
 
+def test_resolve_outcomes_does_not_reresolve_on_a_later_call(store, monkeypatch):
+    # The original day's shadow_trades record never gets mutated with an
+    # outcome (see test_resolve_outcomes_does_not_mutate_the_original_day_file),
+    # so a naive re-check of the trade's own `outcome` field would re-resolve
+    # — and re-append a duplicate outcomes record for — the same expired trade
+    # on every subsequent call, forever.
+    import data_handler
+    dp._record({"date": "2026-08-01", "candidates": [], "outcomes": [],
+               "shadow_trades": [{
+                   "strategy_tag": dp.STRATEGY_TAG, "ticker": "GDDY", "tier": dp.TIER_GENERAL,
+                   "opened_date": "2026-08-01", "expiration": "2026-08-08", "dte": 7,
+                   "strike": 90.0, "abs_delta": 0.18, "premium_per_share": 0.60,
+                   "contracts": 1, "collateral": 9000.0,
+                   "weekly_equivalent_yield_pct": 0.67, "annualized_yield_pct": 34.9,
+                   "outcome": None}]})
+    monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: _frame([100.0] * 40))
+
+    first = dp.resolve_outcomes(state={"positions": [], "metadata": {}}, as_of="2026-08-10")
+    assert len(first) == 1
+
+    # A later call (e.g. the next day's nightly sweep) must not re-resolve it.
+    second = dp.resolve_outcomes(state={"positions": [], "metadata": {}}, as_of="2026-08-20")
+    assert second == []
+
+    total_outcomes = sum(len(dp._load_day(d).get("outcomes", [])) for d in dp.stored_days())
+    assert total_outcomes == 1
+
+
 # ===========================================================================
 # summary() — the read rollup a UI surface renders.
 # ===========================================================================

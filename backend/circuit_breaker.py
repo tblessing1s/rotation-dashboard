@@ -14,12 +14,25 @@ Any one of these is a breach. ``evaluate`` returns every condition's state plus
 the overall verdict; the alert engine (alerts.check_circuit_breaker) and the
 Positions view read the verdict from here so the definition lives in one place,
 exactly like kill_switch.py owns the RS exit rule.
+
+AUTO-EXIT PERMISSIONS (opt-in, per-condition, default OFF): the operator may
+grant drawdown / ma_fast / ma_slow individually the authority to close the
+position UNATTENDED the moment that specific condition trips — see
+get_auto_exit_permissions / set_auto_exit_permission below and
+recommendation_runner._check_circuit_breaker_auto_exit, which is the only
+caller that acts on them. The manual line is deliberately excluded: it is
+freeform, set once at entry, and was never scoped for this. Granting a
+condition does not change what evaluate() computes or displays one bit —
+it only decides whether recommendation_runner is ALLOWED to call
+executor.exit_position() on the SAME rec a human would otherwise have to
+click "Execute" on.
 """
 from __future__ import annotations
 
 import config
 import data_handler
 import indicators
+import logging_handler as log
 
 
 def _round(v) -> float | None:
@@ -154,10 +167,41 @@ def exit_reason_code(evaluation: dict) -> str | None:
     """The coded exit reason a breach implies, or None when nothing is tripped.
     Takes the FIRST tripped condition in evaluation order (drawdown, fast-MA,
     slow-MA, manual line) so the reason is set at the point the breaker fires.
-    Advisory: circuit_breaker never closes on its own."""
+    This evaluator itself never closes anything — see the module docstring's
+    AUTO-EXIT PERMISSIONS section for the one, explicitly opt-in path that can
+    act on the code this returns without a human clicking Execute."""
     import exit_reasons
     for cid in evaluation.get("tripped_conditions") or []:
         code = _CONDITION_EXIT_CODE.get(cid)
         if code and exit_reasons.is_valid(code):
             return code
     return None
+
+
+# ---------------------------------------------------------------------------
+# Auto-exit permissions — see the module docstring. Persisted like
+# strike_policy's posture: state.metadata, per-store (live/demo never share
+# a grant), surviving restarts. Default OFF for every condition.
+# ---------------------------------------------------------------------------
+AUTO_EXIT_CONDITIONS = ("drawdown", "ma_fast", "ma_slow")
+_AUTO_EXIT_KEY = "circuit_breaker_auto_exit"
+
+
+def get_auto_exit_permissions(state: dict | None = None) -> dict:
+    """{"drawdown": bool, "ma_fast": bool, "ma_slow": bool} — always all three
+    keys, defaulting False for any condition never explicitly granted."""
+    state = state if state is not None else log.load_state()
+    stored = (state.get("metadata") or {}).get(_AUTO_EXIT_KEY) or {}
+    return {c: bool(stored.get(c)) for c in AUTO_EXIT_CONDITIONS}
+
+
+def set_auto_exit_permission(condition: str, on: bool) -> dict:
+    """Grant or revoke ONE condition's auto-exit permission. Raises on an
+    unrecognized condition rather than silently no-op-ing a typo."""
+    if condition not in AUTO_EXIT_CONDITIONS:
+        raise ValueError(f"condition must be one of {AUTO_EXIT_CONDITIONS}")
+    state = log.load_state()
+    perms = state.setdefault("metadata", {}).setdefault(_AUTO_EXIT_KEY, {})
+    perms[condition] = bool(on)
+    log.save_state(state)
+    return get_auto_exit_permissions(state)
