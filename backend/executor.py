@@ -3421,6 +3421,152 @@ def order_status(order_id: str) -> dict:
     return {"order_id": order_id, "status": "working", "raw_status": raw}
 
 
+# ---------------------------------------------------------------------------
+# Full position exit — closes every open short, then sells the shares, IN
+# THAT ORDER, waiting for each leg to actually fill before the next one is
+# even attempted. See exit_position() docstring for why this exists: today
+# every close_short / sell_shares execution is well-tested individually, but
+# nothing in this app has ever sequenced them into one "get me out" action —
+# not the UI (there is no exit button that calls both), and not a rule (every
+# EXIT recommendation stops at "emitted" and waits for a human). This is the
+# first thing that can, so it is the one place that must never guess forward
+# past a leg that did not confirm.
+# ---------------------------------------------------------------------------
+_EXIT_LEG_POLL_INTERVAL_S = 1.0
+
+
+def _run_leg_to_fill(payload: dict, now: datetime | None = None) -> tuple[dict | None, str | None]:
+    """Execute one leg and, for a live order, block until it is confirmed
+    filled (or definitively not going to be). Returns (result, None) on a
+    confirmed fill, or (None, error) the instant anything is less than a
+    clean fill — never a guess. Paper/logged legs commit synchronously inside
+    execute() itself, so there is nothing to poll for them."""
+    try:
+        result = execute(payload, now=now)
+    except Exception as e:  # noqa: BLE001 — the caller decides what a failed leg means
+        return None, str(e)
+    status = result.get("status")
+    if status in ("filled", "recorded"):
+        return result, None
+    if status != "working":
+        return None, f"unexpected order status '{status}'"
+    order_id = result.get("order_id")
+    deadline = time.monotonic() + config.ORDER_FILL_WAIT_SECONDS + _EXIT_LEG_POLL_INTERVAL_S
+    while True:
+        time.sleep(_EXIT_LEG_POLL_INTERVAL_S)
+        poll = order_status(order_id)
+        poll_status = poll.get("status")
+        if poll_status == "filled":
+            return poll, None
+        if poll_status in ("rejected", "canceled"):
+            return None, f"order {poll_status}"
+        if time.monotonic() >= deadline:
+            return None, "order did not fill within the wait window"
+
+
+def exit_position(ticker: str, exit_reason: str, exit_note: str | None = None,
+                  source_rec_id: str | None = None, now: datetime | None = None) -> dict:
+    """Fully exit a shares-primary position: BUY_TO_CLOSE every open short
+    call, then SELL every owned share. Never the other order — selling the
+    shares while a short is still open leaves a naked short, the one shape
+    this must never pass through (see recommendation_engine._shares_exit_ticket).
+
+    Each leg is priced from a FRESH quote taken right now (never a stale rec
+    snapshot — a circuit breaker firing usually means the stock just moved).
+    A live leg is polled to a confirmed fill (see _run_leg_to_fill) before the
+    next leg is even attempted; anything short of a clean fill — an
+    exception, a rejection, a timeout — stops the sequence immediately and
+    the shares are NOT sold, no matter what caused the stop.
+
+    Refuses outright on a position still carrying a legacy LEAP leg (the
+    read-only migration seam, config.LEGACY_LEAP_READONLY) — that shape needs
+    a human, not a first attempt at unattended sequencing.
+
+    Returns {"ok", "ticker", "steps": [...], "position_closed", "error"}.
+    Every attempted leg lands in ``steps`` (filled or not) so a caller or
+    alert can say exactly how far the exit got — not just that it "failed"."""
+    import exit_reasons
+    import position_manager
+    ticker = (ticker or "").strip().upper()
+    if not ticker:
+        raise ValueError("ticker is required")
+    exit_reason = exit_reasons.normalize(exit_reason)
+    if exit_reason is None:
+        raise ValueError("exit_reason must be a recognized coded reason (exit_reasons.ExitReason)")
+    if exit_reasons.requires_note(exit_reason) and not (exit_note or "").strip():
+        raise ValueError(f"exit_reason {exit_reason} requires a typed exit_note")
+    steps: list[dict] = []
+
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if not position or position.get("status") == "closed":
+        return {"ok": False, "ticker": ticker, "steps": steps,
+                "position_closed": True, "error": "no open position"}
+    if log.leap_legs(position):
+        return {"ok": False, "ticker": ticker, "steps": steps, "position_closed": False,
+                "error": ("refusing to auto-sequence a position carrying a legacy LEAP "
+                          "leg — close it by hand (close_leap / close_position_atomic)")}
+
+    # 1) Every open short call, one at a time — a position normally holds one,
+    #    but this never assumes it.
+    for sc in list(position.get("short_calls") or []):
+        contracts = int(sc.get("contracts") or 0)
+        if contracts <= 0:
+            continue
+        strike, expiration = sc.get("strike"), sc.get("expiration")
+        marks = position_manager._live_short_marks(ticker, [sc])
+        price = marks.get((strike, expiration))
+        if price is None:
+            price = sc.get("current_bid")
+        if price is None:
+            steps.append({"leg": "close_short", "strike": strike, "ok": False,
+                         "error": "no price available to close this short safely"})
+            return {"ok": False, "ticker": ticker, "steps": steps, "position_closed": False,
+                    "error": (f"stopped before selling shares — {ticker} {strike}C could not "
+                              "be priced")}
+        payload = {"action": "close_short", "ticker": ticker, "strike": strike,
+                  "contracts": contracts, "expiration": expiration,
+                  "close_price_per_share": round(float(price), 4),
+                  "source_rec_id": source_rec_id}
+        result, err = _run_leg_to_fill(payload, now)
+        steps.append({"leg": "close_short", "strike": strike, "ok": err is None,
+                     **({"error": err} if err else {}), **({"result": result} if result else {})})
+        if err:
+            return {"ok": False, "ticker": ticker, "steps": steps, "position_closed": False,
+                    "error": (f"stopped — {ticker} {strike}C did not close ({err}); "
+                              "shares NOT sold, position still covered")}
+
+    # 2) Every owned share — only ever reached once every short above is
+    #    confirmed closed.
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    share_count = int((position.get("shares") or {}).get("count") or 0) if position else 0
+    if share_count > 0:
+        price = position_manager._stock_price(ticker)
+        if price is None:
+            steps.append({"leg": "sell_shares", "ok": False, "error": "no live quote available"})
+            return {"ok": False, "ticker": ticker, "steps": steps, "position_closed": False,
+                    "error": (f"every short closed but {ticker} shares could not be priced — "
+                              "sell them manually")}
+        payload = {"action": "sell_shares", "ticker": ticker, "qty": share_count,
+                  "price_per_share": round(float(price), 4),
+                  "source_rec_id": source_rec_id,
+                  "exit_reason": exit_reason, "exit_note": exit_note}
+        result, err = _run_leg_to_fill(payload, now)
+        steps.append({"leg": "sell_shares", "ok": err is None,
+                     **({"error": err} if err else {}), **({"result": result} if result else {})})
+        if err:
+            return {"ok": False, "ticker": ticker, "steps": steps, "position_closed": False,
+                    "error": (f"every short closed but the share sale failed ({err}) — "
+                              f"{ticker} now sits uncovered, resolve immediately")}
+
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    closed = position is None or position.get("status") == "closed"
+    return {"ok": True, "ticker": ticker, "steps": steps, "position_closed": closed,
+            "error": None, "exit_reason": exit_reason, "exit_note": exit_note}
+
+
 def _capture_order_receipt(order_id, raw_status, rec, order, result) -> None:
     """Record a broker fill receipt: the Schwab order id + the committed
     execution ids, so the live-order path can later be diffed against Schwab's
@@ -4241,9 +4387,16 @@ def _buy_shares(payload, ticker, stock_price):
 
 
 def _sell_shares(payload, ticker, stock_price):
-    """Sell shares from the base leg (operator rotation / trim). Realized P&L vs the
-    lot cost basis. NOT a called-away assignment — that is close_shares_assigned,
-    booked at the short strike with a CALLED_AWAY exit reason."""
+    """Sell shares from the base leg (operator rotation / trim, OR the final leg
+    of exit_position()'s full exit). Realized P&L vs the lot cost basis. NOT a
+    called-away assignment — that is close_shares_assigned, booked at the short
+    strike with a CALLED_AWAY exit reason.
+
+    exit_reason/exit_note are OPTIONAL and unvalidated here (a plain trim never
+    sets them) — normalized to a recognized code when present so a full exit
+    routed through this action carries the same coded provenance close_leap
+    does, without gating an ordinary share sale on the exit-reason menu."""
+    import exit_reasons
     qty = int(payload.get("qty") or payload.get("shares") or 0)
     price_per_share = float(payload.get("price_per_share")
                             if payload.get("price_per_share") is not None else (stock_price or 0))
@@ -4260,6 +4413,8 @@ def _sell_shares(payload, ticker, stock_price):
         "price_per_share": round(price_per_share, 4), "execution_total": round(proceeds, 2),
         "stock_price": stock_price, "cost_basis_per_share": round(cost_ps, 4),
         "realized_pnl": realized_pnl,
+        "exit_reason": exit_reasons.normalize(payload.get("exit_reason")),
+        "exit_note": (payload.get("exit_note") or None),
     }
 
     def apply(position):

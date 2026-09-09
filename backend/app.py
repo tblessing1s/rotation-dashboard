@@ -859,6 +859,35 @@ def api_positions():
         return _err(e)
 
 
+@app.route("/api/positions/<ticker>/exit", methods=["POST"])
+def api_positions_exit(ticker):
+    """Fully exit a position on ONE call: close every open short, then sell
+    every owned share — executor.exit_position(), the first thing in this app
+    that sequences both legs of a real exit instead of stopping at a
+    recommendation. Manual-trigger only: this endpoint is the human-in-the-
+    loop path (a click), never called by a scheduled pass. Blocks for the
+    duration of the exit (each leg waits for its own fill, live mode included)
+    exactly like the other synchronous "do it now" actions (reconcile, run
+    evaluation pass) — a deliberate, rare action a human is actively waiting on.
+
+    Body: {exit_reason (required, a coded ExitReason), exit_note (required
+    only for OPERATOR_DISCRETION), source_rec_id (optional)}."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        result = executor.exit_position(
+            ticker, exit_reason=payload.get("exit_reason"),
+            exit_note=payload.get("exit_note"),
+            source_rec_id=payload.get("source_rec_id"))
+        return jsonify(result), (200 if result.get("ok") else 409)
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except executor.PositionFrozenError as e:
+        return jsonify({"error": str(e), "frozen": True, "ticker": e.ticker,
+                        "review": e.review}), 409
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/positions/refresh-quote", methods=["POST"])
 def api_positions_refresh_quote():
     """Force a live quote for one position's stock + its open short-call legs
