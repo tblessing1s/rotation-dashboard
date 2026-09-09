@@ -429,16 +429,28 @@ def resolve_outcomes(state: dict | None = None, as_of: str | None = None) -> lis
     TODAY's-gates read, not a true point-in-time backtest.
 
     Appends a new `outcomes` record to TODAY's file rather than mutating the
-    original day's file — no in-place mutation, ever."""
+    original day's file — no in-place mutation, ever. Because the original
+    trade record is never mutated, "already resolved" is instead a look
+    ACROSS every stored day's `outcomes` for this trade's (ticker,
+    opened_date, expiration) key — not a read of the trade's own `outcome`
+    field, which stays None forever. Without that cross-day look, a past
+    trade would be re-resolved and re-appended on every subsequent call
+    (once per day, forever) instead of exactly once."""
     if state is None:
         state = log.load_state()
     as_of_date = pd.Timestamp(as_of) if as_of else pd.Timestamp(_today())
     resolved: list[dict] = []
 
+    already_resolved: set[tuple] = set()
+    for day in stored_days():
+        for rec in _load_day(day).get("outcomes", []):
+            already_resolved.add((rec.get("ticker"), rec.get("opened_date"), rec.get("expiration")))
+
     for day in stored_days():
         data = _load_day(day)
         for trade in data.get("shadow_trades", []):
-            if trade.get("outcome") is not None:
+            key = (trade.get("ticker"), trade.get("opened_date"), trade.get("expiration"))
+            if key in already_resolved:
                 continue
             exp = trade.get("expiration")
             if not exp:
@@ -475,6 +487,9 @@ def resolve_outcomes(state: dict | None = None, as_of: str | None = None) -> lis
                 except Exception as e:  # noqa: BLE001
                     outcome["gate_error"] = str(e)
 
+            already_resolved.add(key)  # a trade recorded more than once (the
+                                        # documented multi-account log-sharing
+                                        # limitation) resolves only once per run
             resolved.append({"ticker": trade["ticker"], "opened_date": trade["opened_date"],
                              "expiration": exp, "strike": trade["strike"],
                              "contracts": trade["contracts"], "outcome": outcome})
