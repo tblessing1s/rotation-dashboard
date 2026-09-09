@@ -38,6 +38,122 @@ const SETTLE_REASON_LABEL = {
   MARKET_CLOSED: "market closed",
 };
 
+// Circuit-breaker auto-exit — the one place this app ever closes a position
+// with nobody clicking anything. Off by default for every condition; turning
+// one on requires an explicit confirmation (mirrors LiveTradingSwitch's
+// enable flow), turning one off is immediate.
+const AUTO_EXIT_CONDITIONS = [
+  { id: "drawdown", label: "15% drop from entry",
+    detail: "The stock has fallen 15% from the price this position was entered at." },
+  { id: "ma_fast", label: "3 closes below the 50-day MA",
+    detail: "3 consecutive daily closes below the 50-day moving average." },
+  { id: "ma_slow", label: "A close below the 200-day MA",
+    detail: "A single daily close below the 200-day moving average — the final backstop." },
+];
+
+function AutoExitPermissions({ perms, onChanged }) {
+  const toast = useToast();
+  const [busy, setBusy] = React.useState(null); // condition id currently saving
+  const [confirming, setConfirming] = React.useState(null); // condition object being enabled
+
+  async function apply(condition, on) {
+    setBusy(condition);
+    try {
+      await api.setCircuitBreakerAutoExit(condition, on);
+      toast.show(`Circuit-breaker auto-exit ${on ? "enabled" : "disabled"} for ${condition}`,
+        { type: on ? "success" : "info" });
+      onChanged();
+    } catch (e) {
+      toast.show(String(e.message || e), { type: "error" });
+    } finally {
+      setBusy(null);
+      setConfirming(null);
+    }
+  }
+
+  const anyOn = AUTO_EXIT_CONDITIONS.some((c) => perms?.[c.id]);
+
+  return (
+    <Card
+      title="Circuit-breaker auto-exit"
+      right={
+        <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300">
+          {anyOn ? "armed" : "off"}
+        </span>
+      }
+    >
+      <p className="mb-3 text-xs text-slate-400">
+        Off by default, per condition. Granting one lets the engine close the position —
+        buy back the call, then sell the shares — the moment that specific condition trips,
+        with nobody clicking anything. It still goes through the normal Paper/Live switch: it
+        stays paper (logged, no order sent) until you separately enable Live Trading in Settings.
+      </p>
+      <div className="divide-y divide-slate-800">
+        {AUTO_EXIT_CONDITIONS.map((c) => {
+          const on = !!perms?.[c.id];
+          return (
+            <div key={c.id} className="flex items-center justify-between gap-4 py-2.5">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-slate-200">{c.label}</div>
+                <div className="mt-0.5 text-xs text-slate-500">{c.detail}</div>
+              </div>
+              {on ? (
+                <button
+                  onClick={() => apply(c.id, false)}
+                  disabled={busy === c.id}
+                  className="shrink-0 rounded-lg border border-emerald-600/50 bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-50"
+                >
+                  {busy === c.id ? "Saving…" : "✓ Armed — disable"}
+                </button>
+              ) : (
+                <button
+                  onClick={() => setConfirming(c)}
+                  disabled={busy === c.id}
+                  className="shrink-0 rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                >
+                  Grant permission
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {confirming && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+             role="dialog" aria-modal="true" onClick={() => setConfirming(null)}>
+          <div className="w-full max-w-md rounded-xl border border-amber-700 bg-slate-900 p-5 shadow-2xl"
+               onClick={(e) => e.stopPropagation()}>
+            <h2 className="mb-2 text-base font-semibold text-slate-100">
+              Auto-exit on "{confirming.label}"?
+            </h2>
+            <p className="text-sm text-amber-200">
+              The next time this condition trips, the engine will close the position — buy back
+              the call, then sell the shares — <span className="font-semibold">without you clicking
+              anything</span>. Nothing else about the circuit breaker changes; every other
+              condition still just recommends.
+            </p>
+            <p className="mt-2 rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-2 text-xs text-slate-300">
+              This still respects Paper/Live: it stays paper (logged only, no order sent) until
+              you separately enable Live Trading in Settings.
+            </p>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button onClick={() => setConfirming(null)} disabled={busy === confirming.id}
+                      className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-40">
+                Cancel
+              </button>
+              <button onClick={() => apply(confirming.id, true)} disabled={busy === confirming.id}
+                      className="rounded-lg bg-amber-500/20 px-4 py-2 text-sm font-semibold text-amber-300 hover:bg-amber-500/30 disabled:opacity-40">
+                {busy === confirming.id ? "Enabling…" : "Grant permission"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function useNow(intervalMs = 60000) {
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {
@@ -434,6 +550,8 @@ export default function RecommendationsTab({ onNavigate, onSelectStock, onAction
           {(data?.pending_settle || []).length} staged for settle · {data?.total ?? 0} recommendations total.
         </p>
       </Card>
+
+      <AutoExitPermissions perms={data?.circuit_breaker_auto_exit} onChanged={reload} />
 
       <OpenRecommendations
         recs={data?.open_actionable}
