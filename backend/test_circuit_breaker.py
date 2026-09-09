@@ -31,14 +31,26 @@ def _tripped(verdict):
 
 # ---- condition 1: drawdown from entry ---------------------------------------
 def test_drawdown_trips_at_or_below_15pct():
-    # entry 100, a 16% drop to 84 — short frame so the MA legs stay inert.
-    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([84.0] * 5))
+    # High since entry 100 (the first 4 closes), a 16% drop to 84 on the last
+    # close — short frame so the MA legs stay inert.
+    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([100.0] * 4 + [84.0]))
     assert v["tripped"] and "drawdown" in _tripped(v)
     assert v["status"] == "red"
 
 
+def test_drawdown_trails_the_high_not_the_entry_price():
+    # Entered at 60, ran up to a 100 high, now sitting at 84 — only 16% off
+    # the HIGH (tripped), even though it is +40% above the original entry.
+    v = circuit_breaker.evaluate(_pos(entry_price=60.0), df=_frame([60.0, 100.0, 100.0, 100.0, 84.0]))
+    assert v["tripped"] and "drawdown" in _tripped(v)
+    assert v["conditions"][0]["detail"]["high_since_entry"] == 100.0
+    assert v["conditions"][0]["detail"]["line"] == 85.0
+
+
 def test_drawdown_holds_above_the_line_but_warns_when_two_thirds_there():
-    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([90.0] * 5))  # -10%
+    # High since entry 100, now -10% off it (holds above the -15% line, but
+    # is already 2/3 of the way there).
+    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([100.0] * 4 + [90.0]))
     assert not v["tripped"]
     assert v["status"] == "yellow" and "drawdown" in v["approaching"]
 
@@ -102,8 +114,9 @@ def test_whichever_comes_first_reports_every_breached_condition():
 
 # ---- levels / nearest_trigger — the Positions card's "spot it trips" readout
 def test_levels_and_nearest_trigger_with_only_a_drawdown_line():
-    # Short frame -> the MA legs stay inert (no SMA yet); no manual line set.
-    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([95.0] * 5))
+    # High since entry 100 (first close), settled at 95 — short frame so the
+    # MA legs stay inert (no SMA yet); no manual line set.
+    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([100.0, 95.0, 95.0, 95.0, 95.0]))
     assert v["levels"] == {"drawdown": 85.0}
     assert v["nearest_trigger"] == {"condition": "drawdown", "price": 85.0,
                                     "label": v["conditions"][0]["label"]}
@@ -156,3 +169,23 @@ def test_consecutive_closes_below_sma_zero_when_last_close_is_above():
 
 def test_consecutive_closes_below_sma_none_without_enough_history():
     assert indicators.consecutive_closes_below_sma(_frame([100.0] * 10), 50) is None
+
+
+def test_high_close_since_filters_to_the_given_date():
+    df = _frame([50.0, 200.0, 100.0, 90.0, 80.0])  # index starts 2020-01-01
+    # The 200 high on day 2 is BEFORE the given since_date -> excluded.
+    assert indicators.high_close_since(df, "2020-01-03") == 100.0
+
+
+def test_high_close_since_falls_back_to_the_whole_frame_without_a_date():
+    df = _frame([50.0, 200.0, 100.0])
+    assert indicators.high_close_since(df, None) == 200.0
+
+
+def test_high_close_since_falls_back_when_the_date_matches_nothing():
+    df = _frame([50.0, 200.0, 100.0])
+    assert indicators.high_close_since(df, "2099-01-01") == 200.0
+
+
+def test_high_close_since_none_without_any_price_data():
+    assert indicators.high_close_since(None, "2020-01-01") is None

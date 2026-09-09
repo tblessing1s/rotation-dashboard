@@ -62,6 +62,27 @@ def consecutive_closes_below_sma(df: pd.DataFrame | None, window: int) -> int | 
     return count
 
 
+def high_close_since(df: pd.DataFrame | None, since_date: str | None) -> float | None:
+    """Highest daily close on or after ``since_date`` (e.g. a position's
+    entry_date) — the circuit breaker's trailing high-water mark. Falls back
+    to the whole frame's high when ``since_date`` is missing/unparseable or
+    matches nothing (an older position never backfilled with a real entry
+    date) — conservative, since that can only push a caller's floor UP, never
+    down. None only when there is no price data at all.
+    """
+    if df is None or df.empty:
+        return None
+    sliced = df
+    if since_date:
+        try:
+            sliced = df.loc[df.index >= pd.Timestamp(since_date)]
+        except (TypeError, ValueError):
+            sliced = df
+    if sliced.empty:
+        sliced = df
+    return float(_close(sliced).max())
+
+
 def rsi(df: pd.DataFrame, window: int = config.RSI_WINDOW) -> float | None:
     c = _close(df)
     if len(c) < window + 1:

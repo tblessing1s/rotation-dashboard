@@ -412,12 +412,13 @@ function DefendPanel({ ticker, onStage }) {
 
 // The circuit breaker's own price levels (circuit_breaker.py's `levels` /
 // `nearest_trigger`) — recomputed fresh every load, so the 50-/200-day MA
-// lines move day to day exactly as the underlying moves, unlike the
-// drawdown/manual lines which stay fixed once set. `nearest_trigger` is
-// whichever defined level sits highest — the one a falling price reaches
-// first. Read-only: nothing here changes what the breaker does.
+// lines move day to day exactly as the underlying moves, and the drawdown
+// line TRAILS the highest close since entry (ratchets up, never down) —
+// only the manual line stays fixed once set. `nearest_trigger` is whichever
+// defined level sits highest — the one a falling price reaches first.
+// Read-only: nothing here changes what the breaker does.
 const CB_LEVEL_LABEL = {
-  drawdown: "15% off entry", ma_fast: "50-day MA",
+  drawdown: "15% off the high", ma_fast: "50-day MA",
   ma_slow: "200-day MA", manual_line: "manual line",
 };
 const CB_STATUS_TONE = {
