@@ -3,7 +3,6 @@ import { api } from "../api.js";
 import { Card } from "./ui.jsx";
 import LiveTradingSwitch from "./LiveTradingSwitch.jsx";
 import { AlertSettings } from "./AlertsPanel.jsx";
-import TrustScoreboard from "./TrustScoreboard.jsx";
 import DataHealth from "./DataHealth.jsx";
 import AccountsPanel from "./AccountsPanel.jsx";
 
@@ -121,12 +120,12 @@ export default function SettingsTab({ demo, modeBusy, onToggleDemo, posture, pos
       </Section>
 
       <Section id="diagnostics" title="Diagnostics"
-               summary="engine trust scoreboard · data sources · universe">
+               summary="data sources · universe">
         <p className="text-xs text-slate-500">
           Read-only instruments for checking on the machine. Nothing here changes what the
-          engine recommends or what the gates allow.
+          engine recommends or what the gates allow. The recommendation engine's trust
+          scoreboard has moved to its own Recommendations tab.
         </p>
-        <TrustScoreboard />
         <DataHealth />
       </Section>
     </div>

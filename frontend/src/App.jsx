@@ -15,6 +15,7 @@ import HistoryTab from "./components/HistoryTab.jsx";
 import ReadyToEnter from "./components/ReadyToEnter.jsx";
 import ScanProgress from "./components/ScanProgress.jsx";
 import Overview from "./components/Overview.jsx";
+import RecommendationsTab from "./components/RecommendationsTab.jsx";
 import SettingsTab from "./components/SettingsTab.jsx";
 import PayoutsTab from "./components/PayoutsTab.jsx";
 
@@ -22,7 +23,7 @@ import PayoutsTab from "./components/PayoutsTab.jsx";
 // deliberately off the daily monitoring path (Overview / Scan): the gate
 // rejection telemetry must be reached on purpose, never encountered while
 // deciding an entry, where it could subtly pressure the decision.
-const TABS = ["Overview", "Scan", "Positions", "History", "Payouts", "Calibration", "Settings"];
+const TABS = ["Overview", "Recommendations", "Scan", "Positions", "History", "Payouts", "Calibration", "Settings"];
 
 export default function App() {
   const [tab, setTab] = React.useState("Overview");
@@ -319,6 +320,14 @@ export default function App() {
                 accountId={accountId}
                 accountNonce={accountNonce}
                 onSelectAccount={switchAccount}
+              />
+            )}
+            {tab === "Recommendations" && (
+              <RecommendationsTab
+                key={`${accountNonce}:${execNonce}`}
+                onNavigate={goToTab}
+                onSelectStock={openTicket}
+                onAction={goToAction}
               />
             )}
             {tab === "Scan" && (
