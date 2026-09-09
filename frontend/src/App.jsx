@@ -5,6 +5,8 @@ import AlertsPanel from "./components/AlertsPanel.jsx";
 import Navbar from "./components/Navbar.jsx";
 import TickerStrip from "./components/TickerStrip.jsx";
 import GateTelemetry from "./components/GateTelemetry.jsx";
+import ShadowCalibration from "./components/ShadowCalibration.jsx";
+import DryPowderSleeve from "./components/DryPowderSleeve.jsx";
 import Login from "./components/Login.jsx";
 import SchwabStatus from "./components/SchwabStatus.jsx";
 import ExecuteTab from "./components/ExecuteTab.jsx";
@@ -340,7 +342,13 @@ export default function App() {
             )}
             {tab === "History" && <HistoryTab key={`${accountNonce}:${execNonce}`} />}
             {tab === "Payouts" && <PayoutsTab key={`${accountNonce}:${execNonce}`} />}
-            {tab === "Calibration" && <GateTelemetry />}
+            {tab === "Calibration" && (
+              <div className="space-y-4">
+                <GateTelemetry />
+                <ShadowCalibration />
+                <DryPowderSleeve />
+              </div>
+            )}
             {tab === "Settings" && (
               <SettingsTab demo={demo} modeBusy={modeBusy} onToggleDemo={toggleDemo}
                            posture={posture} postureBusy={postureBusy}

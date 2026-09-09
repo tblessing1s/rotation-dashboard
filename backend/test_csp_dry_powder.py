@@ -490,3 +490,64 @@ def test_resolve_outcomes_skips_trades_not_yet_expired(store, monkeypatch):
     monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: _frame([100.0] * 40))
     resolved = dp.resolve_outcomes(state={"positions": [], "metadata": {}}, as_of="2026-08-10")
     assert resolved == []
+
+
+# ===========================================================================
+# summary() — the read rollup a UI surface renders.
+# ===========================================================================
+def test_summary_empty_store_reports_zeroes(store):
+    s = dp.summary()
+    assert s["candidates"] == 0
+    assert s["shadow_trades_total"] == 0
+    assert s["open_trades"] == []
+    assert s["resolved_trades"] == []
+    assert s["assignment_rate"] is None
+    assert s["avg_annualized_yield_pct"] is None
+
+
+def test_summary_counts_candidates_and_tiers(store):
+    dp._record({"date": "2026-08-01", "outcomes": [], "shadow_trades": [],
+               "candidates": [
+                   {"ticker": "AAA", "tier": dp.TIER_QUALITY, "scan_result": "qualifying_strike"},
+                   {"ticker": "BBB", "tier": dp.TIER_GENERAL, "scan_result": "no_qualifying_strike"},
+                   {"ticker": "CCC"},
+               ]})
+    s = dp.summary()
+    assert s["candidates"] == 3
+    assert s["tier_counts"] == {dp.TIER_QUALITY: 1, dp.TIER_GENERAL: 1}
+    assert s["scan_result_counts"] == {"qualifying_strike": 1, "no_qualifying_strike": 1}
+
+
+def test_summary_splits_open_from_resolved_trades(store):
+    trade = {"strategy_tag": dp.STRATEGY_TAG, "ticker": "GDDY", "tier": dp.TIER_GENERAL,
+             "opened_date": "2026-08-01", "expiration": "2026-08-08", "dte": 7,
+             "strike": 90.0, "abs_delta": 0.18, "premium_per_share": 0.60,
+             "contracts": 1, "collateral": 9000.0, "weekly_equivalent_yield_pct": 0.67,
+             "annualized_yield_pct": 34.9, "outcome": None}
+    dp._record({"date": "2026-08-01", "candidates": [], "outcomes": [], "shadow_trades": [trade]})
+    s = dp.summary()
+    assert s["shadow_trades_total"] == 1
+    assert s["open_trades"] == [trade]
+    assert s["resolved_trades"] == []
+    assert s["avg_annualized_yield_pct"] == 34.9
+
+    outcome_rec = {"ticker": "GDDY", "opened_date": "2026-08-01", "expiration": "2026-08-08",
+                   "strike": 90.0, "contracts": 1, "outcome": {"assigned": True}}
+    dp._record({"date": "2026-08-09", "candidates": [], "shadow_trades": [], "outcomes": [outcome_rec]})
+    s = dp.summary()
+    assert s["open_trades"] == []
+    assert len(s["resolved_trades"]) == 1
+    assert s["resolved_trades"][0]["outcome"]["assigned"] is True
+    assert s["assigned"] == 1
+    assert s["expired"] == 0
+    assert s["assignment_rate"] == 100.0
+
+
+def test_summary_days_bounds_to_most_recent_stored_days(store, monkeypatch):
+    monkeypatch.setattr(config, "DRY_POWDER_LOG_RETENTION_DAYS", 10)
+    for day in ("2026-08-01", "2026-08-02", "2026-08-03"):
+        dp._record({"date": day, "shadow_trades": [], "outcomes": [],
+                   "candidates": [{"ticker": "AAA"}]})
+    assert dp.summary(days=1)["candidates"] == 1
+    assert dp.summary(days=2)["candidates"] == 2
+    assert dp.summary()["candidates"] == 3

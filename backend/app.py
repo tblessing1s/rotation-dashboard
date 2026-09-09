@@ -1207,6 +1207,22 @@ def api_scan_gate_telemetry():
         return _err(e)
 
 
+@app.route("/api/csp-dry-powder/summary")
+def api_csp_dry_powder_summary():
+    """Dry-powder cash-secured-put shadow sleeve (csp_dry_powder.py) — a second,
+    distinct income sweep run nightly on idle cash, entirely separate from the
+    CFM entry mechanism. SHADOW ONLY: it never places an order. Optional
+    ?days=N bounds the rollup to the N most recent stored scan days (default:
+    all retained, up to DRY_POWDER_LOG_RETENTION_DAYS). Read-only telemetry;
+    empty until the nightly sweep has logged a few days."""
+    try:
+        import csp_dry_powder
+        days = int(request.args.get("days") or 0) or None
+        return jsonify(csp_dry_powder.summary(days=days))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/scan/transitions")
 def api_scan_transitions():
     """The nightly scan transition feed — BENCH→READY / fresh-READY / degrade /

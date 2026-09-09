@@ -556,6 +556,92 @@ def prune(max_days: int | None = None) -> int:
     return removed
 
 
+# ---------------------------------------------------------------------------
+# Read rollup — for a UI surface. This sleeve had none: it ran nightly and
+# logged to a JSON file under DATA_DIR that nothing ever rendered.
+# ---------------------------------------------------------------------------
+def summary(days: int | None = None) -> dict:
+    """Rollup over the most recent ``days`` stored days (default: all
+    retained). Read-only; never touches the log.
+
+    KNOWN LIMITATION: the side-channel is process-wide, not per-account (see
+    module docstring on STORAGE) — a book running several accounts appends
+    each account's sweep into the same day's file with no account tag, so a
+    trade/outcome pair keyed by (ticker, opened_date, expiration) here is
+    last-write-wins across accounts rather than summed. Acceptable for a
+    shadow-only sleeve at today's account counts; a true per-account split
+    would need the log itself tagged, which is out of scope here."""
+    days_list = stored_days()
+    if days:
+        days_list = days_list[-days:]
+
+    candidates_total = 0
+    tier_counts: dict[str, int] = {}
+    scan_result_counts: dict[str, int] = {}
+    trades_by_key: dict[tuple, dict] = {}
+    outcomes_by_key: dict[tuple, dict] = {}
+
+    for day in days_list:
+        data = _load_day(day)
+        for row in data.get("candidates", []):
+            candidates_total += 1
+            if row.get("tier"):
+                tier_counts[row["tier"]] = tier_counts.get(row["tier"], 0) + 1
+            if row.get("scan_result"):
+                scan_result_counts[row["scan_result"]] = scan_result_counts.get(row["scan_result"], 0) + 1
+        for trade in data.get("shadow_trades", []):
+            key = (trade.get("ticker"), trade.get("opened_date"), trade.get("expiration"))
+            trades_by_key[key] = trade
+        for rec in data.get("outcomes", []):
+            key = (rec.get("ticker"), rec.get("opened_date"), rec.get("expiration"))
+            outcomes_by_key[key] = rec
+
+    open_trades: list[dict] = []
+    resolved_trades: list[dict] = []
+    assigned = expired = 0
+    yield_total = 0.0
+    yield_n = 0
+    for key, trade in trades_by_key.items():
+        yp = trade.get("annualized_yield_pct")
+        if yp is not None:
+            yield_total += yp
+            yield_n += 1
+        outcome_rec = outcomes_by_key.get(key)
+        if outcome_rec is None:
+            open_trades.append(trade)
+            continue
+        outcome = outcome_rec.get("outcome") or {}
+        resolved_trades.append({**trade, "outcome": outcome})
+        if outcome.get("assigned"):
+            assigned += 1
+        else:
+            expired += 1
+
+    open_trades.sort(key=lambda t: t.get("opened_date") or "", reverse=True)
+    resolved_trades.sort(key=lambda t: t.get("opened_date") or "", reverse=True)
+    settled = assigned + expired
+    return {
+        "enabled": dry_powder_scan_enabled(),
+        "days": len(days_list),
+        "candidates": candidates_total,
+        "tier_counts": tier_counts,
+        "scan_result_counts": scan_result_counts,
+        "shadow_trades_total": len(trades_by_key),
+        "open_trades": open_trades,
+        "resolved_trades": resolved_trades,
+        "assigned": assigned,
+        "expired": expired,
+        "assignment_rate": round(assigned / settled * 100, 1) if settled else None,
+        "avg_annualized_yield_pct": round(yield_total / yield_n, 2) if yield_n else None,
+    }
+
+
+def dry_powder_scan_enabled() -> bool:
+    """Mirrors ``alert_scheduler.dry_powder_scan_enabled`` (kept local so this
+    module's read path never imports the scheduler)."""
+    return os.environ.get("CFM_DRY_POWDER_SCAN", "1").strip() not in ("0", "false", "no")
+
+
 def _record(entry: dict) -> dict:
     """Append this run's candidates/shadow_trades/outcomes to today's file.
     Best-effort by contract, same as `gate_telemetry.record_scan`: a logging
