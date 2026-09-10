@@ -986,6 +986,15 @@ ROLL_READY_ITM_FLOOR_PCT = 3.0  # % ITM cushion below which the strike itself is
 # Distinct from the 75% rule (BUYBACK_DECAY_PCT reads TOTAL premium decay, which
 # an ITM short's intrinsic drags down; this reads the extrinsic alone).
 ROLL_EXTRINSIC_CAPTURED_PCT = ROLL_READY_DECAY_PCT
+
+# TRAVIS_EXTENSION / PROPOSED_DEFAULT — once ROLL_EXTRINSIC_CAPTURED fires, this
+# is the dividing line between the two flavors of roll the recommendation
+# offers, both to a fresh higher strike: >= this many DTE left in the CURRENT
+# contract -> roll UP in place (same expiration — there's still real time to
+# sell against the new strike this week); below it -> roll UP AND OUT to the
+# next weekly instead, for a full fresh week of extrinsic rather than a few
+# days' worth. See roll_advisor.roll_direction.
+ROLL_UP_SAME_WEEK_MIN_DTE = 3
 # The weekly-juice BASIS (account_gate.juice_estimate): the model weekly call is
 # priced on one FULL Friday-to-Friday week — 7 calendar days — so every name is
 # compared on the same week whatever weekday the scan runs. (The old 5/365 was a
@@ -1017,6 +1026,16 @@ EXTRINSIC_ABOVE_ENTRY_ALERT_PCT = 25.0
 # section of the assignment/dividend rule). PROPOSED_DEFAULT floor — a few cents
 # of remaining time value per share.
 ASSIGNMENT_EXTRINSIC_FLOOR = 0.10
+
+# TRAVIS_EXTENSION / PROPOSED_DEFAULT — this structure sells the short BELOW
+# spot (deep ITM by design), so the risk direction is the stock falling DOWN
+# toward the strike. Still at/above the strike but within this % of spot
+# (position_manager.strike_gap's distance_pct) -> the ITM cushion is thinning
+# before the strike is actually breached. A strictly-earlier warning than
+# DEFEND_POSITION (which needs the close to be below the strike): the two never
+# double-fire on the same short (see position_manager.enrich_short's
+# approaching_atm, which hands off at the strike).
+SHORT_ATM_APPROACH_PCT = 3.0
 
 # PROPOSED_DEFAULT — Schwab refresh tokens die at 7 days (no programmatic
 # renewal); alert at day 5 so re-auth happens before data goes dark.

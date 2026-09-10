@@ -277,6 +277,18 @@ def enrich_short(sc: dict, stock_price: float | None, dividend: dict | None,
     out["itm"] = gap["itm"]
     out["moneyness"] = gap["moneyness"]
 
+    # Approaching ATM: this structure sells the short BELOW spot (deep ITM by
+    # design — strike_policy's ATR-below-price table), so the risk direction is
+    # the stock falling DOWN toward the strike, thinning the ITM cushion, not
+    # rising up through it. Still at/above the strike (below_strike hasn't
+    # tripped) but within SHORT_ATM_APPROACH_PCT of it -> warn before there's
+    # anything to defend. Never true at the same time as below_strike.
+    out["approaching_atm"] = bool(
+        stock_price is not None and strike is not None
+        and float(stock_price) >= float(strike)
+        and gap["distance_pct"] is not None
+        and gap["distance_pct"] <= config.SHORT_ATM_APPROACH_PCT)
+
     dte = sc.get("dte")
     out["roll_now"] = bool(decay is not None and decay >= config.BUYBACK_DECAY_PCT
                            and dte is not None and dte > config.BUYBACK_MIN_DTE)

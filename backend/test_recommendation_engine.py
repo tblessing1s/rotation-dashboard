@@ -645,6 +645,12 @@ def _captured_case(current_bid=3.4, dte=4, price=183.0):
 
 
 def test_extrinsic_captured_emits_an_early_roll_out():
+    # 4 DTE is >= config.ROLL_UP_SAME_WEEK_MIN_DTE (3), so this rolls UP in
+    # place (same expiration) rather than out to next week — see
+    # test_extrinsic_captured_rolls_up_and_out_when_the_week_is_nearly_gone for
+    # the other side of that decision. "ROLL_OUT" is the action-type FAMILY
+    # (rec_types has no separate roll-up action); the direction lives on the
+    # ticket's own roll_direction field.
     p, tk = _captured_case()
     recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
     assert len(recs) == 1, recs
@@ -654,13 +660,29 @@ def test_extrinsic_captured_emits_an_early_roll_out():
     ticket = rec["proposed_ticket"]
     assert ticket["action"] == "roll_short"
     assert ticket["roll_reason"] == "extrinsic-captured"
+    assert ticket["roll_direction"] == "ROLL_UP"
     sto = [l for l in ticket["legs"] if l["instruction"] == "SELL_TO_OPEN"][0]
-    assert sto["dte"] == 4 + 7          # OUT to the next weekly
+    assert sto["dte"] == 4               # UP in place — same expiration
     detail = rec["input_snapshot"]["trigger_detail"]
     assert detail["extrinsic_captured_pct"] == 84.0
     assert detail["threshold_pct"] == config.ROLL_EXTRINSIC_CAPTURED_PCT
+    assert detail["roll_up_same_week_min_dte"] == config.ROLL_UP_SAME_WEEK_MIN_DTE
     # the evidence rides the features too, so an ALL_CLEAR shows what was seen
     assert rec["input_snapshot"]["shorts"][0]["extrinsic_captured_pct"] == 84.0
+
+
+def test_extrinsic_captured_rolls_up_and_out_when_the_week_is_nearly_gone():
+    # 2 DTE is under the same-week floor (3) but still > EXPIRY_WARN_DTE (1), so
+    # ROLL_EXTRINSIC_CAPTURED still fires as the dominant trigger — it just picks
+    # the other direction: not enough of the current week left to sell the fresh
+    # higher strike in place, so roll all the way out to next week instead.
+    p, tk = _captured_case(dte=2)
+    recs = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])
+    assert recs[0]["trigger_rule"] == TriggerRule.ROLL_EXTRINSIC_CAPTURED
+    ticket = recs[0]["proposed_ticket"]
+    assert ticket["roll_direction"] == "ROLL_UP_AND_OUT"
+    sto = [l for l in ticket["legs"] if l["instruction"] == "SELL_TO_OPEN"][0]
+    assert sto["dte"] == 2 + 7           # OUT to the next weekly
 
 
 def test_extrinsic_captured_below_threshold_is_all_clear():

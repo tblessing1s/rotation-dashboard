@@ -42,6 +42,7 @@ ALERT_TYPES = {
     "CIRCUIT_BREAKER": ("CRITICAL", "HARD_CFM_RULE: line-in-the-sand exit price stored at entry"),
     "DELTA_UNCOVERED": ("HIGH", "HARD_CFM_RULE: more calls sold than owned 100-share lots (or, on a legacy diagonal, a LEAP that no longer covers the short)"),
     "DEFEND_POSITION": ("HIGH", "HARD_CFM_RULE: underlying closed below the short strike -> defensive roll-down"),
+    "SHORT_APPROACHING_ATM": ("MEDIUM", "PROPOSED_DEFAULT: short strike still OTM but within SHORT_ATM_APPROACH_PCT of spot -> assignment risk rising before DEFEND_POSITION would trip"),
     "WHIPSAW_EXIT": ("CRITICAL", "HARD_CFM_RULE: defend whipsaw (too many roll-downs / too much cumulative drag) -> exit, not another defend"),
     "ASSIGNMENT_RISK": ("HIGH", "HARD_CFM_RULE: short extrinsic below the coming dividend invites early assignment"),
     "LOT_ADD_READY": ("MEDIUM", "TRAVIS_EXTENSION: accrued realized juice + dividends now cover another 100-share lot -> confirm the add (never auto-executed)"),
@@ -111,7 +112,7 @@ _FOCUS_ACTIONS = {
     "DELTA_UNCOVERED", "DELTA_VELOCITY", "LEAP_ROLL_DUE", "CAPITAL_BURN", "RECONCILE_DIRTY",
     "WHIPSAW_EXIT", "JUICE_INADEQUATE", "EARNINGS_DATE_STALE", "ROLL_LEG_IMBALANCE",
     "EXTRINSIC_ABOVE_ENTRY", "RECOMMENDATION", "TRUST_COVERAGE_MISS",
-    "ORDER_FIDELITY_FAIL", "LOT_ADD_READY",
+    "ORDER_FIDELITY_FAIL", "LOT_ADD_READY", "SHORT_APPROACHING_ATM",
 }
 
 
@@ -330,6 +331,41 @@ def check_defend_position(state: dict) -> list[dict]:
                  "atr_mult": sp["atr_mult"] if sp else None,
                  "itm_pct": sp["itm_pct"] if sp else None,
                  "posture": sp["posture"] if sp else None},
+                key=str(strike)))
+    return out
+
+
+def check_approaching_atm(state: dict) -> list[dict]:
+    """This structure sells the short BELOW spot (deep ITM by design), so the
+    risk direction is the stock falling DOWN toward the strike, not rising up
+    through it. Still at/above the strike (DEFEND_POSITION hasn't tripped), but
+    the close has drifted within SHORT_ATM_APPROACH_PCT of it -> the ITM cushion
+    is thinning before there's anything to defend. Uses the same close-confirmed
+    read as DEFEND_POSITION and hands off the moment the strike is actually
+    breached (that's DEFEND_POSITION's territory, never both on one short)."""
+    out = []
+    for p in _open_positions(state):
+        t = p.get("ticker", "")
+        close = _last_close(t)
+        if not close:
+            continue
+        for sc in p.get("short_calls", []):
+            strike = sc.get("strike")
+            if strike is None or close < float(strike):
+                continue
+            distance_pct = (close - float(strike)) / close * 100.0
+            if distance_pct > config.SHORT_ATM_APPROACH_PCT:
+                continue
+            out.append(_alert(
+                "SHORT_APPROACHING_ATM", t,
+                (f"{t} closed at {close:.2f}, only {distance_pct:.1f}% above the "
+                 f"short strike {strike} — the ITM cushion is thinning."),
+                "Still above the strike, but getting close — if it slips below, the "
+                "base position stops being covered at this level. Watch it into the "
+                "close; a roll may be worth getting ahead of.",
+                {"last_close": round(close, 2), "strike": strike,
+                 "distance_pct": round(distance_pct, 2),
+                 "threshold_pct": config.SHORT_ATM_APPROACH_PCT},
                 key=str(strike)))
     return out
 
@@ -1449,6 +1485,7 @@ EVALUATORS = [
     check_whipsaw_exit,
     check_delta_uncovered,
     check_defend_position,
+    check_approaching_atm,
     check_buyback_75,
     check_assignment_risk,
     check_lot_add_ready,

@@ -138,6 +138,27 @@ def test_buyback_75_requires_decay_and_dte():
     assert alerts.check_buyback_75(_state(_pos(short_calls=[not_decayed]))) == []
 
 
+def test_approaching_atm_fires_inside_the_band_only(monkeypatch):
+    import data_handler
+    sc = {"strike": 132, "contracts": 5, "dte": 4, "current_bid": 0.25,
+          "entry_premium_total": 600.0}
+
+    # 133.5 close -> 1.12% above the 132 strike: inside the default 3% band.
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([133.5] * 60))
+    out = alerts.check_approaching_atm(_state(_pos(short_calls=[sc])))
+    assert len(out) == 1 and out[0]["type"] == "SHORT_APPROACHING_ATM"
+    assert out[0]["data"]["distance_pct"] == pytest.approx(1.12, abs=0.01)
+    assert out[0]["data"]["threshold_pct"] == config.SHORT_ATM_APPROACH_PCT
+
+    # Comfortably ITM (deep cushion) -> quiet, no warning needed yet.
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([147.0] * 60))
+    assert alerts.check_approaching_atm(_state(_pos(short_calls=[sc]))) == []
+
+    # Already below the strike -> DEFEND_POSITION's territory, not this one.
+    monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: _frame([130.0] * 60))
+    assert alerts.check_approaching_atm(_state(_pos(short_calls=[sc]))) == []
+
+
 def test_defend_position_suggests_atr_roll_down(monkeypatch):
     import data_handler
     import screening
@@ -530,6 +551,9 @@ def test_engineered_state_trips_every_position_condition(isolated_state, monkeyp
         ("DELTA_UNCOVERED", "PG"),   # below the 0.50 floor
         ("DELTA_UNCOVERED", "PG"),   # long delta < 1-DTE ITM short's delta
         ("DEFEND_POSITION", "PG"),
+        # The second short (126 strike, close 128) is still above its own strike,
+        # 1.56% of the way to being breached — inside the default 3% band.
+        ("SHORT_APPROACHING_ATM", "PG"),
         ("BUYBACK_75", "PG"),
         ("ASSIGNMENT_RISK", "PG"),
         ("EARNINGS_WINDOW", "PG"),

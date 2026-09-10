@@ -67,14 +67,22 @@ export function explainRec(rec) {
       why = `${num(d.decay_pct, 0)}% of the premium you sold on ${shortStr(d.short)} has already decayed${dteStr(d.dte)}. The remaining juice is small and slow — the rule says roll early and sell fresh time value.`;
       numbers.push({ k: "captured", v: `${num(d.decay_pct, 0)}%` }, { k: "DTE", v: num(d.dte, 0) });
       break;
-    case "ROLL_EXTRINSIC_CAPTURED":
-      why = `${num(d.extrinsic_captured_pct, 0)}% of the extrinsic on ${shortStr(d.short)} is banked (threshold ${num(d.threshold_pct, 0)}%)${dteStr(d.dte)}. Sold at ${dollars(d.entry_extrinsic_per_share)}/sh, only ${dollars(d.current_extrinsic_per_share)}/sh is left to earn.`;
+    case "ROLL_EXTRINSIC_CAPTURED": {
+      const dir = rec.proposed_ticket?.roll_direction;
+      const dirWhy = dir === "ROLL_UP"
+        ? ` Enough of the week is left (≥${num(d.roll_up_same_week_min_dte, 0)} DTE) to roll UP in place — same expiration, fresh higher strike.`
+        : dir === "ROLL_UP_AND_OUT"
+          ? ` Not enough of the week left — roll UP AND OUT to next week's strike for a full fresh week of extrinsic instead.`
+          : "";
+      why = `${num(d.extrinsic_captured_pct, 0)}% of the extrinsic on ${shortStr(d.short)} is banked (threshold ${num(d.threshold_pct, 0)}%)${dteStr(d.dte)}. Sold at ${dollars(d.entry_extrinsic_per_share)}/sh, only ${dollars(d.current_extrinsic_per_share)}/sh is left to earn.${dirWhy}`;
       numbers.push(
         { k: "banked", v: `${num(d.extrinsic_captured_pct, 0)}%` },
         { k: "juice left", v: `${dollars(d.current_extrinsic_per_share)}/sh` },
         { k: "DTE", v: num(d.dte, 0) },
+        ...(dir ? [{ k: "roll", v: dir === "ROLL_UP" ? "up, same exp" : "up & out, next wk" }] : []),
       );
       break;
+    }
     case "ROLL_SCHEDULED_WEEKLY":
       why = `${shortStr(d.short)} expires in ${num(d.dte, 0)} day${Number(d.dte) === 1 ? "" : "s"}. Weekly shorts are always rolled, never left to expire unmanaged.`;
       numbers.push({ k: "DTE", v: num(d.dte, 0) }, { k: "strike", v: num(d.short?.strike, 2) });

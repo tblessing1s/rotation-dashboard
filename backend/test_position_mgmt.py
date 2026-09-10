@@ -95,6 +95,38 @@ def test_deployed_capital_derives_from_open_positions():
     assert pm.deployed_capital(state) == 25000.0
 
 
+def test_enrich_short_approaching_atm():
+    """This structure sells the short BELOW spot (deep ITM by design), so the
+    risk direction is the stock falling DOWN toward the strike. Still at/above
+    the strike but within SHORT_ATM_APPROACH_PCT of it -> the earlier warning,
+    strictly before below_strike trips. Mutually exclusive with below_strike by
+    construction."""
+    sc = {"strike": 132, "contracts": 5, "dte": 4, "current_bid": 0.25,
+          "entry_premium_total": 600.0}
+    # 132 strike, 133.5 spot -> 1.12% above: inside the 3% band.
+    near = pm.enrich_short(sc, stock_price=133.5, dividend=None)
+    assert near["approaching_atm"] is True
+    assert near["below_strike"] is False
+
+    # Comfortably ITM (deep cushion, ~10% above) -> no warning needed yet.
+    far = pm.enrich_short(sc, stock_price=147.0, dividend=None)
+    assert far["approaching_atm"] is False
+
+    # Already below the strike -> below_strike owns it, never both flags.
+    below = pm.enrich_short(sc, stock_price=130.0, dividend=None)
+    assert below["approaching_atm"] is False
+    assert below["below_strike"] is True
+
+    # Exactly at the strike (ATM, distance 0) -> still counts as "approaching".
+    atm = pm.enrich_short(sc, stock_price=132.0, dividend=None)
+    assert atm["approaching_atm"] is True
+    assert atm["below_strike"] is False
+
+    # No live price -> False, same convention as below_strike (not a triggerable
+    # unknown state — this field, like below_strike, is a plain bool).
+    assert pm.enrich_short(sc, stock_price=None, dividend=None)["approaching_atm"] is False
+
+
 def test_enrich_short_extrinsic_capture():
     sc = {"strike": 132, "contracts": 5, "entry_premium_total": 600.0,
           "entry_extrinsic_per_share": 0.80, "current_bid": 1.20, "dte": 4}

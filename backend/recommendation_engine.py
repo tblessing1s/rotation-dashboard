@@ -38,6 +38,7 @@ import config
 import indicators
 import kill_switch
 import position_manager
+import roll_advisor
 import strike_policy
 import units
 from rec_types import ActionType, TriggerRule
@@ -526,12 +527,15 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
         if (dte is not None and int(dte) <= config.EXPIRY_WARN_DTE
                 and TriggerRule.ROLL_SCHEDULED_WEEKLY not in triggers):
             triggers[TriggerRule.ROLL_SCHEDULED_WEEKLY] = {"short": key, "dte": dte}
-        # Extrinsic captured — the juice is banked, so roll OUT and sell fresh
+        # Extrinsic captured — the juice is banked, so roll and sell fresh
         # extrinsic, at ANY remaining DTE (TRAVIS_EXTENSION). Reads enrich_short's
         # extrinsic_captured_pct (the position tile's own figure), never total
         # premium decay: an ITM short's intrinsic makes the 75% rule read low
         # long after the extrinsic itself is gone. A contract expiring today is
         # left to the scheduled weekly roll above (it outranks this one anyway).
+        # Whether that roll stays in the SAME expiration (roll up) or moves to
+        # the next weekly (roll up and out) is decided in _build_action_rec via
+        # roll_advisor.roll_direction, off this trigger's own dte.
         captured = es.get("extrinsic_captured_pct")
         if (captured is not None and dte is not None and int(dte) >= 1
                 and float(captured) >= config.ROLL_EXTRINSIC_CAPTURED_PCT
@@ -542,6 +546,7 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
                 "threshold_pct": config.ROLL_EXTRINSIC_CAPTURED_PCT,
                 "entry_extrinsic_per_share": es.get("entry_extrinsic_per_share"),
                 "current_extrinsic_per_share": es.get("current_extrinsic_per_share"),
+                "roll_up_same_week_min_dte": config.ROLL_UP_SAME_WEEK_MIN_DTE,
             }
 
     features = {
@@ -631,13 +636,27 @@ def _build_action_rec(position: dict, market: dict, now: datetime,
         # Same-week roll when the current expiry still has time, else next weekly
         # (mirrors executor.defend_recommendation's default).
         roll_dte = int(dte) if dte else 5
-        if rule in (TriggerRule.ROLL_75PCT, TriggerRule.ROLL_SCHEDULED_WEEKLY,
-                    TriggerRule.EARNINGS_WINDOW, TriggerRule.DIVIDEND_ASSIGNMENT_RISK,
-                    TriggerRule.ROLL_EXTRINSIC_CAPTURED):
+        roll_direction = None
+        if rule == TriggerRule.ROLL_EXTRINSIC_CAPTURED:
+            # The juice is banked either way; roll_advisor.roll_direction decides
+            # whether there's still enough of THIS contract's week left to sell
+            # the fresh higher strike in place (ROLL_UP), or whether it's late
+            # enough to skip straight to next week's full extrinsic instead
+            # (ROLL_UP_AND_OUT) — see config.ROLL_UP_SAME_WEEK_MIN_DTE.
+            rd = roll_advisor.roll_direction(dte)
+            roll_direction = rd["direction"]
+            if roll_direction == "ROLL_UP_AND_OUT":
+                roll_dte = (int(dte) if dte else 0) + 7
+            elif roll_direction == "ROLL_UP":
+                roll_dte = int(dte)
+        elif rule in (TriggerRule.ROLL_75PCT, TriggerRule.ROLL_SCHEDULED_WEEKLY,
+                    TriggerRule.EARNINGS_WINDOW, TriggerRule.DIVIDEND_ASSIGNMENT_RISK):
             roll_dte = (int(dte) if dte else 0) + 7  # roll OUT to the next weekly
         ticket = _roll_ticket(position, sc, tk, new_strike=pol.get("strike"),
                               roll_dte=roll_dte, roll_reason=_ROLL_REASON[rule], q=q)
         ticket["strike_policy"] = pol or None
+        if roll_direction:
+            ticket["roll_direction"] = roll_direction
     snapshot = dict(features)
     snapshot["trigger_detail"] = detail
     snapshot["secondary_triggers"] = sorted(r for r in triggers if r != rule)

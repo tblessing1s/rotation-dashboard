@@ -126,6 +126,26 @@ def rank_weeks_by_juice(rows: list[dict], parity_band_pct: float | None = None) 
     return {"best": best, "rows": rows}
 
 
+def roll_direction(dte: int | None, min_same_week_dte: float | None = None) -> dict:
+    """Once ROLL_EXTRINSIC_CAPTURED fires, is the fresh higher strike sold in the
+    SAME expiration ("ROLL_UP") or the next weekly ("ROLL_UP_AND_OUT")?
+
+    ``dte`` is the CURRENT contract's remaining days. Enough of the week left
+    (``dte >= min_same_week_dte``, default config.ROLL_UP_SAME_WEEK_MIN_DTE) ->
+    roll up in place, there's still real time to sell against the new strike
+    this week. Not enough left -> roll up AND out to the next weekly instead,
+    for a full fresh week of extrinsic rather than a few days' worth.
+
+    ``dte`` unmeasured -> ``direction`` is None (unmeasured, not a default
+    guess). PURE, advisory: the recommendation engine is the only caller that
+    turns this into an actual roll_dte; nothing here blocks or auto-executes."""
+    floor = min_same_week_dte if min_same_week_dte is not None else config.ROLL_UP_SAME_WEEK_MIN_DTE
+    if dte is None:
+        return {"direction": None, "dte": None, "min_same_week_dte": floor}
+    direction = "ROLL_UP" if int(dte) >= floor else "ROLL_UP_AND_OUT"
+    return {"direction": direction, "dte": int(dte), "min_same_week_dte": floor}
+
+
 def roll_up_guard(*, current_strike: float | None, chosen_strike: float | None,
                   earnings_in_week: bool | None, ex_div_known: bool,
                   ex_div_in_week: bool | None, chosen_juice_per_week_pct: float | None,

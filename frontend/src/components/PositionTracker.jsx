@@ -1057,6 +1057,14 @@ function ShortCalls({ p, shorts, setRolling, onOpenTicket }) {
                     below strike
                   </span>
                 )}
+                {!sc.below_strike && sc.approaching_atm && (
+                  <span
+                    title="Still above the strike, but the ITM cushion is thinning — if it slips below, the base position stops being covered at this level."
+                    className="rounded-full border border-amber-500/40 bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-300"
+                  >
+                    approaching ATM
+                  </span>
+                )}
                 {sc.assignment_risk && (
                   /* The dividend-triggered variant (EARLY_ASSIGNMENT_RISK) is
                      time-critical — it fires on a specific ex-date — so it carries
