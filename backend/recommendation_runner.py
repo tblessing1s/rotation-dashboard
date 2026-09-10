@@ -621,11 +621,17 @@ def _check_circuit_breaker_auto_exit(now: datetime, dry_run: bool | None) -> lis
     """The one place in this app that ever calls executor.exit_position()
     without a human clicking anything. Opt-in and per-condition: reads
     circuit_breaker.get_auto_exit_permissions() (default every condition OFF)
-    and, for each currently OPEN CIRCUIT_BREAKER EXIT recommendation whose
-    tripped_conditions include a GRANTED condition, executes it — reusing the
-    exact rec + proposed_ticket a human would otherwise act on from the
-    Recommendations tab, never a separately-derived signal.
+    and, for each currently OPEN CIRCUIT_BREAKER EXIT recommendation, acts
+    ONLY on `nearest_trigger` — whichever defined level sits closest to the
+    current stock price, not just any tripped condition that happens to be
+    granted. That level is mathematically guaranteed to be tripped whenever
+    the rec exists at all (see circuit_breaker.py: it is the highest of the
+    defined floors, and price is at or below every tripped floor including
+    the highest one) — it never grants execution ahead of a genuine breach,
+    it only picks WHICH breach a multi-condition day is attributed to.
 
+    Reuses the exact rec + proposed_ticket a human would otherwise act on
+    from the Recommendations tab, never a separately-derived signal.
     Deliberately reads open_recommendations fresh (not just this pass's
     `stored`) so granting a permission acts on a circuit-breaker rec that was
     already open before the grant, on the very next pass.
@@ -647,23 +653,27 @@ def _check_circuit_breaker_auto_exit(now: datetime, dry_run: bool | None) -> lis
             continue
         detail = (rec.get("input_snapshot") or {}).get("trigger_detail") or {}
         cb = detail.get("circuit_breaker") or {}
-        granted = [c for c in (cb.get("tripped_conditions") or []) if perms.get(c)]
-        code = detail.get("exit_reason_code")
-        if not granted or not code:
+        nearest = cb.get("nearest_trigger") or {}
+        condition = nearest.get("condition")
+        if not condition or not perms.get(condition):
+            continue
+        code = circuit_breaker.exit_reason_code_for(condition)
+        if not code:
             continue
         ticker = rec.get("ticker")
         try:
             outcome = executor.exit_position(
                 ticker, exit_reason=code,
                 exit_note=(f"auto-exit — circuit breaker permission granted for "
-                          f"{', '.join(granted)} (rec {rec.get('rec_id')})"),
+                          f"{condition} (nearest to price at {nearest.get('price')}; "
+                          f"rec {rec.get('rec_id')})"),
                 source_rec_id=rec.get("rec_id"), now=now)
         except Exception as e:  # noqa: BLE001 — one failed auto-exit must never sink the pass
             logger.exception("circuit-breaker auto-exit raised for %s", ticker)
             outcome = {"ok": False, "ticker": ticker, "position_closed": False,
                       "error": str(e), "steps": []}
         result = {"rec_id": rec.get("rec_id"), "ticker": ticker,
-                  "conditions": granted, **outcome}
+                  "condition": condition, **outcome}
         results.append(result)
         logger.info("circuit-breaker auto-exit: %s", result)
         # "already closed" (a harmless re-check racing resolution matching) is
@@ -690,7 +700,7 @@ def _notify_auto_exit_failure(result: dict, state: dict, dry_run: bool | None) -
             "ticker": t,
             "message": f"{t}: auto-exit stopped partway — {result.get('error')}",
             "action": f"Resolve {t} on the Positions tab immediately.",
-            "data": {"rec_id": result.get("rec_id"), "conditions": result.get("conditions"),
+            "data": {"rec_id": result.get("rec_id"), "condition": result.get("condition"),
                      "steps": result.get("steps")},
             "fingerprint": f"CIRCUIT_BREAKER_AUTO_EXIT_FAILED|{t}|{result.get('rec_id')}",
         }], settings, dry_run=dry_run)

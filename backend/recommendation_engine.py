@@ -463,11 +463,15 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
         triggers[rule] = {"kill_switch": ks, "condition_first_true_at": first}
 
     # Circuit breaker — the shared evaluator with the snapshot's bars injected.
+    # `nearest_trigger` rides along in the snapshot (not just status/headline)
+    # because it is what recommendation_runner's auto-exit path acts on —
+    # whichever level is closest to price, not a fixed priority order.
     cb = circuit_breaker.evaluate(position, df=tk.get("bars")) if tk.get("bars") is not None else None
     if cb and cb.get("tripped"):
         triggers[TriggerRule.CIRCUIT_BREAKER] = {
             "circuit_breaker": {k: cb.get(k) for k in
-                                ("status", "tripped_conditions", "headline", "suggested_action")},
+                                ("status", "tripped_conditions", "headline",
+                                 "suggested_action", "levels", "nearest_trigger")},
             "exit_reason_code": circuit_breaker.exit_reason_code(cb),
         }
 
