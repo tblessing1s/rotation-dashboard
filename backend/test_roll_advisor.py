@@ -199,3 +199,30 @@ def test_roll_up_guard_worst_signal_wins_fail_over_unknown():
         juice_floor_pct=0.75, operating_cash=None, reserve_required=13000,
         net_credit=None)
     assert out["summary"] == "FAIL"
+
+
+# ---------------------------------------------------------------------------
+# roll_direction — ROLL_UP (same expiration) vs ROLL_UP_AND_OUT (next weekly)
+# once ROLL_EXTRINSIC_CAPTURED fires. Pure function.
+# ---------------------------------------------------------------------------
+
+def test_roll_direction_unmeasured_dte_gives_none_not_a_guess():
+    out = ra.roll_direction(None)
+    assert out["direction"] is None
+    assert out["min_same_week_dte"] == config.ROLL_UP_SAME_WEEK_MIN_DTE
+
+
+def test_roll_direction_enough_dte_rolls_up_in_place():
+    out = ra.roll_direction(config.ROLL_UP_SAME_WEEK_MIN_DTE)
+    assert out["direction"] == "ROLL_UP"
+    assert out["dte"] == config.ROLL_UP_SAME_WEEK_MIN_DTE
+
+
+def test_roll_direction_just_under_threshold_rolls_up_and_out():
+    out = ra.roll_direction(config.ROLL_UP_SAME_WEEK_MIN_DTE - 1)
+    assert out["direction"] == "ROLL_UP_AND_OUT"
+
+
+def test_roll_direction_honors_an_explicit_floor_override():
+    assert ra.roll_direction(5, min_same_week_dte=6)["direction"] == "ROLL_UP_AND_OUT"
+    assert ra.roll_direction(6, min_same_week_dte=6)["direction"] == "ROLL_UP"
