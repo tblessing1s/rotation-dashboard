@@ -427,11 +427,17 @@ const CB_STATUS_TONE = {
   green: "border-slate-800 bg-slate-900/40 text-slate-400",
 };
 
-function CircuitBreakerLevel({ cb }) {
+function CircuitBreakerLevel({ cb, spot }) {
   if (!cb) return null;
   const nt = cb.nearest_trigger;
   const levels = cb.levels || {};
   const others = Object.entries(levels).filter(([id]) => id !== nt?.condition);
+  // "now" is the card's LIVE spot (the same price the share base and ticker
+  // strip show), never cb.price — that field is the last DAILY CLOSE the
+  // breach conditions confirm against (deliberately not intraday, to avoid
+  // whipsaw), which can visibly disagree with the live price mid-session and
+  // read as flat-out wrong labeled "now".
+  const live = spot != null ? spot : cb.price;
   return (
     <div className={`mt-3 rounded-lg border px-3 py-2 text-xs ${CB_STATUS_TONE[cb.status] || CB_STATUS_TONE.green}`}>
       <div className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1">
@@ -440,7 +446,7 @@ function CircuitBreakerLevel({ cb }) {
           <span title={`${CB_LEVEL_LABEL[nt.condition] || nt.label} — ${nt.label}`}>
             triggers at <span className="font-mono font-semibold">{fmt(nt.price, 2)}</span>
             {" "}({CB_LEVEL_LABEL[nt.condition] || nt.label})
-            {cb.price != null && <span className="text-slate-500"> · now {fmt(cb.price, 2)}</span>}
+            {live != null && <span className="text-slate-500"> · now {fmt(live, 2)}</span>}
           </span>
         ) : (
           <span className="text-slate-500">no level computable yet</span>
@@ -1843,7 +1849,7 @@ function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focus
             {p.position_type === "CASH_SECURED_PUT" ? <PutBase p={p} />
               : p.position_type === "LEAP_PMCC_LEGACY" ? <LegacyLeapBase p={p} />
               : <SharesBase p={p} onCleared={afterResolve} />}
-            <CircuitBreakerLevel cb={p.circuit_breaker_status} />
+            <CircuitBreakerLevel cb={p.circuit_breaker_status} spot={p.stock_price} />
           </div>
 
           {/* (2) weekly covered-call capture */}
