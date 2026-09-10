@@ -154,6 +154,125 @@ function AutoExitPermissions({ perms, onChanged }) {
   );
 }
 
+// Roll/defend auto-execute — the same "opt-in, per-trigger, default off,
+// confirm-to-enable" pattern as AutoExitPermissions above, extended to the
+// routine roll/defend triggers instead of EXIT. See
+// backend/recommendation_auto_execute.py.
+const AUTO_EXECUTE_TRIGGERS = [
+  { id: "ROLL_SCHEDULED_WEEKLY", label: "Weekly roll due",
+    detail: "The short is inside the expiry-warning window and hasn't been rolled yet — the scheduled weekly cadence." },
+  { id: "ROLL_75PCT", label: "75% of the premium captured",
+    detail: "The short has decayed ≥75% of its sale premium with more than a couple days left — the early-roll rule." },
+  { id: "ROLL_EXTRINSIC_CAPTURED", label: "Extrinsic mostly banked",
+    detail: "≥80% of the extrinsic sold at entry is captured — rolls up in place or up-and-out, whichever the current week's runway supports." },
+  { id: "DEFEND_BELOW_STRIKE", label: "Stock closed below the strike",
+    detail: "The underlying closed under the short strike — the defensive roll-down." },
+];
+
+function RollDefendAutoExecutePermissions({ perms, onChanged }) {
+  const toast = useToast();
+  const [busy, setBusy] = React.useState(null); // trigger id currently saving
+  const [confirming, setConfirming] = React.useState(null); // trigger object being enabled
+
+  async function apply(trigger, on) {
+    setBusy(trigger);
+    try {
+      await api.setRollDefendAutoExecute(trigger, on);
+      toast.show(`Roll/defend auto-execute ${on ? "enabled" : "disabled"} for ${trigger}`,
+        { type: on ? "success" : "info" });
+      onChanged();
+    } catch (e) {
+      toast.show(String(e.message || e), { type: "error" });
+    } finally {
+      setBusy(null);
+      setConfirming(null);
+    }
+  }
+
+  const anyOn = AUTO_EXECUTE_TRIGGERS.some((t) => perms?.[t.id]);
+
+  return (
+    <Card
+      title="Roll / defend auto-execute"
+      right={
+        <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-300">
+          {anyOn ? "armed" : "off"}
+        </span>
+      }
+    >
+      <p className="mb-3 text-xs text-slate-400">
+        Off by default, per trigger. Granting one lets the engine roll the short —
+        buy back the current call, then sell the new one — the moment that specific
+        trigger fires, with nobody clicking anything. It still goes through the normal
+        Paper/Live switch: it stays paper (logged, no order sent) until you separately
+        enable Live Trading in Settings.
+      </p>
+      <div className="divide-y divide-slate-800">
+        {AUTO_EXECUTE_TRIGGERS.map((t) => {
+          const on = !!perms?.[t.id];
+          return (
+            <div key={t.id} className="flex items-center justify-between gap-4 py-2.5">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-slate-200">{t.label}</div>
+                <div className="mt-0.5 text-xs text-slate-500">{t.detail}</div>
+              </div>
+              {on ? (
+                <button
+                  onClick={() => apply(t.id, false)}
+                  disabled={busy === t.id}
+                  className="shrink-0 rounded-lg border border-emerald-600/50 bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-50"
+                >
+                  {busy === t.id ? "Saving…" : "✓ Armed — disable"}
+                </button>
+              ) : (
+                <button
+                  onClick={() => setConfirming(t)}
+                  disabled={busy === t.id}
+                  className="shrink-0 rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+                >
+                  Grant permission
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {confirming && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/70 p-4"
+             role="dialog" aria-modal="true" onClick={() => setConfirming(null)}>
+          <div className="w-full max-w-md rounded-xl border border-amber-700 bg-slate-900 p-5 shadow-2xl"
+               onClick={(e) => e.stopPropagation()}>
+            <h2 className="mb-2 text-base font-semibold text-slate-100">
+              Auto-roll on "{confirming.label}"?
+            </h2>
+            <p className="text-sm text-amber-200">
+              The next time this trigger fires, the engine will roll the short — buy back
+              the current call, then sell the new one — <span className="font-semibold">without
+              you clicking anything</span>. Nothing else about the recommendation engine
+              changes; every other trigger still just recommends.
+            </p>
+            <p className="mt-2 rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-2 text-xs text-slate-300">
+              This still respects Paper/Live: it stays paper (logged only, no order sent) until
+              you separately enable Live Trading in Settings.
+            </p>
+            <div className="mt-4 flex items-center justify-end gap-2">
+              <button onClick={() => setConfirming(null)} disabled={busy === confirming.id}
+                      className="rounded-lg border border-slate-700 px-3 py-2 text-sm text-slate-300 hover:bg-slate-800 disabled:opacity-40">
+                Cancel
+              </button>
+              <button onClick={() => apply(confirming.id, true)} disabled={busy === confirming.id}
+                      className="rounded-lg bg-amber-500/20 px-4 py-2 text-sm font-semibold text-amber-300 hover:bg-amber-500/30 disabled:opacity-40">
+                {busy === confirming.id ? "Enabling…" : "Grant permission"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 function useNow(intervalMs = 60000) {
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {
@@ -552,6 +671,8 @@ export default function RecommendationsTab({ onNavigate, onSelectStock, onAction
       </Card>
 
       <AutoExitPermissions perms={data?.circuit_breaker_auto_exit} onChanged={reload} />
+
+      <RollDefendAutoExecutePermissions perms={data?.roll_defend_auto_execute} onChanged={reload} />
 
       <OpenRecommendations
         recs={data?.open_actionable}

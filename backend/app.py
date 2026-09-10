@@ -1467,6 +1467,7 @@ def api_recommendations():
     import trust_derive
     import position_manager
     import circuit_breaker
+    import recommendation_auto_execute
     from datetime import datetime, timezone
     try:
         state = log.load_state()
@@ -1517,6 +1518,9 @@ def api_recommendations():
             # Per-condition circuit-breaker auto-exit permissions (default OFF).
             # See circuit_breaker.py's AUTO-EXIT PERMISSIONS section.
             "circuit_breaker_auto_exit": circuit_breaker.get_auto_exit_permissions(state),
+            # Per-trigger roll/defend auto-execute permissions (default OFF).
+            # See recommendation_auto_execute.py.
+            "roll_defend_auto_execute": recommendation_auto_execute.get_permissions(state),
         })
     except Exception as e:  # noqa: BLE001
         return _err(e)
@@ -1533,6 +1537,23 @@ def api_set_circuit_breaker_auto_exit():
         import circuit_breaker
         return jsonify(circuit_breaker.set_auto_exit_permission(
             payload.get("condition"), bool(payload.get("on"))))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/recommendations/roll-defend-auto-execute", methods=["POST"])
+def api_set_roll_defend_auto_execute():
+    """Grant or revoke ONE roll/defend trigger's permission to roll the short
+    UNATTENDED the moment it fires — see recommendation_auto_execute.py. Every
+    trigger defaults OFF; this is the only way any of them turns on.
+    Body: {trigger_rule, on}."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        import recommendation_auto_execute
+        return jsonify(recommendation_auto_execute.set_permission(
+            payload.get("trigger_rule"), bool(payload.get("on"))))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
     except Exception as e:  # noqa: BLE001

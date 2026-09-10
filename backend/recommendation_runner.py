@@ -600,6 +600,12 @@ def run(notify: bool = True, include_entry: bool = True,
         #    on; with nothing granted (the default) this is one cheap read and
         #    returns immediately. See _check_circuit_breaker_auto_exit.
         auto_exit = _check_circuit_breaker_auto_exit(now, dry_run)
+        # 6) Roll/defend auto-execute — opt-in, per-trigger (Recommendations tab
+        #    / recommendation_auto_execute.get_permissions). Acts on the SAME
+        #    ROLL_OUT/DEFEND rec + ticket a human would otherwise click Execute
+        #    on; with nothing granted (the default) this is one cheap read and
+        #    returns immediately. See _check_roll_defend_auto_execute.
+        auto_roll = _check_roll_defend_auto_execute(now, dry_run)
         _last_run = _remember_run({
             "at": log.utcnow(),
             "trigger": trigger,
@@ -612,6 +618,7 @@ def run(notify: bool = True, include_entry: bool = True,
             "staged_pending": len(staged),
             "released": release_summary,
             "auto_exit": auto_exit,
+            "auto_roll": auto_roll,
         })
         logger.info("recommendation pass: %s", _last_run)
         return _last_run
@@ -706,6 +713,92 @@ def _notify_auto_exit_failure(result: dict, state: dict, dry_run: bool | None) -
         }], settings, dry_run=dry_run)
     except Exception:  # noqa: BLE001
         logger.exception("auto-exit failure notification itself failed")
+
+
+def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list[dict]:
+    """Opt-in, per-trigger (recommendation_auto_execute.get_permissions, default
+    every trigger OFF): for each currently OPEN recommendation whose
+    trigger_rule is in AUTO_EXECUTE_TRIGGERS and granted, submits the SAME
+    proposed_ticket a human would otherwise click Execute on via
+    executor.execute({"action": "roll_short", ...}) — buy back the current
+    short, sell the new one, one net ticket.
+
+    The ticket's own new-leg date is only ever an ESTIMATE (see
+    recommendation_auto_execute.payload_from_ticket); a LIVE submission
+    (executor.live_transmit()) additionally resolves a REAL listed expiration
+    from the live chain first and refuses to submit (skips this rec, tries
+    again next pass) rather than guess one — see
+    recommendation_auto_execute.resolve_live_expiration. Paper/logged mode
+    needs no such lookup: it commits on the ticket's own dte target directly.
+
+    Best-effort per rec: one failure (a leg that could not be priced, a
+    rejected order, a bad quote — see executor.execute) is recorded and
+    notified, never raised — it must never sink the recommendation pass or
+    stop the next position in the loop from being checked."""
+    import executor
+    import recommendation_auto_execute as auto_exec
+    state = log.load_state()
+    perms = auto_exec.get_permissions(state)
+    if not any(perms.values()):
+        return []
+    results = []
+    for rec in trust_derive.open_recommendations(state, now):
+        rule = rec.get("trigger_rule")
+        if rule not in auto_exec.AUTO_EXECUTE_TRIGGERS or not perms.get(rule):
+            continue
+        payload = auto_exec.payload_from_ticket(rec)
+        if payload is None:
+            continue
+        ticker = rec.get("ticker")
+        if executor.live_transmit():
+            edte = auto_exec.emission_dte(rec, payload["from_strike"], payload["from_expiration"])
+            if edte is None:
+                # Can't tell which real contract this targets — never guess on a
+                # live order; try again next pass once state settles, or leave it
+                # to a human acting from the card.
+                continue
+            same_week = payload.get("to_dte") == edte
+            to_expiration = auto_exec.resolve_live_expiration(
+                ticker, payload["from_expiration"], same_week)
+            if not to_expiration:
+                continue
+            payload["to_expiration"] = to_expiration
+        try:
+            outcome = executor.execute(payload, now=now)
+        except Exception as e:  # noqa: BLE001 — one failed auto-roll must never sink the pass
+            logger.exception("roll/defend auto-execute raised for %s", ticker)
+            outcome = {"success": False, "ticker": ticker, "error": str(e)}
+        result = {"rec_id": rec.get("rec_id"), "ticker": ticker,
+                  "trigger_rule": rule, **outcome}
+        results.append(result)
+        logger.info("roll/defend auto-execute: %s", result)
+        if not outcome.get("success"):
+            _notify_auto_roll_failure(result, state, dry_run)
+    return results
+
+
+def _notify_auto_roll_failure(result: dict, state: dict, dry_run: bool | None) -> None:
+    """A granted roll/defend auto-execute did not finish cleanly — the loudest
+    alert this module raises for this path: an unattended action stopped
+    partway and needs a human NOW, not at the next scheduled check-in."""
+    import notifier
+    try:
+        settings = (state.get("alerts") or {}).get("settings") or {}
+        if dry_run is None:
+            dry_run = bool(settings.get("dry_run", config.alerts_dry_run_default()))
+        t = result.get("ticker") or ""
+        notifier.dispatch([{
+            "type": "ROLL_AUTO_EXECUTE_FAILED",
+            "severity": "CRITICAL",
+            "rule": "roll/defend auto-execute",
+            "ticker": t,
+            "message": f"{t}: auto-roll stopped partway — {result.get('error')}",
+            "action": f"Resolve {t} on the Positions tab immediately.",
+            "data": {"rec_id": result.get("rec_id"), "trigger_rule": result.get("trigger_rule")},
+            "fingerprint": f"ROLL_AUTO_EXECUTE_FAILED|{t}|{result.get('rec_id')}",
+        }], settings, dry_run=dry_run)
+    except Exception:  # noqa: BLE001
+        logger.exception("auto-roll failure notification itself failed")
 
 
 # The last pass summary is a small operational readout (the UI's "engine last

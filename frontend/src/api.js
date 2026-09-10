@@ -259,6 +259,15 @@ export const api = {
     request("/api/recommendations/circuit-breaker-auto-exit", {
       method: "POST", body: JSON.stringify({ condition, on }),
     }),
+  // Roll/defend auto-execute permission — per trigger rule (ROLL_SCHEDULED_WEEKLY /
+  // ROLL_75PCT / ROLL_EXTRINSIC_CAPTURED / DEFEND_BELOW_STRIKE), default OFF.
+  // Granting one lets the engine roll the short UNATTENDED the moment that
+  // specific trigger fires (still through the normal Paper/Live gate). See
+  // recommendation_auto_execute.py.
+  setRollDefendAutoExecute: (triggerRule, on) =>
+    request("/api/recommendations/roll-defend-auto-execute", {
+      method: "POST", body: JSON.stringify({ trigger_rule: triggerRule, on }),
+    }),
   // Classify a coverage miss with a coded reason. The miss stays counted (and
   // still blocks graduation); it stops re-paging and reads as acknowledged.
   acknowledgeMiss: (executionIds, reason, note) =>
