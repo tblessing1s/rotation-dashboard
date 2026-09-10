@@ -75,6 +75,26 @@ def test_fast_ma_warns_one_close_away():
     assert not v["tripped"] and "ma_fast" in v["approaching"]
 
 
+def test_fast_ma_warns_on_the_very_first_close_below():
+    # A single close under the 50-day MA — well short of the 3-close trip —
+    # is advisory only: yellow, not tripped, headline names the progress.
+    closes = [100.0] * 100 + [90.0]
+    v = circuit_breaker.evaluate(_pos(), df=_frame(closes))
+    assert not v["tripped"] and v["status"] == "yellow"
+    assert "ma_fast" in v["approaching"]
+    assert "1 of 3 closes" in v["headline"]
+
+
+def test_fast_ma_single_close_warning_never_touches_levels_or_nearest_trigger():
+    # The single-close warning is purely advisory: it must never create a
+    # fifth level, change nearest_trigger, or otherwise look like a real,
+    # actionable condition — only the 3-close "ma_fast" line does that.
+    closes = [100.0] * 100 + [90.0]
+    v = circuit_breaker.evaluate(_pos(), df=_frame(closes))
+    assert set(v["levels"]) <= {"ma_fast"}
+    assert v["nearest_trigger"] is None or v["nearest_trigger"]["condition"] == "ma_fast"
+
+
 # ---- condition 3: close below the slow (200-day) MA -------------------------
 def test_slow_ma_trips_on_close_below():
     closes = list(range(300, 40, -1))  # 260 strictly descending closes

@@ -17,6 +17,18 @@ the overall verdict; the alert engine (alerts.check_circuit_breaker) and the
 Positions view read the verdict from here so the definition lives in one place,
 exactly like kill_switch.py owns the RS exit rule.
 
+EARLY WARNING (single-close MA50, advisory only): the fast-MA leg's card turns
+YELLOW on the very FIRST daily close below the 50-day MA — "1 of 3 closes"
+progressing toward the 3-close trip above — rather than waiting until the
+position is one close away. This is deliberately just a heads-up: it is not a
+fifth condition, carries no exit-reason code, and never touches `breached`,
+`levels`, or `nearest_trigger`. A single close under the 50-day MA is common
+and reverses often; making it a real breach (or an auto-exit candidate) would
+flood every held position with EXIT recommendations the strategy's own 3-close
+persistence rule exists to avoid. Want the position to actually CLOSE on the
+first close below the 50-day MA instead of merely a warning? That is a
+different, stricter rule than this one and is not what this warning does.
+
 AUTO-EXIT PERMISSIONS (opt-in, per-condition, default OFF): the operator may
 grant drawdown / ma_fast / ma_slow individually the authority to close the
 position UNATTENDED — see get_auto_exit_permissions / set_auto_exit_permission
@@ -127,11 +139,14 @@ def evaluate(position: dict, df=None) -> dict:
     tripped = bool(breached)
 
     # A soft "approaching" band so the Positions card can warn before the breach:
-    # one close away from the fast-MA trip, or already two-thirds of the way to
-    # the drawdown line.
+    # the fast-MA leg warns on the FIRST close below the 50-day MA (a single-close
+    # heads-up, well ahead of the 3-close trip itself), and the drawdown leg warns
+    # once it is already two-thirds of the way to its line. Purely advisory — it
+    # is not a fifth condition, adds no exit code, and never feeds `breached`,
+    # `levels`, or `nearest_trigger`; granting nothing changes because of it.
     approaching = []
     if not tripped:
-        if below is not None and below == config.CIRCUIT_BREAKER_MA_FAST_CLOSES - 1:
+        if below is not None and below >= 1:
             approaching.append(fast["id"])
         if (drop_pct is not None
                 and drop_pct <= -config.CIRCUIT_BREAKER_DROP_PCT * 100 * (2 / 3)):
@@ -143,8 +158,17 @@ def evaluate(position: dict, df=None) -> dict:
         headline = "circuit breaker breached — " + "; ".join(reasons)
         action = f"EXIT {ticker} — {' and '.join(reasons)}."
     elif approaching:
-        headline = "approaching the circuit breaker"
-        action = f"Watch {ticker} — a circuit-breaker condition is one step from tripping."
+        warn_bits = []
+        if fast["id"] in approaching and below is not None:
+            warn_bits.append(f"{below} of {config.CIRCUIT_BREAKER_MA_FAST_CLOSES} closes "
+                             f"below the {config.CIRCUIT_BREAKER_MA_FAST}-day MA")
+        if drawdown["id"] in approaching and drop_pct is not None:
+            warn_bits.append(f"{abs(drop_pct):g}% off the high (trips at "
+                             f"{config.CIRCUIT_BREAKER_DROP_PCT * 100:g}%)")
+        headline = ("circuit breaker warning — " + "; ".join(warn_bits) if warn_bits
+                   else "approaching the circuit breaker")
+        action = (f"Watch {ticker} — " + " and ".join(warn_bits) + "." if warn_bits
+                 else f"Watch {ticker} — a circuit-breaker condition is nearing its trip.")
     else:
         headline = "circuit breaker intact"
         action = "Hold — no circuit-breaker condition tripped."
