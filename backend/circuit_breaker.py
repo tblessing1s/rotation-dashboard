@@ -19,14 +19,19 @@ exactly like kill_switch.py owns the RS exit rule.
 
 AUTO-EXIT PERMISSIONS (opt-in, per-condition, default OFF): the operator may
 grant drawdown / ma_fast / ma_slow individually the authority to close the
-position UNATTENDED the moment that specific condition trips — see
-get_auto_exit_permissions / set_auto_exit_permission below and
-recommendation_runner._check_circuit_breaker_auto_exit, which is the only
-caller that acts on them. The manual line is deliberately excluded: it is
-freeform, set once at entry, and was never scoped for this. Granting a
-condition does not change what evaluate() computes or displays one bit —
-it only decides whether recommendation_runner is ALLOWED to call
-executor.exit_position() on the SAME rec a human would otherwise have to
+position UNATTENDED — see get_auto_exit_permissions / set_auto_exit_permission
+below and recommendation_runner._check_circuit_breaker_auto_exit, which is
+the only caller that acts on them. That caller acts ONLY on `nearest_trigger`
+(whichever defined level sits closest to the current price): on a day where
+more than one condition trips at once, the engine attributes the exit to the
+level that was actually crossed first, not a fixed priority order, and does
+not execute unless THAT specific condition is the one granted. The manual
+line is deliberately excluded from permission-granting: it is freeform, set
+once at entry, and was never scoped for this (though it can still be the
+`nearest_trigger` and block execution when it is the closest level and
+ungranted). Granting a condition does not change what evaluate() computes or
+displays one bit — it only decides whether recommendation_runner is ALLOWED
+to call executor.exit_position() on the SAME rec a human would otherwise have to
 click "Execute" on.
 """
 from __future__ import annotations
@@ -204,17 +209,32 @@ _CONDITION_EXIT_CODE = {
 
 def exit_reason_code(evaluation: dict) -> str | None:
     """The coded exit reason a breach implies, or None when nothing is tripped.
-    Takes the FIRST tripped condition in evaluation order (drawdown, fast-MA,
-    slow-MA, manual line) so the reason is set at the point the breaker fires.
+    Takes the FIRST tripped condition in a FIXED evaluation order (drawdown,
+    fast-MA, slow-MA, manual line) — this is the DISPLAY/advisory reason
+    stamped on the recommendation and its ticket, so the rec always cites a
+    consistent order regardless of price. It is NOT what the auto-exit path
+    acts on — see exit_reason_code_for() for that.
     This evaluator itself never closes anything — see the module docstring's
     AUTO-EXIT PERMISSIONS section for the one, explicitly opt-in path that can
-    act on the code this returns without a human clicking Execute."""
+    act on a code from here without a human clicking Execute."""
     import exit_reasons
     for cid in evaluation.get("tripped_conditions") or []:
         code = _CONDITION_EXIT_CODE.get(cid)
         if code and exit_reasons.is_valid(code):
             return code
     return None
+
+
+def exit_reason_code_for(condition_id: str | None) -> str | None:
+    """The coded exit reason for exactly ONE named condition, or None if it
+    isn't a recognized condition. Unlike exit_reason_code() (which always
+    picks in the same fixed drawdown/fast-MA/slow-MA/manual-line order), this
+    looks up precisely the condition asked for — what the auto-exit path uses
+    to act on nearest_trigger (whichever level is closest to price), which
+    can be any one of the four depending on the day."""
+    import exit_reasons
+    code = _CONDITION_EXIT_CODE.get(condition_id)
+    return code if code and exit_reasons.is_valid(code) else None
 
 
 # ---------------------------------------------------------------------------
