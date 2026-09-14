@@ -247,6 +247,60 @@ def test_a_failed_auto_roll_notifies_and_does_not_raise(store, monkeypatch):
     assert notified[0][0]["ticker"] == "KO"
 
 
+def test_a_placed_live_order_notifies_so_it_can_be_cancelled(store, monkeypatch):
+    """The mechanical ability to cancel an auto-submitted order already exists
+    (it shares the same order_id/pending-order record any manual order does) —
+    the actual gap is awareness: an operator away from the app has no way to
+    know a trade just went out and could be cancelled. This is that notice."""
+    auto_exec.set_permission(TriggerRule.ROLL_75PCT, True)
+    _seed([_roll_rec("rec_1", "KO", TriggerRule.ROLL_75PCT)])
+    monkeypatch.setattr(executor, "execute",
+                        lambda *a, **k: {"success": True, "status": "working", "order_id": "999"})
+    notified = []
+    monkeypatch.setattr(notifier, "dispatch",
+                        lambda batch, settings, dry_run=None: notified.append(batch))
+
+    results = runner._check_roll_defend_auto_execute(NOW, dry_run=True)
+
+    assert results[0]["success"] is True
+    assert len(notified) == 1
+    alert = notified[0][0]
+    assert alert["type"] == "ROLL_AUTO_EXECUTE_PLACED" and alert["severity"] == "MEDIUM"
+    assert alert["ticker"] == "KO" and alert["data"]["order_id"] == "999"
+
+
+def test_a_paper_commit_never_notifies_nothing_to_cancel(store, monkeypatch):
+    """Paper/logged mode commits synchronously — no broker order, nothing
+    pending, nothing a human could act on — so no placed-notice fires."""
+    auto_exec.set_permission(TriggerRule.ROLL_75PCT, True)
+    _seed([_roll_rec("rec_1", "KO", TriggerRule.ROLL_75PCT)])
+    monkeypatch.setattr(executor, "execute",
+                        lambda *a, **k: {"success": True, "status": "recorded", "mode": "paper"})
+    notified = []
+    monkeypatch.setattr(notifier, "dispatch",
+                        lambda batch, settings, dry_run=None: notified.append(batch))
+
+    runner._check_roll_defend_auto_execute(NOW, dry_run=True)
+
+    assert notified == []
+
+
+def test_an_already_filled_order_does_not_notify_to_cancel(store, monkeypatch):
+    """A same-pass idempotent replay (or an instant fill) reporting 'filled'
+    has nothing left to cancel — the placed-notice would be misleading."""
+    auto_exec.set_permission(TriggerRule.ROLL_75PCT, True)
+    _seed([_roll_rec("rec_1", "KO", TriggerRule.ROLL_75PCT)])
+    monkeypatch.setattr(executor, "execute",
+                        lambda *a, **k: {"success": True, "status": "filled", "order_id": "999"})
+    notified = []
+    monkeypatch.setattr(notifier, "dispatch",
+                        lambda batch, settings, dry_run=None: notified.append(batch))
+
+    runner._check_roll_defend_auto_execute(NOW, dry_run=True)
+
+    assert notified == []
+
+
 def test_an_exception_from_execute_is_caught_and_notified(store, monkeypatch):
     auto_exec.set_permission(TriggerRule.ROLL_75PCT, True)
     _seed([_roll_rec("rec_1", "KO", TriggerRule.ROLL_75PCT)])

@@ -148,6 +148,26 @@ def test_juice_escalation_survives_briefly_dropping_back_below(monkeypatch):
     assert tier_poll._tracker.is_escalated("AAPL", later) is True
 
 
+def test_juice_critical_zone_promotes_beyond_the_escalated_cadence(monkeypatch):
+    # entry_extrinsic 2.00, current mark 5.42 (5.00 intrinsic + 0.42 extrinsic
+    # left) -> 79% captured: within the 8pt escalation band AND the 2pt
+    # critical band of the 80% threshold.
+    state = {"positions": [{"ticker": "AAPL", "status": "active", "sector": "XLK",
+                            "short_calls": [{"strike": 95.0, "entry_extrinsic_per_share": 2.0,
+                                            "current_bid": 5.42}],
+                            "circuit_breaker": {"price": 70.0}}]}
+    tiers = {"AAPL": Tier.T0}
+    _wire(monkeypatch, state, tiers, {"AAPL": 100.0})
+    tier_poll.run_cycle(OPEN)
+    assert tier_poll._tracker.is_critical("AAPL", OPEN) is True
+    # Due again well before the plain-escalated 30s cadence would allow, because
+    # the critical 10s cadence applies instead.
+    soon = OPEN + timedelta(seconds=config.POLL_CRITICAL_SECONDS + 1)
+    assert ms.fetch_due("AAPL", Tier.T0, ms.QUOTE, True, OPEN,
+                        tier_poll._tracker.escalated_symbols(soon), soon,
+                        tier_poll._tracker.critical_symbols(soon)) is True
+
+
 def test_market_escalation_on_spy_move(monkeypatch):
     state = _state(("AAPL",))
     tiers = {"AAPL": Tier.T0}

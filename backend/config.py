@@ -1094,6 +1094,13 @@ ROLL_UP_SAME_WEEK_MIN_DTE = 3
 # approach — so a genuine crossing is far more likely to land on a poll before
 # it snaps back. Decays after ESCALATION_DECAY_MINUTES without a re-trigger.
 JUICE_ESCALATION_BAND_PCT = 8.0
+# TRAVIS_EXTENSION / PROPOSED_DEFAULT — a second, tighter band nested inside
+# JUICE_ESCALATION_BAND_PCT: once capture is THIS close to the threshold, 30s
+# (POLL_ESCALATED_SECONDS) still isn't tight enough — bump to
+# POLL_CRITICAL_SECONDS instead. Must stay < JUICE_ESCALATION_BAND_PCT (the
+# critical zone is nested inside the escalated one, never wider than it).
+JUICE_CRITICAL_BAND_PCT = 2.0
+POLL_CRITICAL_SECONDS = 10      # PROPOSED_DEFAULT — max freshness in the critical juice zone
 # The weekly-juice BASIS (account_gate.juice_estimate): the model weekly call is
 # priced on one FULL Friday-to-Friday week — 7 calendar days — so every name is
 # compared on the same week whatever weekday the scan runs. (The old 5/365 was a

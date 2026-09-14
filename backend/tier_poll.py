@@ -77,22 +77,31 @@ def _market_symbols(state: dict) -> set[str]:
 
 def _escalation_flags(now: datetime):
     """Snapshot for fetch_due: True (all-escalated) under a global market
-    escalation, else the set of symbols with an active defense escalation."""
+    escalation, else the set of symbols with an active per-symbol escalation
+    (defense breach or juice proximity)."""
     if _tracker.market_active(now):
         return True
     return _tracker.escalated_symbols(now)
 
 
+def _critical_flags(now: datetime):
+    """Snapshot for fetch_due: the set of symbols in the TIGHTER critical
+    juice-proximity zone (config.JUICE_CRITICAL_BAND_PCT) — nested inside
+    _escalation_flags, never wider than it."""
+    return _tracker.critical_symbols(now)
+
+
 def _due_quotes(tiers: dict[str, Tier], market_open: bool, now: datetime) -> dict[str, Tier]:
     """The Tier 0/1 symbols due for a quote this cycle, after the shed ladder."""
     flags = _escalation_flags(now)
+    critical = _critical_flags(now)
     t1_mult = data_budget.t1_cadence_multiplier("schwab")
     due: dict[str, Tier] = {}
     for sym, tier in tiers.items():
         if tier not in (Tier.T0, Tier.T1):
             continue
         last = _last_quote_at.get(sym)
-        if not ms.fetch_due(sym, tier, QUOTE, market_open, last, flags, now):
+        if not ms.fetch_due(sym, tier, QUOTE, market_open, last, flags, now, critical):
             continue
         # Budget shed: Tier 1 cadence is stretched under deep pressure; Tier 0 is
         # never slowed. An escalated symbol ignores the stretch (freshness wins).
@@ -133,8 +142,11 @@ def _run_juice_escalations(state: dict, tiers: dict, quotes: dict, now: datetime
     promotion _run_defense_escalations uses, just a different early-warning
     condition. See config.JUICE_ESCALATION_BAND_PCT for why: a brief spike
     through the threshold can otherwise revert between two POLL_T0_SECONDS
-    polls without ever being observed. Reads the SAME live mark option_marks
-    just captured this cycle (option_marks.mark_for), never a fresh fetch."""
+    polls without ever being observed. Within the tighter
+    config.JUICE_CRITICAL_BAND_PCT, the cadence promotes further still (30s ->
+    POLL_CRITICAL_SECONDS) — see EscalationTracker.observe_juice. Reads the
+    SAME live mark option_marks just captured this cycle (option_marks.mark_for),
+    never a fresh fetch."""
     import position_manager
     fired: list[str] = []
     for pos in state.get("positions", []):
@@ -164,7 +176,8 @@ def _run_juice_escalations(state: dict, tiers: dict, quotes: dict, now: datetime
             continue
         alert = _tracker.observe_juice(
             sym, best_captured, config.ROLL_EXTRINSIC_CAPTURED_PCT,
-            config.JUICE_ESCALATION_BAND_PCT, now)
+            config.JUICE_ESCALATION_BAND_PCT, now,
+            critical_band_pct=config.JUICE_CRITICAL_BAND_PCT)
         if alert:
             fired.append(alert.detail)
     return fired
