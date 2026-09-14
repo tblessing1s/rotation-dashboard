@@ -572,6 +572,41 @@ class SchwabClient:
             raise SchwabError(f"schwab {symbol}: no usable rows")
         return df
 
+    def get_intraday_bars(self, symbol: str, minutes: int = 5) -> pd.DataFrame:
+        """Intraday candles for the CURRENT trading day only (periodType=day,
+        period=1) — the day-trade sleeve's signal window is same-day, so there
+        is no need (yet) for a multi-day intraday history the way
+        get_daily_bars covers a year. Index stays tz-aware US/Eastern (unlike
+        get_daily_bars, which normalizes to a bare date) — an intraday
+        candle's TIME is the point."""
+        schwab_symbol = SYMBOL_MAP.get(symbol, symbol)
+        resp = _request(
+            "get", PRICE_HISTORY_URL,
+            headers=self._auth_headers(),
+            params={"symbol": schwab_symbol, "periodType": "day", "period": 1,
+                    "frequencyType": "minute", "frequency": minutes,
+                    "needExtendedHoursData": "false"},
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise SchwabError(f"schwab {symbol}: HTTP {resp.status_code} {resp.text[:200]}")
+        payload = resp.json()
+        candles = payload.get("candles") or []
+        if payload.get("empty") or not candles:
+            raise SchwabError(f"schwab {symbol}: empty response")
+        idx = pd.to_datetime([c["datetime"] for c in candles], unit="ms", utc=True) \
+            .tz_convert("America/New_York")
+        df = pd.DataFrame({
+            "Open": [c.get("open") for c in candles],
+            "High": [c.get("high") for c in candles],
+            "Low": [c.get("low") for c in candles],
+            "Close": [c.get("close") for c in candles],
+            "Volume": [c.get("volume") for c in candles],
+        }, index=idx).dropna(subset=["Close"])
+        if df.empty:
+            raise SchwabError(f"schwab {symbol}: no usable rows")
+        return df
+
     def get_quotes(self, symbols) -> dict:
         if isinstance(symbols, str):
             symbols = [symbols]

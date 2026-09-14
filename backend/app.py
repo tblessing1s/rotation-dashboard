@@ -20,6 +20,8 @@ import alerts
 import auth
 import config
 import data_handler
+from daytrade import scheduler as daytrade_scheduler
+from daytrade import store as daytrade_store
 import earnings
 import executor
 import fetch_budget
@@ -140,6 +142,35 @@ def api_logout():
 def api_regime():
     try:
         return jsonify(screening.regime())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/daytrade/universe")
+def api_daytrade_universe():
+    """Phase 1 read-only view of the day-trade sleeve's nightly screener
+    output (defaults to today, ET). Read-only: the sleeve's scheduler is what
+    populates this file — see daytrade/scheduler.py."""
+    try:
+        from datetime import datetime
+        day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
+        result = daytrade_store.load_screen(day)
+        if result is None:
+            return jsonify({"date": day, "picks": [], "screened": [], "ran": False})
+        return jsonify({**result, "ran": True})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/daytrade/bars/<symbol>")
+def api_daytrade_bars(symbol: str):
+    """Phase 1 read-only view of the day-trade sleeve's ingested 5-min bars
+    for one symbol (defaults to today, ET)."""
+    try:
+        from datetime import datetime
+        day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
+        return jsonify({"date": day, "symbol": symbol.upper(),
+                         "bars": daytrade_store.load_bars(day, symbol.upper())})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
@@ -2691,6 +2722,11 @@ if os.environ.get("CFM_SKIP_STARTUP_CHECK", "").strip() not in ("1", "true", "ye
 # path below reaches it too). start_once() is idempotent and a no-op when
 # CFM_ALERTS_SCHEDULER=0 (tests / one-off scripts).
 alert_scheduler.start_once()
+
+# Same for the day-trade sleeve's own scheduler (nightly screener + 5-min bar
+# ingestion) — a separate daemon thread so a bug in one sleeve's tick can
+# never stall the other's. CFM_DAYTRADE_SCHEDULER=0 disables it.
+daytrade_scheduler.start_once()
 
 
 if __name__ == "__main__":
