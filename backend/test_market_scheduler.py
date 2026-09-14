@@ -202,6 +202,59 @@ def test_defense_no_breach_no_escalation():
     assert alerts == [] and tr.is_escalated("AAPL", NOON) is False
 
 
+# ---- 3b. Juice-proximity escalation ----------------------------------------
+
+def test_juice_escalation_promotes_and_emits_within_band():
+    sink = ListAlertSink()
+    tr = EscalationTracker(sink=sink)
+    threshold, band = 80.0, 8.0
+    # 74% is within 8pts of 80% -> escalate + alert
+    alert = tr.observe_juice("AAPL", 74.0, threshold, band, NOON)
+    assert alert is not None and alert.kind == "juice" and alert.symbol == "AAPL"
+    assert tr.is_escalated("AAPL", NOON) is True
+    assert "AAPL" in tr.escalated_symbols(NOON)
+    interval = ms.quote_poll_seconds(Tier.T0, escalated=True)
+    assert interval == config.POLL_ESCALATED_SECONDS
+
+
+def test_juice_escalation_outside_band_does_nothing():
+    tr = EscalationTracker(sink=ListAlertSink())
+    alert = tr.observe_juice("AAPL", 50.0, 80.0, 8.0, NOON)
+    assert alert is None and tr.is_escalated("AAPL", NOON) is False
+
+
+def test_juice_escalation_edge_triggered_no_spam():
+    sink = ListAlertSink()
+    tr = EscalationTracker(sink=sink)
+    tr.observe_juice("AAPL", 75.0, 80.0, 8.0, NOON)                          # 1 alert
+    tr.observe_juice("AAPL", 76.0, 80.0, 8.0, NOON + timedelta(seconds=30))  # still in band, no new alert
+    assert len(sink.alerts) == 1
+
+
+def test_juice_escalation_survives_a_brief_drop_out_of_band():
+    """The whole point: a spike through 80% that reverts a moment later must not
+    instantly drop the elevated cadence — it decays on its own schedule so the
+    NEXT genuine crossing is more likely to be caught, not just the first one."""
+    tr = EscalationTracker(sink=ListAlertSink())
+    tr.observe_juice("AAPL", 81.0, 80.0, 8.0, NOON)  # popped above threshold, then reverted
+    still_in_decay = NOON + timedelta(seconds=90)
+    assert tr.observe_juice("AAPL", 50.0, 80.0, 8.0, still_in_decay) is None  # out of band now
+    assert tr.is_escalated("AAPL", still_in_decay) is True  # but still escalated
+
+
+def test_juice_escalation_decays():
+    tr = EscalationTracker(sink=ListAlertSink())
+    tr.observe_juice("AAPL", 75.0, 80.0, 8.0, NOON)
+    assert tr.is_escalated("AAPL", NOON + timedelta(minutes=config.ESCALATION_DECAY_MINUTES - 1))
+    assert not tr.is_escalated("AAPL", NOON + timedelta(minutes=config.ESCALATION_DECAY_MINUTES + 1))
+
+
+def test_juice_escalation_none_captured_is_a_no_op():
+    tr = EscalationTracker(sink=ListAlertSink())
+    assert tr.observe_juice("AAPL", None, 80.0, 8.0, NOON) is None
+    assert tr.is_escalated("AAPL", NOON) is False
+
+
 # ---- Regression fixture: XLK-like snapshot ---------------------------------
 
 def test_xlk_regression_triggers_defense():

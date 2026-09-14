@@ -321,7 +321,8 @@ def market_escalation_triggered(moves: Mapping[str, float]) -> bool:
 
 @dataclass
 class EscalationTracker:
-    """Tracks defense (per-symbol) and market (global) escalations over time.
+    """Tracks defense (per-symbol), juice-proximity (per-symbol), and market
+    (global) escalations over time.
 
     Deterministic given the clock passed to each call — no wall-clock reads, so it
     is testable with a mocked ``now``. Alerts are emitted on the *rising edge* of a
@@ -331,6 +332,7 @@ class EscalationTracker:
     sink: object = field(default_factory=LoggingAlertSink)
     _defense_expiry: dict[str, datetime] = field(default_factory=dict)
     _active_breach: dict[str, set[str]] = field(default_factory=dict)
+    _juice_expiry: dict[str, datetime] = field(default_factory=dict)
     _market_expiry: datetime | None = None
     _market_reason: str | None = None
 
@@ -364,6 +366,34 @@ class EscalationTracker:
             alerts.append(alert)
         return alerts
 
+    # -- juice proximity (per Tier-0 symbol; extrinsic-captured early warning) --
+    def observe_juice(self, symbol: str, captured_pct: float | None, threshold_pct: float,
+                      band_pct: float, now: datetime) -> EscalationAlert | None:
+        """Promote a symbol's cadence once its short's extrinsic capture reads
+        within ``band_pct`` of ``threshold_pct`` (the ROLL_EXTRINSIC_CAPTURED
+        trigger) — a brief spike THROUGH the threshold is then far more likely to
+        land on a poll before it reverts, instead of only being sampled every
+        POLL_T0_SECONDS. Re-arms (extends decay) on every call still inside the
+        band, same as observe_defense; unlike a breach, dropping OUT of the band
+        does not clear the escalation early — it decays on its own, so the
+        cadence stays elevated for a while after a near-miss rather than
+        flapping back to normal the instant the read dips a point below."""
+        sym = (symbol or "").upper()
+        in_band = captured_pct is not None and float(captured_pct) >= threshold_pct - band_pct
+        if not in_band:
+            return None
+        was_active = sym in self._juice_expiry and self._juice_expiry[sym] > now
+        self._juice_expiry[sym] = now + self._decay()
+        if was_active:
+            return None  # already escalated — extend decay, don't re-alert
+        alert = EscalationAlert(
+            kind="juice", symbol=sym, level="extrinsic_captured",
+            price=float(captured_pct), level_value=threshold_pct - band_pct, at=_iso(now),
+            detail=f"{sym} extrinsic captured {captured_pct:.0f}% (within {band_pct:.0f}pt "
+                   f"of the {threshold_pct:.0f}% roll trigger) — quote cadence escalated")
+        self.sink.emit(alert)
+        return alert
+
     # -- market (global) --
     def observe_market(self, moves: Mapping[str, float], now: datetime) -> EscalationAlert | None:
         """Check SPY / held-sector intraday moves. On a fresh trigger, arms the
@@ -389,23 +419,30 @@ class EscalationTracker:
         return self._market_expiry is not None and now < self._market_expiry
 
     def is_escalated(self, symbol: str, now: datetime | None = None) -> bool:
-        """True when ``symbol``'s freshness is promoted right now — either its own
-        defense escalation or a global market escalation is active. ``now`` may be
-        omitted when the tracker is used as a plain flags snapshot for ``fetch_due``
-        (in which case any recorded escalation counts)."""
+        """True when ``symbol``'s freshness is promoted right now — its own
+        defense escalation, its own juice-proximity escalation, or a global
+        market escalation is active. ``now`` may be omitted when the tracker is
+        used as a plain flags snapshot for ``fetch_due`` (in which case any
+        recorded escalation counts)."""
         sym = (symbol or "").upper()
         if now is None:  # snapshot semantics
-            return self._market_expiry is not None or sym in self._defense_expiry
+            return (self._market_expiry is not None
+                    or sym in self._defense_expiry or sym in self._juice_expiry)
         if self.market_active(now):
             return True
         exp = self._defense_expiry.get(sym)
+        if exp is not None and exp > now:
+            return True
+        exp = self._juice_expiry.get(sym)
         return exp is not None and exp > now
 
     def escalated_symbols(self, now: datetime) -> frozenset[str]:
-        """The set of symbols with an ACTIVE defense escalation at ``now`` (market
-        escalation is global and applies to whatever is being polled, so it is not
-        enumerated here)."""
-        return frozenset(s for s, exp in self._defense_expiry.items() if exp > now)
+        """The set of symbols with an ACTIVE per-symbol escalation (defense
+        breach or juice proximity) at ``now`` — market escalation is global and
+        applies to whatever is being polled, so it is not enumerated here."""
+        defense = (s for s, exp in self._defense_expiry.items() if exp > now)
+        juice = (s for s, exp in self._juice_expiry.items() if exp > now)
+        return frozenset(defense) | frozenset(juice)
 
     def prune(self, now: datetime) -> None:
         """Drop expired escalations. Optional housekeeping — queries already treat
@@ -413,6 +450,8 @@ class EscalationTracker:
         for s in [s for s, exp in self._defense_expiry.items() if exp <= now]:
             self._defense_expiry.pop(s, None)
             self._active_breach.pop(s, None)
+        for s in [s for s, exp in self._juice_expiry.items() if exp <= now]:
+            self._juice_expiry.pop(s, None)
         if self._market_expiry is not None and now >= self._market_expiry:
             self._market_expiry = None
             self._market_reason = None

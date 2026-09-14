@@ -126,6 +126,50 @@ def _run_defense_escalations(state: dict, tiers: dict, quotes: dict, now: dateti
     return fired
 
 
+def _run_juice_escalations(state: dict, tiers: dict, quotes: dict, now: datetime) -> list[str]:
+    """Escalate a Tier-0 symbol's quote cadence once its short's extrinsic
+    capture reads within config.JUICE_ESCALATION_BAND_PCT of the
+    ROLL_EXTRINSIC_CAPTURED threshold — the same EscalationTracker + cadence
+    promotion _run_defense_escalations uses, just a different early-warning
+    condition. See config.JUICE_ESCALATION_BAND_PCT for why: a brief spike
+    through the threshold can otherwise revert between two POLL_T0_SECONDS
+    polls without ever being observed. Reads the SAME live mark option_marks
+    just captured this cycle (option_marks.mark_for), never a fresh fetch."""
+    import position_manager
+    fired: list[str] = []
+    for pos in state.get("positions", []):
+        if pos.get("status") == "closed":
+            continue
+        sym = (pos.get("ticker") or "").upper()
+        if tiers.get(sym) != Tier.T0:
+            continue
+        q = quotes.get(sym)
+        if not q or q.get("price") is None:
+            continue
+        price = float(q["price"])
+        best_captured = None
+        for sc in pos.get("short_calls", []) or []:
+            try:
+                es = position_manager.enrich_short(
+                    sc, price, pos.get("dividend"),
+                    live_mark=option_marks.mark_for(sym, sc),
+                    today=now.date(), position_type=pos.get("position_type"))
+            except Exception as e:  # noqa: BLE001 — one leg must not break the cycle
+                logger.warning("juice escalation check failed for %s: %s", sym, e)
+                continue
+            captured = es.get("extrinsic_captured_pct")
+            if captured is not None and (best_captured is None or captured > best_captured):
+                best_captured = captured
+        if best_captured is None:
+            continue
+        alert = _tracker.observe_juice(
+            sym, best_captured, config.ROLL_EXTRINSIC_CAPTURED_PCT,
+            config.JUICE_ESCALATION_BAND_PCT, now)
+        if alert:
+            fired.append(alert.detail)
+    return fired
+
+
 def _run_market_escalation(state: dict, quotes: dict, now: datetime):
     import data_handler
     moves: dict[str, float] = {}
@@ -229,9 +273,17 @@ def run_cycle(now: datetime | None = None, sleep=time.sleep) -> dict | None:
             summary["degraded"] = fetched["degraded"]
             for sym in due:
                 _last_quote_at[sym] = now
-            summary["escalations"] = _run_defense_escalations(state, tiers, fetched["quotes"], now)
+            defense_alerts = _run_defense_escalations(state, tiers, fetched["quotes"], now)
+            # Juice-proximity alerts ride the same tracker/cadence promotion as
+            # defense, but are kept OUT of escalation_symbols below: that list
+            # feeds event_runner.maybe_run's DEFENSE-tagged edges, and a juice
+            # near-miss is a different condition (event_runner's own
+            # EXTRINSIC_CAPTURED signal already reacts to the real crossing on
+            # every poll regardless). This only needs to speed up the poll.
+            juice_alerts = _run_juice_escalations(state, tiers, fetched["quotes"], now)
+            summary["escalations"] = defense_alerts + juice_alerts
             summary["escalation_symbols"] = sorted({d.split(" ", 1)[0].rstrip(":").upper()
-                                                    for d in summary["escalations"] if d})
+                                                    for d in defense_alerts if d})
             alert = _run_market_escalation(state, fetched["quotes"], now)
             summary["market_escalation"] = alert.detail if alert else None
         except Exception as e:  # noqa: BLE001
