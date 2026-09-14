@@ -731,6 +731,43 @@ DRY_POWDER_DURATION_TIE_TOLERANCE_PCT = 0.5
 # file unlink, never a rewrite).
 DRY_POWDER_LOG_RETENTION_DAYS = 180
 
+# ---- Day-trade sleeve (TRAVIS_EXTENSION) -----------------------------------
+# A SEPARATE rules-based intraday strategy (see backend/daytrade/) for capital
+# too small to fit a CFM position — NOT the CFM strategy, and the rotation
+# regime gate does not feed into it. Shares Schwab auth, quotes, and the
+# account layer with CFM; nothing else. This is Phase 1 only: nightly
+# screener + 5-min bar ingestion, no signal engine, no paper/live execution,
+# and no state.json involvement (see daytrade/store.py for the side-channel
+# storage this writes to — the same zero-authority pattern csp_dry_powder.py
+# uses above). Every constant below is a PROPOSED_DEFAULT taken directly from
+# the strategy brief; none has been calibrated against real fills.
+
+# Rule 1 — nightly universe screen bounds.
+DAYTRADE_MIN_PRICE = 20.0
+DAYTRADE_MAX_PRICE = 150.0
+DAYTRADE_MIN_AVG_VOLUME = 1_000_000
+DAYTRADE_AVG_VOLUME_LOOKBACK_DAYS = 20
+DAYTRADE_ATR_PCT_MIN = 2.0
+DAYTRADE_ATR_PCT_MAX = 5.0
+DAYTRADE_UNIVERSE_MIN = 3
+DAYTRADE_UNIVERSE_MAX = 5
+# Its OWN ATR window — NOT ATR_WINDOW above (CFM's 9-day ATR): rule 5's stop
+# is daily ATR(14), a different tunable that must not silently share CFM's.
+DAYTRADE_ATR_WINDOW = 14
+
+# Rule 2 — signal window, 8:30-10:00 AM CT. Expressed in ET rather than adding
+# a second timezone to the process: 8:30-10:00 CT == 9:30-11:00 ET year-round
+# (both zones observe the same US DST transitions on the same date), and
+# alert_scheduler's clock is already ET.
+DAYTRADE_WINDOW_START_ET = "09:30"
+DAYTRADE_WINDOW_END_ET = "11:00"
+# 5-min bar ingestion cadence during the window.
+DAYTRADE_BAR_INTERVAL_MINUTES = 5
+
+# Nightly screener run time (ET, after the close) — mirrors the
+# once-per-day-after-threshold shape of alert_scheduler.maintenance_due.
+DAYTRADE_SCREEN_ET = "16:45"
+
 # ---- Dividend income profile (schema v21) ---------------------------------
 # TRAVIS_EXTENSION — NOT a CFM rule. The CFM source prefers volatile names for
 # their juice and warns against "safe" low-vol stocks; the dividend sleeve is an
