@@ -735,13 +735,14 @@ DRY_POWDER_LOG_RETENTION_DAYS = 180
 # A SEPARATE rules-based intraday strategy (see backend/daytrade/) for capital
 # too small to fit a CFM position — NOT the CFM strategy, and the rotation
 # regime gate does not feed into it. Shares Schwab auth, quotes, and the
-# account layer with CFM; nothing else. Phase 2 adds the signal engine (rules
-# 3-8: setup/entry/stop/target/risk/logging) on top of Phase 1's screener +
-# bar ingestion — still no paper/live execution and no state.json
-# involvement (see daytrade/store.py for the side-channel storage this writes
-# to — the same zero-authority pattern csp_dry_powder.py uses above). Every
-# constant below is a PROPOSED_DEFAULT taken directly from the strategy
-# brief; none has been calibrated against real fills.
+# account layer with CFM; nothing else. Phase 2 added the signal engine
+# (rules 3-8). Phase 3 adds the execution adapter interface (PaperAdapter for
+# now; SchwabAdapter is Phase 6, live money, not built here) and the trade
+# log — still no state.json involvement, and paper mode places no real order
+# (see daytrade/store.py for the side-channel storage this writes to — the
+# same zero-authority pattern csp_dry_powder.py uses above). Every constant
+# below is a PROPOSED_DEFAULT taken directly from the strategy brief; none
+# has been calibrated against real fills.
 
 # Rule 1 — nightly universe screen bounds.
 DAYTRADE_MIN_PRICE = 20.0
@@ -807,6 +808,17 @@ DAYTRADE_DAILY_STOP_R = 2.0
 # own equity figure until a real one is wired up. Override with the
 # DAYTRADE_ACCOUNT_EQUITY env var; nothing here places a real order yet.
 DAYTRADE_ACCOUNT_EQUITY = float(os.environ.get("DAYTRADE_ACCOUNT_EQUITY", "5000"))
+
+
+def daytrade_mode() -> str:
+    """'paper' (default) or 'live' — selects which daytrade.adapters
+    ExecutionAdapter daytrade.adapters.get_adapter() returns. Env-only for
+    now (DAYTRADE_MODE), no persisted UI toggle yet: the brief's own Phase 6
+    (live Schwab adapter) doesn't exist in this change, so 'live' has
+    nothing to select — get_adapter() raises rather than silently running
+    paper under a live-sounding flag."""
+    return os.environ.get("DAYTRADE_MODE", "paper").strip().lower()
+
 
 # ---- Dividend income profile (schema v21) ---------------------------------
 # TRAVIS_EXTENSION — NOT a CFM rule. The CFM source prefers volatile names for
