@@ -23,13 +23,21 @@ are diffed against what's already journaled by ``id`` before appending), the
 same "re-run is cheap and correct" trade-off Phase 1's scheduler already
 makes for the screener. There is no persisted mid-day machine state.
 
-OUTCOME SIMULATION IS A PHASE-2 STAND-IN: a real fill/slippage model belongs
-to the paper/live execution adapter (a later phase per the build order).
-Until then, an entry fills exactly at the setup candle's high/low (the level
-the rule says to break) and an exit fills exactly at its trigger level
-(stop/target) or at the last available bar's close (the window cutoff) — see
-``DAYTRADE_STOP_ATR_DIVISOR`` etc. in config.py for the rest of the rule
-constants this engine reads.
+FILLS GO THROUGH ``daytrade/adapters.py`` (Phase 3): every entry/exit this
+engine decides on is a REQUEST to an ``ExecutionAdapter`` (default
+``PaperAdapter``, resolved per day via ``adapters.get_adapter``), not an
+assumption. ``PaperAdapter`` still fills instantly and exactly at the
+requested price — no slippage/partial-fill model yet, that's
+``SchwabAdapter``'s problem, a later phase — but the seam is real: this
+engine only ever uses the returned ``Fill``, never the request, for the
+price/size it books. The adapter is also the day's trade log; see its
+module docstring for how that differs from this module's signals journal.
+
+REPLAY-SAFE ADAPTER CALLS: because a re-run replays bars this engine has
+already seen, ``enter``/``exit`` are idempotent on the adapter side (keyed
+by trade_id and by trade_id+kind+at respectively) — calling them again for
+an already-recorded fill is a no-op, not a double-fill or a double-counted
+P&L. See ``PaperAdapter`` for the dedup.
 
 RULE 3's "average 5-min volume" baseline is a Phase-2 interpretation call —
 see ``_avg_prior_volume`` and the config.py comment above
@@ -46,7 +54,7 @@ from zoneinfo import ZoneInfo
 
 import config
 
-from daytrade import store
+from daytrade import adapters, store
 
 logger = logging.getLogger("cfm.daytrade")
 
@@ -145,7 +153,8 @@ def _event(day: str, symbol: str, event: str, at: str, **extra) -> dict:
     return row
 
 
-def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict) -> dict | None:
+def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict,
+                  adapter: adapters.ExecutionAdapter) -> dict | None:
     """Commit a triggered setup as a live trade. Returns None (and leaves the
     symbol able to re-arm) if a guardrail blocks the entry at trigger time —
     rare (the same guardrail was clear when the setup armed) but re-checked
@@ -155,20 +164,24 @@ def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict) -> dict | None:
         sym.status = "watching"
         return _event(bar["date"], bar["symbol"], "entry_skipped", bar["datetime"],
                       direction=sym.direction, reason=reason, trade_id=sym.trade_id)
-    risk_amount = day_state.account_equity * (config.DAYTRADE_RISK_PCT / 100.0)
-    entry = sym.setup_high if sym.direction == "long" else sym.setup_low
+    requested_entry = sym.setup_high if sym.direction == "long" else sym.setup_low
     risk_per_share = sym.risk_per_share
+    risk_amount = day_state.account_equity * (config.DAYTRADE_RISK_PCT / 100.0)
+    requested_size = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
+
+    fill = adapter.enter(symbol=bar["symbol"], trade_id=sym.trade_id, direction=sym.direction,
+                         price=requested_entry, size=requested_size, at=bar["datetime"])
+    entry, size = fill.price, fill.size
     stop = entry - risk_per_share if sym.direction == "long" else entry + risk_per_share
     target1 = entry + risk_per_share if sym.direction == "long" else entry - risk_per_share
     target2 = (entry + 2 * risk_per_share if sym.direction == "long"
                else entry - 2 * risk_per_share)
-    size = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
 
     sym.status = "in_trade"
     sym.entry, sym.stop, sym.target1, sym.target2 = entry, stop, target1, target2
     sym.half_taken = False
     sym.size = size
-    sym.entry_at = bar["datetime"]
+    sym.entry_at = fill.at
     sym.last_bar = bar  # so a trade entered on the day's last bar still has
                         # something to close out against if finalize() runs
     day_state.trades_taken += 1
@@ -177,26 +190,40 @@ def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict) -> dict | None:
                   target2=round(target2, 4), size=size, trade_id=sym.trade_id)
 
 
-def _resolve_trade(sym: _Symbol, day_state: _Day, bar: dict) -> list[dict]:
+def _exit_fill(adapter: adapters.ExecutionAdapter, sym: _Symbol, bar: dict, kind: str,
+                price: float, size: int, r: float) -> float:
+    """Request an exit fill and return the price actually booked."""
+    fill = adapter.exit(symbol=bar["symbol"], trade_id=sym.trade_id, kind=kind,
+                        price=price, size=size, at=bar["datetime"], r=r)
+    return fill.price
+
+
+def _resolve_trade(sym: _Symbol, day_state: _Day, bar: dict,
+                    adapter: adapters.ExecutionAdapter) -> list[dict]:
     events: list[dict] = []
     long = sym.direction == "long"
+    half_size = sym.size // 2
+    remainder_size = sym.size - half_size
 
     if not sym.half_taken:
         stop_hit = bar["low"] <= sym.stop if long else bar["high"] >= sym.stop
         if stop_hit:
             net_r = -1.0
+            price = _exit_fill(adapter, sym, bar, "stop_out", sym.stop, sym.size, net_r)
             day_state.record_trade_result(net_r)
             events.append(_event(bar["date"], bar["symbol"], "stop_out", bar["datetime"],
-                                  direction=sym.direction, price=round(sym.stop, 4),
+                                  direction=sym.direction, price=round(price, 4),
                                   r=net_r, trade_id=sym.trade_id))
             sym.status = "watching"
             return events
         target1_hit = bar["high"] >= sym.target1 if long else bar["low"] <= sym.target1
         if target1_hit:
+            price = _exit_fill(adapter, sym, bar, "half_target", sym.target1, half_size,
+                               config.DAYTRADE_HALF_TARGET_R)
             sym.half_taken = True
             sym.stop = sym.entry  # move to breakeven, rule 6
             events.append(_event(bar["date"], bar["symbol"], "half_target", bar["datetime"],
-                                  direction=sym.direction, price=round(sym.target1, 4),
+                                  direction=sym.direction, price=round(price, 4),
                                   r=config.DAYTRADE_HALF_TARGET_R, trade_id=sym.trade_id))
             # fall through: the same bar can also resolve the remainder below
         else:
@@ -208,16 +235,18 @@ def _resolve_trade(sym: _Symbol, day_state: _Day, bar: dict) -> list[dict]:
     target2_hit = bar["high"] >= sym.target2 if long else bar["low"] <= sym.target2
     if breakeven_hit:
         net_r = 0.5 * config.DAYTRADE_HALF_TARGET_R
+        price = _exit_fill(adapter, sym, bar, "breakeven_exit", sym.stop, remainder_size, net_r)
         day_state.record_trade_result(net_r)
         events.append(_event(bar["date"], bar["symbol"], "breakeven_exit", bar["datetime"],
-                              direction=sym.direction, price=round(sym.stop, 4),
+                              direction=sym.direction, price=round(price, 4),
                               r=net_r, trade_id=sym.trade_id))
         sym.status = "watching"
     elif target2_hit:
         net_r = 0.5 * config.DAYTRADE_HALF_TARGET_R + 0.5 * config.DAYTRADE_FULL_TARGET_R
+        price = _exit_fill(adapter, sym, bar, "final_target", sym.target2, remainder_size, net_r)
         day_state.record_trade_result(net_r)
         events.append(_event(bar["date"], bar["symbol"], "final_target", bar["datetime"],
-                              direction=sym.direction, price=round(sym.target2, 4),
+                              direction=sym.direction, price=round(price, 4),
                               r=net_r, trade_id=sym.trade_id))
         sym.status = "watching"
     else:
@@ -225,7 +254,8 @@ def _resolve_trade(sym: _Symbol, day_state: _Day, bar: dict) -> list[dict]:
     return events
 
 
-def _process_bar(sym: _Symbol, day_state: _Day, bar: dict, day: str) -> list[dict]:
+def _process_bar(sym: _Symbol, day_state: _Day, bar: dict, day: str,
+                  adapter: adapters.ExecutionAdapter) -> list[dict]:
     events: list[dict] = []
     avg_volume = _avg_prior_volume(sym.seen_volumes)
 
@@ -253,7 +283,7 @@ def _process_bar(sym: _Symbol, day_state: _Day, bar: dict, day: str) -> list[dic
     elif sym.status == "armed":
         sym.candles_waited += 1
         if _triggered(bar, sym.direction, sym.setup_high, sym.setup_low):
-            ev = _enter_trade(sym, day_state, bar)
+            ev = _enter_trade(sym, day_state, bar, adapter)
             if ev:
                 events.append(ev)
         elif sym.candles_waited >= config.DAYTRADE_ENTRY_EXPIRY_CANDLES:
@@ -261,13 +291,14 @@ def _process_bar(sym: _Symbol, day_state: _Day, bar: dict, day: str) -> list[dic
                                   direction=sym.direction, trade_id=sym.trade_id))
             sym.status = "watching"
     elif sym.status == "in_trade":
-        events.extend(_resolve_trade(sym, day_state, bar))
+        events.extend(_resolve_trade(sym, day_state, bar, adapter))
 
     sym.seen_volumes.append(bar["volume"])
     return events
 
 
-def _finalize_open_trades(symbols: dict[str, _Symbol], day_state: _Day, day: str) -> list[dict]:
+def _finalize_open_trades(symbols: dict[str, _Symbol], day_state: _Day, day: str,
+                           adapter: adapters.ExecutionAdapter) -> list[dict]:
     """Force-exit any still-open trade at the window cutoff (rule 6), using
     the last bar seen for that symbol as the cutoff price. Only called once
     the caller has established the window has actually ended — a trade still
@@ -279,28 +310,33 @@ def _finalize_open_trades(symbols: dict[str, _Symbol], day_state: _Day, day: str
             continue
         long = sym.direction == "long"
         close = sym.last_bar["close"]
+        size = sym.size - sym.size // 2 if sym.half_taken else sym.size
         if sym.half_taken:
             remainder_r = ((close - sym.entry) if long else (sym.entry - close)) / sym.risk_per_share
             net_r = 0.5 * config.DAYTRADE_HALF_TARGET_R + 0.5 * remainder_r
         else:
             net_r = ((close - sym.entry) if long else (sym.entry - close)) / sym.risk_per_share
+        price = _exit_fill(adapter, sym, sym.last_bar, "time_cutoff", close, size, round(net_r, 4))
         day_state.record_trade_result(net_r)
         events.append(_event(day, symbol, "time_cutoff", sym.last_bar["datetime"],
-                              direction=sym.direction, price=round(close, 4),
+                              direction=sym.direction, price=round(price, 4),
                               half_taken=sym.half_taken, r=round(net_r, 4), trade_id=sym.trade_id))
         sym.status = "watching"
     return events
 
 
-def run_day(day: str, now: datetime | None = None,
-            account_equity: float | None = None) -> dict:
+def run_day(day: str, now: datetime | None = None, account_equity: float | None = None,
+            adapter: adapters.ExecutionAdapter | None = None) -> dict:
     """Replay one trading day's bars through the signal engine and journal
     any new events. Idempotent: safe to call repeatedly as bars keep
     arriving (Phase 1's scheduler does, every DAYTRADE_BAR_INTERVAL_MINUTES).
-    Returns ``{"date", "events"}`` — every event journaled for the day so
-    far, oldest first."""
+    ``adapter`` defaults to ``adapters.get_adapter(day)`` (PaperAdapter) —
+    tests inject their own to assert on fill/trade-log behaviour without a
+    second config seam. Returns ``{"date", "events"}`` — every event
+    journaled for the day so far, oldest first."""
     now = now or datetime.now(ET)
     account_equity = config.DAYTRADE_ACCOUNT_EQUITY if account_equity is None else account_equity
+    adapter = adapter if adapter is not None else adapters.get_adapter(day)
 
     screen = store.load_screen(day)
     if not screen:
@@ -320,11 +356,13 @@ def run_day(day: str, now: datetime | None = None,
     new_events: list[dict] = []
     for bar in bars:
         sym = symbols[bar["symbol"]]
-        new_events.extend(_process_bar(sym, day_state, bar, day))
+        new_events.extend(_process_bar(sym, day_state, bar, day, adapter))
 
     window_over = now.strftime("%H:%M") >= config.DAYTRADE_WINDOW_END_ET
     if window_over:
-        new_events.extend(_finalize_open_trades(symbols, day_state, day))
+        new_events.extend(_finalize_open_trades(symbols, day_state, day, adapter))
+
+    adapter.flush()
 
     existing = store.load_signals(day)
     existing_ids = {e.get("id") for e in existing}

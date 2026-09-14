@@ -1,4 +1,5 @@
-"""Day-trade signal engine — Phase 2 (strategy rules 3-8), TRAVIS_EXTENSION.
+"""Day-trade signal engine — Phase 2 (strategy rules 3-8) and its Phase 3
+execution-adapter wiring, TRAVIS_EXTENSION.
 
 Offline throughout: hand-built bar sequences and a tmp_path store, no network.
 ATR14 is fixed at 4.0 with the default DAYTRADE_STOP_ATR_DIVISOR=4.0 so
@@ -13,7 +14,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 import config
-from daytrade import signals, store
+from daytrade import adapters, signals, store
 
 DAY = "2026-09-14"
 ET = ZoneInfo("America/New_York")
@@ -373,3 +374,64 @@ def test_run_day_with_no_screener_output_returns_no_events(tmp_store):
 def test_run_day_with_no_bars_returns_no_events(tmp_store):
     _save_screen([_pick("ABC", 100, 90)])
     assert _events() == []
+
+
+# ===========================================================================
+# Phase 3 — execution adapter / trade log wiring
+# ===========================================================================
+def test_run_day_writes_a_matching_trade_log_row(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars() + [
+        _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),   # half target
+        _bar("ABC", "09:50", 103, 103.6, 102.9, 103.5, 20_000),   # final target
+    ])
+
+    events = _events()
+    entry_event = next(e for e in events if e["event"] == "entry")
+    trade_id = entry_event["trade_id"]
+
+    trades = store.load_trades(DAY)
+    trade = trades[trade_id]
+    assert trade["symbol"] == "ABC" and trade["direction"] == "long"
+    assert trade["entry"]["price"] == entry_event["entry"]
+    assert trade["entry"]["size"] == entry_event["size"]
+    assert [e["kind"] for e in trade["exits"]] == ["half_target", "final_target"]
+    assert trade["status"] == "closed"
+    assert trade["realized_r"] == pytest.approx(1.5)
+    # entry size 50 (see PaperAdapter tests) -> half 25 @ +1, remainder 25 @ +2
+    assert trade["realized_pnl"] == pytest.approx(25 * 1.0 + 25 * 2.0)
+
+
+def test_run_day_trade_log_is_idempotent_across_repeated_calls(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars() + [
+        _bar("ABC", "09:45", 101, 101.2, 100.4, 100.6, 30_000),  # stop_out
+    ])
+
+    _events(now="09:50")
+    trade_id = next(iter(store.load_trades(DAY)))
+    first_pnl = store.load_trades(DAY)[trade_id]["realized_pnl"]
+
+    _events(now="09:50")  # replay again — must not double the loss
+    second = store.load_trades(DAY)[trade_id]
+    assert second["realized_pnl"] == first_pnl
+    assert len(second["exits"]) == 1
+
+
+def test_run_day_uses_the_fill_price_an_injected_adapter_returns(tmp_store):
+    """The engine must book whatever the adapter says filled, not the level
+    it requested — the whole point of routing through an adapter at all."""
+    class _SlippageAdapter(adapters.ExecutionAdapter):
+        def enter(self, *, symbol, trade_id, direction, price, size, at):
+            return adapters.Fill(price=price + 0.05, size=size, at=at)  # +5c slippage
+
+        def exit(self, *, symbol, trade_id, kind, price, size, at, r):
+            return adapters.Fill(price=price, size=size, at=at)
+
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars())
+
+    events = signals.run_day(DAY, now=_now("09:50"), adapter=_SlippageAdapter())["events"]
+    entry_event = next(e for e in events if e["event"] == "entry")
+    assert entry_event["entry"] == pytest.approx(101.55)  # 101.5 requested + 0.05
+    assert entry_event["stop"] == pytest.approx(100.55)   # stop is relative to the FILL, not the request

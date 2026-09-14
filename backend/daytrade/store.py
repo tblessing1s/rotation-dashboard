@@ -14,6 +14,18 @@ CFM book. Two files per trading day:
                              engine produces (``daytrade.signals.run_day``,
                              rule 8: "log every signal, taken or not") — one
                              JSON object per line, append-only.
+  ``YYYY-MM-DD.trades.json`` the day's TRADE LOG (``daytrade.adapters.
+                             PaperAdapter``) — one row per trade_id, keyed
+                             (not append-only like the signals log: a trade's
+                             row is updated in place as it fills and later
+                             exits), whole-file atomic write. Aggregated and
+                             fill-oriented (entry/exit prices, sizes, $ P&L)
+                             where the signals log is raw and decision-
+                             oriented (every setup/skip/entry/exit, taken or
+                             not) — the two intentionally overlap in the
+                             trades a symbol actually took, read the signals
+                             log for "what did the strategy consider" and the
+                             trade log for "what actually filled".
 
 Market-wide, not per-account: the screener universe and bar prices don't
 depend on which book is active (unlike CFM positions), so there is exactly one
@@ -46,6 +58,10 @@ def _bars_path(day: str) -> str:
 
 def _signals_path(day: str) -> str:
     return os.path.join(STORE_DIR, f"{day}.signals.jsonl")
+
+
+def _trades_path(day: str) -> str:
+    return os.path.join(STORE_DIR, f"{day}.trades.json")
 
 
 def save_screen(result: dict) -> None:
@@ -105,6 +121,31 @@ def load_bars(day: str, symbol: str | None = None) -> list[dict]:
             if symbol is None or row.get("symbol") == symbol:
                 out.append(row)
     return out
+
+
+def save_trades(day: str, trades: dict) -> None:
+    """Atomic whole-file write of one day's trade log — trade_id -> row. Same
+    durability shape as save_screen; the caller (PaperAdapter) owns loading
+    the existing dict, mutating it, and calling this with the merged result."""
+    _ensure_dir()
+    path = _trades_path(day)
+    with _lock:
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(trades, fh, indent=2, sort_keys=True, default=str)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+
+
+def load_trades(day: str) -> dict:
+    """That trading day's trade log — trade_id -> row. Empty dict if no
+    trade has opened yet."""
+    path = _trades_path(day)
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 def append_signals(day: str, rows: list[dict]) -> int:

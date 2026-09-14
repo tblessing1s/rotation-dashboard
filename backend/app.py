@@ -191,6 +191,19 @@ def api_daytrade_signals():
         return _err(e)
 
 
+@app.route("/api/daytrade/trades")
+def api_daytrade_trades():
+    """Phase 3 read-only view of the day's trade log — one row per trade_id,
+    with fills and $ P&L (daytrade/adapters.py's PaperAdapter). Defaults to
+    today, ET."""
+    try:
+        from datetime import datetime
+        day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
+        return jsonify({"date": day, "trades": daytrade_store.load_trades(day)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/sectors")
 def api_sectors():
     try:
