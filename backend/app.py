@@ -204,6 +204,19 @@ def api_daytrade_trades():
         return _err(e)
 
 
+@app.route("/api/daytrade/budget")
+def api_daytrade_budget():
+    """Live read of the sleeve's current sizing budget — the primary book's
+    dry powder, or the static fallback if that read fails right now (see
+    daytrade/budget.py). Not cached: reflects CFM's capital as of THIS
+    request, which is also what the next scheduler tick will size off."""
+    try:
+        from daytrade import budget
+        return jsonify(budget.daytrade_budget())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/sectors")
 def api_sectors():
     try:

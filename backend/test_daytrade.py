@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 import config
-from daytrade import bars, scheduler, store, universe
+from daytrade import bars, budget, scheduler, signals, store, universe
 
 ET = ZoneInfo("America/New_York")
 
@@ -233,3 +233,21 @@ def test_signals_finalize_due_fires_once_per_trading_day_after_window_end():
     assert scheduler.signals_finalize_due(at, None) is True
     assert scheduler.signals_finalize_due(at, at.date()) is False      # already ran today
     assert scheduler.signals_finalize_due(at, at.date() - timedelta(days=1)) is True
+
+
+def test_run_signals_sizes_off_the_live_daytrade_budget(monkeypatch):
+    """The scheduler — not signals.run_day's own default — is what wires the
+    live dry-powder budget in, so a bad budget read can never silently
+    resize a symbol-engine test's expectations (see daytrade/budget.py)."""
+    seen = {}
+    monkeypatch.setattr(budget, "daytrade_budget",
+                        lambda: {"amount": 777.0, "source": "dry_powder", "detail": "x"})
+
+    def _fake_run_day(day, now=None, account_equity=None, adapter=None):
+        seen["account_equity"] = account_equity
+        return {"date": day, "events": []}
+    monkeypatch.setattr(signals, "run_day", _fake_run_day)
+
+    scheduler._run_signals(datetime(2026, 9, 14, 10, 0, tzinfo=ET))
+
+    assert seen["account_equity"] == 777.0

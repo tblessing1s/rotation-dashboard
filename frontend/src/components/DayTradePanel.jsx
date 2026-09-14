@@ -178,6 +178,10 @@ function TradeLog({ trades }) {
 export default function DayTradePanel() {
   const [date, setDate] = React.useState(todayISO);
 
+  // Live sizing budget — independent of `date` (it's always "right now"),
+  // so it gets its own poll rather than riding the per-date fetch below.
+  const { data: budget } = useApi(() => api.daytradeBudget(), [], 60000);
+
   const { data, error, loading, reload } = useApi(
     async () => {
       const [universe, signals, trades] = await Promise.all([
@@ -239,7 +243,13 @@ export default function DayTradePanel() {
 
       {data && (
         <>
-          <div className="mb-4 grid grid-cols-2 gap-4 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3 sm:grid-cols-5">
+          <div className="mb-4 grid grid-cols-2 gap-4 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3 sm:grid-cols-3 lg:grid-cols-6">
+            <Stat
+              label="Budget"
+              value={budget ? money(budget.amount) : "—"}
+              sub={budget ? (budget.source === "dry_powder" ? budget.detail : `fallback — ${budget.detail}`) : "loading…"}
+              tone={budget?.source === "fallback" ? "text-amber-300" : "text-slate-100"}
+            />
             <Stat label="Trades taken" value={trades.length} sub={`max 2/day`} />
             <Stat label="Cumulative R" value={rMult(cumulativeR)} tone={toneFor(cumulativeR)} />
             <Stat label="Realized P&L" value={money(realizedPnl)} tone={toneFor(realizedPnl)} />

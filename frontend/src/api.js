@@ -134,6 +134,10 @@ export const api = {
   daytradeBars: (symbol, date) =>
     request(`/api/daytrade/bars/${symbol}${date ? `?date=${date}` : ""}`),
   daytradeTrades: (date) => request(`/api/daytrade/trades${date ? `?date=${date}` : ""}`),
+  // Live sizing budget — the primary book's dry powder right now, or the
+  // static fallback (see backend/daytrade/budget.py). Always "now", not
+  // scoped to the selected date, so it's polled independent of `date`.
+  daytradeBudget: () => request("/api/daytrade/budget"),
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
   // they can clear the STALE_BLOCKS_GO gate on the next scan.
   refreshReadyQuote: (tickers) =>

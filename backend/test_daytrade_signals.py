@@ -145,6 +145,21 @@ def test_entry_triggers_on_break_of_setup_candle_high(tmp_store):
     assert entry["size"] > 0
 
 
+def test_entry_is_skipped_not_taken_at_zero_size_when_the_budget_is_zero(tmp_store):
+    """A day-trade budget of $0 (daytrade/budget.py: the funding book has no
+    dry powder right now) must not silently take a size-0 trade — that would
+    still burn one of the day's two slots for a no-op position."""
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _setup_bars() + [
+        _bar("ABC", "09:40", 101.6, 102, 101.4, 101.8, 50_000),
+    ])
+
+    events = _events(account_equity=0.0)
+
+    assert _event_types(events) == ["setup", "entry_skipped"]
+    assert events[1]["reason"] == "no budget available"
+
+
 def test_entry_triggers_on_the_second_and_last_allowed_candle(tmp_store):
     _save_screen([_pick("ABC", 100, 90)])
     store.append_bars(DAY, _setup_bars() + [

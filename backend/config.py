@@ -801,12 +801,14 @@ DAYTRADE_RISK_PCT = 1.0
 DAYTRADE_MAX_TRADES_PER_DAY = 2
 DAYTRADE_MAX_LOSSES_PER_DAY = 2
 DAYTRADE_DAILY_STOP_R = 2.0
-# PLACEHOLDER pending the brief's own later "account guardrails" piece (PDT /
-# settled-cash tracking, a real capital allocation): the sleeve's capital is
-# explicitly SEPARATE from CFM's book (state.json's operating_cash is the
-# wrong number here — it's committed to CFM), so position sizing needs its
-# own equity figure until a real one is wired up. Override with the
-# DAYTRADE_ACCOUNT_EQUITY env var; nothing here places a real order yet.
+# FALLBACK ONLY as of daytrade/budget.py: the scheduler sizes off the primary
+# book's real dry-powder deploy capacity (position_manager.capital_summary()
+# ["deployable"]) on every run, and only falls back to this static figure
+# when that read fails (no primary book yet, Schwab not connected, a state
+# error) — never for a successfully-read $0, which is the sleeve's honest
+# budget when CFM has no dry powder right now. Override with the
+# DAYTRADE_ACCOUNT_EQUITY env var; still paper-only (config.daytrade_mode()),
+# so a stale fallback figure is a sizing inaccuracy, never a financial risk.
 DAYTRADE_ACCOUNT_EQUITY = float(os.environ.get("DAYTRADE_ACCOUNT_EQUITY", "5000"))
 
 

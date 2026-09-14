@@ -168,6 +168,15 @@ def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict,
     risk_per_share = sym.risk_per_share
     risk_amount = day_state.account_equity * (config.DAYTRADE_RISK_PCT / 100.0)
     requested_size = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
+    if requested_size <= 0:
+        # 1% of the current budget doesn't buy even one share at this risk
+        # distance — e.g. the funding book's dry powder is at or near zero
+        # (daytrade/budget.py). A real trade here would be a size-0 no-op
+        # that still consumed one of the day's two slots; skip it outright
+        # instead, the same as any other guardrail block.
+        sym.status = "watching"
+        return _event(bar["date"], bar["symbol"], "entry_skipped", bar["datetime"],
+                      direction=sym.direction, reason="no budget available", trade_id=sym.trade_id)
 
     fill = adapter.enter(symbol=bar["symbol"], trade_id=sym.trade_id, direction=sym.direction,
                          price=requested_entry, size=requested_size, at=bar["datetime"])

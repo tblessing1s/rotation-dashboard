@@ -126,11 +126,19 @@ def _run_bar_ingest(now: datetime) -> None:
 
 def _run_signals(now: datetime) -> None:
     try:
-        from daytrade import signals
+        from daytrade import budget, signals
         day = now.strftime("%Y-%m-%d")
-        result = signals.run_day(day, now=now)
-        logger.info("daytrade signals: %d total event(s) journaled for %s",
-                     len(result["events"]), day)
+        # Live budget every run — see budget.daytrade_budget: the primary
+        # book's dry powder, falling back to the static config placeholder
+        # on any read failure. run_day() itself still defaults to the
+        # placeholder when account_equity is omitted (the signal-engine
+        # tests rely on that default staying pure/offline), so the live
+        # figure only reaches production runs through this explicit pass.
+        equity = budget.daytrade_budget()
+        result = signals.run_day(day, now=now, account_equity=equity["amount"])
+        logger.info("daytrade signals: %d total event(s) journaled for %s "
+                    "(budget $%.2f from %s)",
+                    len(result["events"]), day, equity["amount"], equity["detail"])
     except Exception as e:  # noqa: BLE001 — best-effort, never fatal to the tick
         logger.warning("daytrade signal engine failed: %s", e)
 
