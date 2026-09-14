@@ -202,6 +202,112 @@ def test_defense_no_breach_no_escalation():
     assert alerts == [] and tr.is_escalated("AAPL", NOON) is False
 
 
+# ---- 3b. Juice-proximity escalation ----------------------------------------
+
+def test_juice_escalation_promotes_and_emits_within_band():
+    sink = ListAlertSink()
+    tr = EscalationTracker(sink=sink)
+    threshold, band = 80.0, 8.0
+    # 74% is within 8pts of 80% -> escalate + alert
+    alert = tr.observe_juice("AAPL", 74.0, threshold, band, NOON)
+    assert alert is not None and alert.kind == "juice" and alert.symbol == "AAPL"
+    assert tr.is_escalated("AAPL", NOON) is True
+    assert "AAPL" in tr.escalated_symbols(NOON)
+    interval = ms.quote_poll_seconds(Tier.T0, escalated=True)
+    assert interval == config.POLL_ESCALATED_SECONDS
+
+
+def test_juice_escalation_outside_band_does_nothing():
+    tr = EscalationTracker(sink=ListAlertSink())
+    alert = tr.observe_juice("AAPL", 50.0, 80.0, 8.0, NOON)
+    assert alert is None and tr.is_escalated("AAPL", NOON) is False
+
+
+def test_juice_escalation_edge_triggered_no_spam():
+    sink = ListAlertSink()
+    tr = EscalationTracker(sink=sink)
+    tr.observe_juice("AAPL", 75.0, 80.0, 8.0, NOON)                          # 1 alert
+    tr.observe_juice("AAPL", 76.0, 80.0, 8.0, NOON + timedelta(seconds=30))  # still in band, no new alert
+    assert len(sink.alerts) == 1
+
+
+def test_juice_escalation_survives_a_brief_drop_out_of_band():
+    """The whole point: a spike through 80% that reverts a moment later must not
+    instantly drop the elevated cadence — it decays on its own schedule so the
+    NEXT genuine crossing is more likely to be caught, not just the first one."""
+    tr = EscalationTracker(sink=ListAlertSink())
+    tr.observe_juice("AAPL", 81.0, 80.0, 8.0, NOON)  # popped above threshold, then reverted
+    still_in_decay = NOON + timedelta(seconds=90)
+    assert tr.observe_juice("AAPL", 50.0, 80.0, 8.0, still_in_decay) is None  # out of band now
+    assert tr.is_escalated("AAPL", still_in_decay) is True  # but still escalated
+
+
+def test_juice_escalation_decays():
+    tr = EscalationTracker(sink=ListAlertSink())
+    tr.observe_juice("AAPL", 75.0, 80.0, 8.0, NOON)
+    assert tr.is_escalated("AAPL", NOON + timedelta(minutes=config.ESCALATION_DECAY_MINUTES - 1))
+    assert not tr.is_escalated("AAPL", NOON + timedelta(minutes=config.ESCALATION_DECAY_MINUTES + 1))
+
+
+def test_juice_escalation_none_captured_is_a_no_op():
+    tr = EscalationTracker(sink=ListAlertSink())
+    assert tr.observe_juice("AAPL", None, 80.0, 8.0, NOON) is None
+    assert tr.is_escalated("AAPL", NOON) is False
+
+
+# ---- 3c. Juice critical zone (nested inside the juice band) ----------------
+
+def test_juice_critical_zone_promotes_beyond_the_escalated_cadence():
+    sink = ListAlertSink()
+    tr = EscalationTracker(sink=sink)
+    # threshold 80, band 8 (>=72 escalates), critical band 2 (>=78 critical)
+    alert = tr.observe_juice("AAPL", 79.0, 80.0, 8.0, NOON, critical_band_pct=2.0)
+    assert alert is not None and "CRITICAL" in alert.detail
+    assert tr.is_critical("AAPL", NOON) is True
+    assert "AAPL" in tr.critical_symbols(NOON)
+    assert tr.is_escalated("AAPL", NOON) is True  # critical implies escalated too
+    interval = ms.quote_poll_seconds(Tier.T0, escalated=True, critical=True)
+    assert interval == config.POLL_CRITICAL_SECONDS
+    assert config.POLL_CRITICAL_SECONDS < config.POLL_ESCALATED_SECONDS
+
+
+def test_juice_escalated_but_not_critical_stays_at_the_normal_escalated_cadence():
+    tr = EscalationTracker(sink=ListAlertSink())
+    # 74 is within the 8pt band (>=72) but not the 2pt critical band (>=78)
+    tr.observe_juice("AAPL", 74.0, 80.0, 8.0, NOON, critical_band_pct=2.0)
+    assert tr.is_escalated("AAPL", NOON) is True
+    assert tr.is_critical("AAPL", NOON) is False
+
+
+def test_juice_critical_edge_alerts_separately_from_the_outer_band():
+    """Entering the outer band alerts once; later tightening into the critical
+    zone is a materially different, worse situation and deserves its own
+    alert — even though the symbol was already merely 'escalated' and would
+    otherwise stay silent."""
+    sink = ListAlertSink()
+    tr = EscalationTracker(sink=sink)
+    tr.observe_juice("AAPL", 74.0, 80.0, 8.0, NOON, critical_band_pct=2.0)  # escalated only
+    assert len(sink.alerts) == 1 and "CRITICAL" not in sink.alerts[0].detail
+    tr.observe_juice("AAPL", 79.0, 80.0, 8.0,
+                     NOON + timedelta(seconds=30), critical_band_pct=2.0)  # now critical
+    assert len(sink.alerts) == 2 and "CRITICAL" in sink.alerts[1].detail
+    # still critical on the next call -> no third alert (no spam)
+    tr.observe_juice("AAPL", 79.5, 80.0, 8.0,
+                     NOON + timedelta(seconds=60), critical_band_pct=2.0)
+    assert len(sink.alerts) == 2
+
+
+def test_juice_critical_decays_independently_and_survives_dropping_to_merely_escalated():
+    tr = EscalationTracker(sink=ListAlertSink())
+    tr.observe_juice("AAPL", 79.0, 80.0, 8.0, NOON, critical_band_pct=2.0)
+    # drops back to merely-escalated (still >=72, no longer >=78) a moment later
+    later = NOON + timedelta(seconds=30)
+    assert tr.observe_juice("AAPL", 74.0, 80.0, 8.0, later, critical_band_pct=2.0) is None
+    # critical doesn't clear early — it decays on its own, same as the outer band
+    assert tr.is_critical("AAPL", later) is True
+    assert not tr.is_critical("AAPL", NOON + timedelta(minutes=config.ESCALATION_DECAY_MINUTES + 1))
+
+
 # ---- Regression fixture: XLK-like snapshot ---------------------------------
 
 def test_xlk_regression_triggers_defense():

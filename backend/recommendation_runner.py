@@ -774,7 +774,50 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
         logger.info("roll/defend auto-execute: %s", result)
         if not outcome.get("success"):
             _notify_auto_roll_failure(result, state, dry_run)
+        elif outcome.get("order_id") and outcome.get("status") not in ("filled", "canceled"):
+            # A LIVE order was just placed unattended and is still WORKING/unknown
+            # at the broker — see _notify_auto_roll_placed for why this is the one
+            # chance the operator gets to actually use the cancel path.
+            _notify_auto_roll_placed(result, payload, state, dry_run)
     return results
+
+
+def _notify_auto_roll_placed(result: dict, payload: dict, state: dict, dry_run: bool | None) -> None:
+    """A granted roll/defend auto-execute just placed a LIVE order unattended.
+    Cancelling it was never the gap — any order, auto-submitted or not, shares
+    the same order_id and pending-order record a human's own ticket would, so
+    it's already cancelable from Data Health's Pending Orders panel
+    (executor.cancel_order / POST /api/order-cancel), and a server-side sweep
+    (executor.cancel_stale_pending_orders) cancels it regardless if it's still
+    WORKING past config.PENDING_ORDER_STALE_SECONDS. The actual gap this closes
+    is AWARENESS: without this, an operator away from the app has no way to
+    know a trade just went out, so the cancel path — however solid — is
+    unreachable in practice. This is the one notification that gives them the
+    chance to actually use it before the order fills."""
+    import notifier
+    try:
+        settings = (state.get("alerts") or {}).get("settings") or {}
+        if dry_run is None:
+            dry_run = bool(settings.get("dry_run", config.alerts_dry_run_default()))
+        t = result.get("ticker") or ""
+        order_id = result.get("order_id")
+        notifier.dispatch([{
+            "type": "ROLL_AUTO_EXECUTE_PLACED",
+            "severity": "MEDIUM",
+            "rule": "roll/defend auto-execute",
+            "ticker": t,
+            "message": (f"{t}: auto-rolled {payload.get('from_strike')} -> "
+                       f"{payload.get('to_strike')} unattended ({result.get('trigger_rule')}, "
+                       f"order {order_id}, still {result.get('status')})."),
+            "action": "Cancel from Data Health -> Pending Orders now if you disagree — "
+                     "it's still working at the broker.",
+            "data": {"rec_id": result.get("rec_id"), "trigger_rule": result.get("trigger_rule"),
+                     "order_id": order_id, "status": result.get("status"),
+                     "from_strike": payload.get("from_strike"), "to_strike": payload.get("to_strike")},
+            "fingerprint": f"ROLL_AUTO_EXECUTE_PLACED|{t}|{order_id}",
+        }], settings, dry_run=dry_run)
+    except Exception:  # noqa: BLE001
+        logger.exception("auto-roll placed notification itself failed")
 
 
 def _notify_auto_roll_failure(result: dict, state: dict, dry_run: bool | None) -> None:

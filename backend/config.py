@@ -1084,6 +1084,23 @@ ROLL_EXTRINSIC_CAPTURED_PCT = ROLL_READY_DECAY_PCT
 # next weekly instead, for a full fresh week of extrinsic rather than a few
 # days' worth. See roll_advisor.roll_direction.
 ROLL_UP_SAME_WEEK_MIN_DTE = 3
+# TRAVIS_EXTENSION / PROPOSED_DEFAULT — a brief intraday spike through
+# ROLL_EXTRINSIC_CAPTURED_PCT can revert before the next scheduled quote poll
+# ever samples it (POLL_T0_SECONDS), so nothing is ever observed to be >= the
+# threshold and no recommendation fires. Once a short's extrinsic capture is
+# within this many points of the threshold, market_scheduler.EscalationTracker.
+# observe_juice promotes that symbol's quote cadence to POLL_ESCALATED_SECONDS
+# (see tier_poll._run_juice_escalations) — same mechanism as a defense-level
+# approach — so a genuine crossing is far more likely to land on a poll before
+# it snaps back. Decays after ESCALATION_DECAY_MINUTES without a re-trigger.
+JUICE_ESCALATION_BAND_PCT = 8.0
+# TRAVIS_EXTENSION / PROPOSED_DEFAULT — a second, tighter band nested inside
+# JUICE_ESCALATION_BAND_PCT: once capture is THIS close to the threshold, 30s
+# (POLL_ESCALATED_SECONDS) still isn't tight enough — bump to
+# POLL_CRITICAL_SECONDS instead. Must stay < JUICE_ESCALATION_BAND_PCT (the
+# critical zone is nested inside the escalated one, never wider than it).
+JUICE_CRITICAL_BAND_PCT = 2.0
+POLL_CRITICAL_SECONDS = 10      # PROPOSED_DEFAULT — max freshness in the critical juice zone
 # The weekly-juice BASIS (account_gate.juice_estimate): the model weekly call is
 # priced on one FULL Friday-to-Friday week — 7 calendar days — so every name is
 # compared on the same week whatever weekday the scan runs. (The old 5/365 was a
