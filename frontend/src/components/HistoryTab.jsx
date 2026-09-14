@@ -114,6 +114,28 @@ function ThetaLedgerCards({ theta }) {
 // (no historical option/stock prices are stored), so the line only covers
 // however long tracking has been running; a fresh book just shows a prompt
 // to check back once a few nightly runs have landed.
+// Same breakdown position_manager.account_value returns per point:
+//   total = shares + legacy LEAP value + cash + put collateral − short liability
+// Rendered as a plain-text equation for a native tooltip (title=), matching
+// the cursor-help pattern used elsewhere on this tab (SpotSource, wash sale).
+function accountValueMath(p) {
+  if (!p) return "";
+  const shares = p.shares_value ?? 0;
+  const leap = p.leap_value ?? 0;
+  const cash = p.operating_cash ?? 0;
+  const putColl = p.put_collateral ?? 0;
+  const shortLiab = p.short_liability ?? 0;
+  const lines = [`${p.date}: ${money(p.total)}`, ""];
+  lines.push(`shares at spot        ${money(shares)}`);
+  if (leap) lines.push(`legacy LEAP value   +${money(leap)}`);
+  lines.push(`operating cash       +${money(cash)}`);
+  if (putColl) lines.push(`put collateral       +${money(putColl)}`);
+  lines.push(`short call/put cost  −${money(shortLiab)}`);
+  lines.push(`                     ${"=".repeat(6)}`);
+  lines.push(`total                 ${money(p.total)}`);
+  return lines.join("\n");
+}
+
 function AccountValueChart({ points }) {
   if (!points || points.length < 2) {
     return (
@@ -134,8 +156,10 @@ function AccountValueChart({ points }) {
     p,
   }));
   const path = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(2)},${c.y.toFixed(2)}`).join(" ");
-  const first = points[0].total;
-  const last = points[points.length - 1].total;
+  const firstPoint = points[0];
+  const lastPoint = points[points.length - 1];
+  const first = firstPoint.total;
+  const last = lastPoint.total;
   const change = last - first;
   const changePct = first ? (change / Math.abs(first)) * 100 : null;
   const up = change >= 0;
@@ -144,17 +168,25 @@ function AccountValueChart({ points }) {
   return (
     <div>
       <div className="mb-2 flex flex-wrap items-baseline gap-x-3 gap-y-1">
-        <span className="text-2xl font-semibold text-slate-100">{money(last)}</span>
+        <span className="cursor-help text-2xl font-semibold text-slate-100" title={accountValueMath(lastPoint)}>
+          {money(last)}
+        </span>
         <span className={`text-sm font-semibold ${up ? "text-emerald-300" : "text-rose-300"}`}>
           {money(change)} ({pct(changePct)})
         </span>
         <span className="text-xs text-slate-500">since {points[0].date}</span>
+        <span
+          className="cursor-help rounded-full border border-slate-700 bg-slate-800/60 px-1.5 text-[10px] font-semibold text-slate-400"
+          title={"total = shares at spot + legacy LEAP value + operating cash + put collateral − short call/put buyback cost\n\nHover any point on the line for that day's numbers."}
+        >
+          ⓘ
+        </span>
       </div>
       <svg viewBox={`0 0 100 ${H}`} preserveAspectRatio="none" className="h-32 w-full overflow-visible">
         <path d={path} fill="none" stroke={stroke} strokeWidth="1.5" vectorEffect="non-scaling-stroke" />
         {coords.map((c, i) => (
-          <circle key={i} cx={c.x} cy={c.y} r="0.9" fill={stroke}>
-            <title>{`${c.p.date}: ${money(c.p.total)}`}</title>
+          <circle key={i} cx={c.x} cy={c.y} r="0.9" fill={stroke} className="cursor-help">
+            <title>{accountValueMath(c.p)}</title>
           </circle>
         ))}
       </svg>
