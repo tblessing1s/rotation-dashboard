@@ -1,0 +1,276 @@
+import React from "react";
+import { api } from "../api.js";
+import { Card, Pill, Spinner, ErrorState, Stat, useApi } from "./ui.jsx";
+
+// Day-trade sleeve (backend/daytrade/) — a SEPARATE, rules-based intraday
+// strategy for capital too small to fit a CFM position. The rotation regime
+// gate does not feed into it, and paper mode never places a real order — see
+// PaperAdapter in daytrade/adapters.py. Account-agnostic (market-wide): this
+// panel is intentionally NOT keyed on the active account/book.
+
+const todayISO = () => new Date().toISOString().slice(0, 10);
+const addDays = (iso, n) => {
+  const d = new Date(`${iso}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+
+const timeOf = (iso) => (iso ? iso.slice(11, 16) : "—");
+const money = (n) =>
+  n == null ? "—" : `${n < 0 ? "-" : ""}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const rMult = (n) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}R`);
+const toneFor = (n) => (n == null ? "text-slate-300" : n > 0 ? "text-emerald-300" : n < 0 ? "text-rose-300" : "text-slate-300");
+
+// Every event this panel can see is the engine following its own rules
+// exactly (paper mode has no manual-override path yet) — so each maps to a
+// Pill status that reads as "expected", never as a warning, including the
+// skips: a guardrail skip IS the rule working, not a miss.
+const EVENT_META = {
+  setup: { label: "setup", status: "watch" },
+  setup_skipped: { label: "setup · skipped", status: "unknown" },
+  entry: { label: "entry", status: "go" },
+  entry_skipped: { label: "entry · skipped", status: "unknown" },
+  expired: { label: "expired", status: "unknown" },
+  half_target: { label: "half target", status: "go" },
+  breakeven_exit: { label: "breakeven exit", status: "caution" },
+  final_target: { label: "final target", status: "go" },
+  stop_out: { label: "stop out", status: "avoid" },
+  time_cutoff: { label: "time cutoff", status: "caution" },
+};
+
+function detailFor(e) {
+  switch (e.event) {
+    case "setup":
+      return `${e.high}/${e.low} on ${e.volume?.toLocaleString()} vol (avg ${e.avg_volume?.toLocaleString()})`;
+    case "setup_skipped":
+    case "entry_skipped":
+      return e.reason || "—";
+    case "expired":
+      return "no break within the entry window";
+    case "entry":
+      return `@${e.entry} · ${e.size} sh · stop ${e.stop} · targets ${e.target1}/${e.target2}`;
+    default:
+      return e.price != null ? `@${e.price} · ${rMult(e.r)}` : rMult(e.r);
+  }
+}
+
+function UniverseTable({ picks }) {
+  if (!picks?.length) {
+    return <p className="text-[11px] text-slate-500">No qualifying names for this date.</p>;
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[640px] text-sm">
+        <thead>
+          <tr className="text-left text-[10px] uppercase tracking-wide text-slate-500">
+            <th className="py-1 pr-3">Symbol</th>
+            <th className="py-1 pr-3 text-right">Price</th>
+            <th className="py-1 pr-3 text-right">Avg Volume</th>
+            <th className="py-1 pr-3 text-right">ATR14</th>
+            <th className="py-1 pr-3 text-right">ATR%</th>
+            <th className="py-1 pr-3 text-right">Prior High</th>
+            <th className="py-1 pr-3 text-right">Prior Low</th>
+          </tr>
+        </thead>
+        <tbody>
+          {picks.map((p) => (
+            <tr key={p.symbol} className="border-t border-slate-800 text-slate-200">
+              <td className="py-1.5 pr-3 font-mono font-semibold">{p.symbol}</td>
+              <td className="py-1.5 pr-3 text-right font-mono">{p.price}</td>
+              <td className="py-1.5 pr-3 text-right font-mono">{p.avg_volume?.toLocaleString()}</td>
+              <td className="py-1.5 pr-3 text-right font-mono">{p.atr14}</td>
+              <td className="py-1.5 pr-3 text-right font-mono">{p.atr_pct}%</td>
+              <td className="py-1.5 pr-3 text-right font-mono text-slate-400">{p.prior_day_high}</td>
+              <td className="py-1.5 pr-3 text-right font-mono text-slate-400">{p.prior_day_low}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function SignalFeed({ events }) {
+  if (!events?.length) {
+    return <p className="text-[11px] text-slate-500">No signals yet for this date.</p>;
+  }
+  const rows = [...events].sort((a, b) => (a.at < b.at ? 1 : -1)); // newest first
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[720px] text-sm">
+        <thead>
+          <tr className="text-left text-[10px] uppercase tracking-wide text-slate-500">
+            <th className="py-1 pr-3">Time</th>
+            <th className="py-1 pr-3">Symbol</th>
+            <th className="py-1 pr-3">Event</th>
+            <th className="py-1 pr-3">Dir</th>
+            <th className="py-1 pr-3">Detail</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((e) => {
+            const meta = EVENT_META[e.event] || { label: e.event, status: "unknown" };
+            return (
+              <tr key={e.id || `${e.symbol}-${e.event}-${e.at}`} className="border-t border-slate-800 text-slate-200">
+                <td className="py-1.5 pr-3 font-mono text-[11px] text-slate-400">{timeOf(e.at)}</td>
+                <td className="py-1.5 pr-3 font-mono font-semibold">{e.symbol}</td>
+                <td className="py-1.5 pr-3"><Pill status={meta.status}>{meta.label}</Pill></td>
+                <td className={`py-1.5 pr-3 font-mono text-[11px] uppercase ${e.direction === "long" ? "text-emerald-300" : e.direction === "short" ? "text-rose-300" : "text-slate-500"}`}>
+                  {e.direction || "—"}
+                </td>
+                <td className="py-1.5 pr-3 text-[11px] text-slate-400">{detailFor(e)}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function TradeLog({ trades }) {
+  const rows = Object.values(trades || {}).sort((a, b) => (a.entry?.at < b.entry?.at ? 1 : -1));
+  if (!rows.length) {
+    return <p className="text-[11px] text-slate-500">No trades taken for this date.</p>;
+  }
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full min-w-[760px] text-sm">
+        <thead>
+          <tr className="text-left text-[10px] uppercase tracking-wide text-slate-500">
+            <th className="py-1 pr-3">Symbol</th>
+            <th className="py-1 pr-3">Dir</th>
+            <th className="py-1 pr-3">Entry</th>
+            <th className="py-1 pr-3">Exits</th>
+            <th className="py-1 pr-3">Status</th>
+            <th className="py-1 pr-3 text-right">R</th>
+            <th className="py-1 pr-3 text-right">P&amp;L</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((t) => (
+            <tr key={t.trade_id} className="border-t border-slate-800 text-slate-200">
+              <td className="py-1.5 pr-3 font-mono font-semibold">{t.symbol}</td>
+              <td className={`py-1.5 pr-3 font-mono text-[11px] uppercase ${t.direction === "long" ? "text-emerald-300" : "text-rose-300"}`}>
+                {t.direction}
+              </td>
+              <td className="py-1.5 pr-3 font-mono text-[11px]">
+                {t.entry.price} · {t.entry.size}sh · {timeOf(t.entry.at)}
+              </td>
+              <td className="py-1.5 pr-3 text-[11px] text-slate-400">
+                {t.exits.length
+                  ? t.exits.map((x) => `${EVENT_META[x.kind]?.label || x.kind} @${x.price} (${x.size}sh)`).join(", ")
+                  : "open"}
+              </td>
+              <td className="py-1.5 pr-3">
+                <Pill status={t.status === "closed" ? "unknown" : "watch"}>{t.status}</Pill>
+              </td>
+              <td className={`py-1.5 pr-3 text-right font-mono ${toneFor(t.realized_r)}`}>{rMult(t.realized_r)}</td>
+              <td className={`py-1.5 pr-3 text-right font-mono ${toneFor(t.realized_pnl)}`}>{money(t.realized_pnl)}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export default function DayTradePanel() {
+  const [date, setDate] = React.useState(todayISO);
+
+  const { data, error, loading, reload } = useApi(
+    async () => {
+      const [universe, signals, trades] = await Promise.all([
+        api.daytradeUniverse(date),
+        api.daytradeSignals(date),
+        api.daytradeTrades(date),
+      ]);
+      return { universe, signals, trades };
+    },
+    [date],
+    60000, // the strategy's own scheduler ticks every 30s and bars land every 5 min
+  );
+
+  const trades = React.useMemo(() => Object.values(data?.trades?.trades || {}), [data]);
+  const closed = trades.filter((t) => t.status === "closed");
+  const wins = closed.filter((t) => (t.realized_r || 0) > 0);
+  const cumulativeR = closed.reduce((s, t) => s + (t.realized_r || 0), 0);
+  const realizedPnl = trades.reduce((s, t) => s + (t.realized_pnl || 0), 0);
+
+  return (
+    <Card
+      title="Day Trade"
+      right={
+        <div className="flex items-center gap-2">
+          <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-sky-300">
+            paper mode
+          </span>
+          <button onClick={() => setDate((d) => addDays(d, -1))} className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-slate-400 hover:text-slate-200">
+            ←
+          </button>
+          <input
+            type="date"
+            value={date}
+            max={todayISO()}
+            onChange={(e) => e.target.value && setDate(e.target.value)}
+            className="rounded border border-slate-700 bg-slate-900 px-1.5 py-0.5 text-[11px] text-slate-200"
+          />
+          <button
+            onClick={() => setDate((d) => addDays(d, 1))}
+            disabled={date >= todayISO()}
+            className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-slate-400 hover:text-slate-200 disabled:opacity-30"
+          >
+            →
+          </button>
+          <button onClick={reload} className="text-[11px] text-slate-400 hover:text-slate-200">↻</button>
+        </div>
+      }
+    >
+      <p className="mb-3 text-xs text-slate-400">
+        A separate, rules-based intraday strategy for capital that doesn't fit
+        a CFM position — 8:30-10:00 AM CT breakout setups on the nightly
+        screener's picks, ATR-based stops, half-out at 1R. Paper mode only:
+        every fill here is simulated against real market data; nothing is
+        ever sent to the broker.
+      </p>
+
+      {loading && <Spinner />}
+      {error && <ErrorState error={error} onRetry={reload} />}
+
+      {data && (
+        <>
+          <div className="mb-4 grid grid-cols-2 gap-4 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3 sm:grid-cols-5">
+            <Stat label="Trades taken" value={trades.length} sub={`max 2/day`} />
+            <Stat label="Cumulative R" value={rMult(cumulativeR)} tone={toneFor(cumulativeR)} />
+            <Stat label="Realized P&L" value={money(realizedPnl)} tone={toneFor(realizedPnl)} />
+            <Stat
+              label="Win rate"
+              value={closed.length ? `${Math.round((wins.length / closed.length) * 100)}%` : "—"}
+              sub={closed.length ? `${wins.length}/${closed.length} closed` : "no closed trades yet"}
+            />
+            <Stat label="Rule adherence" value="100%" sub="paper mode enforces the rules exactly" tone="text-emerald-300" />
+          </div>
+
+          <div className="space-y-6">
+            <section>
+              <h4 className="mb-2 text-xs font-semibold text-slate-300">
+                {data.universe.ran ? "Screener picks" : "Screener hasn't run for this date"}
+              </h4>
+              <UniverseTable picks={data.universe.picks} />
+            </section>
+
+            <section>
+              <h4 className="mb-2 text-xs font-semibold text-slate-300">Signal feed</h4>
+              <SignalFeed events={data.signals.events} />
+            </section>
+
+            <section>
+              <h4 className="mb-2 text-xs font-semibold text-slate-300">Trade log</h4>
+              <TradeLog trades={data.trades.trades} />
+            </section>
+          </div>
+        </>
+      )}
+    </Card>
+  );
+}

@@ -117,6 +117,23 @@ export const api = {
   // stored scan days.
   cspDryPowderSummary: (days) =>
     request(`/api/csp-dry-powder/summary${days ? `?days=${days}` : ""}`),
+  // Day-trade sleeve (daytrade/ package) — a separate, rules-based intraday
+  // strategy for capital too small to fit a CFM position; the rotation
+  // regime gate does not feed into it. All four are read-only: the
+  // in-process scheduler is what populates them. `date` defaults to today
+  // (server-side, in ET) when omitted. Account-agnostic (market-wide) — no
+  // account param, unlike most of this file.
+  daytradeUniverse: (date) => request(`/api/daytrade/universe${date ? `?date=${date}` : ""}`),
+  daytradeSignals: (date, symbol) => {
+    const q = new URLSearchParams();
+    if (date) q.set("date", date);
+    if (symbol) q.set("symbol", symbol);
+    const qs = q.toString();
+    return request(`/api/daytrade/signals${qs ? `?${qs}` : ""}`);
+  },
+  daytradeBars: (symbol, date) =>
+    request(`/api/daytrade/bars/${symbol}${date ? `?date=${date}` : ""}`),
+  daytradeTrades: (date) => request(`/api/daytrade/trades${date ? `?date=${date}` : ""}`),
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
   // they can clear the STALE_BLOCKS_GO gate on the next scan.
   refreshReadyQuote: (tickers) =>
