@@ -175,6 +175,22 @@ def api_daytrade_bars(symbol: str):
         return _err(e)
 
 
+@app.route("/api/daytrade/signals")
+def api_daytrade_signals():
+    """Phase 2 read-only view of the signal engine's journal — every setup,
+    entry, and exit for the day, taken or not (rule 8). Defaults to today,
+    ET. Read-only: the scheduler runs the engine — see
+    daytrade/scheduler.py's _run_signals."""
+    try:
+        from datetime import datetime
+        day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
+        symbol = request.args.get("symbol")
+        events = daytrade_store.load_signals(day, symbol.upper() if symbol else None)
+        return jsonify({"date": day, "events": events})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/sectors")
 def api_sectors():
     try:

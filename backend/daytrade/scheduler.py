@@ -46,6 +46,10 @@ _stop = threading.Event()
 _last_screen_day: date | None = None
 # Last time the bar-ingest job ran, any day — cadence-gated within the window.
 _last_bar_fetch: datetime | None = None
+# Trading day the signal engine's post-window finalize last ran for — see
+# _maybe_finalize_signals. The engine also runs after every bar ingest
+# (in-window), so this only covers the once-per-day cutoff sweep.
+_last_signals_finalize_day: date | None = None
 
 
 def enabled() -> bool:
@@ -77,6 +81,14 @@ def bar_fetch_due(now: datetime, last_fetch: datetime | None) -> bool:
     if last_fetch is None:
         return True
     return (now - last_fetch).total_seconds() >= config.DAYTRADE_BAR_INTERVAL_MINUTES * 60
+
+
+def signals_finalize_due(now: datetime, last_day: date | None) -> bool:
+    """Signal-engine cutoff sweep: fires once per trading day, at/after the
+    signal window ends — forces any still-open trade to its rule-6 time-
+    cutoff exit. Same shape as screen_due; the engine also runs (without
+    finalizing) after every in-window bar ingest, see _maybe_bar_ingest."""
+    return now.strftime("%H:%M") >= config.DAYTRADE_WINDOW_END_ET and last_day != now.date()
 
 
 # ---------------------------------------------------------------------------
@@ -112,6 +124,17 @@ def _run_bar_ingest(now: datetime) -> None:
         logger.warning("daytrade bar ingest failed: %s", e)
 
 
+def _run_signals(now: datetime) -> None:
+    try:
+        from daytrade import signals
+        day = now.strftime("%Y-%m-%d")
+        result = signals.run_day(day, now=now)
+        logger.info("daytrade signals: %d total event(s) journaled for %s",
+                     len(result["events"]), day)
+    except Exception as e:  # noqa: BLE001 — best-effort, never fatal to the tick
+        logger.warning("daytrade signal engine failed: %s", e)
+
+
 def _maybe_bar_ingest(now: datetime) -> None:
     global _last_bar_fetch
     if not market_calendar.is_trading_day(now.date()):
@@ -120,12 +143,31 @@ def _maybe_bar_ingest(now: datetime) -> None:
         return
     _last_bar_fetch = now
     _run_bar_ingest(now)
+    # Evaluate the signal engine against the bars just ingested — rules 3-6
+    # react to each new candle as it lands, not just once at day's end.
+    _run_signals(now)
+
+
+def _maybe_finalize_signals(now: datetime) -> None:
+    """Once per trading day, at/after the window ends: force any still-open
+    trade to its rule-6 time-cutoff exit (see signals.run_day/_finalize_open_
+    trades). Separate from _maybe_bar_ingest's in-window run because bar
+    ingestion — and with it the in-window signals run — stops once the
+    window closes, but the cutoff itself still needs one more pass."""
+    global _last_signals_finalize_day
+    if not market_calendar.is_trading_day(now.date()):
+        return
+    if not signals_finalize_due(now, _last_signals_finalize_day):
+        return
+    _last_signals_finalize_day = now.date()
+    _run_signals(now)
 
 
 def _tick() -> None:
     now = datetime.now(ET)
     _maybe_screen(now)
     _maybe_bar_ingest(now)
+    _maybe_finalize_signals(now)
 
 
 def _loop() -> None:
