@@ -18,12 +18,18 @@ import Overview from "./components/Overview.jsx";
 import RecommendationsTab from "./components/RecommendationsTab.jsx";
 import SettingsTab from "./components/SettingsTab.jsx";
 import PayoutsTab from "./components/PayoutsTab.jsx";
+import DayTradePanel from "./components/DayTradePanel.jsx";
 
 // "Calibration" is a DIAGNOSTIC surface, deliberately its own tab and
 // deliberately off the daily monitoring path (Overview / Scan): the gate
 // rejection telemetry must be reached on purpose, never encountered while
 // deciding an entry, where it could subtly pressure the decision.
-const TABS = ["Overview", "Recommendations", "Scan", "Positions", "History", "Payouts", "Calibration", "Settings"];
+//
+// "Day Trade" is its own tab, not stacked into Calibration like DryPowderSleeve:
+// unlike that shadow sleeve, the day-trade engine takes real (paper) trades and
+// has its own daily rhythm (screener, signal feed, trade log) worth a dedicated
+// monitoring surface, not a diagnostic one.
+const TABS = ["Overview", "Recommendations", "Scan", "Positions", "History", "Payouts", "Day Trade", "Calibration", "Settings"];
 
 export default function App() {
   const [tab, setTab] = React.useState("Overview");
@@ -351,6 +357,7 @@ export default function App() {
             )}
             {tab === "History" && <HistoryTab key={`${accountNonce}:${execNonce}`} />}
             {tab === "Payouts" && <PayoutsTab key={`${accountNonce}:${execNonce}`} />}
+            {tab === "Day Trade" && <DayTradePanel />}
             {tab === "Calibration" && (
               <div className="space-y-4">
                 <GateTelemetry />
