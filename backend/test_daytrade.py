@@ -222,3 +222,14 @@ def test_bar_fetch_due_respects_interval_and_window():
 
     outside_window = now.replace(hour=7)
     assert scheduler.bar_fetch_due(outside_window, None) is False
+
+
+def test_signals_finalize_due_fires_once_per_trading_day_after_window_end():
+    end_h, end_m = (int(x) for x in config.DAYTRADE_WINDOW_END_ET.split(":"))
+    at = datetime(2026, 9, 14, end_h, end_m)
+    before = at - timedelta(minutes=1)
+
+    assert scheduler.signals_finalize_due(before, None) is False
+    assert scheduler.signals_finalize_due(at, None) is True
+    assert scheduler.signals_finalize_due(at, at.date()) is False      # already ran today
+    assert scheduler.signals_finalize_due(at, at.date() - timedelta(days=1)) is True

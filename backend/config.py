@@ -735,12 +735,13 @@ DRY_POWDER_LOG_RETENTION_DAYS = 180
 # A SEPARATE rules-based intraday strategy (see backend/daytrade/) for capital
 # too small to fit a CFM position — NOT the CFM strategy, and the rotation
 # regime gate does not feed into it. Shares Schwab auth, quotes, and the
-# account layer with CFM; nothing else. This is Phase 1 only: nightly
-# screener + 5-min bar ingestion, no signal engine, no paper/live execution,
-# and no state.json involvement (see daytrade/store.py for the side-channel
-# storage this writes to — the same zero-authority pattern csp_dry_powder.py
-# uses above). Every constant below is a PROPOSED_DEFAULT taken directly from
-# the strategy brief; none has been calibrated against real fills.
+# account layer with CFM; nothing else. Phase 2 adds the signal engine (rules
+# 3-8: setup/entry/stop/target/risk/logging) on top of Phase 1's screener +
+# bar ingestion — still no paper/live execution and no state.json
+# involvement (see daytrade/store.py for the side-channel storage this writes
+# to — the same zero-authority pattern csp_dry_powder.py uses above). Every
+# constant below is a PROPOSED_DEFAULT taken directly from the strategy
+# brief; none has been calibrated against real fills.
 
 # Rule 1 — nightly universe screen bounds.
 DAYTRADE_MIN_PRICE = 20.0
@@ -767,6 +768,45 @@ DAYTRADE_BAR_INTERVAL_MINUTES = 5
 # Nightly screener run time (ET, after the close) — mirrors the
 # once-per-day-after-threshold shape of alert_scheduler.maintenance_due.
 DAYTRADE_SCREEN_ET = "16:45"
+
+# Rule 3 — setup: a 5-min candle closing beyond the prior-day level on volume
+# at/above this multiple of the symbol's average 5-min volume. "Average 5-min
+# volume" is a PHASE-2 INTERPRETATION CALL: there is no historical intraday
+# bar archive yet (Phase 1 only ingests the current day), so the baseline is
+# the RUNNING average of that symbol's own bars ingested so far that day
+# (daytrade/signals.py's _avg_prior_volume), not a multi-day same-time-of-day
+# average. Revisit once historical intraday bars exist to compare against.
+DAYTRADE_SETUP_VOLUME_MULT = 1.5
+
+# Rule 4 — entry: cancel the setup if the break doesn't trigger within this
+# many candles after the setup candle.
+DAYTRADE_ENTRY_EXPIRY_CANDLES = 2
+
+# Rule 5 — stop: daily ATR(14) / this divisor, from entry.
+DAYTRADE_STOP_ATR_DIVISOR = 4.0
+
+# Rule 6 — target: take half size at this many R, move stop to breakeven for
+# the remainder, which then runs to the full-target R or the window cutoff
+# (DAYTRADE_WINDOW_END_ET above — rule 6's "10:00 cutoff" IS rule 2's window
+# end, not a separate constant).
+DAYTRADE_HALF_TARGET_R = 1.0
+DAYTRADE_FULL_TARGET_R = 2.0
+
+# Rule 7 — risk: % of account risked per trade (sized off the stop distance),
+# max trades/day, and the day-stop trigger (two losing trades OR cumulative
+# R at/above DAYTRADE_DAILY_STOP_R halts new entries for the rest of the day
+# — existing signals already in flight still play out).
+DAYTRADE_RISK_PCT = 1.0
+DAYTRADE_MAX_TRADES_PER_DAY = 2
+DAYTRADE_MAX_LOSSES_PER_DAY = 2
+DAYTRADE_DAILY_STOP_R = 2.0
+# PLACEHOLDER pending the brief's own later "account guardrails" piece (PDT /
+# settled-cash tracking, a real capital allocation): the sleeve's capital is
+# explicitly SEPARATE from CFM's book (state.json's operating_cash is the
+# wrong number here — it's committed to CFM), so position sizing needs its
+# own equity figure until a real one is wired up. Override with the
+# DAYTRADE_ACCOUNT_EQUITY env var; nothing here places a real order yet.
+DAYTRADE_ACCOUNT_EQUITY = float(os.environ.get("DAYTRADE_ACCOUNT_EQUITY", "5000"))
 
 # ---- Dividend income profile (schema v21) ---------------------------------
 # TRAVIS_EXTENSION — NOT a CFM rule. The CFM source prefers volatile names for
