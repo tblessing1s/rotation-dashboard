@@ -5,8 +5,11 @@ import { Card, Meter, Pill, Spinner, ErrorState, Stat, useApi } from "./ui.jsx";
 // Day-trade sleeve (backend/daytrade/) — a SEPARATE, rules-based intraday
 // strategy for capital too small to fit a CFM position. The rotation regime
 // gate does not feed into it, and paper mode never places a real order — see
-// PaperAdapter in daytrade/adapters.py. Account-agnostic (market-wide): this
-// panel is intentionally NOT keyed on the active account/book.
+// PaperAdapter in daytrade/adapters.py. PER ACCOUNT (daytrade/settings.py):
+// one book can run the trial while another sits out entirely, so App.jsx
+// keys this component on the active account (remount on switch — the same
+// convention Overview/PositionTracker/HistoryTab use) and every fetch here
+// rides the X-CFM-Account header like the rest of the app.
 
 const todayISO = () => new Date().toISOString().slice(0, 10);
 const addDays = (iso, n) => {
@@ -209,8 +212,34 @@ function TrialBanner({ trial }) {
   );
 }
 
+function EnabledToggle({ enabled, busy, onToggle }) {
+  if (!enabled) return null;
+  return (
+    <button
+      onClick={() => onToggle(!enabled.enabled)}
+      disabled={busy}
+      className={`rounded px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide disabled:opacity-40 ${
+        enabled.enabled
+          ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+          : "bg-slate-700/40 text-slate-400 hover:bg-slate-700/60"
+      }`}
+      title={enabled.enabled ? "Click to turn OFF for this account" : "Click to turn ON for this account"}
+    >
+      day trading: {enabled.enabled ? "on" : "off"}
+    </button>
+  );
+}
+
 export default function DayTradePanel() {
   const [date, setDate] = React.useState(todayISO);
+
+  const { data: enabled, reload: reloadEnabled } = useApi(() => api.daytradeEnabled(), [], null);
+  const [toggleBusy, setToggleBusy] = React.useState(false);
+  async function toggle(on) {
+    setToggleBusy(true);
+    try { await api.daytradeSetEnabled(on); await reloadEnabled(); }
+    finally { setToggleBusy(false); }
+  }
 
   // Live sizing budget and trial progress — independent of `date` (both are
   // always "right now"/"overall"), so they get their own poll rather than
@@ -245,6 +274,7 @@ export default function DayTradePanel() {
           <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-sky-300">
             paper mode
           </span>
+          <EnabledToggle enabled={enabled} busy={toggleBusy} onToggle={toggle} />
           <button onClick={() => setDate((d) => addDays(d, -1))} className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-slate-400 hover:text-slate-200">
             ←
           </button>
@@ -273,6 +303,14 @@ export default function DayTradePanel() {
         every fill here is simulated against real market data; nothing is
         ever sent to the broker.
       </p>
+
+      {enabled && !enabled.enabled && (
+        <p className="mb-3 rounded border border-slate-700 bg-slate-800/40 px-3 py-2 text-[11px] text-slate-400">
+          Day trading is <span className="font-semibold text-slate-300">OFF</span> for this
+          account — the scheduler won't screen or take new entries here. History below (if
+          any) is read-only. Flip the switch above to turn it on.
+        </p>
+      )}
 
       <TrialBanner trial={trial} />
 

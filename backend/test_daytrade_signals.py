@@ -51,8 +51,11 @@ def tmp_store(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _events(day=DAY, now="09:50", **kw):
-    return signals.run_day(day, now=_now(now), **kw)["events"]
+ACCOUNT = "primary"
+
+
+def _events(day=DAY, now="09:50", account_id=ACCOUNT, **kw):
+    return signals.run_day(day, account_id, now=_now(now), **kw)["events"]
 
 
 def _event_types(events):
@@ -382,7 +385,7 @@ def test_run_day_is_idempotent_across_repeated_calls(tmp_store):
     first = _events(now="09:50")
     second = _events(now="09:50")
     assert first == second
-    assert len(store.load_signals(DAY)) == len(first)
+    assert len(store.load_signals(DAY, ACCOUNT)) == len(first)
 
 
 def test_a_later_call_with_more_bars_only_appends_new_events(tmp_store):
@@ -395,7 +398,7 @@ def test_a_later_call_with_more_bars_only_appends_new_events(tmp_store):
     store.append_bars(DAY, [_bar("ABC", "09:40", 101.6, 102, 101.4, 101.8, 50_000)])
     after_entry = _events(now="09:41")
     assert _event_types(after_entry) == ["setup", "entry"]
-    assert len(store.load_signals(DAY)) == 2
+    assert len(store.load_signals(DAY, ACCOUNT)) == 2
 
 
 def test_run_day_with_no_screener_output_returns_no_events(tmp_store):
@@ -421,7 +424,7 @@ def test_run_day_writes_a_matching_trade_log_row(tmp_store):
     entry_event = next(e for e in events if e["event"] == "entry")
     trade_id = entry_event["trade_id"]
 
-    trades = store.load_trades(DAY)
+    trades = store.load_trades(DAY, ACCOUNT)
     trade = trades[trade_id]
     assert trade["symbol"] == "ABC" and trade["direction"] == "long"
     assert trade["entry"]["price"] == entry_event["entry"]
@@ -440,11 +443,11 @@ def test_run_day_trade_log_is_idempotent_across_repeated_calls(tmp_store):
     ])
 
     _events(now="09:50")
-    trade_id = next(iter(store.load_trades(DAY)))
-    first_pnl = store.load_trades(DAY)[trade_id]["realized_pnl"]
+    trade_id = next(iter(store.load_trades(DAY, ACCOUNT)))
+    first_pnl = store.load_trades(DAY, ACCOUNT)[trade_id]["realized_pnl"]
 
     _events(now="09:50")  # replay again — must not double the loss
-    second = store.load_trades(DAY)[trade_id]
+    second = store.load_trades(DAY, ACCOUNT)[trade_id]
     assert second["realized_pnl"] == first_pnl
     assert len(second["exits"]) == 1
 
@@ -462,7 +465,31 @@ def test_run_day_uses_the_fill_price_an_injected_adapter_returns(tmp_store):
     _save_screen([_pick("ABC", 100, 90)])
     store.append_bars(DAY, _entered_bars())
 
-    events = signals.run_day(DAY, now=_now("09:50"), adapter=_SlippageAdapter())["events"]
+    events = signals.run_day(DAY, ACCOUNT, now=_now("09:50"), adapter=_SlippageAdapter())["events"]
     entry_event = next(e for e in events if e["event"] == "entry")
     assert entry_event["entry"] == pytest.approx(101.55)  # 101.5 requested + 0.05
     assert entry_event["stop"] == pytest.approx(100.55)   # stop is relative to the FILL, not the request
+
+
+# ===========================================================================
+# Per-account independence — daytrade/settings.py's whole point
+# ===========================================================================
+def test_two_accounts_replay_the_shared_bars_independently(tmp_store):
+    """Same screener, same bars (both shared, daytrade/store.py) — but each
+    account gets its own signal log, its own trade log, and can reach a
+    DIFFERENT outcome on the identical symbol because its budget differs."""
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars())
+
+    primary_events = _events(account_id="primary")
+    ira_events = _events(account_id="ira", account_equity=0.0)  # no budget -> can't enter
+
+    assert _event_types(primary_events) == ["setup", "entry"]
+    assert _event_types(ira_events) == ["setup", "entry_skipped"]
+    assert ira_events[1]["reason"] == "no budget available"
+
+    # Each account's signals/trades are on entirely separate files.
+    assert len(store.load_signals(DAY, "primary")) == 2
+    assert len(store.load_signals(DAY, "ira")) == 2
+    assert len(store.load_trades(DAY, "primary")) == 1
+    assert len(store.load_trades(DAY, "ira")) == 0

@@ -119,10 +119,14 @@ export const api = {
     request(`/api/csp-dry-powder/summary${days ? `?days=${days}` : ""}`),
   // Day-trade sleeve (daytrade/ package) — a separate, rules-based intraday
   // strategy for capital too small to fit a CFM position; the rotation
-  // regime gate does not feed into it. All four are read-only: the
-  // in-process scheduler is what populates them. `date` defaults to today
-  // (server-side, in ET) when omitted. Account-agnostic (market-wide) — no
-  // account param, unlike most of this file.
+  // regime gate does not feed into it. All read-only: the in-process
+  // scheduler is what populates them. `date` defaults to today (server-side,
+  // in ET) when omitted. Universe/bars are SHARED (market-wide, no account
+  // param — which stocks qualify doesn't depend on account data); signals/
+  // trades/budget/trial/enabled are PER ACCOUNT (daytrade/settings.py —
+  // one book can run the trial while another sits out), resolved from the
+  // X-CFM-Account header every request already carries, same as the rest
+  // of this file.
   daytradeUniverse: (date) => request(`/api/daytrade/universe${date ? `?date=${date}` : ""}`),
   daytradeSignals: (date, symbol) => {
     const q = new URLSearchParams();
@@ -134,13 +138,23 @@ export const api = {
   daytradeBars: (symbol, date) =>
     request(`/api/daytrade/bars/${symbol}${date ? `?date=${date}` : ""}`),
   daytradeTrades: (date) => request(`/api/daytrade/trades${date ? `?date=${date}` : ""}`),
-  // Live sizing budget — the primary book's dry powder right now, or the
-  // static fallback (see backend/daytrade/budget.py). Always "now", not
-  // scoped to the selected date, so it's polled independent of `date`.
+  // Live sizing budget for the ACTIVE ACCOUNT — its own dry powder right
+  // now, or the static fallback (see backend/daytrade/budget.py). Always
+  // "now", not scoped to the selected date, so it's polled independent of
+  // `date`. Per account, unlike daytradeUniverse/daytradeBars above — the
+  // account comes from the X-CFM-Account header every request already
+  // carries, same as the rest of this file.
   daytradeBudget: () => request("/api/daytrade/budget"),
-  // Paper-trading trial progress (backend/daytrade/trial.py) — aggregated
-  // across every day, not scoped to `date`, same as daytradeBudget.
+  // Paper-trading trial progress for the active account
+  // (backend/daytrade/trial.py) — aggregated across every day, not scoped
+  // to `date`, same as daytradeBudget.
   daytradeTrial: () => request("/api/daytrade/trial"),
+  // Whether the day-trade sleeve is turned ON for the active account
+  // (backend/daytrade/settings.py — default on for the primary book, off
+  // for every other). GET reads it, POST {enabled} sets it.
+  daytradeEnabled: () => request("/api/daytrade/enabled"),
+  daytradeSetEnabled: (on) =>
+    request("/api/daytrade/enabled", { method: "POST", body: JSON.stringify({ enabled: on }) }),
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
   // they can clear the STALE_BLOCKS_GO gate on the next scan.
   refreshReadyQuote: (tickers) =>

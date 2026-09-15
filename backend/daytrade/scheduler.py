@@ -8,26 +8,38 @@ needs no new infrastructure. A second daemon thread (not a hook into
 the other's, and so this sleeve can be disabled independently
 (``CFM_DAYTRADE_SCHEDULER=0``) without touching CFM's alerts.
 
+PER ACCOUNT: the screener/bar ingest are SHARED (one nightly universe scan,
+one set of ingested bars — which stocks qualify doesn't depend on account
+data). Everything downstream of that — the signal engine, its budget, its
+trial, its digest line — runs independently per account with day-trading
+turned on (``daytrade.settings.enabled_account_ids()``). ``_for_each_
+enabled_account`` is the per-tick iterator every per-account job uses,
+mirroring ``alert_scheduler.for_each_account``'s isolation: one account's
+exception must never skip another's.
+
 Jobs, all best-effort (logged, never fatal to the tick):
 
   screen        once per trading day, after the close (``DAYTRADE_SCREEN_ET``)
-                — ``daytrade.universe.screen()``. Skipped once the paper
-                trial (``daytrade.trial.trial_status()``) is complete: no
-                screener picks that day means bar ingest and the signal
-                engine have nothing to do either, so gating the screener
-                alone quietly stops the whole pipeline for future days.
+                — ``daytrade.universe.screen()``, SHARED. Skipped when no
+                account is enabled, or every enabled account's paper trial
+                is already complete: no screener picks that day means bar
+                ingest and the signal engine have nothing to do for anyone,
+                so gating the screener alone quietly stops the whole
+                pipeline for future days.
   bar ingest    every ``DAYTRADE_BAR_INTERVAL_MINUTES`` during the Rule 2
                 signal window (``DAYTRADE_WINDOW_START_ET``-``_END_ET``) —
-                ``daytrade.bars.ingest()``
-  signals       after every bar ingest, and once more at the window's end —
-                ``daytrade.signals.run_day()``, sized off the live budget
-                (``daytrade.budget``) and gated on the trial's completion
-                (``entries_enabled``): a trade already open the day the
-                trial completes still resolves normally.
+                ``daytrade.bars.ingest()``, SHARED.
+  signals       after every bar ingest, and once more at the window's end,
+                ONE RUN PER ENABLED ACCOUNT — ``daytrade.signals.run_day()``,
+                each sized off that account's own live budget
+                (``daytrade.budget``) and gated on that account's own
+                trial's completion (``entries_enabled``): a trade already
+                open the day an account's trial completes still resolves
+                normally, and every other enabled account keeps running.
   daily digest  once per trading day (``DAYTRADE_DIGEST_ET``) —
-                ``daytrade.digest.send_daily_digest()`` pushes the trial's
-                running P&L/R so it reaches the operator without opening
-                the UI.
+                ``daytrade.digest.send_daily_digest()`` pushes every
+                enabled account's running P&L/R in one combined message, so
+                it reaches the operator without opening the UI.
 
 The window is expressed in ET, not CT: alert_scheduler's clock is already ET,
 and 8:30-10:00 AM CT == 9:30-11:00 AM ET year-round (both zones observe the
@@ -69,8 +81,26 @@ _last_digest_day: date | None = None
 
 def enabled() -> bool:
     """Scheduler on by default; CFM_DAYTRADE_SCHEDULER=0 turns it off (tests,
-    CLI tools importing app, one-off scripts)."""
+    CLI tools importing app, one-off scripts). Independent of any per-
+    account day-trading toggle (daytrade.settings) — this is the process-
+    level kill switch for the whole thread."""
     return os.environ.get("CFM_DAYTRADE_SCHEDULER", "1").strip() not in ("0", "false", "no")
+
+
+def _for_each_enabled_account(what: str, fn) -> None:
+    """Run ``fn(account_id)`` for every account with day-trading turned on.
+    ``fn`` owns its own error handling for anything it wants to survive;
+    the guard here only stops one account's unexpected explosion from
+    skipping the accounts after it — same isolation as alert_scheduler.
+    for_each_account."""
+    import accounts
+    from daytrade import settings
+    for account_id in settings.enabled_account_ids():
+        try:
+            with accounts.use(account_id):
+                fn(account_id)
+        except Exception as e:  # noqa: BLE001 — one account must not sink the others
+            logger.error("%s failed for account %s: %s", what, account_id, e)
 
 
 # ---------------------------------------------------------------------------
@@ -135,11 +165,16 @@ def _maybe_screen(now: datetime) -> None:
         return
     _last_screen_day = now.date()
     try:
-        from daytrade import trial
-        if trial.trial_status()["status"] == "complete":
-            logger.info("daytrade screener skipped — paper trial complete, no new entries")
+        from daytrade import settings, trial
+        enabled_ids = settings.enabled_account_ids()
+        if not enabled_ids:
+            logger.info("daytrade screener skipped — no account has day-trading enabled")
             return
-    except Exception as e:  # noqa: BLE001 — a trial-status read failure must not block screening
+        if all(trial.trial_status(aid)["status"] == "complete" for aid in enabled_ids):
+            logger.info("daytrade screener skipped — every enabled account's paper "
+                        "trial is complete, no new entries")
+            return
+    except Exception as e:  # noqa: BLE001 — a settings/trial read failure must not block screening
         logger.warning("daytrade trial status check failed (%s); screening anyway", e)
     _run_screen()
 
@@ -154,31 +189,31 @@ def _run_bar_ingest(now: datetime) -> None:
         logger.warning("daytrade bar ingest failed: %s", e)
 
 
-def _run_signals(now: datetime) -> None:
+def _run_signals(now: datetime, account_id: str) -> None:
     try:
         from daytrade import budget, signals, trial
         day = now.strftime("%Y-%m-%d")
-        # Live budget every run — see budget.daytrade_budget: the primary
-        # book's dry powder, falling back to the static config placeholder
-        # on any read failure. run_day() itself still defaults to the
+        # Live budget every run — see budget.daytrade_budget: THIS account's
+        # own dry powder, falling back to the static config placeholder on
+        # any read failure. run_day() itself still defaults to the
         # placeholder when account_equity is omitted (the signal-engine
         # tests rely on that default staying pure/offline), so the live
         # figure only reaches production runs through this explicit pass.
-        equity = budget.daytrade_budget()
+        equity = budget.daytrade_budget(account_id)
         # Same for the trial gate: run_day() defaults entries_enabled=True,
-        # so the paper-trading trial's completion only reaches production
-        # runs through this explicit pass too.
-        status = trial.trial_status()
+        # so THIS account's paper-trading trial completion only reaches
+        # production runs through this explicit pass too.
+        status = trial.trial_status(account_id)
         entries_enabled = status["status"] != "complete"
-        result = signals.run_day(day, now=now, account_equity=equity["amount"],
+        result = signals.run_day(day, account_id, now=now, account_equity=equity["amount"],
                                  entries_enabled=entries_enabled)
-        logger.info("daytrade signals: %d total event(s) journaled for %s "
-                    "(budget $%.2f from %s, trial %d/%d%s)",
-                    len(result["events"]), day, equity["amount"], equity["detail"],
+        logger.info("daytrade signals: %d total event(s) journaled for %s (account %s, "
+                    "budget $%.2f from %s, trial %d/%d%s)",
+                    len(result["events"]), day, account_id, equity["amount"], equity["detail"],
                     status["completed_trades"], status["target_trades"],
                     "" if entries_enabled else " — COMPLETE, no new entries")
     except Exception as e:  # noqa: BLE001 — best-effort, never fatal to the tick
-        logger.warning("daytrade signal engine failed: %s", e)
+        logger.warning("daytrade signal engine failed for account %s: %s", account_id, e)
 
 
 def _maybe_bar_ingest(now: datetime) -> None:
@@ -189,31 +224,34 @@ def _maybe_bar_ingest(now: datetime) -> None:
         return
     _last_bar_fetch = now
     _run_bar_ingest(now)
-    # Evaluate the signal engine against the bars just ingested — rules 3-6
-    # react to each new candle as it lands, not just once at day's end.
-    _run_signals(now)
+    # Evaluate every enabled account's signal engine against the bars just
+    # ingested — rules 3-6 react to each new candle as it lands, not just
+    # once at day's end.
+    _for_each_enabled_account("signals", lambda aid: _run_signals(now, aid))
 
 
 def _maybe_finalize_signals(now: datetime) -> None:
     """Once per trading day, at/after the window ends: force any still-open
     trade to its rule-6 time-cutoff exit (see signals.run_day/_finalize_open_
-    trades). Separate from _maybe_bar_ingest's in-window run because bar
-    ingestion — and with it the in-window signals run — stops once the
-    window closes, but the cutoff itself still needs one more pass."""
+    trades), for every enabled account. Separate from _maybe_bar_ingest's
+    in-window run because bar ingestion — and with it the in-window signals
+    run — stops once the window closes, but the cutoff itself still needs
+    one more pass."""
     global _last_signals_finalize_day
     if not market_calendar.is_trading_day(now.date()):
         return
     if not signals_finalize_due(now, _last_signals_finalize_day):
         return
     _last_signals_finalize_day = now.date()
-    _run_signals(now)
+    _for_each_enabled_account("signals finalize", lambda aid: _run_signals(now, aid))
 
 
 def _run_daily_digest() -> None:
     try:
         from daytrade import digest
         report = digest.send_daily_digest()
-        logger.info("daytrade daily digest: %s", report or "no channel configured")
+        logger.info("daytrade daily digest: %s", report or "no channel configured "
+                    "(or no account enabled)")
     except Exception as e:  # noqa: BLE001 — best-effort, never fatal to the tick
         logger.warning("daytrade daily digest failed: %s", e)
 

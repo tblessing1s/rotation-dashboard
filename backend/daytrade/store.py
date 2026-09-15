@@ -2,34 +2,42 @@
 ``DATA_DIR/daytrade_log/``, the same zero-authority pattern ``csp_dry_powder.py``
 uses (see its module docstring): nothing here is a real position or execution,
 so none of it belongs in state.json / the single source of truth for the real
-CFM book. Two files per trading day:
+CFM book.
 
   ``YYYY-MM-DD.json``       nightly screener output (``daytrade.universe.screen``)
                              — whole-file atomic write, overwritten if the
-                             screener re-runs the same day.
+                             screener re-runs the same day. SHARED across
+                             every account: which stocks qualify doesn't
+                             depend on account data.
   ``YYYY-MM-DD.bars.jsonl``  5-min bars ingested during the signal window
                              (``daytrade.bars.ingest``) — one JSON object per
-                             line, append-only.
-  ``YYYY-MM-DD.signals.jsonl``  every setup/entry/exit event the signal
-                             engine produces (``daytrade.signals.run_day``,
-                             rule 8: "log every signal, taken or not") — one
-                             JSON object per line, append-only.
-  ``YYYY-MM-DD.trades.json`` the day's TRADE LOG (``daytrade.adapters.
-                             PaperAdapter``) — one row per trade_id, keyed
-                             (not append-only like the signals log: a trade's
-                             row is updated in place as it fills and later
-                             exits), whole-file atomic write. Aggregated and
-                             fill-oriented (entry/exit prices, sizes, $ P&L)
-                             where the signals log is raw and decision-
-                             oriented (every setup/skip/entry/exit, taken or
-                             not) — the two intentionally overlap in the
-                             trades a symbol actually took, read the signals
-                             log for "what did the strategy consider" and the
-                             trade log for "what actually filled".
+                             line, append-only. Also SHARED.
+  ``YYYY-MM-DD.<account_id>.signals.jsonl``  every setup/entry/exit event
+                             that account's signal engine produced
+                             (``daytrade.signals.run_day``, rule 8: "log
+                             every signal, taken or not") — one JSON object
+                             per line, append-only. PER ACCOUNT: an account
+                             sizes off its own budget and runs its own
+                             guardrails/trial, so two accounts can each set
+                             up (or skip) the same symbol independently.
+  ``YYYY-MM-DD.<account_id>.trades.json``  that account's TRADE LOG for the
+                             day (``daytrade.adapters.PaperAdapter``) — one
+                             row per trade_id, keyed (not append-only like
+                             the signals log: a trade's row is updated in
+                             place as it fills and later exits), whole-file
+                             atomic write. Aggregated and fill-oriented
+                             (entry/exit prices, sizes, $ P&L) where the
+                             signals log is raw and decision-oriented (every
+                             setup/skip/entry/exit, taken or not) — the two
+                             intentionally overlap in the trades an account
+                             actually took, read the signals log for "what
+                             did the strategy consider" and the trade log
+                             for "what actually filled".
 
-Market-wide, not per-account: the screener universe and bar prices don't
-depend on which book is active (unlike CFM positions), so there is exactly one
-day's file regardless of how many accounts the dashboard holds.
+Screener/bars are the only files with no account in their name — every other
+file's day-key is followed by the account_id, mirroring accounts.py's own
+``state.json`` / ``state.<id>.json`` sibling convention (see
+``daytrade.settings`` for the enable/disable toggle this all serves).
 """
 from __future__ import annotations
 
@@ -56,12 +64,12 @@ def _bars_path(day: str) -> str:
     return os.path.join(STORE_DIR, f"{day}.bars.jsonl")
 
 
-def _signals_path(day: str) -> str:
-    return os.path.join(STORE_DIR, f"{day}.signals.jsonl")
+def _signals_path(day: str, account_id: str) -> str:
+    return os.path.join(STORE_DIR, f"{day}.{account_id}.signals.jsonl")
 
 
-def _trades_path(day: str) -> str:
-    return os.path.join(STORE_DIR, f"{day}.trades.json")
+def _trades_path(day: str, account_id: str) -> str:
+    return os.path.join(STORE_DIR, f"{day}.{account_id}.trades.json")
 
 
 def save_screen(result: dict) -> None:
@@ -123,12 +131,13 @@ def load_bars(day: str, symbol: str | None = None) -> list[dict]:
     return out
 
 
-def save_trades(day: str, trades: dict) -> None:
-    """Atomic whole-file write of one day's trade log — trade_id -> row. Same
-    durability shape as save_screen; the caller (PaperAdapter) owns loading
-    the existing dict, mutating it, and calling this with the merged result."""
+def save_trades(day: str, account_id: str, trades: dict) -> None:
+    """Atomic whole-file write of one account's trade log for one day —
+    trade_id -> row. Same durability shape as save_screen; the caller
+    (PaperAdapter) owns loading the existing dict, mutating it, and calling
+    this with the merged result."""
     _ensure_dir()
-    path = _trades_path(day)
+    path = _trades_path(day, account_id)
     with _lock:
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -138,25 +147,26 @@ def save_trades(day: str, trades: dict) -> None:
         os.replace(tmp, path)
 
 
-def load_trades(day: str) -> dict:
-    """That trading day's trade log — trade_id -> row. Empty dict if no
-    trade has opened yet."""
-    path = _trades_path(day)
+def load_trades(day: str, account_id: str) -> dict:
+    """That account's trade log for one trading day — trade_id -> row. Empty
+    dict if no trade has opened yet."""
+    path = _trades_path(day, account_id)
     if not os.path.exists(path):
         return {}
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
 
 
-def iter_all_trades():
-    """Yield ``(day, trades)`` for every day that has ever had a trade log,
-    oldest first (the ``YYYY-MM-DD`` filename sorts chronologically). Used
-    by ``daytrade.trial`` to aggregate the whole paper-trading trial across
-    days without a separate running counter that could drift from what
-    actually closed. A malformed file is skipped, never fatal."""
+def iter_all_trades(account_id: str):
+    """Yield ``(day, trades)`` for every day that account has ever had a
+    trade log, oldest first (the ``YYYY-MM-DD`` filename sorts
+    chronologically). Used by ``daytrade.trial`` to aggregate that account's
+    whole paper-trading trial across days without a separate running counter
+    that could drift from what actually closed. A malformed file is
+    skipped, never fatal."""
     if not os.path.isdir(STORE_DIR):
         return
-    suffix = ".trades.json"
+    suffix = f".{account_id}.trades.json"
     for name in sorted(os.listdir(STORE_DIR)):
         if not name.endswith(suffix):
             continue
@@ -168,16 +178,16 @@ def iter_all_trades():
             continue
 
 
-def append_signals(day: str, rows: list[dict]) -> int:
-    """Append signal-engine events for one trading day. Returns how many were
-    written. Dedup against events already logged (e.g. an earlier scheduler
-    tick's replay) is the caller's job — daytrade.signals.run_day does it by
-    ``id`` before calling this, the same division of labour as bars.ingest
-    dedup-ing before append_bars."""
+def append_signals(day: str, account_id: str, rows: list[dict]) -> int:
+    """Append one account's signal-engine events for one trading day.
+    Returns how many were written. Dedup against events already logged
+    (e.g. an earlier scheduler tick's replay) is the caller's job —
+    daytrade.signals.run_day does it by ``id`` before calling this, the same
+    division of labour as bars.ingest dedup-ing before append_bars."""
     if not rows:
         return 0
     _ensure_dir()
-    path = _signals_path(day)
+    path = _signals_path(day, account_id)
     with _lock:
         with open(path, "a", encoding="utf-8") as fh:
             for row in rows:
@@ -187,10 +197,10 @@ def append_signals(day: str, rows: list[dict]) -> int:
     return len(rows)
 
 
-def load_signals(day: str, symbol: str | None = None) -> list[dict]:
-    """That trading day's signal-engine events, oldest first. A malformed
-    line is skipped, never fatal."""
-    path = _signals_path(day)
+def load_signals(day: str, account_id: str, symbol: str | None = None) -> list[dict]:
+    """That account's signal-engine events for one trading day, oldest
+    first. A malformed line is skipped, never fatal."""
+    path = _signals_path(day, account_id)
     if not os.path.exists(path):
         return []
     out: list[dict] = []

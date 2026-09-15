@@ -1,10 +1,15 @@
 """Day-trade signal engine — strategy rules 3-8.
 
-Replays one trading day's ingested 5-min bars (``daytrade/bars.py``) against
-today's screener picks (``daytrade/universe.py``, prior-day high/low + ATR14)
-through a small per-symbol state machine, and journals every signal the
-strategy produces — taken or not, with outcome (rule 8) — to
-``daytrade/store.py``'s signals log.
+``run_day(day, account_id, ...)`` replays one trading day's ingested 5-min
+bars (``daytrade/bars.py``, SHARED across every account) against today's
+screener picks (``daytrade/universe.py``, also shared) through a small
+per-symbol state machine, and journals every signal ONE ACCOUNT's strategy
+run produces — taken or not, with outcome (rule 8) — to
+``daytrade/store.py``'s signals log for that account. Two accounts with
+day-trading enabled (``daytrade/settings.py``) replay the SAME bars
+independently, each against its own budget/guardrails/trial, and can reach
+different decisions on the same symbol (different budget -> different size
+-> a guardrail trips for one and not the other).
 
 STATE MACHINE (per symbol, independent of the other picks):
 
@@ -14,8 +19,9 @@ STATE MACHINE (per symbol, independent of the other picks):
        +----------------------------+----------------------------+
 
 A symbol returns to ``watching`` after a trade resolves or a setup expires —
-"Max 2 trades/day" (rule 7) is an ACCOUNT-WIDE cap enforced by the shared
-``_Day`` guardrail state, not a one-trade-per-symbol limit.
+"Max 2 trades/day" (rule 7) is an ACCOUNT-WIDE cap (one account's own day)
+enforced by the shared ``_Day`` guardrail state, not a one-trade-per-symbol
+limit.
 
 THIS IS A REPLAY, NOT A LIVE STREAM: ``run_day`` recomputes the whole day's
 events from the stored bars every time it's called (idempotent — new events
@@ -341,22 +347,27 @@ def _finalize_open_trades(symbols: dict[str, _Symbol], day_state: _Day, day: str
     return events
 
 
-def run_day(day: str, now: datetime | None = None, account_equity: float | None = None,
+def run_day(day: str, account_id: str, now: datetime | None = None,
+            account_equity: float | None = None,
             adapter: adapters.ExecutionAdapter | None = None,
             entries_enabled: bool = True) -> dict:
-    """Replay one trading day's bars through the signal engine and journal
-    any new events. Idempotent: safe to call repeatedly as bars keep
-    arriving (Phase 1's scheduler does, every DAYTRADE_BAR_INTERVAL_MINUTES).
-    ``adapter`` defaults to ``adapters.get_adapter(day)`` (PaperAdapter) —
-    tests inject their own to assert on fill/trade-log behaviour without a
-    second config seam. ``entries_enabled=False`` (the scheduler passes this
-    once daytrade.trial.trial_status() says the paper trial has hit its
-    target) blocks every NEW setup/entry for the day but still resolves any
-    trade already open — see _Day.block_reason. Returns ``{"date",
-    "events"}`` — every event journaled for the day so far, oldest first."""
+    """Replay one trading day's bars through ONE ACCOUNT's signal engine and
+    journal any new events for it. Idempotent: safe to call repeatedly as
+    bars keep arriving (Phase 1's scheduler does, every
+    DAYTRADE_BAR_INTERVAL_MINUTES). The screener/bars this reads are shared
+    across every account (daytrade/store.py); the signals/trades this
+    writes are that account's alone. ``adapter`` defaults to
+    ``adapters.get_adapter(day, account_id)`` (PaperAdapter) — tests inject
+    their own to assert on fill/trade-log behaviour without a second config
+    seam. ``entries_enabled=False`` (the scheduler passes this once
+    daytrade.trial.trial_status(account_id) says THIS account's paper trial
+    has hit its target) blocks every NEW setup/entry for the day but still
+    resolves any trade already open — see _Day.block_reason. Returns
+    ``{"date", "events"}`` — every event journaled for this account today,
+    oldest first."""
     now = now or datetime.now(ET)
     account_equity = config.DAYTRADE_ACCOUNT_EQUITY if account_equity is None else account_equity
-    adapter = adapter if adapter is not None else adapters.get_adapter(day)
+    adapter = adapter if adapter is not None else adapters.get_adapter(day, account_id)
 
     screen = store.load_screen(day)
     if not screen:
@@ -384,11 +395,12 @@ def run_day(day: str, now: datetime | None = None, account_equity: float | None 
 
     adapter.flush()
 
-    existing = store.load_signals(day)
+    existing = store.load_signals(day, account_id)
     existing_ids = {e.get("id") for e in existing}
     to_write = [e for e in new_events if e["id"] not in existing_ids]
     if to_write:
-        store.append_signals(day, to_write)
-        logger.info("daytrade signals: %d new event(s) journaled for %s", len(to_write), day)
+        store.append_signals(day, account_id, to_write)
+        logger.info("daytrade signals: %d new event(s) journaled for %s (account %s)",
+                    len(to_write), day, account_id)
 
     return {"date": day, "events": existing + to_write}
