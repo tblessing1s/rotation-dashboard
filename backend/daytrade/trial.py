@@ -1,24 +1,29 @@
-"""Paper-trading trial tracker.
+"""Paper-trading trial tracker — per account.
 
 Per the strategy brief's own definition of success — a tracked run in paper
 mode before ever flipping to live — and an explicit operator decision to
 size that run at ``config.DAYTRADE_TRIAL_TRADES`` completed trades (the
-brief's own backtest precedent: "two rounds of 50 trades").
+brief's own backtest precedent: "two rounds of 50 trades"), run
+independently for each account with day-trading turned on
+(``daytrade.settings``): each gets its own budget, so each gets its own
+trade count and its own verdict.
 
-``trial_status()`` aggregates every CLOSED trade across every day's trade
-log (``daytrade/store.py``'s ``YYYY-MM-DD.trades.json``, via
-``store.iter_all_trades()``) into one running trial, capped at the target.
-Pure/read-only, recomputed on every call — the same recompute-from-source
-trade-off ``signals.run_day`` already makes for a day's events, so there is
-no separate running counter that could drift from what the trade logs
-actually record.
+``trial_status(account_id)`` aggregates every CLOSED trade across that
+account's trade logs (``daytrade/store.py``'s
+``YYYY-MM-DD.<account_id>.trades.json``, via ``store.iter_all_trades()``)
+into one running trial, capped at the target. Pure/read-only, recomputed on
+every call — the same recompute-from-source trade-off ``signals.run_day``
+already makes for a day's events, so there is no separate running counter
+that could drift from what the trade logs actually record.
 
-Once the trial reaches its target, ``daytrade/scheduler.py`` stops opening
-new positions (``signals.run_day``'s ``entries_enabled``) — any trade
-already open that day still plays out normally to its rule-6 exit. The
-verdict (WIN/LOSS/FLAT) is net $ P&L across the counted trades. Going live
-from there is an explicit operator decision (``config.daytrade_mode()``),
-never automatic — this module only reports, it never flips the switch.
+Once an account's trial reaches its target, ``daytrade/scheduler.py`` stops
+opening new positions FOR THAT ACCOUNT (``signals.run_day``'s
+``entries_enabled``) — a trade already open that day still plays out
+normally to its rule-6 exit, and every OTHER enabled account keeps running
+on its own clock. The verdict (WIN/LOSS/FLAT) is net $ P&L across the
+counted trades. Going live from there is an explicit operator decision
+(``config.daytrade_mode()``), never automatic — this module only reports,
+it never flips the switch.
 """
 from __future__ import annotations
 
@@ -27,12 +32,13 @@ import config
 from daytrade import store
 
 
-def trial_status() -> dict:
+def trial_status(account_id: str) -> dict:
     """``{target_trades, completed_trades, status, verdict, net_r,
-    net_pnl, win_rate}`` — ``status`` is "running" or "complete"; ``verdict``
-    ("win"/"loss"/"flat") is set only once complete."""
+    net_pnl, win_rate}`` for one account — ``status`` is "running" or
+    "complete"; ``verdict`` ("win"/"loss"/"flat") is set only once
+    complete."""
     trades: list[dict] = []
-    for _day, day_trades in store.iter_all_trades():
+    for _day, day_trades in store.iter_all_trades(account_id):
         for t in day_trades.values():
             if t.get("status") == "closed":
                 trades.append(t)

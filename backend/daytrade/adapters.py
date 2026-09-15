@@ -11,15 +11,16 @@ live mode.
 
 ``PaperAdapter`` fills instantly, exactly at the requested price — still no
 slippage/partial-fill model (see signals.py's module docstring for why
-that's an explicit stand-in) — and is also the day's TRADE LOG: every
+that's an explicit stand-in) — and is also that ACCOUNT's TRADE LOG: every
 ``enter``/``exit`` call updates that trade's row in
-``daytrade/store.py``'s ``YYYY-MM-DD.trades.json`` (trade_id -> row), the
-aggregated, fill-oriented counterpart to the signal engine's raw event
-journal. One adapter instance is constructed per ``signals.run_day()`` call
-(loading that day's existing trades, if any, so a later replay resumes the
-same rows rather than starting over) and flushed back to disk once at the
-end of the replay — the same "recompute in memory, persist once" shape
-``run_day`` already uses for the signals journal.
+``daytrade/store.py``'s ``YYYY-MM-DD.<account_id>.trades.json`` (trade_id ->
+row), the aggregated, fill-oriented counterpart to the signal engine's raw
+event journal. One adapter instance is constructed per account per
+``signals.run_day()`` call (loading that day's existing trades for that
+account, if any, so a later replay resumes the same rows rather than
+starting over) and flushed back to disk once at the end of the replay — the
+same "recompute in memory, persist once" shape ``run_day`` already uses for
+the signals journal.
 """
 from __future__ import annotations
 
@@ -81,9 +82,10 @@ class PaperAdapter(ExecutionAdapter):
     recorded), and ``exit`` skips appending if that exact (trade_id, kind,
     at) is already in ``exits`` rather than double-booking size and P&L."""
 
-    def __init__(self, day: str):
+    def __init__(self, day: str, account_id: str):
         self.day = day
-        self.trades: dict[str, dict] = store.load_trades(day)
+        self.account_id = account_id
+        self.trades: dict[str, dict] = store.load_trades(day, account_id)
 
     def enter(self, *, symbol: str, trade_id: str, direction: str, price: float,
               size: int, at: str) -> Fill:
@@ -121,13 +123,13 @@ class PaperAdapter(ExecutionAdapter):
         """Persist this replay's trades (new + updated) for the day. Called
         once at the end of signals.run_day, mirroring how it flushes the
         signals journal once rather than per bar."""
-        store.save_trades(self.day, self.trades)
+        store.save_trades(self.day, self.account_id, self.trades)
 
 
-def get_adapter(day: str) -> ExecutionAdapter:
+def get_adapter(day: str, account_id: str) -> ExecutionAdapter:
     mode = config.daytrade_mode()
     if mode == "paper":
-        return PaperAdapter(day)
+        return PaperAdapter(day, account_id)
     raise NotImplementedError(
         f"daytrade execution mode {mode!r} has no adapter yet — SchwabAdapter "
         "(live money) is a later phase of the build order, not built in this change")

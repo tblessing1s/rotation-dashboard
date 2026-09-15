@@ -5,7 +5,7 @@ from __future__ import annotations
 import notifier
 import pytest
 
-from daytrade import digest, trial
+from daytrade import digest, settings, trial
 
 
 class _StubChannel:
@@ -33,20 +33,26 @@ class _NativePanic(BaseException):
     build, and notably NOT an Exception subclass."""
 
 
-@pytest.fixture
-def running_trial(monkeypatch):
-    monkeypatch.setattr(trial, "trial_status", lambda: {
-        "target_trades": 50, "completed_trades": 12, "status": "running",
-        "verdict": None, "net_r": 3.25, "net_pnl": 187.5, "win_rate": 58.3,
-    })
+RUNNING = {"target_trades": 50, "completed_trades": 12, "status": "running",
+           "verdict": None, "net_r": 3.25, "net_pnl": 187.5, "win_rate": 58.3}
+COMPLETE_WIN = {"target_trades": 50, "completed_trades": 50, "status": "complete",
+                "verdict": "win", "net_r": 14.0, "net_pnl": 812.4, "win_rate": 61.0}
 
 
 @pytest.fixture
-def completed_trial(monkeypatch):
-    monkeypatch.setattr(trial, "trial_status", lambda: {
-        "target_trades": 50, "completed_trades": 50, "status": "complete",
-        "verdict": "win", "net_r": 14.0, "net_pnl": 812.4, "win_rate": 61.0,
-    })
+def one_enabled_account(monkeypatch):
+    monkeypatch.setattr(settings, "enabled_account_ids", lambda: ["primary"])
+    monkeypatch.setattr(digest, "_account_label", lambda aid: aid)
+
+
+@pytest.fixture
+def running_trial(monkeypatch, one_enabled_account):
+    monkeypatch.setattr(trial, "trial_status", lambda account_id: RUNNING)
+
+
+@pytest.fixture
+def completed_trial(monkeypatch, one_enabled_account):
+    monkeypatch.setattr(trial, "trial_status", lambda account_id: COMPLETE_WIN)
 
 
 def test_sends_to_every_configured_channel(monkeypatch, running_trial):
@@ -95,6 +101,34 @@ def test_no_configured_channel_does_not_raise(monkeypatch, running_trial):
     report = digest.send_daily_digest()
 
     assert report == []
+
+
+def test_no_enabled_account_sends_nothing(monkeypatch):
+    monkeypatch.setattr(settings, "enabled_account_ids", lambda: [])
+    a = _StubChannel("a")
+    monkeypatch.setattr(notifier, "CHANNELS", [a])
+
+    report = digest.send_daily_digest()
+
+    assert report == []
+    assert a.sent is None
+
+
+def test_multiple_enabled_accounts_get_one_combined_message(monkeypatch):
+    monkeypatch.setattr(settings, "enabled_account_ids", lambda: ["primary", "ira"])
+    monkeypatch.setattr(digest, "_account_label", lambda aid: aid)
+    monkeypatch.setattr(trial, "trial_status",
+                        lambda account_id: RUNNING if account_id == "primary" else COMPLETE_WIN)
+    a = _StubChannel("a")
+    monkeypatch.setattr(notifier, "CHANNELS", [a])
+
+    report = digest.send_daily_digest()
+
+    assert report == [{"channel": "a", "ok": True}]
+    subject, body, _ = a.sent
+    assert "2 account(s)" in subject
+    assert "primary" in body and "12/50" in body
+    assert "ira" in body and "complete — WIN" in body
 
 
 def test_a_configured_check_that_raises_a_non_exception_does_not_propagate(monkeypatch, running_trial):

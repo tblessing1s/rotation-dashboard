@@ -357,7 +357,7 @@ export default function App() {
             )}
             {tab === "History" && <HistoryTab key={`${accountNonce}:${execNonce}`} />}
             {tab === "Payouts" && <PayoutsTab key={`${accountNonce}:${execNonce}`} />}
-            {tab === "Day Trade" && <DayTradePanel />}
+            {tab === "Day Trade" && <DayTradePanel key={accountNonce} />}
             {tab === "Calibration" && (
               <div className="space-y-4">
                 <GateTelemetry />

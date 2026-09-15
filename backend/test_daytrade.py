@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 import config
-from daytrade import bars, budget, scheduler, signals, store, trial, universe
+from daytrade import bars, budget, scheduler, settings, signals, store, trial, universe
 
 ET = ZoneInfo("America/New_York")
 
@@ -69,17 +69,26 @@ def test_load_bars_missing_day_returns_empty(tmp_store):
 
 
 def test_iter_all_trades_yields_every_day_oldest_first(tmp_store):
-    store.save_trades("2026-09-15", {"t2": {"symbol": "XYZ"}})
-    store.save_trades("2026-09-14", {"t1": {"symbol": "ABC"}})
+    store.save_trades("2026-09-15", "primary", {"t2": {"symbol": "XYZ"}})
+    store.save_trades("2026-09-14", "primary", {"t1": {"symbol": "ABC"}})
 
-    days = list(store.iter_all_trades())
+    days = list(store.iter_all_trades("primary"))
 
     assert [d for d, _ in days] == ["2026-09-14", "2026-09-15"]
     assert days[0][1] == {"t1": {"symbol": "ABC"}}
 
 
 def test_iter_all_trades_with_no_files_yields_nothing(tmp_store):
-    assert list(store.iter_all_trades()) == []
+    assert list(store.iter_all_trades("primary")) == []
+
+
+def test_iter_all_trades_only_yields_the_requested_account(tmp_store):
+    store.save_trades("2026-09-14", "primary", {"t1": {"symbol": "ABC"}})
+    store.save_trades("2026-09-14", "ira", {"t2": {"symbol": "XYZ"}})
+
+    assert [d for d, _ in store.iter_all_trades("primary")] == ["2026-09-14"]
+    assert [d for d, _ in store.iter_all_trades("ira")] == ["2026-09-14"]
+    assert list(store.iter_all_trades("primary"))[0][1] == {"t1": {"symbol": "ABC"}}
 
 
 # ===========================================================================
@@ -255,18 +264,21 @@ def test_run_signals_sizes_off_the_live_daytrade_budget(monkeypatch):
     resize a symbol-engine test's expectations (see daytrade/budget.py)."""
     seen = {}
     monkeypatch.setattr(budget, "daytrade_budget",
-                        lambda: {"amount": 777.0, "source": "dry_powder", "detail": "x"})
+                        lambda aid: {"amount": 777.0, "source": "dry_powder", "detail": "x"})
     monkeypatch.setattr(trial, "trial_status",
-                        lambda: {"status": "running", "completed_trades": 0, "target_trades": 50})
+                        lambda aid: {"status": "running", "completed_trades": 0, "target_trades": 50})
 
-    def _fake_run_day(day, now=None, account_equity=None, adapter=None, entries_enabled=True):
+    def _fake_run_day(day, account_id, now=None, account_equity=None, adapter=None,
+                       entries_enabled=True):
+        seen["account_id"] = account_id
         seen["account_equity"] = account_equity
         seen["entries_enabled"] = entries_enabled
         return {"date": day, "events": []}
     monkeypatch.setattr(signals, "run_day", _fake_run_day)
 
-    scheduler._run_signals(datetime(2026, 9, 14, 10, 0, tzinfo=ET))
+    scheduler._run_signals(datetime(2026, 9, 14, 10, 0, tzinfo=ET), "primary")
 
+    assert seen["account_id"] == "primary"
     assert seen["account_equity"] == 777.0
     assert seen["entries_enabled"] is True
 
@@ -274,23 +286,24 @@ def test_run_signals_sizes_off_the_live_daytrade_budget(monkeypatch):
 def test_run_signals_disables_entries_once_the_trial_is_complete(monkeypatch):
     seen = {}
     monkeypatch.setattr(budget, "daytrade_budget",
-                        lambda: {"amount": 777.0, "source": "dry_powder", "detail": "x"})
+                        lambda aid: {"amount": 777.0, "source": "dry_powder", "detail": "x"})
     monkeypatch.setattr(trial, "trial_status",
-                        lambda: {"status": "complete", "completed_trades": 50, "target_trades": 50})
+                        lambda aid: {"status": "complete", "completed_trades": 50, "target_trades": 50})
 
-    def _fake_run_day(day, now=None, account_equity=None, adapter=None, entries_enabled=True):
+    def _fake_run_day(day, account_id, now=None, account_equity=None, adapter=None,
+                       entries_enabled=True):
         seen["entries_enabled"] = entries_enabled
         return {"date": day, "events": []}
     monkeypatch.setattr(signals, "run_day", _fake_run_day)
 
-    scheduler._run_signals(datetime(2026, 9, 14, 10, 0, tzinfo=ET))
+    scheduler._run_signals(datetime(2026, 9, 14, 10, 0, tzinfo=ET), "primary")
 
     assert seen["entries_enabled"] is False
 
 
-def test_maybe_screen_skips_once_the_trial_is_complete(monkeypatch, tmp_path):
+def test_maybe_screen_skips_when_no_account_is_enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
-    monkeypatch.setattr(trial, "trial_status", lambda: {"status": "complete"})
+    monkeypatch.setattr(settings, "enabled_account_ids", lambda: [])
     called = []
     monkeypatch.setattr(scheduler, "_run_screen", lambda: called.append(True))
     monkeypatch.setattr(scheduler, "_last_screen_day", None)
@@ -298,6 +311,50 @@ def test_maybe_screen_skips_once_the_trial_is_complete(monkeypatch, tmp_path):
     scheduler._maybe_screen(datetime(2026, 9, 14, 17, 0, tzinfo=ET))  # past DAYTRADE_SCREEN_ET
 
     assert called == []
+
+
+def test_maybe_screen_skips_once_every_enabled_accounts_trial_is_complete(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
+    monkeypatch.setattr(settings, "enabled_account_ids", lambda: ["primary", "ira"])
+    monkeypatch.setattr(trial, "trial_status", lambda aid: {"status": "complete"})
+    called = []
+    monkeypatch.setattr(scheduler, "_run_screen", lambda: called.append(True))
+    monkeypatch.setattr(scheduler, "_last_screen_day", None)
+
+    scheduler._maybe_screen(datetime(2026, 9, 14, 17, 0, tzinfo=ET))  # past DAYTRADE_SCREEN_ET
+
+    assert called == []
+
+
+def test_maybe_screen_runs_while_any_enabled_account_still_has_a_running_trial(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
+    monkeypatch.setattr(settings, "enabled_account_ids", lambda: ["primary", "ira"])
+    monkeypatch.setattr(trial, "trial_status",
+                        lambda aid: {"status": "complete" if aid == "primary" else "running"})
+    called = []
+    monkeypatch.setattr(scheduler, "_run_screen", lambda: called.append(True))
+    monkeypatch.setattr(scheduler, "_last_screen_day", None)
+
+    scheduler._maybe_screen(datetime(2026, 9, 14, 17, 0, tzinfo=ET))
+
+    assert called == [True]
+
+
+def test_for_each_enabled_account_isolates_one_accounts_exception(monkeypatch):
+    import contextlib
+    import accounts
+    monkeypatch.setattr(accounts, "use", lambda account_id: contextlib.nullcontext())
+    monkeypatch.setattr(settings, "enabled_account_ids", lambda: ["primary", "ira"])
+    seen = []
+
+    def _fn(account_id):
+        if account_id == "primary":
+            raise RuntimeError("boom")
+        seen.append(account_id)
+
+    scheduler._for_each_enabled_account("test job", _fn)  # must not raise
+
+    assert seen == ["ira"]
 
 
 def test_digest_due_fires_once_per_day_after_threshold():

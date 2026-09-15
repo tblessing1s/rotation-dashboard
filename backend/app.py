@@ -177,55 +177,76 @@ def api_daytrade_bars(symbol: str):
 
 @app.route("/api/daytrade/signals")
 def api_daytrade_signals():
-    """Phase 2 read-only view of the signal engine's journal — every setup,
-    entry, and exit for the day, taken or not (rule 8). Defaults to today,
-    ET. Read-only: the scheduler runs the engine — see
-    daytrade/scheduler.py's _run_signals."""
+    """Read-only view of the ACTIVE ACCOUNT's signal-engine journal — every
+    setup, entry, and exit for the day, taken or not (rule 8). Defaults to
+    today, ET. Per account (daytrade/settings.py): the account is whichever
+    book this request is bound to (_bind_account, X-CFM-Account header),
+    same as every other account-scoped route. Read-only: the scheduler runs
+    the engine — see daytrade/scheduler.py's _run_signals."""
     try:
         from datetime import datetime
         day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
         symbol = request.args.get("symbol")
-        events = daytrade_store.load_signals(day, symbol.upper() if symbol else None)
-        return jsonify({"date": day, "events": events})
+        events = daytrade_store.load_signals(day, accounts.active_id(),
+                                             symbol.upper() if symbol else None)
+        return jsonify({"date": day, "account_id": accounts.active_id(), "events": events})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
 
 @app.route("/api/daytrade/trades")
 def api_daytrade_trades():
-    """Phase 3 read-only view of the day's trade log — one row per trade_id,
-    with fills and $ P&L (daytrade/adapters.py's PaperAdapter). Defaults to
-    today, ET."""
+    """Read-only view of the active account's trade log for the day — one
+    row per trade_id, with fills and $ P&L (daytrade/adapters.py's
+    PaperAdapter). Defaults to today, ET."""
     try:
         from datetime import datetime
         day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
-        return jsonify({"date": day, "trades": daytrade_store.load_trades(day)})
+        return jsonify({"date": day, "account_id": accounts.active_id(),
+                         "trades": daytrade_store.load_trades(day, accounts.active_id())})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
 
 @app.route("/api/daytrade/budget")
 def api_daytrade_budget():
-    """Live read of the sleeve's current sizing budget — the primary book's
+    """Live read of the active account's current sizing budget — its own
     dry powder, or the static fallback if that read fails right now (see
     daytrade/budget.py). Not cached: reflects CFM's capital as of THIS
     request, which is also what the next scheduler tick will size off."""
     try:
         from daytrade import budget
-        return jsonify(budget.daytrade_budget())
+        return jsonify(budget.daytrade_budget(accounts.active_id()))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
 
 @app.route("/api/daytrade/trial")
 def api_daytrade_trial():
-    """Live read of the paper-trading trial's progress across every day
-    (daytrade/trial.py) — completed/target trades, net R, net P&L, and the
-    WIN/LOSS/FLAT verdict once complete. Not date-scoped, unlike the other
-    daytrade routes: the trial spans days by design."""
+    """Live read of the active account's paper-trading trial progress
+    across every day (daytrade/trial.py) — completed/target trades, net R,
+    net P&L, and the WIN/LOSS/FLAT verdict once complete. Not date-scoped,
+    unlike the other daytrade routes: the trial spans days by design."""
     try:
         from daytrade import trial
-        return jsonify(trial.trial_status())
+        return jsonify(trial.trial_status(accounts.active_id()))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/daytrade/enabled", methods=["GET", "POST"])
+def api_daytrade_enabled():
+    """Get or set whether the day-trade sleeve is turned on for the active
+    account (daytrade/settings.py). Per-account so one book can run the
+    trial while another sits out entirely — see settings.py's docstring for
+    the default (on for the primary book, off for every other)."""
+    try:
+        from daytrade import settings
+        account_id = accounts.active_id()
+        if request.method == "POST":
+            payload = request.get_json(silent=True) or {}
+            settings.set_enabled(account_id, bool(payload.get("enabled")))
+        return jsonify({"account_id": account_id, "enabled": settings.is_enabled(account_id)})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
