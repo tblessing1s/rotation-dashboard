@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Spinner, ErrorState, Stat, useApi } from "./ui.jsx";
+import { Card, Meter, Pill, Spinner, ErrorState, Stat, useApi } from "./ui.jsx";
 
 // Day-trade sleeve (backend/daytrade/) — a SEPARATE, rules-based intraday
 // strategy for capital too small to fit a CFM position. The rotation regime
@@ -175,8 +175,48 @@ function TradeLog({ trades }) {
   );
 }
 
+const VERDICT_TONE = { win: "go", loss: "avoid", flat: "unknown" };
+
+function TrialBanner({ trial }) {
+  if (!trial) return null;
+  const pct = trial.target_trades ? (trial.completed_trades / trial.target_trades) * 100 : 0;
+  return (
+    <div className="mb-4 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
+      <div className="mb-1.5 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
+          Paper trial: {trial.completed_trades}/{trial.target_trades} trades
+          {trial.status === "complete" && (
+            <Pill status={VERDICT_TONE[trial.verdict] || "unknown"}>{trial.verdict}</Pill>
+          )}
+        </div>
+        <div className={`text-xs font-mono ${toneFor(trial.net_pnl)}`}>
+          {rMult(trial.net_r)} · {money(trial.net_pnl)}
+        </div>
+      </div>
+      <Meter pct={pct} tone={trial.status === "complete" ? (trial.verdict === "loss" ? "bg-rose-500" : "bg-emerald-500") : "bg-sky-500"} />
+      {trial.status === "complete" ? (
+        <p className="mt-1.5 text-[11px] text-slate-500">
+          Trial complete — no new paper entries will be taken. Going live is
+          your call; nothing here flips MODE automatically.
+        </p>
+      ) : (
+        <p className="mt-1.5 text-[11px] text-slate-500">
+          Running automatically until {trial.target_trades} trades close, then the
+          sleeve pauses new entries and this becomes a WIN/LOSS/FLAT verdict.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export default function DayTradePanel() {
   const [date, setDate] = React.useState(todayISO);
+
+  // Live sizing budget and trial progress — independent of `date` (both are
+  // always "right now"/"overall"), so they get their own poll rather than
+  // riding the per-date fetch below.
+  const { data: budget } = useApi(() => api.daytradeBudget(), [], 60000);
+  const { data: trial } = useApi(() => api.daytradeTrial(), [], 60000);
 
   const { data, error, loading, reload } = useApi(
     async () => {
@@ -234,12 +274,20 @@ export default function DayTradePanel() {
         ever sent to the broker.
       </p>
 
+      <TrialBanner trial={trial} />
+
       {loading && <Spinner />}
       {error && <ErrorState error={error} onRetry={reload} />}
 
       {data && (
         <>
-          <div className="mb-4 grid grid-cols-2 gap-4 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3 sm:grid-cols-5">
+          <div className="mb-4 grid grid-cols-2 gap-4 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3 sm:grid-cols-3 lg:grid-cols-6">
+            <Stat
+              label="Budget"
+              value={budget ? money(budget.amount) : "—"}
+              sub={budget ? (budget.source === "dry_powder" ? budget.detail : `fallback — ${budget.detail}`) : "loading…"}
+              tone={budget?.source === "fallback" ? "text-amber-300" : "text-slate-100"}
+            />
             <Stat label="Trades taken" value={trades.length} sub={`max 2/day`} />
             <Stat label="Cumulative R" value={rMult(cumulativeR)} tone={toneFor(cumulativeR)} />
             <Stat label="Realized P&L" value={money(realizedPnl)} tone={toneFor(realizedPnl)} />

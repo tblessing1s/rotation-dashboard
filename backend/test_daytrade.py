@@ -12,7 +12,7 @@ import pandas as pd
 import pytest
 
 import config
-from daytrade import bars, scheduler, store, universe
+from daytrade import bars, budget, scheduler, signals, store, trial, universe
 
 ET = ZoneInfo("America/New_York")
 
@@ -66,6 +66,20 @@ def test_append_and_load_bars_filters_by_symbol(tmp_store):
 
 def test_load_bars_missing_day_returns_empty(tmp_store):
     assert store.load_bars("2026-01-01") == []
+
+
+def test_iter_all_trades_yields_every_day_oldest_first(tmp_store):
+    store.save_trades("2026-09-15", {"t2": {"symbol": "XYZ"}})
+    store.save_trades("2026-09-14", {"t1": {"symbol": "ABC"}})
+
+    days = list(store.iter_all_trades())
+
+    assert [d for d, _ in days] == ["2026-09-14", "2026-09-15"]
+    assert days[0][1] == {"t1": {"symbol": "ABC"}}
+
+
+def test_iter_all_trades_with_no_files_yields_nothing(tmp_store):
+    assert list(store.iter_all_trades()) == []
 
 
 # ===========================================================================
@@ -233,3 +247,65 @@ def test_signals_finalize_due_fires_once_per_trading_day_after_window_end():
     assert scheduler.signals_finalize_due(at, None) is True
     assert scheduler.signals_finalize_due(at, at.date()) is False      # already ran today
     assert scheduler.signals_finalize_due(at, at.date() - timedelta(days=1)) is True
+
+
+def test_run_signals_sizes_off_the_live_daytrade_budget(monkeypatch):
+    """The scheduler — not signals.run_day's own default — is what wires the
+    live dry-powder budget in, so a bad budget read can never silently
+    resize a symbol-engine test's expectations (see daytrade/budget.py)."""
+    seen = {}
+    monkeypatch.setattr(budget, "daytrade_budget",
+                        lambda: {"amount": 777.0, "source": "dry_powder", "detail": "x"})
+    monkeypatch.setattr(trial, "trial_status",
+                        lambda: {"status": "running", "completed_trades": 0, "target_trades": 50})
+
+    def _fake_run_day(day, now=None, account_equity=None, adapter=None, entries_enabled=True):
+        seen["account_equity"] = account_equity
+        seen["entries_enabled"] = entries_enabled
+        return {"date": day, "events": []}
+    monkeypatch.setattr(signals, "run_day", _fake_run_day)
+
+    scheduler._run_signals(datetime(2026, 9, 14, 10, 0, tzinfo=ET))
+
+    assert seen["account_equity"] == 777.0
+    assert seen["entries_enabled"] is True
+
+
+def test_run_signals_disables_entries_once_the_trial_is_complete(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(budget, "daytrade_budget",
+                        lambda: {"amount": 777.0, "source": "dry_powder", "detail": "x"})
+    monkeypatch.setattr(trial, "trial_status",
+                        lambda: {"status": "complete", "completed_trades": 50, "target_trades": 50})
+
+    def _fake_run_day(day, now=None, account_equity=None, adapter=None, entries_enabled=True):
+        seen["entries_enabled"] = entries_enabled
+        return {"date": day, "events": []}
+    monkeypatch.setattr(signals, "run_day", _fake_run_day)
+
+    scheduler._run_signals(datetime(2026, 9, 14, 10, 0, tzinfo=ET))
+
+    assert seen["entries_enabled"] is False
+
+
+def test_maybe_screen_skips_once_the_trial_is_complete(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
+    monkeypatch.setattr(trial, "trial_status", lambda: {"status": "complete"})
+    called = []
+    monkeypatch.setattr(scheduler, "_run_screen", lambda: called.append(True))
+    monkeypatch.setattr(scheduler, "_last_screen_day", None)
+
+    scheduler._maybe_screen(datetime(2026, 9, 14, 17, 0, tzinfo=ET))  # past DAYTRADE_SCREEN_ET
+
+    assert called == []
+
+
+def test_digest_due_fires_once_per_day_after_threshold():
+    end_h, end_m = (int(x) for x in config.DAYTRADE_DIGEST_ET.split(":"))
+    at = datetime(2026, 9, 14, end_h, end_m)
+    before = at - timedelta(minutes=1)
+
+    assert scheduler.digest_due(before, None) is False
+    assert scheduler.digest_due(at, None) is True
+    assert scheduler.digest_due(at, at.date()) is False
+    assert scheduler.digest_due(at, at.date() - timedelta(days=1)) is True
