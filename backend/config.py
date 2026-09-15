@@ -811,6 +811,23 @@ DAYTRADE_DAILY_STOP_R = 2.0
 # so a stale fallback figure is a sizing inaccuracy, never a financial risk.
 DAYTRADE_ACCOUNT_EQUITY = float(os.environ.get("DAYTRADE_ACCOUNT_EQUITY", "5000"))
 
+# ---- Paper-trading trial (operator decision, not in the original brief) ---
+# The brief's own success gate: a tracked run in paper mode before ever
+# flipping config.daytrade_mode() to live. Sized at the brief's own backtest
+# precedent ("two rounds of 50 trades"). See daytrade/trial.py:
+# trial_status() aggregates every CLOSED trade across every day's trade log
+# and, once completed_trades reaches this target, daytrade/scheduler.py
+# stops taking new entries (any trade already open that day still plays out
+# normally) — going live from there is an explicit operator call, never
+# automatic.
+DAYTRADE_TRIAL_TRADES = 50
+
+# Daily performance digest send time (ET) — see daytrade/digest.py /
+# scheduler.py's _maybe_daily_digest. Same once-per-day-after-threshold
+# shape as DAYTRADE_SCREEN_ET, a bit later so the day's session has fully
+# wrapped (the window itself ends at DAYTRADE_WINDOW_END_ET, ~11:00 ET).
+DAYTRADE_DIGEST_ET = "17:00"
+
 
 def daytrade_mode() -> str:
     """'paper' (default) or 'live' — selects which daytrade.adapters

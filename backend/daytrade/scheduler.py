@@ -8,13 +8,26 @@ needs no new infrastructure. A second daemon thread (not a hook into
 the other's, and so this sleeve can be disabled independently
 (``CFM_DAYTRADE_SCHEDULER=0``) without touching CFM's alerts.
 
-Two jobs, both best-effort (logged, never fatal to the tick):
+Jobs, all best-effort (logged, never fatal to the tick):
 
   screen        once per trading day, after the close (``DAYTRADE_SCREEN_ET``)
-                — ``daytrade.universe.screen()``
+                — ``daytrade.universe.screen()``. Skipped once the paper
+                trial (``daytrade.trial.trial_status()``) is complete: no
+                screener picks that day means bar ingest and the signal
+                engine have nothing to do either, so gating the screener
+                alone quietly stops the whole pipeline for future days.
   bar ingest    every ``DAYTRADE_BAR_INTERVAL_MINUTES`` during the Rule 2
                 signal window (``DAYTRADE_WINDOW_START_ET``-``_END_ET``) —
                 ``daytrade.bars.ingest()``
+  signals       after every bar ingest, and once more at the window's end —
+                ``daytrade.signals.run_day()``, sized off the live budget
+                (``daytrade.budget``) and gated on the trial's completion
+                (``entries_enabled``): a trade already open the day the
+                trial completes still resolves normally.
+  daily digest  once per trading day (``DAYTRADE_DIGEST_ET``) —
+                ``daytrade.digest.send_daily_digest()`` pushes the trial's
+                running P&L/R so it reaches the operator without opening
+                the UI.
 
 The window is expressed in ET, not CT: alert_scheduler's clock is already ET,
 and 8:30-10:00 AM CT == 9:30-11:00 AM ET year-round (both zones observe the
@@ -50,6 +63,8 @@ _last_bar_fetch: datetime | None = None
 # _maybe_finalize_signals. The engine also runs after every bar ingest
 # (in-window), so this only covers the once-per-day cutoff sweep.
 _last_signals_finalize_day: date | None = None
+# Trading day the daily performance digest last went out.
+_last_digest_day: date | None = None
 
 
 def enabled() -> bool:
@@ -91,6 +106,14 @@ def signals_finalize_due(now: datetime, last_day: date | None) -> bool:
     return now.strftime("%H:%M") >= config.DAYTRADE_WINDOW_END_ET and last_day != now.date()
 
 
+def digest_due(now: datetime, last_day: date | None) -> bool:
+    """Daily digest: fires once per day, at/after DAYTRADE_DIGEST_ET. Every
+    calendar day, not just trading days — a Saturday digest just repeats
+    Friday's still-accurate trial status, same trade-off market_calendar-
+    unaware alert_scheduler slots make elsewhere."""
+    return now.strftime("%H:%M") >= config.DAYTRADE_DIGEST_ET and last_day != now.date()
+
+
 # ---------------------------------------------------------------------------
 # Jobs
 # ---------------------------------------------------------------------------
@@ -111,6 +134,13 @@ def _maybe_screen(now: datetime) -> None:
     if not screen_due(now, _last_screen_day):
         return
     _last_screen_day = now.date()
+    try:
+        from daytrade import trial
+        if trial.trial_status()["status"] == "complete":
+            logger.info("daytrade screener skipped — paper trial complete, no new entries")
+            return
+    except Exception as e:  # noqa: BLE001 — a trial-status read failure must not block screening
+        logger.warning("daytrade trial status check failed (%s); screening anyway", e)
     _run_screen()
 
 
@@ -126,7 +156,7 @@ def _run_bar_ingest(now: datetime) -> None:
 
 def _run_signals(now: datetime) -> None:
     try:
-        from daytrade import budget, signals
+        from daytrade import budget, signals, trial
         day = now.strftime("%Y-%m-%d")
         # Live budget every run — see budget.daytrade_budget: the primary
         # book's dry powder, falling back to the static config placeholder
@@ -135,10 +165,18 @@ def _run_signals(now: datetime) -> None:
         # tests rely on that default staying pure/offline), so the live
         # figure only reaches production runs through this explicit pass.
         equity = budget.daytrade_budget()
-        result = signals.run_day(day, now=now, account_equity=equity["amount"])
+        # Same for the trial gate: run_day() defaults entries_enabled=True,
+        # so the paper-trading trial's completion only reaches production
+        # runs through this explicit pass too.
+        status = trial.trial_status()
+        entries_enabled = status["status"] != "complete"
+        result = signals.run_day(day, now=now, account_equity=equity["amount"],
+                                 entries_enabled=entries_enabled)
         logger.info("daytrade signals: %d total event(s) journaled for %s "
-                    "(budget $%.2f from %s)",
-                    len(result["events"]), day, equity["amount"], equity["detail"])
+                    "(budget $%.2f from %s, trial %d/%d%s)",
+                    len(result["events"]), day, equity["amount"], equity["detail"],
+                    status["completed_trades"], status["target_trades"],
+                    "" if entries_enabled else " — COMPLETE, no new entries")
     except Exception as e:  # noqa: BLE001 — best-effort, never fatal to the tick
         logger.warning("daytrade signal engine failed: %s", e)
 
@@ -171,18 +209,43 @@ def _maybe_finalize_signals(now: datetime) -> None:
     _run_signals(now)
 
 
+def _run_daily_digest() -> None:
+    try:
+        from daytrade import digest
+        report = digest.send_daily_digest()
+        logger.info("daytrade daily digest: %s", report or "no channel configured")
+    except Exception as e:  # noqa: BLE001 — best-effort, never fatal to the tick
+        logger.warning("daytrade daily digest failed: %s", e)
+
+
+def _maybe_daily_digest(now: datetime) -> None:
+    global _last_digest_day
+    if not digest_due(now, _last_digest_day):
+        return
+    _last_digest_day = now.date()
+    _run_daily_digest()
+
+
 def _tick() -> None:
     now = datetime.now(ET)
     _maybe_screen(now)
     _maybe_bar_ingest(now)
     _maybe_finalize_signals(now)
+    _maybe_daily_digest(now)
 
 
 def _loop() -> None:
     while not _stop.wait(_TICK_SECONDS):
         try:
             _tick()
-        except Exception as e:  # noqa: BLE001 — one bad tick must not kill the daemon
+        except BaseException as e:  # noqa: BLE001 — one bad tick must not kill the daemon.
+            # BaseException, not Exception: a broken native dependency (seen
+            # in practice — a broken `cryptography`/pyo3 build makes
+            # webpush.configured() raise pyo3_runtime.PanicException, which
+            # does NOT subclass Exception) would otherwise escape this
+            # thread's target function entirely, silently ending the
+            # scheduler for the rest of the process with no crash and no
+            # further log line to explain why it stopped.
             logger.error("daytrade scheduler tick failed: %s", e)
 
 

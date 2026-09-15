@@ -138,6 +138,9 @@ export const api = {
   // static fallback (see backend/daytrade/budget.py). Always "now", not
   // scoped to the selected date, so it's polled independent of `date`.
   daytradeBudget: () => request("/api/daytrade/budget"),
+  // Paper-trading trial progress (backend/daytrade/trial.py) — aggregated
+  // across every day, not scoped to `date`, same as daytradeBudget.
+  daytradeTrial: () => request("/api/daytrade/trial"),
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
   // they can clear the STALE_BLOCKS_GO gate on the next scan.
   refreshReadyQuote: (tickers) =>

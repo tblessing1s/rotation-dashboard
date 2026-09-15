@@ -120,16 +120,23 @@ class _Symbol:
 
 
 class _Day:
-    """Account-wide guardrail state (rule 7) shared across every symbol."""
+    """Account-wide guardrail state (rule 7) shared across every symbol, plus
+    the cross-day paper-trading trial gate (daytrade/trial.py)."""
 
-    def __init__(self, account_equity: float):
+    def __init__(self, account_equity: float, entries_enabled: bool = True):
         self.account_equity = account_equity
+        self.entries_enabled = entries_enabled
         self.trades_taken = 0
         self.losses = 0
         self.cumulative_r = 0.0
         self.stopped_reason: str | None = None
 
     def block_reason(self) -> str | None:
+        if not self.entries_enabled:
+            # The trial (daytrade/trial.py) has already hit its target trade
+            # count — a cross-day gate, not this day's own guardrails, so it
+            # is checked first and never cleared by anything below.
+            return "paper trial complete — no new entries"
         if self.stopped_reason:
             return self.stopped_reason
         if self.trades_taken >= config.DAYTRADE_MAX_TRADES_PER_DAY:
@@ -335,14 +342,18 @@ def _finalize_open_trades(symbols: dict[str, _Symbol], day_state: _Day, day: str
 
 
 def run_day(day: str, now: datetime | None = None, account_equity: float | None = None,
-            adapter: adapters.ExecutionAdapter | None = None) -> dict:
+            adapter: adapters.ExecutionAdapter | None = None,
+            entries_enabled: bool = True) -> dict:
     """Replay one trading day's bars through the signal engine and journal
     any new events. Idempotent: safe to call repeatedly as bars keep
     arriving (Phase 1's scheduler does, every DAYTRADE_BAR_INTERVAL_MINUTES).
     ``adapter`` defaults to ``adapters.get_adapter(day)`` (PaperAdapter) —
     tests inject their own to assert on fill/trade-log behaviour without a
-    second config seam. Returns ``{"date", "events"}`` — every event
-    journaled for the day so far, oldest first."""
+    second config seam. ``entries_enabled=False`` (the scheduler passes this
+    once daytrade.trial.trial_status() says the paper trial has hit its
+    target) blocks every NEW setup/entry for the day but still resolves any
+    trade already open — see _Day.block_reason. Returns ``{"date",
+    "events"}`` — every event journaled for the day so far, oldest first."""
     now = now or datetime.now(ET)
     account_equity = config.DAYTRADE_ACCOUNT_EQUITY if account_equity is None else account_equity
     adapter = adapter if adapter is not None else adapters.get_adapter(day)
@@ -361,7 +372,7 @@ def run_day(day: str, now: datetime | None = None, account_equity: float | None 
     bars = [b for b in store.load_bars(day) if b.get("symbol") in symbols]
     bars.sort(key=lambda b: (_parse_at(b["datetime"]), b["symbol"]))
 
-    day_state = _Day(account_equity)
+    day_state = _Day(account_equity, entries_enabled=entries_enabled)
     new_events: list[dict] = []
     for bar in bars:
         sym = symbols[bar["symbol"]]

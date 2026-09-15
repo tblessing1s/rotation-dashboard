@@ -160,6 +160,22 @@ def test_entry_is_skipped_not_taken_at_zero_size_when_the_budget_is_zero(tmp_sto
     assert events[1]["reason"] == "no budget available"
 
 
+def test_no_new_setups_arm_once_entries_are_disabled_by_the_trial_gate(tmp_store):
+    """entries_enabled=False (daytrade/scheduler.py passes this once
+    daytrade.trial says the paper trial has hit its target) must block a
+    setup from ever arming — not just the later entry trigger — since an
+    armed-but-never-entered setup is still a pointless partial state."""
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _setup_bars() + [
+        _bar("ABC", "09:40", 101.6, 102, 101.4, 101.8, 50_000),
+    ])
+
+    events = _events(entries_enabled=False)
+
+    assert _event_types(events) == ["setup_skipped"]
+    assert events[0]["reason"] == "paper trial complete — no new entries"
+
+
 def test_entry_triggers_on_the_second_and_last_allowed_candle(tmp_store):
     _save_screen([_pick("ABC", 100, 90)])
     store.append_bars(DAY, _setup_bars() + [

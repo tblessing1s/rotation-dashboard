@@ -148,6 +148,26 @@ def load_trades(day: str) -> dict:
         return json.load(fh)
 
 
+def iter_all_trades():
+    """Yield ``(day, trades)`` for every day that has ever had a trade log,
+    oldest first (the ``YYYY-MM-DD`` filename sorts chronologically). Used
+    by ``daytrade.trial`` to aggregate the whole paper-trading trial across
+    days without a separate running counter that could drift from what
+    actually closed. A malformed file is skipped, never fatal."""
+    if not os.path.isdir(STORE_DIR):
+        return
+    suffix = ".trades.json"
+    for name in sorted(os.listdir(STORE_DIR)):
+        if not name.endswith(suffix):
+            continue
+        day = name[: -len(suffix)]
+        try:
+            with open(os.path.join(STORE_DIR, name), encoding="utf-8") as fh:
+                yield day, json.load(fh)
+        except (OSError, ValueError):
+            continue
+
+
 def append_signals(day: str, rows: list[dict]) -> int:
     """Append signal-engine events for one trading day. Returns how many were
     written. Dedup against events already logged (e.g. an earlier scheduler
