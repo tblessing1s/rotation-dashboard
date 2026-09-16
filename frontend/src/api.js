@@ -206,6 +206,16 @@ export const api = {
   // (UNKNOWN stays "confirming", a rejection carries Schwab's verbatim reason).
   submissionStatus: (ref) => request(`/api/order-submission-status?ref=${encodeURIComponent(ref)}`),
   positions: () => request("/api/positions"),
+  // Full exit: close every open short call, then sell every owned share, in
+  // one blocking call (executor.exit_position). Each leg waits for its own
+  // fill (live mode included), so this can run well past the default request
+  // timeout — give it more room than a normal call.
+  exitPosition: (ticker, { exit_reason, exit_note, source_rec_id } = {}) =>
+    request(`/api/positions/${encodeURIComponent(ticker)}/exit`, {
+      method: "POST",
+      body: JSON.stringify({ exit_reason, exit_note, source_rec_id }),
+      timeoutMs: 120000,
+    }),
   // On-demand live quote for one position (stock + its open short-call legs),
   // bypassing the caches the position card otherwise reads from — the Roll
   // ticket already gets this implicitly; this is the same pull without opening it.

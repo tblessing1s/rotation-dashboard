@@ -2,6 +2,7 @@ import React from "react";
 import { api } from "../api.js";
 import { Card, Meter, Loading, Modal, Light, ChartLink, SleeveBadge, Spinner, money, fmt, useApi } from "./ui.jsx";
 import RollModal from "./RollModal.jsx";
+import ExitPositionModal from "./ExitPositionModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
 import { useToast } from "./Toast.jsx";
 import { explainRec, explainResolution, ticketSummary } from "../recWhy.js";
@@ -854,7 +855,7 @@ function ResolvedLine({ res, now }) {
   );
 }
 
-function RecSection({ p, recs, resolved, onRecsChanged, focusCard }) {
+function RecSection({ p, recs, resolved, onRecsChanged, focusCard, setExiting }) {
   const now = useNow();
   const toast = useToast();
   const [dismissing, setDismissing] = React.useState(null); // rec being dismissed
@@ -883,11 +884,11 @@ function RecSection({ p, recs, resolved, onRecsChanged, focusCard }) {
 
   function execute(rec) {
     if (rec.action_type === "EXIT") {
-      // There is no in-app exit modal on this page (exits go through the order
-      // ticket) — focus the card and show the full proposed ticket instead of
-      // building a new order path.
+      // Full exit (close every open short, then sell every share) goes through
+      // ExitPositionModal, staged with this rec so the ticket carries
+      // source_rec_id and the modal can prefill its coded reason.
       focusCard(p.ticker);
-      setDetailId(rec.rec_id);
+      setExiting({ ticker: p.ticker, recId: rec.rec_id, rec });
       return;
     }
     // ROLL_OUT / ROLL_DOWN / DEFEND ride the existing roll-staging intent — the
@@ -1746,7 +1747,7 @@ function BookSummary({ positions, diffsByTicker, risk }) {
 // the share base, covered-lot capacity, short-call capture. Expanded: those in
 // full (share block, short list, accrual), plus any active safety alert
 // (reconciliation, defend, whipsaw) which also auto-opens the row.
-function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focused, setRolling, onOpenTicket, afterResolve }) {
+function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focused, setRolling, setExiting, onOpenTicket, afterResolve }) {
   const shorts = p.short_calls || [];
   const hasAlert = !!(p.needs_review || p.defend || p.whipsaw?.tripped || (diffs && diffs.length));
   // Collapsed by default for a clean, scannable list; a tapped-alert deep link
@@ -1832,7 +1833,7 @@ function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focus
 
       {/* Engine recommendations stay visible even when the row is collapsed —
           they're the "act now" layer, not detail. */}
-      <RecSection p={p} recs={recs} resolved={resolved} onRecsChanged={onRecsChanged} focusCard={focusCard} />
+      <RecSection p={p} recs={recs} resolved={resolved} onRecsChanged={onRecsChanged} focusCard={focusCard} setExiting={setExiting} />
 
       {open && (
         <div className="border-t border-slate-800 p-4">
@@ -1848,6 +1849,18 @@ function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focus
             <div className="mb-3 rounded-lg border border-rose-500/50 bg-rose-500/10 px-3 py-2 text-xs text-rose-200">
               <span className="font-semibold text-rose-300">⚠ Whipsaw — exit, don't defend again.</span>{" "}
               {(p.whipsaw.reasons || []).join("; ")}.
+            </div>
+          )}
+
+          {p.position_type !== "LEAP_PMCC_LEGACY" && (count > 0 || shorts.length > 0) && (
+            <div className="mb-3 flex justify-end">
+              <button
+                onClick={() => setExiting({ ticker: p.ticker })}
+                title="Close every open short call, then sell every share — one blocking action"
+                className="rounded-lg border border-rose-700 px-3 py-1.5 text-xs font-semibold text-rose-300 hover:bg-rose-500/10"
+              >
+                Exit position
+              </button>
             </div>
           )}
 
@@ -1884,6 +1897,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
   // remounts (the execNonce key) and after a dismissal.
   const { data: recsData, reload: reloadRecs } = useApi(api.recommendations, [], null);
   const [rolling, setRolling] = React.useState(null); // {ticker, reason, recId?}
+  const [exiting, setExiting] = React.useState(null); // {ticker, recId?, rec?}
   const [focusedTicker, setFocusedTicker] = React.useState(null);
   const handledIntentId = React.useRef(null);
 
@@ -1990,6 +2004,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
             focusCard={focusCard}
             focused={focusedTicker === p.ticker}
             setRolling={setRolling}
+            setExiting={setExiting}
             onOpenTicket={onOpenTicket}
             afterResolve={afterResolve}
           />
@@ -2004,6 +2019,17 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
           hasOpenRecommendation={!!(recsByTicker[(rolling.ticker || "").toUpperCase()] || []).length}
           onExecute={runRoll}
           onClose={() => setRolling(null)}
+        />
+      )}
+
+      {exiting && (
+        <ExitPositionModal
+          ticker={exiting.ticker}
+          position={positions.find((p) => p.ticker === exiting.ticker)}
+          rec={exiting.rec}
+          sourceRecId={exiting.recId}
+          onExecuted={() => { reload(); reloadRecs(); }}
+          onClose={() => setExiting(null)}
         />
       )}
     </div>
