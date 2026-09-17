@@ -1,10 +1,11 @@
 """Day-trade nightly screener — strategy rule 1.
 
-Screens the existing CFM ticker universe (``sector_data.all_tickers()``) for
-$20-150 stocks, avg daily volume > 1M, and ATR% between 2% and 5%
-(``config.DAYTRADE_*``), and records each candidate's most recent completed
-session's high/low as the next day's prior-day levels for the setup/entry
-rules (a later phase). Reuses the CFM daily-bar plumbing
+Screens the day-trade sleeve's OWN ticker roster (``daytrade/tickers.py``,
+seeded once from CFM's universe but independent from then on — see its
+module docstring) for $20-150 stocks, avg daily volume > 1M, and ATR% between
+2% and 5% (``config.DAYTRADE_*``), and records each candidate's most recent
+completed session's high/low as the next day's prior-day levels for the
+setup/entry rules (a later phase). Reuses the CFM daily-bar plumbing
 (``data_handler.get_daily``) rather than a new data path — the day-trade
 sleeve is a new STRATEGY, not a new DATA SOURCE.
 
@@ -21,9 +22,8 @@ from datetime import datetime, timezone
 import config
 import data_handler
 import indicators
-import sector_data
 
-from daytrade import store
+from daytrade import store, tickers as daytrade_tickers
 
 logger = logging.getLogger("cfm.daytrade")
 
@@ -79,7 +79,7 @@ def screen(tickers: list[str] | None = None, now: datetime | None = None) -> dic
     """Run the nightly screener once and persist the result. Returns the same
     dict that gets written to disk."""
     now = now or datetime.now(timezone.utc)
-    tickers = tickers if tickers is not None else sector_data.all_tickers()
+    tickers = tickers if tickers is not None else daytrade_tickers.all_tickers()
 
     screened = [_evaluate(t) for t in tickers]
     qualified = [r for r in screened if r.get("qualified")]

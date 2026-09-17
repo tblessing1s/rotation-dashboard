@@ -251,6 +251,54 @@ def api_daytrade_enabled():
         return _err(e)
 
 
+@app.route("/api/daytrade/tickers", methods=["GET"])
+def api_daytrade_tickers():
+    """The day-trade sleeve's OWN ticker roster (daytrade/tickers.py) — a
+    separate, editable list from CFM's universe (/api/universe), seeded once
+    from it but independent from then on. Managed via /add and /remove
+    below; the nightly screener (daytrade/universe.py) reads this list."""
+    try:
+        from daytrade import tickers as daytrade_tickers
+        names = daytrade_tickers.all_tickers()
+        return jsonify({"tickers": names, "total": len(names)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/daytrade/tickers/add", methods=["POST"])
+def api_daytrade_tickers_add():
+    """Add to the day-trade sleeve's roster. {ticker} for one (raises on a
+    duplicate/blank), or {tickers:[...]} to bulk-import (e.g. a pasted CSV
+    watchlist) — duplicates/blanks are silently skipped rather than raising,
+    since a large import shouldn't abort on the first repeat."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        from daytrade import tickers as daytrade_tickers
+        if isinstance(payload.get("tickers"), list):
+            return jsonify(daytrade_tickers.add_tickers(payload["tickers"]))
+        return jsonify(daytrade_tickers.add_ticker(payload.get("ticker", "")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/daytrade/tickers/remove", methods=["POST"])
+def api_daytrade_tickers_remove():
+    """Remove from the day-trade sleeve's roster. {ticker} for one, or
+    {tickers:[...]} to bulk remove."""
+    payload = request.get_json(silent=True) or {}
+    try:
+        from daytrade import tickers as daytrade_tickers
+        if isinstance(payload.get("tickers"), list):
+            return jsonify(daytrade_tickers.remove_tickers(payload["tickers"]))
+        return jsonify(daytrade_tickers.remove_ticker(payload.get("ticker", "")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/sectors")
 def api_sectors():
     try:

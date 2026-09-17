@@ -93,6 +93,173 @@ function UniverseTable({ picks }) {
   );
 }
 
+// Pulls ticker symbols out of a pasted/uploaded CSV: takes each line's first
+// cell, keeps only ones shaped like a ticker (letters, optional ".B"-style
+// share class), drops a leading header cell ("Symbol"/"Ticker"/…), and
+// dedupes. Deliberately simple (no quoted-comma handling) — good enough for
+// a plain watchlist export, which is what this is for.
+const CSV_HEADER_CELLS = new Set(["SYMBOL", "TICKER", "STOCK", "STOCKS", "NAME"]);
+function parseCsvTickers(text) {
+  const tokens = [];
+  for (const line of text.split(/\r?\n/)) {
+    const cell = line.split(",")[0].trim().replace(/^"|"$/g, "");
+    if (!cell) continue;
+    const t = cell.toUpperCase();
+    if (/^[A-Z]{1,6}(\.[A-Z]{1,3})?$/.test(t)) tokens.push(t);
+  }
+  if (tokens.length && CSV_HEADER_CELLS.has(tokens[0])) tokens.shift();
+  return Array.from(new Set(tokens));
+}
+
+// The day-trade sleeve's OWN ticker roster (backend/daytrade/tickers.py) —
+// separate from CFM's universe: seeded from it once, independent from then
+// on. Collapsed by default (the roster can run into the hundreds) with a
+// client-side filter so managing it doesn't mean scrolling a wall of chips.
+function TickerRoster() {
+  const [open, setOpen] = React.useState(false);
+  const { data, error, loading, reload } = useApi(() => api.daytradeTickers(), [], null);
+  const [filter, setFilter] = React.useState("");
+  const [newTicker, setNewTicker] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [msg, setMsg] = React.useState(null);
+
+  const addTicker = async () => {
+    if (!newTicker.trim()) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const r = await api.daytradeTickersAdd(newTicker.trim());
+      setMsg({ ok: `Added ${r.added}` });
+      setNewTicker("");
+      await reload();
+    } catch (e) {
+      setMsg({ err: String(e.message || e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeTicker = async (ticker) => {
+    setMsg(null);
+    try {
+      await api.daytradeTickersRemove(ticker);
+      await reload();
+    } catch (e) {
+      setMsg({ err: String(e.message || e) });
+    }
+  };
+
+  const fileInputRef = React.useRef(null);
+  const importCsv = async (file) => {
+    if (!file) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const text = await file.text();
+      const parsed = parseCsvTickers(text);
+      if (!parsed.length) {
+        setMsg({ err: "No ticker-looking symbols found in that file" });
+        return;
+      }
+      const r = await api.daytradeTickersAddBulk(parsed);
+      setMsg({
+        ok: `Imported ${r.added.length} of ${parsed.length}` +
+          (r.skipped.length ? ` (${r.skipped.length} already in the universe)` : ""),
+      });
+      await reload();
+    } catch (e) {
+      setMsg({ err: String(e.message || e) });
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
+  const shown = (data?.tickers || []).filter((t) => t.includes(filter.trim().toUpperCase()));
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-slate-100"
+      >
+        <span className="text-slate-500">{open ? "▾" : "▸"}</span>
+        Day-trade universe{data ? ` (${data.total})` : ""}
+      </button>
+      {open && (
+        <div className="rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+          <p className="mb-2 text-[11px] text-slate-500">
+            The stocks the nightly screener draws from — separate from CFM's own
+            universe, seeded from it once and managed independently from here on.
+          </p>
+          <div className="mb-2 flex flex-wrap items-center gap-2">
+            <input
+              type="text"
+              value={newTicker}
+              onChange={(e) => setNewTicker(e.target.value.toUpperCase())}
+              onKeyDown={(e) => e.key === "Enter" && addTicker()}
+              placeholder="Add ticker…"
+              className="w-28 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-200"
+            />
+            <button
+              onClick={addTicker}
+              disabled={busy || !newTicker.trim()}
+              className="rounded border border-emerald-700 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
+            >
+              Add
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={(e) => importCsv(e.target.files?.[0])}
+              className="hidden"
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={busy}
+              title="Import a CSV — the first column of each row is read as a ticker symbol"
+              className="rounded border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+            >
+              Import CSV
+            </button>
+            <input
+              type="text"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              placeholder="Filter…"
+              className="w-28 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-200"
+            />
+            {msg?.ok && <span className="text-[11px] text-emerald-300">{msg.ok}</span>}
+            {msg?.err && <span className="text-[11px] text-rose-300">{msg.err}</span>}
+          </div>
+          {loading && <Spinner />}
+          {error && <ErrorState error={error} onRetry={reload} />}
+          {data && (
+            <div className="max-h-48 overflow-y-auto">
+              <div className="flex flex-wrap gap-1.5">
+                {shown.map((t) => (
+                  <button
+                    key={t}
+                    onClick={() => removeTicker(t)}
+                    title={`Remove ${t}`}
+                    className="rounded border border-slate-700 bg-slate-800/60 px-1.5 py-0.5 text-[11px] font-mono text-slate-300 hover:border-rose-800 hover:bg-rose-500/10 hover:text-rose-300"
+                  >
+                    {t} ✕
+                  </button>
+                ))}
+                {!shown.length && (
+                  <p className="text-[11px] text-slate-500">No tickers match.</p>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function SignalFeed({ events }) {
   if (!events?.length) {
     return <p className="text-[11px] text-slate-500">No signals yet for this date.</p>;
@@ -344,6 +511,8 @@ export default function DayTradePanel() {
               </h4>
               <UniverseTable picks={data.universe.picks} />
             </section>
+
+            <TickerRoster />
 
             <section>
               <h4 className="mb-2 text-xs font-semibold text-slate-300">Signal feed</h4>

@@ -155,6 +155,16 @@ export const api = {
   daytradeEnabled: () => request("/api/daytrade/enabled"),
   daytradeSetEnabled: (on) =>
     request("/api/daytrade/enabled", { method: "POST", body: JSON.stringify({ enabled: on }) }),
+  // The day-trade sleeve's OWN ticker roster (backend/daytrade/tickers.py) —
+  // separate from CFM's universe (api.universe above), seeded from it once
+  // but independent from then on. SHARED, like daytradeUniverse/Bars.
+  daytradeTickers: () => request("/api/daytrade/tickers"),
+  daytradeTickersAdd: (ticker) =>
+    request("/api/daytrade/tickers/add", { method: "POST", body: JSON.stringify({ ticker }) }),
+  daytradeTickersAddBulk: (tickers) =>
+    request("/api/daytrade/tickers/add", { method: "POST", body: JSON.stringify({ tickers }) }),
+  daytradeTickersRemove: (ticker) =>
+    request("/api/daytrade/tickers/remove", { method: "POST", body: JSON.stringify({ ticker }) }),
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so
   // they can clear the STALE_BLOCKS_GO gate on the next scan.
   refreshReadyQuote: (tickers) =>

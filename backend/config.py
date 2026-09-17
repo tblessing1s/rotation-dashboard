@@ -21,6 +21,13 @@ CACHE_DIR = os.path.join(DATA_DIR, "cache")
 # once from the read-only repo file (TICKERS_BY_SECTOR_PATH) so it can be managed
 # at runtime (add/remove/fix tickers) and survives deploys.
 UNIVERSE_PATH = os.path.join(DATA_DIR, "universe.json")
+# The day-trade sleeve's OWN ticker roster — a separate editable JSON store,
+# NOT a view onto UNIVERSE_PATH above: CFM's dividend/options universe and the
+# day-trade sleeve's intraday-liquidity universe are different lists that
+# happen to start from the same names (see daytrade/tickers.py). Seeded once
+# (a one-time copy of sector_data.all_tickers(), not a live merge) so it can
+# grow or shrink independently of CFM's universe from then on.
+DAYTRADE_TICKERS_PATH = os.path.join(DATA_DIR, "daytrade_universe.json")
 
 # ---- Demo mode -------------------------------------------------------------
 # A self-contained "fake data" view, kept entirely separate from the live store
