@@ -89,6 +89,14 @@ class SchwabError(RuntimeError):
     pass
 
 
+class SchwabChainNotFoundError(SchwabError):
+    """The chains endpoint's "no chain for this symbol" shape specifically (an
+    outer HTTP 400 wrapping an inner errors[].status of 404) — distinct from
+    other SchwabErrors so a caller can retry with a narrower date range before
+    giving up: seen live for a symbol whose options exist but whose furthest
+    listed expiration is closer than a wide LEAP-spanning request asks for."""
+
+
 class _RateLimiter:
     """Process-wide pacing for Schwab requests: a token bucket sized to
     config.SCHWAB_REQUESTS_PER_MINUTE (capacity = one minute's worth, so a
@@ -674,14 +682,21 @@ class SchwabClient:
                 "app is approved for market data; a token refresh will not fix this.")
         if resp.status_code == 400 and _is_chain_not_found(resp.text):
             # Schwab wraps "no chain for this symbol" as an outer 400 carrying an
-            # inner errors[].status of 404 — not a malformed request. Seen for
-            # symbols with no listed options market yet (e.g. a recent IPO still
-            # inside the exchanges' waiting period) as well as for a
-            # renamed/delisted ticker whose equity quote still resolves elsewhere.
-            raise SchwabError(
-                f"schwab has no option chain for {symbol.upper()} (HTTP 400 -> 404 Not Found) "
-                "— either it has no listed options yet (common for a recent IPO) or the "
-                "symbol was renamed/delisted. Confirm on Schwab's own site/app.")
+            # inner errors[].status of 404 — not a malformed request. Confirmed
+            # (live, SPCX) NOT to mean "no listed options at all": Schwab's own
+            # site showed both calls and puts for the same symbol. The remaining
+            # suspect is the requested date window itself — this app asks for a
+            # LEAP-spanning range (~270 days) up front, and a recently-listed name
+            # may not have any series that far out yet, which this endpoint seems
+            # to reject outright rather than truncate. SchwabChainNotFoundError
+            # lets a caller retry with a narrower fromDate/toDate before giving up
+            # (see option_chain._fetch_chain).
+            window = f" (requested {from_date} -> {to_date})" if (from_date or to_date) else ""
+            raise SchwabChainNotFoundError(
+                f"schwab option chain: HTTP 400 -> 404 Not Found for {symbol.upper()}{window} "
+                "— Schwab may not have any option series inside the requested date range "
+                "(a recently-listed name often has nothing that far out yet). Retrying with "
+                "a narrower window may still work.")
         if resp.status_code != 200:
             raise SchwabError(f"schwab option chain: HTTP {resp.status_code} {resp.text[:200]}")
         return resp.json()

@@ -56,14 +56,16 @@ def test_option_chain_akamai_403_gives_clean_message(monkeypatch):
         _client(monkeypatch).get_option_chain("XLK")
 
 
-def test_option_chain_400_wrapped_404_gives_clean_message(monkeypatch):
+def test_option_chain_400_wrapped_404_raises_the_retryable_subclass(monkeypatch):
     # Schwab's "no chain for this symbol" shape: an outer 400 carrying an inner
-    # errors[].status of 404 — e.g. a recent IPO with no listed options yet, or
-    # a renamed/delisted ticker. Seen live for SPCX.
+    # errors[].status of 404. Confirmed live (SPCX) that this does NOT mean "no
+    # options at all" — Schwab's own site showed both calls and puts — so the
+    # message points at the requested date window, and the error is the
+    # SchwabChainNotFoundError subclass a caller can retry narrower on.
     body = '{"errors":[{"id":"44d6b68c-48e6-4037-aa09-4949495f6b88","status":"404","title":"Not Found"}]}'
     monkeypatch.setattr(schwab_api.requests, "get", lambda *a, **k: _Resp(400, text=body))
-    with pytest.raises(schwab_api.SchwabError, match="no option chain for SPCX"):
-        _client(monkeypatch).get_option_chain("SPCX")
+    with pytest.raises(schwab_api.SchwabChainNotFoundError, match="404 Not Found for SPCX"):
+        _client(monkeypatch).get_option_chain("SPCX", from_date="2026-09-17", to_date="2027-06-14")
 
 
 def test_option_chain_other_400_keeps_raw_body(monkeypatch):
