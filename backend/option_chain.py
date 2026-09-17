@@ -60,6 +60,13 @@ def _chain_ttl(refresh: bool) -> float:
     return config.CHAIN_LIVE_REFRESH_MIN_SECONDS if refresh else _CHAIN_TTL
 
 
+# Fallback window when the full LEAP-spanning request 404s (see
+# SchwabChainNotFoundError): comfortably covers the weekly comparison window and
+# the roll picker's ROLL_MAX_DTE, for a name whose furthest listed expiration is
+# closer than the LEAP window asks for (e.g. a recently-listed IPO).
+_CHAIN_FALLBACK_TO_DTE = 90
+
+
 def _fetch_chain(ticker: str, refresh: bool = False) -> dict:
     """Raw Schwab CALL chain spanning near-term through ~LEAP expirations, cached
     for 5 minutes per ticker (seconds, for a forced live re-pull — see
@@ -77,9 +84,21 @@ def _fetch_chain(ticker: str, refresh: bool = False) -> dict:
             raise schwab_api.SchwabError(
                 "Schwab is not connected — re-authorize at /auth/schwab to load option chains")
         today = datetime.now()
+        from_str = today.strftime("%Y-%m-%d")
         to_date = (today + timedelta(days=config.LEAP_TARGET_DTE + 90)).strftime("%Y-%m-%d")
-        payload = data_handler.client().get_option_chain(
-            ticker, strike_count=100, from_date=today.strftime("%Y-%m-%d"), to_date=to_date)
+        try:
+            payload = data_handler.client().get_option_chain(
+                ticker, strike_count=100, from_date=from_str, to_date=to_date)
+        except schwab_api.SchwabChainNotFoundError:
+            # The LEAP-spanning window itself may be the problem (a recently-
+            # listed name with nothing that far out yet) rather than a symbol
+            # with no chain at all — retry once with a much narrower window
+            # before giving up. No LEAP candidates come back for this ticker
+            # this way, but the weekly short and roll picker (all this app's
+            # shares-primary flows actually need) are unaffected.
+            narrow_to = (today + timedelta(days=_CHAIN_FALLBACK_TO_DTE)).strftime("%Y-%m-%d")
+            payload = data_handler.client().get_option_chain(
+                ticker, strike_count=100, from_date=from_str, to_date=narrow_to)
         status = (payload or {}).get("status")
         if status and status != "SUCCESS":
             raise schwab_api.SchwabError(f"Schwab returned status '{status}' for {ticker}")

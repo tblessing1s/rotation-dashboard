@@ -753,6 +753,55 @@ def test_a_forced_chain_pull_is_floored_per_ticker(monkeypatch):
     assert pulls["n"] == 2
 
 
+def test_fetch_chain_retries_narrower_window_on_chain_not_found(monkeypatch):
+    """Live case (SPCX): the wide LEAP-spanning request 404s even though Schwab
+    has calls and puts listed — its furthest expiration is just closer than that
+    window asks for. _fetch_chain must retry once with a narrower window rather
+    than surfacing the failure outright."""
+    import option_chain as oc
+    import schwab_api
+
+    calls = []
+
+    class _Client:
+        def get_option_chain(self, ticker, from_date=None, to_date=None, **kwargs):
+            calls.append(to_date)
+            if len(calls) == 1:
+                raise schwab_api.SchwabChainNotFoundError(f"no chain out to {to_date}")
+            return {"status": "SUCCESS", "callExpDateMap": {}}
+
+    monkeypatch.setattr(oc.schwab_api, "market_configured", lambda: True)
+    monkeypatch.setattr(oc.data_handler, "client", lambda: _Client())
+    monkeypatch.setattr(oc, "_chain_cache", {})
+
+    result = oc._fetch_chain("SPCX")
+    assert result["status"] == "SUCCESS"
+    assert len(calls) == 2
+    # The retry's window is meaningfully narrower than the first, wide attempt.
+    from datetime import datetime
+    first_dte = (datetime.strptime(calls[0], "%Y-%m-%d") - datetime.now()).days
+    second_dte = (datetime.strptime(calls[1], "%Y-%m-%d") - datetime.now()).days
+    assert second_dte < first_dte
+
+
+def test_fetch_chain_narrow_retry_failure_still_raises(monkeypatch):
+    """If even the narrower window 404s, the (still informative) error propagates
+    rather than being swallowed."""
+    import option_chain as oc
+    import schwab_api
+
+    class _Client:
+        def get_option_chain(self, ticker, from_date=None, to_date=None, **kwargs):
+            raise schwab_api.SchwabChainNotFoundError(f"no chain out to {to_date}")
+
+    monkeypatch.setattr(oc.schwab_api, "market_configured", lambda: True)
+    monkeypatch.setattr(oc.data_handler, "client", lambda: _Client())
+    monkeypatch.setattr(oc, "_chain_cache", {})
+
+    with pytest.raises(schwab_api.SchwabChainNotFoundError):
+        oc._fetch_chain("SPCX")
+
+
 def test_occ_symbol_and_order_ticket():
     import schwab_api
     assert schwab_api.occ_option_symbol("AAPL", "2024-09-20", 250) == "AAPL  240920C00250000"
