@@ -73,6 +73,28 @@ def add_ticker(ticker: str) -> dict:
     return {"added": ticker}
 
 
+def add_tickers(tickers: list[str]) -> dict:
+    """Bulk add — e.g. importing a CSV watchlist. Unlike ``add_ticker``, a
+    blank or already-present entry is skipped rather than raising: a 500-row
+    import shouldn't abort on the first duplicate. Returns which of the
+    requested tickers were newly added vs. already present."""
+    wanted = []
+    seen = set()
+    for t in (tickers or []):
+        t = str(t).strip().upper()
+        if t and t not in seen:
+            wanted.append(t)
+            seen.add(t)
+    with _lock:
+        current = all_tickers()
+        already = set(current)
+        added = [t for t in wanted if t not in already]
+        if added:
+            _write_store(current + added)
+    skipped = [t for t in wanted if t in already]
+    return {"added": added, "skipped": skipped}
+
+
 def remove_ticker(ticker: str) -> dict:
     """Remove one ticker from the day-trade roster. Raises if it isn't there."""
     ticker = (ticker or "").strip().upper()

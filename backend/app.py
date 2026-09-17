@@ -267,10 +267,15 @@ def api_daytrade_tickers():
 
 @app.route("/api/daytrade/tickers/add", methods=["POST"])
 def api_daytrade_tickers_add():
-    """Add a ticker to the day-trade sleeve's roster: {ticker}."""
+    """Add to the day-trade sleeve's roster. {ticker} for one (raises on a
+    duplicate/blank), or {tickers:[...]} to bulk-import (e.g. a pasted CSV
+    watchlist) — duplicates/blanks are silently skipped rather than raising,
+    since a large import shouldn't abort on the first repeat."""
     payload = request.get_json(silent=True) or {}
     try:
         from daytrade import tickers as daytrade_tickers
+        if isinstance(payload.get("tickers"), list):
+            return jsonify(daytrade_tickers.add_tickers(payload["tickers"]))
         return jsonify(daytrade_tickers.add_ticker(payload.get("ticker", "")))
     except ValueError as e:
         return _err(e, 400)

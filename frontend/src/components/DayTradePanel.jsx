@@ -93,6 +93,24 @@ function UniverseTable({ picks }) {
   );
 }
 
+// Pulls ticker symbols out of a pasted/uploaded CSV: takes each line's first
+// cell, keeps only ones shaped like a ticker (letters, optional ".B"-style
+// share class), drops a leading header cell ("Symbol"/"Ticker"/…), and
+// dedupes. Deliberately simple (no quoted-comma handling) — good enough for
+// a plain watchlist export, which is what this is for.
+const CSV_HEADER_CELLS = new Set(["SYMBOL", "TICKER", "STOCK", "STOCKS", "NAME"]);
+function parseCsvTickers(text) {
+  const tokens = [];
+  for (const line of text.split(/\r?\n/)) {
+    const cell = line.split(",")[0].trim().replace(/^"|"$/g, "");
+    if (!cell) continue;
+    const t = cell.toUpperCase();
+    if (/^[A-Z]{1,6}(\.[A-Z]{1,3})?$/.test(t)) tokens.push(t);
+  }
+  if (tokens.length && CSV_HEADER_CELLS.has(tokens[0])) tokens.shift();
+  return Array.from(new Set(tokens));
+}
+
 // The day-trade sleeve's OWN ticker roster (backend/daytrade/tickers.py) —
 // separate from CFM's universe: seeded from it once, independent from then
 // on. Collapsed by default (the roster can run into the hundreds) with a
@@ -131,6 +149,32 @@ function TickerRoster() {
     }
   };
 
+  const fileInputRef = React.useRef(null);
+  const importCsv = async (file) => {
+    if (!file) return;
+    setBusy(true);
+    setMsg(null);
+    try {
+      const text = await file.text();
+      const parsed = parseCsvTickers(text);
+      if (!parsed.length) {
+        setMsg({ err: "No ticker-looking symbols found in that file" });
+        return;
+      }
+      const r = await api.daytradeTickersAddBulk(parsed);
+      setMsg({
+        ok: `Imported ${r.added.length} of ${parsed.length}` +
+          (r.skipped.length ? ` (${r.skipped.length} already in the universe)` : ""),
+      });
+      await reload();
+    } catch (e) {
+      setMsg({ err: String(e.message || e) });
+    } finally {
+      setBusy(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   const shown = (data?.tickers || []).filter((t) => t.includes(filter.trim().toUpperCase()));
 
   return (
@@ -163,6 +207,21 @@ function TickerRoster() {
               className="rounded border border-emerald-700 bg-emerald-500/10 px-2.5 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50"
             >
               Add
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={(e) => importCsv(e.target.files?.[0])}
+              className="hidden"
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={busy}
+              title="Import a CSV — the first column of each row is read as a ticker symbol"
+              className="rounded border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50"
+            >
+              Import CSV
             </button>
             <input
               type="text"

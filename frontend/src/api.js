@@ -161,6 +161,8 @@ export const api = {
   daytradeTickers: () => request("/api/daytrade/tickers"),
   daytradeTickersAdd: (ticker) =>
     request("/api/daytrade/tickers/add", { method: "POST", body: JSON.stringify({ ticker }) }),
+  daytradeTickersAddBulk: (tickers) =>
+    request("/api/daytrade/tickers/add", { method: "POST", body: JSON.stringify({ tickers }) }),
   daytradeTickersRemove: (ticker) =>
     request("/api/daytrade/tickers/remove", { method: "POST", body: JSON.stringify({ ticker }) }),
   // Force a live quote + bars pull for specific stale Ready-to-Enter names, so

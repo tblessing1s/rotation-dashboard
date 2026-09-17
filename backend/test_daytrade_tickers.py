@@ -72,6 +72,22 @@ def test_remove_tickers_bulk_skips_unknown(roster):
     assert "YYYY" not in daytrade_tickers.all_tickers()
 
 
+def test_add_tickers_bulk_skips_blank_and_duplicate(roster):
+    daytrade_tickers.add_ticker("ZZZZ")
+    out = daytrade_tickers.add_tickers(["zzzz", "yyyy", "  ", "yyyy", "wwww"])
+    assert out["added"] == ["YYYY", "WWWW"]
+    assert out["skipped"] == ["ZZZZ"]
+    tickers = daytrade_tickers.all_tickers()
+    assert {"ZZZZ", "YYYY", "WWWW"} <= set(tickers)
+
+
+def test_add_tickers_bulk_persists(roster):
+    daytrade_tickers.all_tickers()  # seed
+    daytrade_tickers.add_tickers(["QQQQ", "RRRR"])
+    on_disk = json.load(open(config.DAYTRADE_TICKERS_PATH, encoding="utf-8"))
+    assert "QQQQ" in on_disk["tickers"] and "RRRR" in on_disk["tickers"]
+
+
 def test_universe_screen_defaults_to_daytrade_roster(roster, monkeypatch):
     from datetime import datetime
     from zoneinfo import ZoneInfo
