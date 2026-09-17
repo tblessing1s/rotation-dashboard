@@ -99,7 +99,7 @@ def test_roll_options_supports_red_regime(isolated_state, monkeypatch):
     # target (145.5 — see below) — the roll-up cap must bite and hold 142.5.
     monkeypatch.setattr(log, "find_position", lambda s, t: {
         "short_calls": [{"strike": 142.5, "contracts": 5, "dte": 2, "expiration": "2026-07-03"}]})
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: {
         "status": "SUCCESS", "underlyingPrice": 150.0,
         "callExpDateMap": {"2026-07-10:8": {"142.5": [
             {"symbol": "C", "strikePrice": 142.5, "daysToExpiration": 8,

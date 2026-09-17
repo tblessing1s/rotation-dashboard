@@ -39,7 +39,7 @@ def _mock_common(monkeypatch, short_call, chain_mark):
     monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 150.0, "source": "t"})
     monkeypatch.setattr(log, "find_position", lambda s, t: {
         "position_type": "SHARES", "short_calls": [short_call]})
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: {
         "status": "SUCCESS", "underlyingPrice": 150.0,
         "callExpDateMap": {"2026-07-10:8": {str(short_call["strike"]): [
             {"symbol": "C", "strikePrice": short_call["strike"], "daysToExpiration": 8,

@@ -277,7 +277,7 @@ def test_red_regime_blocks_entries_but_allows_managing_open_positions(monkeypatc
     df = _frame([100.0] * 60)
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
     monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 100.0, "source": "test"})
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: {
         "status": "SUCCESS", "underlyingPrice": 100.0,
         "callExpDateMap": {"2026-07-02:5": {"100.0": [
             {"symbol": "X", "strikePrice": 100.0, "daysToExpiration": 5,
@@ -305,7 +305,7 @@ def test_existing_leap_matches_stored_expiration(monkeypatch):
     df = _frame([100.0] * 60)
     monkeypatch.setattr(data_handler, "get_daily", lambda s, force=False: df)
     monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 100.0, "source": "test"})
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: {
         "status": "SUCCESS", "underlyingPrice": 100.0,
         "callExpDateMap": {
             "2026-09-18:90": {"80.0": [{"symbol": "A", "strikePrice": 80.0, "daysToExpiration": 90,
@@ -360,7 +360,7 @@ def test_itm_call_delta_uses_otm_put_iv(monkeypatch):
     monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 192.5, "source": "t"})
     monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {}})
     monkeypatch.setattr(log, "find_position", lambda s, t: None)
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: {
         "status": "SUCCESS", "underlyingPrice": 192.5,
         "callExpDateMap": {"2026-06-29:2": {"180.0": [
             {"symbol": "C", "strikePrice": 180.0, "daysToExpiration": 2,
@@ -389,7 +389,7 @@ def test_weekly_short_skips_0dte_expiration(monkeypatch):
     monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 112.5, "source": "t"})
     monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {}})
     monkeypatch.setattr(log, "find_position", lambda s, t: None)
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: {
         "status": "SUCCESS", "underlyingPrice": 112.5,
         "callExpDateMap": {
             "2026-07-02:0": {"105.0": [
@@ -429,7 +429,7 @@ def test_itm_call_delta_implied_from_put_mark_when_iv_missing(monkeypatch):
     monkeypatch.setattr(data_handler, "latest_quote", lambda s: {"price": 117.7, "source": "t"})
     monkeypatch.setattr(log, "load_state", lambda: {"extrinsic_payback": {}})
     monkeypatch.setattr(log, "find_position", lambda s, t: None)
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: {
         "status": "SUCCESS", "underlyingPrice": 117.7,
         "callExpDateMap": {"2026-07-02:2": {"108.0": [
             {"symbol": "C", "strikePrice": 108.0, "daysToExpiration": 2,
@@ -484,7 +484,7 @@ def test_coverage_floor_and_cover_checks(monkeypatch):
     import logging_handler as log
 
     monkeypatch.setattr(schwab_api, "configured", lambda: True)
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {})
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: {})
     contracts = [
         {"strike": 85.0, "expiration": "2026-12-18", "dte": 171, "delta": None},
         {"strike": 115.0, "expiration": "2026-07-02", "dte": 2, "delta": None},
@@ -530,7 +530,7 @@ def test_coverage_multi_short_uses_totals(monkeypatch):
     import logging_handler as log
 
     monkeypatch.setattr(schwab_api, "configured", lambda: True)
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {})
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: {})
     contracts = [
         {"strike": 138.0, "expiration": "2027-01-15", "dte": 193, "delta": 0.90},
         {"strike": 179.0, "expiration": "2026-07-24", "dte": 15, "delta": 0.72},
@@ -566,7 +566,7 @@ def test_coverage_sums_all_leap_legs(monkeypatch):
     import logging_handler as log
 
     monkeypatch.setattr(schwab_api, "configured", lambda: True)
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: {})
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: {})
     contracts = [
         {"strike": 138.0, "expiration": "2027-01-15", "dte": 193, "delta": 0.90},
         {"strike": 150.0, "expiration": "2027-01-15", "dte": 193, "delta": 0.88},
@@ -800,6 +800,55 @@ def test_fetch_chain_narrow_retry_failure_still_raises(monkeypatch):
 
     with pytest.raises(schwab_api.SchwabChainNotFoundError):
         oc._fetch_chain("SPCX")
+
+
+def test_fetch_chain_probes_known_expiration_when_both_ranges_404(monkeypatch):
+    """Second live round on SPCX: even the narrow ~90-day window 404d, despite
+    covering a date (the position's own open short's expiration) Schwab
+    demonstrably lists contracts for. A single-date probe on that known-good
+    expiration is the last thing worth trying before concluding this isn't a
+    date-range problem at all."""
+    import option_chain as oc
+    import schwab_api
+
+    calls = []
+
+    class _Client:
+        def get_option_chain(self, ticker, from_date=None, to_date=None,
+                              expiry_date=None, **kwargs):
+            calls.append((from_date, to_date, expiry_date))
+            if expiry_date is None:
+                raise schwab_api.SchwabChainNotFoundError("no chain in range")
+            return {"status": "SUCCESS", "callExpDateMap": {}}
+
+    monkeypatch.setattr(oc.schwab_api, "market_configured", lambda: True)
+    monkeypatch.setattr(oc.data_handler, "client", lambda: _Client())
+    monkeypatch.setattr(oc, "_chain_cache", {})
+
+    result = oc._fetch_chain("SPCX", known_expiration="2026-09-25")
+    assert result["status"] == "SUCCESS"
+    assert len(calls) == 3
+    assert calls[2] == (None, None, "2026-09-25")
+
+
+def test_fetch_chain_gives_up_with_a_clear_diagnosis_when_even_the_known_date_404s(monkeypatch):
+    """When a probe on a date the position's own fill already trades still 404s,
+    this can't be a date-range issue — the error must say so plainly rather than
+    keep suggesting a narrower window."""
+    import option_chain as oc
+    import schwab_api
+
+    class _Client:
+        def get_option_chain(self, ticker, from_date=None, to_date=None,
+                              expiry_date=None, **kwargs):
+            raise schwab_api.SchwabChainNotFoundError("no chain")
+
+    monkeypatch.setattr(oc.schwab_api, "market_configured", lambda: True)
+    monkeypatch.setattr(oc.data_handler, "client", lambda: _Client())
+    monkeypatch.setattr(oc, "_chain_cache", {})
+
+    with pytest.raises(schwab_api.SchwabError, match="isn't a date-range issue"):
+        oc._fetch_chain("SPCX", known_expiration="2026-09-25")
 
 
 def test_occ_symbol_and_order_ticket():
