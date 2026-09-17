@@ -686,7 +686,8 @@ def option_chain(ticker: str, strategy: str = "atr", refresh: bool = False) -> d
             exp_groups.append({
                 "expiration": exp,
                 "dte": exp_contracts[0]["dte"] if exp_contracts else None,
-                "strikes": indicators.get_nearby_strikes(exp_contracts, suggested_strike, underlying),
+                "strikes": indicators.get_nearby_strikes(
+                    exp_contracts, suggested_strike, underlying, span_to_atm=True),
             })
         # Each week is a full chain with its own ATR-target `suggested` strike.
         # The comparison week (>= a full week of DTE) is the one flagged
