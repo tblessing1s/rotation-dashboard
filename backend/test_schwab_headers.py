@@ -54,3 +54,21 @@ def test_option_chain_akamai_403_gives_clean_message(monkeypatch):
     monkeypatch.setattr(schwab_api.requests, "get", lambda *a, **k: _Resp(403, text=body))
     with pytest.raises(schwab_api.SchwabError, match="Akamai edge"):
         _client(monkeypatch).get_option_chain("XLK")
+
+
+def test_option_chain_400_wrapped_404_gives_clean_message(monkeypatch):
+    # Schwab's "no chain for this symbol" shape: an outer 400 carrying an inner
+    # errors[].status of 404 — e.g. a recent IPO with no listed options yet, or
+    # a renamed/delisted ticker. Seen live for SPCX.
+    body = '{"errors":[{"id":"44d6b68c-48e6-4037-aa09-4949495f6b88","status":"404","title":"Not Found"}]}'
+    monkeypatch.setattr(schwab_api.requests, "get", lambda *a, **k: _Resp(400, text=body))
+    with pytest.raises(schwab_api.SchwabError, match="no option chain for SPCX"):
+        _client(monkeypatch).get_option_chain("SPCX")
+
+
+def test_option_chain_other_400_keeps_raw_body(monkeypatch):
+    # A 400 that isn't the wrapped-404 shape stays the generic, raw-body error.
+    body = '{"errors":[{"id":"x","status":"400","title":"Bad Request"}]}'
+    monkeypatch.setattr(schwab_api.requests, "get", lambda *a, **k: _Resp(400, text=body))
+    with pytest.raises(schwab_api.SchwabError, match="HTTP 400"):
+        _client(monkeypatch).get_option_chain("XLK")
