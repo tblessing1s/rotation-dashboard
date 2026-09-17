@@ -17,6 +17,7 @@ step.
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime, timezone
 
 import config
@@ -97,3 +98,59 @@ def screen(tickers: list[str] | None = None, now: datetime | None = None) -> dic
         logger.warning("daytrade screener: only %d name(s) qualified (rule 1 wants 3-5)",
                         len(picks))
     return result
+
+
+# ---------------------------------------------------------------------------
+# On-demand rescan — the operator's "Rescan now" button.
+#
+# The nightly run is scheduler-owned (daytrade/scheduler.py's _maybe_screen)
+# and gated on "hasn't run today yet" / "some account is enabled" / "not
+# every trial is already complete" — none of which should block an explicit
+# manual request, so this calls screen() directly rather than routing
+# through the scheduler. Same detached-thread shape as
+# screening.start_background_scan for CFM's own universe: the roster can
+# run into the hundreds (bigger after a CSV import of names never fetched
+# before, i.e. cold-cache), so this returns immediately and the client polls
+# screen_status() rather than holding the request open.
+# ---------------------------------------------------------------------------
+_scan_thread: threading.Thread | None = None
+_scan_guard = threading.Lock()
+_scan_state: dict = {"status": "idle", "started_at": None, "finished_at": None, "error": None}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _run_background_screen() -> None:
+    try:
+        screen()
+        with _scan_guard:
+            _scan_state.update(status="done", finished_at=_now_iso(), error=None)
+    except Exception as e:  # noqa: BLE001 — surfaced via status, never crashes the thread silently
+        with _scan_guard:
+            _scan_state.update(status="error", finished_at=_now_iso(), error=str(e))
+
+
+def start_background_screen() -> dict:
+    """Kick an on-demand rescan in a detached daemon thread and return the
+    status immediately. Deduped: a concurrent call while one is already
+    running just returns the current (running) status."""
+    global _scan_thread
+    with _scan_guard:
+        if _scan_thread is not None and _scan_thread.is_alive():
+            return dict(_scan_state, running=True)
+        _scan_state.update(status="running", started_at=_now_iso(), finished_at=None, error=None)
+        _scan_thread = threading.Thread(target=_run_background_screen,
+                                        name="daytrade-screen-runner", daemon=True)
+        _scan_thread.start()
+        return dict(_scan_state, running=True)
+
+
+def screen_status() -> dict:
+    """Current on-demand-rescan state for the client to poll."""
+    with _scan_guard:
+        running = _scan_thread is not None and _scan_thread.is_alive()
+        st = dict(_scan_state)
+    st["running"] = running
+    return st
