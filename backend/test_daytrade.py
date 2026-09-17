@@ -5,7 +5,9 @@ tmp_path store. No network, no live Schwab.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import threading
+import time
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -15,6 +17,17 @@ import config
 from daytrade import bars, budget, scheduler, settings, signals, store, trial, universe
 
 ET = ZoneInfo("America/New_York")
+
+
+def _await_screen_status(timeout: float = 2.0) -> dict:
+    """Poll universe.screen_status() until the background rescan finishes."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        st = universe.screen_status()
+        if not st["running"]:
+            return st
+        time.sleep(0.02)
+    pytest.fail("background screen never finished")
 
 
 def _frame(price: float, spread: float, volume: float, days: int = 30) -> pd.DataFrame:
@@ -149,6 +162,59 @@ def test_screen_handles_a_fetch_failure_without_aborting_the_sweep(tmp_store, mo
     broken = next(r for r in result["screened"] if r["symbol"] == "BROKEN")
     assert broken["qualified"] is False
     assert "provider down" in broken["reason"]
+
+
+# ===========================================================================
+# universe.py — on-demand rescan (the "Rescan now" button)
+# ===========================================================================
+def test_start_background_screen_runs_and_persists_todays_picks(tmp_store, monkeypatch):
+    frames = {"GOOD": _frame(price=100.0, spread=3.0, volume=2_000_000)}
+    monkeypatch.setattr(universe.data_handler, "get_daily", lambda t, force=False: frames[t])
+    monkeypatch.setattr(universe.daytrade_tickers, "all_tickers", lambda: list(frames))
+
+    out = universe.start_background_screen()
+    assert out["running"] is True
+
+    st = _await_screen_status()
+    assert st["status"] == "done"
+    assert st["error"] is None
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert store.load_screen(today)["picks"][0]["symbol"] == "GOOD"
+
+
+def test_start_background_screen_dedupes_a_concurrent_call(tmp_store, monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_get_daily(t, force=False):
+        started.set()
+        release.wait(timeout=2)
+        return _frame(price=100.0, spread=3.0, volume=2_000_000)
+
+    monkeypatch.setattr(universe.data_handler, "get_daily", slow_get_daily)
+    monkeypatch.setattr(universe.daytrade_tickers, "all_tickers", lambda: ["GOOD"])
+
+    first = universe.start_background_screen()
+    assert started.wait(timeout=2), "background thread never started fetching"
+    thread_before = universe._scan_thread
+    second = universe.start_background_screen()  # while the first is still in flight
+
+    assert first["running"] is True and second["running"] is True
+    assert universe._scan_thread is thread_before  # deduped: no second thread spawned
+
+    release.set()
+    _await_screen_status()
+
+
+def test_start_background_screen_reports_an_error(tmp_store, monkeypatch):
+    monkeypatch.setattr(universe, "screen", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+
+    universe.start_background_screen()
+    st = _await_screen_status()
+
+    assert st["status"] == "error"
+    assert "boom" in st["error"]
 
 
 # ===========================================================================
