@@ -31,6 +31,17 @@ def _dec_ge_zero(value) -> bool:
     """True when a price (Decimal or number) is >= 0, without float wobble."""
     return _Decimal(str(value)) >= 0
 
+
+def _is_chain_not_found(body: str) -> bool:
+    """True when a chain-endpoint error body is Schwab's "no chain for this
+    symbol" shape: an outer HTTP 400 wrapping an inner errors[].status of 404,
+    e.g. {"errors":[{"id":"...","status":"404","title":"Not Found"}]}."""
+    try:
+        errors = (json.loads(body or "") or {}).get("errors") or []
+    except (ValueError, TypeError):
+        return False
+    return any(str(e.get("status")) == "404" for e in errors if isinstance(e, dict))
+
 TOKEN_URL = "https://api.schwabapi.com/v1/oauth/token"
 AUTHORIZE_URL = "https://api.schwabapi.com/v1/oauth/authorize"
 PRICE_HISTORY_URL = "https://api.schwabapi.com/marketdata/v1/pricehistory"
@@ -661,6 +672,16 @@ class SchwabClient:
                 "schwab option chain: HTTP 403 blocked at the Schwab/Akamai edge — "
                 "the request was denied before reaching the API. Confirm the Schwab "
                 "app is approved for market data; a token refresh will not fix this.")
+        if resp.status_code == 400 and _is_chain_not_found(resp.text):
+            # Schwab wraps "no chain for this symbol" as an outer 400 carrying an
+            # inner errors[].status of 404 — not a malformed request. Seen for
+            # symbols with no listed options market yet (e.g. a recent IPO still
+            # inside the exchanges' waiting period) as well as for a
+            # renamed/delisted ticker whose equity quote still resolves elsewhere.
+            raise SchwabError(
+                f"schwab has no option chain for {symbol.upper()} (HTTP 400 -> 404 Not Found) "
+                "— either it has no listed options yet (common for a recent IPO) or the "
+                "symbol was renamed/delisted. Confirm on Schwab's own site/app.")
         if resp.status_code != 200:
             raise SchwabError(f"schwab option chain: HTTP {resp.status_code} {resp.text[:200]}")
         return resp.json()
