@@ -23,6 +23,7 @@ const money = (n) =>
   n == null ? "—" : `${n < 0 ? "-" : ""}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const rMult = (n) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}R`);
 const toneFor = (n) => (n == null ? "text-slate-300" : n > 0 ? "text-emerald-300" : n < 0 ? "text-rose-300" : "text-slate-300");
+const clamp01 = (x) => Math.max(0, Math.min(1, x));
 
 // Every event this panel can see is the engine following its own rules
 // exactly (paper mode has no manual-override path yet) — so each maps to a
@@ -57,17 +58,26 @@ function detailFor(e) {
   }
 }
 
-function UniverseTable({ picks }) {
+// `prices` is the latest INGESTED 5-min bar per symbol (api.daytradePrices —
+// backend/daytrade/store.py's latest_bars), NOT a live quote: it only moves
+// on the DAYTRADE_BAR_INTERVAL_MINUTES (5 min) cadence bars.ingest() runs
+// on, during the 8:30-10:00 CT window — outside that window, or before the
+// first bar lands, there's nothing to show. `price` (the screener's own
+// column) is a DIFFERENT, older number: the prior day's close, stamped once
+// when the screener last ran (nightly, or a manual rescan) — it never moves
+// intraday at all.
+function UniverseTable({ picks, prices }) {
   if (!picks?.length) {
     return <p className="text-[11px] text-slate-500">No qualifying names for this date.</p>;
   }
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[640px] text-sm">
+      <table className="w-full min-w-[720px] text-sm">
         <thead>
           <tr className="text-left text-[10px] uppercase tracking-wide text-slate-500">
             <th className="py-1 pr-3">Symbol</th>
             <th className="py-1 pr-3 text-right">Price</th>
+            <th className="py-1 pr-3 text-right" title="Latest ingested 5-min bar — updates every 5 min during the 8:30-10:00 CT window">Live</th>
             <th className="py-1 pr-3 text-right">Avg Volume</th>
             <th className="py-1 pr-3 text-right">ATR14</th>
             <th className="py-1 pr-3 text-right">ATR%</th>
@@ -76,17 +86,28 @@ function UniverseTable({ picks }) {
           </tr>
         </thead>
         <tbody>
-          {picks.map((p) => (
-            <tr key={p.symbol} className="border-t border-slate-800 text-slate-200">
-              <td className="py-1.5 pr-3 font-mono font-semibold">{p.symbol}</td>
-              <td className="py-1.5 pr-3 text-right font-mono">{p.price}</td>
-              <td className="py-1.5 pr-3 text-right font-mono">{p.avg_volume?.toLocaleString()}</td>
-              <td className="py-1.5 pr-3 text-right font-mono">{p.atr14}</td>
-              <td className="py-1.5 pr-3 text-right font-mono">{p.atr_pct}%</td>
-              <td className="py-1.5 pr-3 text-right font-mono text-slate-400">{p.prior_day_high}</td>
-              <td className="py-1.5 pr-3 text-right font-mono text-slate-400">{p.prior_day_low}</td>
-            </tr>
-          ))}
+          {picks.map((p) => {
+            const live = prices?.[p.symbol];
+            const tone = !live ? "text-slate-500"
+              : live.close > p.price ? "text-emerald-300"
+              : live.close < p.price ? "text-rose-300" : "text-slate-300";
+            return (
+              <tr key={p.symbol} className="border-t border-slate-800 text-slate-200">
+                <td className="py-1.5 pr-3 font-mono font-semibold">{p.symbol}</td>
+                <td className="py-1.5 pr-3 text-right font-mono">{p.price}</td>
+                <td className={`py-1.5 pr-3 text-right font-mono ${tone}`}>
+                  {live
+                    ? <>{live.close} <span className="text-[10px] text-slate-500">{timeOf(live.datetime)}</span></>
+                    : "—"}
+                </td>
+                <td className="py-1.5 pr-3 text-right font-mono">{p.avg_volume?.toLocaleString()}</td>
+                <td className="py-1.5 pr-3 text-right font-mono">{p.atr14}</td>
+                <td className="py-1.5 pr-3 text-right font-mono">{p.atr_pct}%</td>
+                <td className="py-1.5 pr-3 text-right font-mono text-slate-400">{p.prior_day_high}</td>
+                <td className="py-1.5 pr-3 text-right font-mono text-slate-400">{p.prior_day_low}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -312,6 +333,108 @@ function TickerRoster() {
   );
 }
 
+// Two-sided range meter for an OPEN trade: -1R (stop) on the left to the
+// active target (+1R before half_taken, +2R after — computed from the
+// actual target price rather than hardcoded, so it tracks
+// DAYTRADE_HALF_TARGET_R/FULL_TARGET_R if those ever change) on the right,
+// 0R (entry) marked as the red/green boundary, current price as the dot.
+// `rNow` is the true, UNCLAMPED R-multiple (shown in the caption); only the
+// dot's POSITION is clamped into the visible domain, since a gap-through
+// can briefly put price past the stop or target before the engine's next
+// replay resolves the trade.
+function RMultiBar({ rNow, targetR }) {
+  const domainMin = -1;
+  const span = targetR - domainMin;
+  const pctOf = (r) => clamp01((r - domainMin) / span) * 100;
+  const entryPct = pctOf(0);
+  const markerPct = pctOf(rNow);
+  return (
+    <div className="relative h-2.5 w-full rounded-full bg-slate-800">
+      <div className="absolute inset-y-0 left-0 rounded-l-full bg-rose-500/30" style={{ width: `${entryPct}%` }} />
+      <div className="absolute inset-y-0 rounded-r-full bg-emerald-500/30" style={{ left: `${entryPct}%`, right: 0 }} />
+      <div
+        className="absolute top-1/2 h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-slate-100 bg-slate-950"
+        style={{ left: `${markerPct}%` }}
+        title={`${rMult(rNow)} now`}
+      />
+    </div>
+  );
+}
+
+// One row per symbol currently armed (watching for a breakout) or in_trade
+// (open, watching for stop/target) — backend/daytrade/signals.py's
+// current_status, display-only and re-derived from the persisted signals
+// log, so it can lag or go stale but can never contradict or drive an
+// actual trading decision.
+function LiveStatusRow({ row }) {
+  const priceKnown = row.current_price != null;
+  const dirTone = row.direction === "long" ? "text-emerald-300" : "text-rose-300";
+
+  if (row.status === "armed") {
+    const trigger = row.direction === "long" ? row.setup_high : row.setup_low;
+    const range = Math.abs(row.setup_high - row.setup_low) || 1;
+    const pct = priceKnown
+      ? clamp01(row.direction === "long"
+          ? (row.current_price - row.setup_low) / range
+          : (row.setup_high - row.current_price) / range) * 100
+      : 0;
+    return (
+      <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+        <div className="mb-1 flex items-center justify-between gap-2 text-xs">
+          <span className="font-mono font-semibold text-slate-200">{row.symbol}</span>
+          <span className={`uppercase ${dirTone}`}>{row.direction} setup</span>
+        </div>
+        <Meter pct={pct} tone="bg-sky-500" />
+        <p className="mt-1 text-[11px] text-slate-500">
+          {priceKnown ? `${Math.round(pct)}% to breakout` : "no live price yet"} — needs a close{" "}
+          {row.direction === "long" ? "above" : "below"} {trigger}
+          {priceKnown ? ` (now ${row.current_price})` : ""}
+        </p>
+      </div>
+    );
+  }
+
+  // in_trade
+  const risk = Math.abs(row.entry - row.stop);
+  const targetPrice = row.half_taken ? row.target2 : row.target1;
+  const canRender = priceKnown && risk > 0;
+  const rNow = canRender
+    ? ((row.direction === "long" ? row.current_price - row.entry : row.entry - row.current_price) / risk)
+    : null;
+  const targetR = (row.direction === "long" ? targetPrice - row.entry : row.entry - targetPrice) / (risk || 1);
+  return (
+    <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+      <div className="mb-1 flex items-center justify-between gap-2 text-xs">
+        <span className="font-mono font-semibold text-slate-200">{row.symbol}</span>
+        <span className={`uppercase ${dirTone}`}>
+          {row.direction} · {row.half_taken ? "half out, riding to target" : "open"}
+        </span>
+      </div>
+      {canRender ? (
+        <>
+          <RMultiBar rNow={rNow} targetR={targetR} />
+          <p className="mt-1 text-[11px] text-slate-500">
+            {rMult(rNow)} now — stop at -1R ({row.stop}), target at {rMult(targetR)} ({targetPrice})
+          </p>
+        </>
+      ) : (
+        <p className="text-[11px] text-slate-500">no live price yet</p>
+      )}
+    </div>
+  );
+}
+
+function LiveStatusPanel({ rows }) {
+  if (!rows?.length) {
+    return <p className="text-[11px] text-slate-500">Nothing armed or open right now.</p>;
+  }
+  return (
+    <div className="space-y-2">
+      {rows.map((r) => <LiveStatusRow key={r.symbol} row={r} />)}
+    </div>
+  );
+}
+
 function SignalFeed({ events }) {
   if (!events?.length) {
     return <p className="text-[11px] text-slate-500">No signals yet for this date.</p>;
@@ -468,12 +591,14 @@ export default function DayTradePanel() {
 
   const { data, error, loading, reload } = useApi(
     async () => {
-      const [universe, signals, trades] = await Promise.all([
+      const [universe, signals, trades, prices, liveStatus] = await Promise.all([
         api.daytradeUniverse(date),
         api.daytradeSignals(date),
         api.daytradeTrades(date),
+        api.daytradePrices(date),
+        api.daytradeLiveStatus(date),
       ]);
-      return { universe, signals, trades };
+      return { universe, signals, trades, prices, liveStatus };
     },
     [date],
     60000, // the strategy's own scheduler ticks every 30s and bars land every 5 min
@@ -564,10 +689,17 @@ export default function DayTradePanel() {
                 </h4>
                 {date === todayISO() && <RescanButton onComplete={reload} />}
               </div>
-              <UniverseTable picks={data.universe.picks} />
+              <UniverseTable picks={data.universe.picks} prices={data.prices.prices} />
             </section>
 
             <TickerRoster />
+
+            <section>
+              <h4 className="mb-2 text-xs font-semibold text-slate-300">
+                Live trade status
+              </h4>
+              <LiveStatusPanel rows={data.liveStatus.rows} />
+            </section>
 
             <section>
               <h4 className="mb-2 text-xs font-semibold text-slate-300">Signal feed</h4>

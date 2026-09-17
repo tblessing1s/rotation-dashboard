@@ -142,6 +142,15 @@ export const api = {
   },
   daytradeBars: (symbol, date) =>
     request(`/api/daytrade/bars/${symbol}${date ? `?date=${date}` : ""}`),
+  // The latest ingested 5-min bar per symbol — the sleeve's closest thing to
+  // a live price (the screener's own `price` is a static prior-day close
+  // stamped once at screen time). SHARED, like daytradeUniverse/Bars above.
+  daytradePrices: (date) => request(`/api/daytrade/prices${date ? `?date=${date}` : ""}`),
+  // Active account's symbols currently armed/in_trade, for a fill/close
+  // proximity meter (backend/daytrade/signals.py's current_status —
+  // display-only, re-derived from the persisted signals log, never
+  // authoritative). Per account, like daytradeSignals/Trades.
+  daytradeLiveStatus: (date) => request(`/api/daytrade/live-status${date ? `?date=${date}` : ""}`),
   daytradeTrades: (date) => request(`/api/daytrade/trades${date ? `?date=${date}` : ""}`),
   // Live sizing budget for the ACTIVE ACCOUNT — its own dry powder right
   // now, or the static fallback (see backend/daytrade/budget.py). Always

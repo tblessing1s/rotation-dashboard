@@ -201,6 +201,21 @@ def api_daytrade_bars(symbol: str):
         return _err(e)
 
 
+@app.route("/api/daytrade/prices")
+def api_daytrade_prices():
+    """The most recently ingested 5-min bar per symbol for the day (defaults
+    to today, ET) — the day-trade sleeve's closest thing to a live price,
+    since the screener's own `price` field is a static prior-day close
+    stamped once at screen time. SHARED (bars aren't account-scoped), same
+    as /api/daytrade/universe and /bars."""
+    try:
+        from datetime import datetime
+        day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
+        return jsonify({"date": day, "prices": daytrade_store.latest_bars(day)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @app.route("/api/daytrade/signals")
 def api_daytrade_signals():
     """Read-only view of the ACTIVE ACCOUNT's signal-engine journal — every
@@ -216,6 +231,23 @@ def api_daytrade_signals():
         events = daytrade_store.load_signals(day, accounts.active_id(),
                                              symbol.upper() if symbol else None)
         return jsonify({"date": day, "account_id": accounts.active_id(), "events": events})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@app.route("/api/daytrade/live-status")
+def api_daytrade_live_status():
+    """The active account's symbols currently ``armed`` or ``in_trade`` right
+    now (daytrade/signals.py's current_status — re-derived from the
+    persisted signals log, display-only, never authoritative), each with the
+    fields a fill/close-proximity meter needs plus the latest ingested price.
+    Defaults to today, ET; per account like /signals."""
+    try:
+        from datetime import datetime
+        from daytrade import signals as daytrade_signals
+        day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
+        return jsonify({"date": day, "account_id": accounts.active_id(),
+                         "rows": daytrade_signals.current_status(day, accounts.active_id())})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

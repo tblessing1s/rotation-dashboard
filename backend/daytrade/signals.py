@@ -404,3 +404,55 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
                     len(to_write), day, account_id)
 
     return {"date": day, "events": existing + to_write}
+
+
+# ---------------------------------------------------------------------------
+# Live status — for display only, e.g. a "how close is this to filling /
+# closing" meter. NOT part of the rule engine: this re-derives each symbol's
+# CURRENT status (armed / in_trade) by walking that account's own PERSISTED
+# signals log oldest-first, mirroring the same status transitions
+# _process_bar/_enter_trade/_resolve_trade already make. It reads the
+# engine's own output rather than replaying bars, so it can surface stale or
+# wrong information but can never contradict or influence an actual trading
+# decision — nothing here is authoritative.
+# ---------------------------------------------------------------------------
+_CLOSED_EVENTS = frozenset({"expired", "entry_skipped", "breakeven_exit",
+                            "final_target", "stop_out", "time_cutoff"})
+
+
+def current_status(day: str, account_id: str) -> list[dict]:
+    """That account's symbols currently ``armed`` or ``in_trade`` today, each
+    with the fields a progress meter needs (setup_low/setup_high for armed;
+    entry/stop/target1/target2/half_taken for in_trade) plus the latest
+    ingested price (``store.latest_bars``) to mark where price is right now.
+    Symbols back to ``watching`` (no live setup/trade) are omitted."""
+    state: dict[str, dict] = {}
+    for e in store.load_signals(day, account_id):
+        row = state.setdefault(e["symbol"], {"symbol": e["symbol"], "status": "watching"})
+        kind = e["event"]
+        if kind == "setup":
+            row.clear()
+            row.update(symbol=e["symbol"], status="armed", direction=e.get("direction"),
+                      setup_low=e.get("low"), setup_high=e.get("high"))
+        elif kind == "entry":
+            row.clear()
+            row.update(symbol=e["symbol"], status="in_trade", direction=e.get("direction"),
+                      entry=e.get("entry"), stop=e.get("stop"), target1=e.get("target1"),
+                      target2=e.get("target2"), half_taken=False)
+        elif kind == "half_target":
+            row["half_taken"] = True
+        elif kind in _CLOSED_EVENTS:
+            row["status"] = "watching"
+        # "setup_skipped" — no state change; the engine never armed in the
+        # first place (see _process_bar's "watching" branch).
+
+    bars = store.latest_bars(day)
+    out = []
+    for row in state.values():
+        if row["status"] not in ("armed", "in_trade"):
+            continue
+        bar = bars.get(row["symbol"])
+        row["current_price"] = bar["close"] if bar else None
+        row["current_price_at"] = bar["datetime"] if bar else None
+        out.append(row)
+    return out
