@@ -162,32 +162,6 @@ def api_daytrade_universe():
         return _err(e)
 
 
-@app.route("/api/daytrade/universe/rescan", methods=["POST"])
-def api_daytrade_universe_rescan():
-    """Force the day-trade screener to run again right now, against the
-    current day-trade universe (daytrade/tickers.py) — bypasses the nightly
-    scheduler's own "already ran today" / "no account enabled" / "every
-    trial complete" guards, which gate the SCHEDULED run, not an explicit
-    manual one. Runs in a detached thread (daytrade/universe.py's
-    start_background_screen) so this returns immediately; poll
-    /api/daytrade/universe/rescan/status."""
-    try:
-        from daytrade import universe as daytrade_universe
-        return jsonify(daytrade_universe.start_background_screen())
-    except Exception as e:  # noqa: BLE001
-        return _err(e)
-
-
-@app.route("/api/daytrade/universe/rescan/status")
-def api_daytrade_universe_rescan_status():
-    """Poll the on-demand rescan kicked off above: running / done / error."""
-    try:
-        from daytrade import universe as daytrade_universe
-        return jsonify(daytrade_universe.screen_status())
-    except Exception as e:  # noqa: BLE001
-        return _err(e)
-
-
 @app.route("/api/daytrade/bars/<symbol>")
 def api_daytrade_bars(symbol: str):
     """Phase 1 read-only view of the day-trade sleeve's ingested 5-min bars
