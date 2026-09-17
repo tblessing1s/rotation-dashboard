@@ -189,6 +189,27 @@ def test_get_nearby_strikes_flags_suggested():
     assert len(suggested) == 1 and suggested[0]["strike"] == 69.0  # closest to 69.4
 
 
+def test_get_nearby_strikes_span_to_atm_fills_the_ladder_to_the_money():
+    # Suggested (target) strike is well OTM from spot — with the count-3 window
+    # alone the ladder would stop short of the ATM strike. span_to_atm should
+    # pull in every listed strike between the target and the money.
+    contracts = [
+        {"strike": s, "dte": 5, "bid": 1.0, "ask": 1.2}
+        for s in (65.0, 68.0, 69.0, 70.0, 71.0, 72.0, 75.0)
+    ]
+    rows = ind.get_nearby_strikes(contracts, 71.0, 65.0, count=3, span_to_atm=True)
+    strikes = [r["strike"] for r in rows]
+    # Spans target(71) down to ATM(65), plus whatever count=3 already pulled in.
+    assert strikes == [65.0, 68.0, 69.0, 70.0, 71.0, 72.0]
+    suggested = [r for r in rows if r["suggested"]]
+    assert len(suggested) == 1 and suggested[0]["strike"] == 71.0
+
+    # Without span_to_atm, the same inputs stay windowed to `count` — it does not
+    # reach all the way down to the ATM strike (65.0).
+    rows_plain = ind.get_nearby_strikes(contracts, 71.0, 65.0, count=3)
+    assert [r["strike"] for r in rows_plain] == [70.0, 71.0, 72.0]
+
+
 def test_hist_vol_is_positive_annualized_pct():
     df = _frame(100 + np.cumsum(np.random.RandomState(7).normal(0, 1, 60)))
     hv = ind.hist_vol(df, 20)

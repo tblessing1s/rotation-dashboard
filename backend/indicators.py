@@ -814,22 +814,33 @@ def get_leap_strikes(contracts: list[dict], underlying_price: float | None,
 
 def get_nearby_strikes(contracts: list[dict], target_strike: float,
                        underlying_price: float | None, count: int = 3,
-                       put: bool = False) -> list[dict]:
+                       put: bool = False, span_to_atm: bool = False) -> list[dict]:
     """The `count` available strikes nearest `target_strike` (a single
     expiration's contracts), sorted ascending and each augmented with
     mark/intrinsic/extrinsic plus a `suggested` flag on the closest strike.
 
     ``put`` only changes how intrinsic/extrinsic are computed — strike selection
     is side-agnostic, so the cash-secured put ticket reuses this rather than
-    growing a parallel picker that could drift from it."""
+    growing a parallel picker that could drift from it.
+
+    ``span_to_atm``: also include every listed strike between `target_strike`
+    and the ATM strike (the one nearest `underlying_price`), so the operator
+    can see the whole ladder from the strike they're selling down to the money
+    rather than just a `count`-sized window that may not reach it."""
     by_strike = {c["strike"]: c for c in contracts if c.get("strike") is not None}
     if not by_strike:
         return []
+    strikes_sorted = sorted(by_strike)
     nearest = sorted(by_strike.values(), key=lambda c: abs(c["strike"] - target_strike))[:count]
     closest = min(by_strike, key=lambda s: abs(s - target_strike))
+    chosen = {c["strike"] for c in nearest}
+    if span_to_atm and underlying_price is not None:
+        atm = min(strikes_sorted, key=lambda s: abs(s - underlying_price))
+        lo, hi = sorted((target_strike, atm))
+        chosen |= {s for s in strikes_sorted if lo <= s <= hi}
     out = []
-    for c in sorted(nearest, key=lambda c: c["strike"]):
-        row = _augment(c, underlying_price, put)
-        row["suggested"] = c["strike"] == closest
+    for s in sorted(chosen):
+        row = _augment(by_strike[s], underlying_price, put)
+        row["suggested"] = s == closest
         out.append(row)
     return out
