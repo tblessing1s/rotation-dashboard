@@ -442,7 +442,8 @@ def roll_options(ticker: str, prior_target: float | None = None) -> dict:
             ex_div_date = None
         ex_div_in_week = bool(ex_div_date and exp_date and today <= ex_div_date <= exp_date)
         target = earn_strike if (earnings_in_week and earn_strike is not None) else default_target
-        strikes = indicators.get_nearby_strikes(grp["contracts"], target, underlying, count=7)
+        strikes = indicators.get_nearby_strikes(
+            grp["contracts"], target, underlying, count=7, span_to_atm=True)
         # Guarantee the current strike AND the displayed default are offered, so
         # "same strike" and the deadbanded default are always selectable.
         for must_have in {cur_strike, suggested_strike} - {None}:
