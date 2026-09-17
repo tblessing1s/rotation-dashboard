@@ -82,6 +82,15 @@ def screen(tickers: list[str] | None = None, now: datetime | None = None) -> dic
     now = now or datetime.now(timezone.utc)
     tickers = tickers if tickers is not None else daytrade_tickers.all_tickers()
 
+    # Warm the cache for every candidate in parallel (data_handler's 8-worker
+    # pool) BEFORE scoring — same pattern CFM's own full-universe scan uses
+    # (metrics/scorecard.py). Without this, _evaluate's per-ticker
+    # get_daily() calls run one at a time, and on a cold cache (e.g. right
+    # after importing a large CSV of names never fetched before) that means
+    # serial, rate-limited network calls — minutes instead of seconds for a
+    # roster in the hundreds/thousands.
+    data_handler.prefetch(tickers)
+
     screened = [_evaluate(t) for t in tickers]
     qualified = [r for r in screened if r.get("qualified")]
     picks = rank(qualified)[:config.DAYTRADE_UNIVERSE_MAX]

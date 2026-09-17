@@ -150,8 +150,12 @@ def test_screen_handles_a_fetch_failure_without_aborting_the_sweep(tmp_store, mo
     good = _frame(price=100.0, spread=3.0, volume=2_000_000)
 
     def _get_daily(t, force=False):
+        # The real get_daily() never raises — a failed fetch degrades to a
+        # cached/stale frame or None (data_handler.py's own contract), which
+        # is what screen()'s prefetch() relies on. None here is the "no
+        # provider, nothing cached" case.
         if t == "BROKEN":
-            raise RuntimeError("provider down")
+            return None
         return good
 
     monkeypatch.setattr(universe.data_handler, "get_daily", _get_daily)
@@ -161,7 +165,22 @@ def test_screen_handles_a_fetch_failure_without_aborting_the_sweep(tmp_store, mo
     assert [p["symbol"] for p in result["picks"]] == ["GOOD"]
     broken = next(r for r in result["screened"] if r["symbol"] == "BROKEN")
     assert broken["qualified"] is False
-    assert "provider down" in broken["reason"]
+    assert broken["reason"] == "no data"
+
+
+def test_screen_prefetches_tickers_in_parallel_before_scoring(tmp_store, monkeypatch):
+    """On a cold cache, _evaluate()'s sequential get_daily() calls used to be
+    the only fetch path — one ticker at a time, no parallelism. screen() must
+    warm the cache via data_handler.prefetch() (the shared 8-worker pool)
+    first, the same pattern CFM's own full-universe scan uses."""
+    frame = _frame(price=100.0, spread=3.0, volume=2_000_000)
+    prefetched = []
+    monkeypatch.setattr(universe.data_handler, "prefetch", lambda syms, force=False: prefetched.append(list(syms)))
+    monkeypatch.setattr(universe.data_handler, "get_daily", lambda t, force=False: frame)
+
+    universe.screen(tickers=["A", "B", "C"], now=datetime(2026, 9, 14, tzinfo=ET))
+
+    assert prefetched == [["A", "B", "C"]]
 
 
 # ===========================================================================
