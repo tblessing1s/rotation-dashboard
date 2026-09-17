@@ -93,6 +93,58 @@ function UniverseTable({ picks }) {
   );
 }
 
+// On-demand rescan of the day-trade screener — a detached server-side job
+// (daytrade/universe.py's start_background_screen), same shape as CFM's own
+// ScanProgress: POST kicks it off, a short poll follows it to completion.
+// Only meaningful for TODAY (the screener always (re)writes today's picks
+// file), so the caller only renders this when the panel's selected date is
+// today.
+function RescanButton({ onComplete }) {
+  const [st, setSt] = React.useState(null);
+  const pollRef = React.useRef(null);
+
+  const poll = React.useCallback(async () => {
+    let s;
+    try { s = await api.daytradeUniverseRescanStatus(); } catch { return; } // transient — next tick retries
+    setSt(s);
+    if (!s.running) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+      if (s.status === "done") onComplete?.();
+    }
+  }, [onComplete]);
+
+  const rescan = async () => {
+    try {
+      const s = await api.daytradeUniverseRescan();
+      setSt(s);
+      if (s.running && !pollRef.current) pollRef.current = setInterval(poll, 2500);
+    } catch (e) {
+      setSt({ status: "error", error: String(e.message || e) });
+    }
+  };
+
+  React.useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  const busy = !!st?.running;
+  return (
+    <div className="flex items-center gap-2">
+      {busy && <span className="text-[11px] text-amber-300">Rescanning…</span>}
+      {!busy && st?.status === "error" && (
+        <span className="text-[11px] text-rose-300" title={st.error}>Rescan failed</span>
+      )}
+      <button
+        onClick={rescan}
+        disabled={busy}
+        title="Force the screener to run again right now against the current day-trade universe"
+        className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-slate-400 hover:text-slate-200 disabled:opacity-40"
+      >
+        {busy ? <Spinner size="h-3 w-3" /> : "Rescan now"}
+      </button>
+    </div>
+  );
+}
+
 // Pulls ticker symbols out of a pasted/uploaded CSV: takes each line's first
 // cell, keeps only ones shaped like a ticker (letters, optional ".B"-style
 // share class), drops a leading header cell ("Symbol"/"Ticker"/…), and
@@ -506,9 +558,12 @@ export default function DayTradePanel() {
 
           <div className="space-y-6">
             <section>
-              <h4 className="mb-2 text-xs font-semibold text-slate-300">
-                {data.universe.ran ? "Screener picks" : "Screener hasn't run for this date"}
-              </h4>
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <h4 className="text-xs font-semibold text-slate-300">
+                  {data.universe.ran ? "Screener picks" : "Screener hasn't run for this date"}
+                </h4>
+                {date === todayISO() && <RescanButton onComplete={reload} />}
+              </div>
               <UniverseTable picks={data.universe.picks} />
             </section>
 

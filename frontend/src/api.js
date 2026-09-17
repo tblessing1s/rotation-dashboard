@@ -128,6 +128,11 @@ export const api = {
   // X-CFM-Account header every request already carries, same as the rest
   // of this file.
   daytradeUniverse: (date) => request(`/api/daytrade/universe${date ? `?date=${date}` : ""}`),
+  // On-demand rescan (forces the nightly screener to run again right now).
+  // Detached server-side job, same shape as api.scanRefresh/scanStatus for
+  // CFM's own universe: POST kicks it off and returns immediately, GET polls.
+  daytradeUniverseRescan: () => request("/api/daytrade/universe/rescan", { method: "POST" }),
+  daytradeUniverseRescanStatus: () => request("/api/daytrade/universe/rescan/status"),
   daytradeSignals: (date, symbol) => {
     const q = new URLSearchParams();
     if (date) q.set("date", date);
