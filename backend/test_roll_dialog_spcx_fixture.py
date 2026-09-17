@@ -100,7 +100,7 @@ def _mock_common(monkeypatch, spot, entry_extrinsic=1.53):
         "short_calls": [{"strike": 133.0, "contracts": 1, "dte": 8, "expiration": "2026-09-11",
                          "entry_premium_total": entry_extrinsic * 100,
                          "entry_extrinsic_per_share": entry_extrinsic}]})
-    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False: _chain_payload(spot))
+    monkeypatch.setattr(oc, "_fetch_chain", lambda t, refresh=False, **kwargs: _chain_payload(spot))
 
 
 def test_regime_target_is_near_138_not_145(store, monkeypatch):

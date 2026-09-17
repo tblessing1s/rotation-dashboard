@@ -67,11 +67,17 @@ def _chain_ttl(refresh: bool) -> float:
 _CHAIN_FALLBACK_TO_DTE = 90
 
 
-def _fetch_chain(ticker: str, refresh: bool = False) -> dict:
+def _fetch_chain(ticker: str, refresh: bool = False, known_expiration: str | None = None) -> dict:
     """Raw Schwab CALL chain spanning near-term through ~LEAP expirations, cached
     for 5 minutes per ticker (seconds, for a forced live re-pull — see
     ``_chain_ttl``). One lock per ticker collapses concurrent opens; a refresh
-    that does pull refreshes the cache for everyone else."""
+    that does pull refreshes the cache for everyone else.
+
+    ``known_expiration`` (optional): an expiration this ticker's OWN open
+    position already carries (so it is known-good, independent of whatever
+    Schwab's chains endpoint does or doesn't list) — used as a last-resort
+    single-date probe if both range-based attempts below 404. See the
+    ``SchwabChainNotFoundError`` handling."""
     ttl = _chain_ttl(refresh)
     hit = _chain_cache.get(ticker)
     if hit and time.time() - hit[0] < ttl:
@@ -89,7 +95,7 @@ def _fetch_chain(ticker: str, refresh: bool = False) -> dict:
         try:
             payload = data_handler.client().get_option_chain(
                 ticker, strike_count=100, from_date=from_str, to_date=to_date)
-        except schwab_api.SchwabChainNotFoundError:
+        except schwab_api.SchwabChainNotFoundError as wide_err:
             # The LEAP-spanning window itself may be the problem (a recently-
             # listed name with nothing that far out yet) rather than a symbol
             # with no chain at all — retry once with a much narrower window
@@ -97,8 +103,32 @@ def _fetch_chain(ticker: str, refresh: bool = False) -> dict:
             # this way, but the weekly short and roll picker (all this app's
             # shares-primary flows actually need) are unaffected.
             narrow_to = (today + timedelta(days=_CHAIN_FALLBACK_TO_DTE)).strftime("%Y-%m-%d")
-            payload = data_handler.client().get_option_chain(
-                ticker, strike_count=100, from_date=from_str, to_date=narrow_to)
+            try:
+                payload = data_handler.client().get_option_chain(
+                    ticker, strike_count=100, from_date=from_str, to_date=narrow_to)
+            except schwab_api.SchwabChainNotFoundError:
+                if not known_expiration:
+                    raise
+                # Both range-based attempts 404d even though this ticker's own
+                # OPEN POSITION already carries `known_expiration` as a real,
+                # previously-tradeable date — so this isn't a date-range problem.
+                # One last probe: ask for that exact date directly (no range at
+                # all). If Schwab STILL can't find it, the endpoint isn't
+                # resolving this symbol at all, and no request shape from here
+                # will fix that — see the message below.
+                try:
+                    payload = data_handler.client().get_option_chain(
+                        ticker, strike_count=100, expiry_date=known_expiration)
+                except schwab_api.SchwabChainNotFoundError:
+                    raise schwab_api.SchwabError(
+                        f"schwab's option chain will not resolve {ticker} at all — even a "
+                        f"request for {known_expiration}, a date this ticker's own open "
+                        "position already trades, came back 'not found'. This isn't a date-"
+                        "range issue; it looks like Schwab's chains endpoint has stale/"
+                        "unresolved instrument data for this symbol (plausible for one "
+                        "recently reassigned to a new company). Nothing on this end can work "
+                        "around that — this needs to be reported to Schwab."
+                    ) from wide_err
         status = (payload or {}).get("status")
         if status and status != "SUCCESS":
             raise schwab_api.SchwabError(f"Schwab returned status '{status}' for {ticker}")
@@ -268,7 +298,11 @@ def roll_options(ticker: str, prior_target: float | None = None) -> dict:
         return {"ticker": ticker, "current_short": None, "expirations": [],
                 "error": "no open short to roll"}
 
-    payload = _fetch_chain(ticker)
+    # The current short's own expiration is a known-good date for this ticker
+    # regardless of what the chains endpoint does — see _fetch_chain's
+    # known_expiration fallback.
+    known_exp = min(open_shorts, key=lambda s: s.get("dte") if s.get("dte") is not None else 1e9).get("expiration")
+    payload = _fetch_chain(ticker, known_expiration=known_exp)
     quote_fetched_at = (_chain_cache.get(ticker) or (None,))[0]
     underlying, contracts = schwab_api.parse_call_chain(payload)
     if underlying is None:
@@ -656,7 +690,12 @@ def option_chain(ticker: str, strategy: str = "atr", refresh: bool = False) -> d
     suggested_action, action_reason = _detect_action(
         has_leap, open_shorts, management_only, shares_mode=shares_mode, has_shares=has_shares)
 
-    payload = _fetch_chain(ticker, refresh=refresh)
+    # The nearest open short's own expiration is a known-good date for this
+    # ticker regardless of what the chains endpoint does — see _fetch_chain's
+    # known_expiration fallback.
+    known_exp = (min(open_shorts, key=lambda s: s.get("dte") if s.get("dte") is not None else 1e9)
+                 .get("expiration") if open_shorts else None)
+    payload = _fetch_chain(ticker, refresh=refresh, known_expiration=known_exp)
     underlying, contracts = schwab_api.parse_call_chain(payload)
     if not contracts:
         raise schwab_api.SchwabError(f"no call contracts returned for {ticker}")
