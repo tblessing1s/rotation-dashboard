@@ -81,6 +81,27 @@ def test_load_bars_missing_day_returns_empty(tmp_store):
     assert store.load_bars("2026-01-01") == []
 
 
+def test_latest_bars_keeps_the_last_occurrence_per_symbol(tmp_store):
+    # Two ingest ticks, interleaved symbols — latest_bars must pick each
+    # symbol's LAST appended row, not just whichever comes last in the file
+    # overall.
+    store.append_bars("2026-09-14", [
+        {"symbol": "ABC", "datetime": "2026-09-14T13:30:00+00:00", "close": 45.0},
+        {"symbol": "XYZ", "datetime": "2026-09-14T13:30:00+00:00", "close": 20.0},
+    ])
+    store.append_bars("2026-09-14", [
+        {"symbol": "ABC", "datetime": "2026-09-14T13:35:00+00:00", "close": 45.5},
+    ])
+
+    latest = store.latest_bars("2026-09-14")
+    assert latest["ABC"]["close"] == 45.5
+    assert latest["XYZ"]["close"] == 20.0
+
+
+def test_latest_bars_missing_day_returns_empty(tmp_store):
+    assert store.latest_bars("2026-01-01") == {}
+
+
 def test_iter_all_trades_yields_every_day_oldest_first(tmp_store):
     store.save_trades("2026-09-15", "primary", {"t2": {"symbol": "XYZ"}})
     store.save_trades("2026-09-14", "primary", {"t1": {"symbol": "ABC"}})

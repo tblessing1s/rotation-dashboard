@@ -493,3 +493,73 @@ def test_two_accounts_replay_the_shared_bars_independently(tmp_store):
     assert len(store.load_signals(DAY, "ira")) == 2
     assert len(store.load_trades(DAY, "primary")) == 1
     assert len(store.load_trades(DAY, "ira")) == 0
+
+
+# ===========================================================================
+# current_status() — display-only live status for a fill/close meter
+# ===========================================================================
+def test_current_status_empty_before_anything_happens(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    assert signals.current_status(DAY, ACCOUNT) == []
+
+
+def test_current_status_armed_carries_setup_range_and_live_price(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _setup_bars())
+    _events()  # replay -> journals the "setup" event
+
+    rows = signals.current_status(DAY, ACCOUNT)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["status"] == "armed"
+    assert row["direction"] == "long"
+    assert row["setup_low"] == 100.5 and row["setup_high"] == 101.5
+    # current_price comes from the latest INGESTED BAR (store.latest_bars),
+    # not from the signal event itself.
+    assert row["current_price"] == 101.0
+
+
+def test_current_status_in_trade_carries_stop_and_targets(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars())
+    _events()
+
+    row = signals.current_status(DAY, ACCOUNT)[0]
+    assert row["status"] == "in_trade"
+    assert row["entry"] == 101.5 and row["stop"] == 100.5
+    assert row["target1"] == 102.5 and row["target2"] == 103.5
+    assert row["half_taken"] is False
+
+
+def test_current_status_reflects_half_taken(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars() + [
+        _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),  # high >= target1(102.5)
+    ])
+    _events()
+
+    row = signals.current_status(DAY, ACCOUNT)[0]
+    assert row["status"] == "in_trade"
+    assert row["half_taken"] is True
+
+
+def test_current_status_omits_a_symbol_once_its_trade_closes(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars() + [
+        _bar("ABC", "09:45", 99, 99.5, 98, 99, 30_000),  # low <= stop(100.5) -> stop_out
+    ])
+    _events()
+
+    assert signals.current_status(DAY, ACCOUNT) == []
+
+
+def test_current_status_only_lists_symbols_still_armed_or_in_trade(tmp_store):
+    _save_screen([_pick("ABC", 100, 90), _pick("XYZ", 100, 90)])
+    store.append_bars(DAY, _entered_bars("ABC") + [
+        _bar("ABC", "09:45", 99, 99.5, 98, 99, 30_000),  # ABC stops out -> watching
+    ] + _setup_bars("XYZ"))  # XYZ stays armed
+    _events()
+
+    rows = signals.current_status(DAY, ACCOUNT)
+    assert [r["symbol"] for r in rows] == ["XYZ"]
+    assert rows[0]["status"] == "armed"

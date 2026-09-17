@@ -131,6 +131,21 @@ def load_bars(day: str, symbol: str | None = None) -> list[dict]:
     return out
 
 
+def latest_bars(day: str) -> dict[str, dict]:
+    """The most recently ingested bar per symbol for one trading day, keyed
+    by symbol. ``append_bars`` always appends each ingest tick's rows after
+    every earlier tick's (bars.ingest dedupes but never reorders), so the
+    LAST occurrence of a symbol in file order is its most recent bar —
+    no need to compare timestamps. Empty dict if nothing's been ingested
+    yet (e.g. before the window opens, or a date with no screener run)."""
+    out: dict[str, dict] = {}
+    for row in load_bars(day):
+        symbol = row.get("symbol")
+        if symbol:
+            out[symbol] = row
+    return out
+
+
 def save_trades(day: str, account_id: str, trades: dict) -> None:
     """Atomic whole-file write of one account's trade log for one day —
     trade_id -> row. Same durability shape as save_screen; the caller
