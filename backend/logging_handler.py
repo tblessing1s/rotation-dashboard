@@ -1407,6 +1407,26 @@ def recompute_derived(state: dict) -> dict:
             except ValueError:
                 dte = None
         p["leap_dte"] = (dte if dte is not None else leap.get("dte")) if leap else None
+        # Short-call dte: same calendar recompute as leap_dte above, per leg.
+        # Without this, `dte` stays frozen at whatever the sell/roll ticket
+        # stamped it as (executor.py's sell_short/roll defaults) and never
+        # counts down — so a call sold with 6 DTE still reads "6" the morning
+        # it actually expires. ROLL_SCHEDULED_WEEKLY (dte <= EXPIRY_WARN_DTE)
+        # keys directly off this field, so a stale snapshot makes that trigger
+        # practically unreachable by calendar decay alone. Falls back to the
+        # stored snapshot when there's no expiration to compute from.
+        for sc in (p.get("short_calls") or []):
+            if not sc:
+                continue
+            sc_dte = None
+            sc_exp = sc.get("expiration")
+            if sc_exp:
+                try:
+                    sc_dte = (datetime.strptime(str(sc_exp)[:10], "%Y-%m-%d").date() - today).days
+                except ValueError:
+                    sc_dte = None
+            if sc_dte is not None:
+                sc["dte"] = sc_dte
         # trailing_avg_weekly_juice: mean net juice over the last N COMPLETED
         # weeks for this ticker (weeks_rows is sorted ascending by week).
         #

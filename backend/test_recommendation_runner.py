@@ -177,3 +177,33 @@ def test_last_run_survives_a_restart(tmp_path, monkeypatch):
     assert again["frozen_tickers"] == ["PG"]
     # Persisted as a readout, not a recommendation record.
     assert log.load_state()["recommendations"] == []
+
+
+def test_run_and_release_pending_refresh_derived_dte_before_evaluating(tmp_path, monkeypatch):
+    """Calendar-derived fields (short-call dte — see
+    test_short_call_dte_recomputed_from_calendar_not_frozen_at_sale) only
+    refresh on a write path; a position idle since its last roll would
+    otherwise have its triggers evaluated against a stale DTE. Both run() and
+    release_pending() must recompute before evaluating, not just on write."""
+    monkeypatch.setattr(config, "active_state_path",
+                        lambda: str(tmp_path / "state.json"))
+    import logging_handler as log
+    import reconcile
+    import recommendation_runner as runner
+
+    log.save_state(log.load_state())
+    calls = []
+    real_recompute = log.recompute_derived
+    monkeypatch.setattr(log, "recompute_derived",
+                        lambda st: (calls.append(1), real_recompute(st))[1])
+    # The freeze path needs no market/provider mocking and returns immediately
+    # after the recompute call this test is checking for.
+    monkeypatch.setattr(reconcile, "freeze_status",
+                        lambda st: {"frozen": True, "tickers": [], "reason": "diverges"})
+
+    runner.run(notify=False)
+    assert calls == [1, 1]  # once in release_pending, once in run() itself
+
+    calls.clear()
+    runner.release_pending(notify=False)
+    assert calls == [1]
