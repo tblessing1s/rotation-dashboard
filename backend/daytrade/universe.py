@@ -104,8 +104,8 @@ def screen(tickers: list[str] | None = None, now: datetime | None = None) -> dic
     }
     store.save_screen(result)
     if len(picks) < config.DAYTRADE_UNIVERSE_MIN:
-        logger.warning("daytrade screener: only %d name(s) qualified (rule 1 wants 3-5)",
-                        len(picks))
+        logger.warning("daytrade screener: only %d name(s) qualified (rule 1 wants %d-%d)",
+                        len(picks), config.DAYTRADE_UNIVERSE_MIN, config.DAYTRADE_UNIVERSE_MAX)
     return result
 
 
