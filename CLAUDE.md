@@ -8,7 +8,15 @@ facts below change.
 A full-stack "CFM" options-strategy dashboard (scan → gate → execute → track):
 
 - **`backend/`** — Python 3.10+ / Flask API. Flat module layout (modules import
-  each other by bare name: `import logging_handler`). Entry point: `app.py`.
+  each other by bare name: `import logging_handler`). Entry point: `app.py`,
+  which is just the app factory (`create_app()`): request-scoped hooks (auth
+  gate, fetch budget, account binding), the SPA catch-all, and startup wiring.
+  Routes live in `backend/blueprints/`, one module per URL-prefix group (e.g.
+  `blueprints/scan_bp.py`, `blueprints/positions_bp.py`); each defines its own
+  `Blueprint` and imports the flat modules it needs. The shared `_err()` JSON-
+  error helper lives in `backend/api_common.py`. Add a new route to the
+  blueprint matching its prefix — create a new one only for a genuinely new
+  domain, and register it in `app.py`'s `BLUEPRINTS` tuple.
 - **`frontend/`** — React + Vite + Tailwind SPA. Entry: `src/index.jsx`.
 - **`scripts/`**, root `*.py` — operational helpers (calibration, VAPID keys, etc.).
 

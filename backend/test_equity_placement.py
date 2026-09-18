@@ -288,15 +288,15 @@ def test_the_equity_flag_is_served_to_the_settings_card(monkeypatch):
     buy_shares ticket still opened the amber "records only" dialog. The operator
     is then debugging a settings screen that is not the cause. The card must be
     able to name THIS flag, so it has to be in the payload."""
-    import app as app_module
+    from blueprints.system_bp import _live_trading_status
 
     monkeypatch.setattr(config, "EQUITY_ORDER_PLACEMENT_ENABLED", False)
-    st = app_module._live_trading_status()
+    st = _live_trading_status()
     assert st["equity_placement"] is False
     # And the two are the same fact, so they can never disagree on the card.
     assert "buy_shares" in st["non_transmitting_actions"]
 
     monkeypatch.setattr(config, "EQUITY_ORDER_PLACEMENT_ENABLED", True)
-    st = app_module._live_trading_status()
+    st = _live_trading_status()
     assert st["equity_placement"] is True
     assert st["non_transmitting_actions"] == []

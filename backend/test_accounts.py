@@ -420,15 +420,15 @@ def test_oauth_state_routes_the_grant_to_the_book_that_started_it(client, store,
                                                                  monkeypatch):
     """The operator may switch books while Schwab's consent screen is open, so
     the callback must follow the state it issued, not whatever is active now."""
-    import app as app_module
     import schwab_api
+    from blueprints.schwab_auth_bp import _connection_from_state
     accounts.create("Spouse")
     accounts.update("spouse", own_connection=True)
 
     started = client.get("/auth/schwab", headers={"X-CFM-Account": "spouse"}).get_json()
     assert started["connection"] == "account-spouse"
     state = started["authorize_url"].rsplit("state=", 1)[-1]
-    assert app_module._connection_from_state(state) == "account-spouse"
+    assert _connection_from_state(state) == "account-spouse"
 
     monkeypatch.setattr(schwab_api, "exchange_code",
                         lambda code, uri: {"refresh_token": "SPOUSE-TOKEN"})
@@ -440,10 +440,10 @@ def test_oauth_state_routes_the_grant_to_the_book_that_started_it(client, store,
 
 
 def test_a_state_naming_an_unknown_connection_falls_back_to_shared(store):
-    import app as app_module
-    assert app_module._connection_from_state("rand.account-ghost") == accounts.SHARED_CONNECTION
-    assert app_module._connection_from_state(None) == accounts.SHARED_CONNECTION
-    assert app_module._connection_from_state("rand") == accounts.SHARED_CONNECTION
+    from blueprints.schwab_auth_bp import _connection_from_state
+    assert _connection_from_state("rand.account-ghost") == accounts.SHARED_CONNECTION
+    assert _connection_from_state(None) == accounts.SHARED_CONNECTION
+    assert _connection_from_state("rand") == accounts.SHARED_CONNECTION
 
 
 def test_connections_endpoint_lists_every_grant(client, store, app_creds):
