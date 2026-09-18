@@ -707,10 +707,11 @@ def test_labels_have_no_consumer_outside_calibration():
         ["grep", "-rlE", r"^[[:space:]]*(import|from) structure_labels",
          root, "--include=*.py"],
         capture_output=True, text=True).stdout.split()
-    # app.py = the curl-able calibration endpoint; the other is this file.
+    # scan_bp.py = the curl-able calibration endpoint (blueprints/scan_bp.py,
+    # split out of the former monolithic app.py); the other is this file.
     # Nothing in the gate / verdict / executor / sizing / ranking path.
     assert sorted(os.path.basename(h) for h in hits) == [
-        "app.py", "test_chart_structure.py"]
+        "scan_bp.py", "test_chart_structure.py"]
 
 
 # ===========================================================================
