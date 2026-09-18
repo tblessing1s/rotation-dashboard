@@ -19,6 +19,10 @@ const addDays = (iso, n) => {
 };
 
 const timeOf = (iso) => (iso ? iso.slice(11, 16) : "—");
+// Unlike the bar/event timestamps above (already stamped in ET, so slicing
+// the string is correct), `computed_at` is stored in UTC — this converts to
+// the VIEWER's own local time instead of assuming an offset.
+const localTime = (iso) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—");
 const money = (n) =>
   n == null ? "—" : `${n < 0 ? "-" : ""}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const rMult = (n) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}R`);
@@ -182,6 +186,101 @@ function parseCsvTickers(text) {
   }
   if (tokens.length && CSV_HEADER_CELLS.has(tokens[0])) tokens.shift();
   return Array.from(new Set(tokens));
+}
+
+// Every reason _evaluate() (daytrade/universe.py) can hand back for a
+// disqualified ticker — matched by substring since a row can combine more
+// than one ("price out of range; avg volume too low"). The two DATA rows
+// (couldn't fetch anything at all) are a different kind of failure from the
+// three CRITERIA rows (fetched fine, just didn't qualify) — see below.
+const SCREEN_REASON_BUCKETS = [
+  { key: "price", label: "price out of range", match: (r) => r.includes("price out of range") },
+  { key: "volume", label: "avg volume too low", match: (r) => r.includes("avg volume too low") },
+  { key: "atr", label: "ATR% out of range", match: (r) => r.includes("ATR% out of range") },
+  { key: "no_data", label: "no data", match: (r) => r === "no data", isDataGap: true },
+  { key: "unavailable", label: "data unavailable", match: (r) => r.startsWith("data unavailable"), isDataGap: true },
+];
+
+// Answers "was the WHOLE roster actually screened?" — the backend already
+// guarantees this structurally (universe.screen()'s screened list has one
+// row per ticker it was ASKED to evaluate, pass or fail, never silently
+// dropped — see its own docstring), so the one way coverage can genuinely
+// fall short is staleness: the roster grew (an add, or a CSV import) AFTER
+// the last screen ran, and nobody's rescanned since. This compares the last
+// screen's coverage against the roster's CURRENT size to catch exactly that.
+function ScreenCoverage({ universe }) {
+  const [open, setOpen] = React.useState(false);
+  const { data: roster } = useApi(() => api.daytradeTickers(), [], 60000);
+
+  if (!universe?.ran) return null;
+
+  const screened = universe.screened || [];
+  const total = screened.length;
+  const qualified = screened.filter((r) => r.qualified).length;
+  const failed = screened.filter((r) => !r.qualified);
+  const buckets = SCREEN_REASON_BUCKETS.map((b) => ({
+    ...b,
+    rows: failed.filter((r) => b.match(r.reason || "")),
+  }));
+  const dataGaps = buckets.filter((b) => b.isDataGap).flatMap((b) => b.rows);
+
+  const rosterTotal = roster?.total;
+  const stale = rosterTotal != null && rosterTotal !== total;
+
+  return (
+    <section>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-slate-100"
+      >
+        <span className="text-slate-500">{open ? "▾" : "▸"}</span>
+        Screener coverage — {total} of {rosterTotal ?? "?"} tickers screened
+        {stale && <Pill status="caution">roster changed since last rescan</Pill>}
+      </button>
+      {open && (
+        <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+          {stale && (
+            <p className="text-[11px] text-amber-300">
+              The day-trade universe now has {rosterTotal} ticker{rosterTotal === 1 ? "" : "s"}, but
+              the last screen (computed {localTime(universe.computed_at)}) only evaluated {total}.
+              Click <span className="font-semibold">Rescan now</span> above to cover the current
+              roster.
+            </p>
+          )}
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+            <Stat label="Screened" value={total} />
+            <Stat label="Qualified" value={qualified} tone="text-emerald-300" />
+            {buckets.map((b) => (
+              <Stat key={b.key} label={b.label} value={b.rows.length}
+                    tone={b.isDataGap && b.rows.length ? "text-amber-300" : "text-slate-100"} />
+            ))}
+          </div>
+          {dataGaps.length > 0 && (
+            <div>
+              <p className="mb-1 text-[11px] text-slate-500">
+                {dataGaps.length} ticker{dataGaps.length === 1 ? "" : "s"} couldn't be evaluated at
+                all (no market data reached the screener) — worth checking for typos or delisted
+                symbols:
+              </p>
+              <div className="max-h-32 overflow-y-auto">
+                <div className="flex flex-wrap gap-1.5">
+                  {dataGaps.map((r) => (
+                    <span
+                      key={r.symbol}
+                      title={r.reason}
+                      className="rounded border border-slate-700 bg-slate-800/60 px-1.5 py-0.5 text-[11px] font-mono text-amber-300"
+                    >
+                      {r.symbol}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
 }
 
 // The day-trade sleeve's OWN ticker roster (backend/daytrade/tickers.py) —
@@ -691,6 +790,8 @@ export default function DayTradePanel() {
               </div>
               <UniverseTable picks={data.universe.picks} prices={data.prices.prices} />
             </section>
+
+            <ScreenCoverage universe={data.universe} />
 
             <TickerRoster />
 
