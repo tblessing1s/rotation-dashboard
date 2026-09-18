@@ -2,20 +2,21 @@
 
 A focused trading dashboard for the **Cash Flow Machine** strategy:
 **scan markets → filter stocks → execute trades → auto-log executions → track
-positions.** Buy deep-ITM LEAP calls in strong, consolidating stocks, sell
-weekly ITM short calls against them, and track extrinsic payback until each
-position is "in profit mode."
+positions.** Buy 100 real shares of strong, consolidating stocks (or get paid
+to wait for a better price via a cash-secured put) and sell weekly covered
+calls against them — collecting extrinsic premium every week while the shares
+carry the position.
 
 ```
   Schwab (primary) ─┐
                     ├─►  data_handler  ──►  parquet cache (DATA_DIR/cache)
   Alpha Vantage  ───┘         │
                               ▼
-        indicators (RS3M · ATR · MA · RSI · breadth)
+        indicators (RS3M · ATR · MA · RSI · breadth · structure)
                               ▼
-     screening (regime · sectors · stock filter · entry gate)
+   screening (regime · veto set · composite SCORE · entry route)
                               ▼
-           Flask API  ◄──►  state.json (source of truth)
+           Flask API  ◄──►  state.json (per-account source of truth)
                               ▼
                      React + Tailwind UI
 ```
@@ -23,43 +24,78 @@ position is "in profit mode."
 Data sources are **Schwab + Alpha Vantage only**. Every execution is captured
 (stock price + premium + timestamp) and appended to `state.json`; the theta
 ledger and extrinsic-payback meters are *derived* from those records, never
-hand-maintained.
+hand-maintained. The dashboard supports **multiple accounts**, each with its
+own state file and Schwab binding — see [`docs/accounts.md`](docs/accounts.md).
 
 ---
 
 ## The CFM system
 
-**Entry gate (4 levels, stop on first fail):**
+**Base leg is 100 real shares, not a LEAP.** There is no diagonal, no long
+option leg, and no LEAP surface in the UI — `config.LEGACY_LEAP_READONLY` is a
+hard `True` so the execution log can keep pricing historical LEAP fills, but
+new entries are shares-only.
 
-1. **Market regime green** — SPY breadth positive, VIX calm.
-2. **Sector strong** — RS3M vs SPY > +10%, breadth > 60%, ATR expanding.
-3. **Stock beats peers** — RS3M vs SPY > +5%, RS3M vs Sector > 0%.
-4. **Consolidating, not breaking** — low ATR%, price near MA21.
+**Entry isn't a stop-on-first-fail gate anymore.** `screening.entry_gate`
+evaluates a thin **veto set** (`scan_verdict.VETOES` — the exit mirrors plus
+hard account constraints: RED regime, below MA50/MA200, no weeklies, stale
+data, account limits) — that's the only thing that can block a name. Every
+eligible candidate is then **ranked** by a composite SCORE
+(`scan_score.compute_score`, shadow mode — see below) built from relative
+strength, sector context, chart structure, and volatility-normalized
+extension. An eligible name also gets an advisory **entry route**:
 
-**Weekly routine:** roll the short ITM call (strike = stock − 1.5×ATR), log the
-extrinsic sold and paid back, check the kill switch. The **Positions** tab rolls
-a short in place — pick the same or a different week, and the same or a different
-strike (e.g. deep-ITM into earnings) — as a single `roll_short` action.
+- **Near/at the MA21 zone** → buy the shares now.
+- **Extended above it** → sell a weekly cash-secured put struck at the MA21
+  zone instead — get paid to wait for the price the strategy would rather
+  pay; assignment turns it into the same shares + covered-call position.
+- **YELLOW regime, or a BLOCKED chart structure** → shares only (a put commits
+  capital a week out on a tape or a chart that doesn't support it).
+- **RED regime** → blocked entirely; no route offered.
 
-**Earnings:** each open position surfaces its next earnings date (Positions tab
-and the Overview action items) and flags it inside `EARNINGS_WARN_DAYS` so
-the short can be rolled deep-ITM for protection or the position exited entirely
-before the report.
+**Weekly routine:** roll the short covered call (strike = stock − ATR ×
+regime/posture table below, see "Weekly short strike selection") to next
+week, log the extrinsic sold and paid back. The **Positions** tab rolls a
+short in place — pick the same or a different week, and the same or a
+different strike (e.g. deep-ITM into earnings) — as a single `roll_short`
+action.
 
-**Kill switch (binary):** RS3M vs Sector turns negative → exit immediately;
-RS3M vs SPY turns negative (confirmed close) → exit within 1–2 days.
+**Earnings:** each open position surfaces its next earnings date (Positions
+tab and the Overview action items) and flags it inside `EARNINGS_WARN_DAYS`
+so the short can be rolled deep-ITM for protection or the position exited
+entirely before the report.
 
-**Delta coverage (the diagonal guardrail):** the LEAP delta must hold the **0.50
-floor** (below it the LEAP stops acting like a deep-ITM stock proxy — roll it
-deeper ITM), and the long's total delta must stay **≥ the short's** (once the
-short's delta climbs past the long's, an up-move loses faster on the short than
-it gains on the long — i.e. uncovered, so roll the short up/out). The
-**Positions** tab shows each leg's live delta and a covered/uncovered badge; this
-is why the recomputed deltas (skew-aware + dividend-adjusted) need to be right.
+**Kill switch:** RS3M vs SPY turns negative on a confirmed close → exit within
+1–2 days. (The earlier RS3M-vs-Sector trigger was removed — see
+[`docs/decision-2026-08-21-remove-sector-rs.md`](docs/decision-2026-08-21-remove-sector-rs.md).)
 
-**Size:** 5 deep-ITM LEAPs (~0.90 delta, ~180 DTE) per stock; accumulate shares
-on pullbacks toward a 500-share cap; open a new stock only when the current one
-maxes out.
+**Weekly short strike selection** (`backend/strike_policy.py`): the ATR
+multiplier and minimum ITM% floor come from a table keyed by market regime
+(green/yellow/red) **and** the operator's risk posture
+(aggressive/conservative), toggled next to the demo/live switch. Whichever
+candidate (ATR-based or ITM%-based) sits further below spot wins — max
+protection.
+
+**Size:** accumulate up to `config.SHARE_CAP` (500) shares per stock on
+pullbacks, capped at `PER_POSITION_CAP_USD` ($15K) per name; open a new stock
+only when the current one maxes out or a new slot is free
+(`MAX_CFM_POSITIONS`, 2 concurrent names by default) within
+`MAX_DEPLOYED_CAPITAL` ($38K) total.
+
+**Shadow mode — computed but not authoritative.** Several signals are
+computed, displayed, and logged with **zero blocking authority** pending
+real-data calibration: the weekly-juice floor, the composite SCORE, the gate
+ruleset replay, the chart-structure metrics, and the trailing juice capacity.
+None of them can veto an entry; they inform the ranking and the operator's
+judgment only, shown in the UI as violet "NO AUTHORITY" badges.
+
+**Recommendation trust layer.** The engine emits explicit ENTER/ROLL/DEFEND/
+EXIT recommendations *before* you act (never automated — see
+[`docs/trust-layer.md`](docs/trust-layer.md)), then measures — from immutable
+records only — how often the operator follows them and whether the resulting
+order lifecycle matched. The **Recommendations** tab shows live picks; the
+trust scoreboard tracks the agreement rate that would eventually justify
+automation.
 
 ---
 
@@ -67,42 +103,54 @@ maxes out.
 
 ### Backend (`backend/`, Python Flask)
 
+Flat module layout — modules import each other by bare name
+(`import logging_handler`), not as a package. Some of the load-bearing pieces:
+
 | Module | Responsibility |
 |---|---|
 | `app.py` | Flask app + all CFM routes; serves the built frontend. |
 | `config.py` | Thresholds, calibration, capital figures, DATA_DIR-aware paths. |
+| `accounts.py` | Multi-account registry; resolves the active `state.<id>.json` + Schwab binding. |
 | `sector_data.py` | Parses the root-level `tickers_by_sector.txt` into the sector universe. |
 | `indicators.py` | RS3M, ATR, MA, RSI, breadth, consolidation, strike spacing. |
+| `structure_classifier.py` | Level-4 chart-structure classification (stage, institutional flow). |
 | `data_handler.py` | Daily OHLCV (Schwab → Alpha Vantage) with a parquet cache. |
-| `refresh_policy.py` | Tiers the universe: force-refreshes the "hot" set (open positions + live entry/earnings candidates) intraday while the long tail rides the daily pre-open warm-up. |
-| `schwab_api.py` | **Kept** — market data, quotes, option chains, order execution. |
-| `alpha_vantage.py` | **Kept** — daily OHLCV + quotes fallback. |
-| `screening.py` | Regime, sector strength, stock filter, the 4-level entry gate, checklist. |
-| `executor.py` | Execute buy_leap / sell_short / close_short; capture + auto-log. |
-| `position_manager.py` | LEAP intrinsic/extrinsic, share-cap progress, capital + milestones. |
+| `refresh_policy.py` | Tiers the universe: force-refreshes the "hot" set (open positions + live candidates) intraday. |
+| `schwab_api.py` | Market data, quotes, option chains, order execution. |
+| `alpha_vantage.py` | Daily OHLCV + quotes fallback. |
+| `screening.py` | Regime, veto set, ranking inputs, entry route (shares vs. cash-secured put). |
+| `scan_verdict.py` / `scan_score.py` | The veto set and the composite ranking SCORE (shadow mode). |
+| `executor.py` | Execute buy_shares/sell_short/close_short/roll_short/put_opened/put_closed/put_assigned; capture + auto-log. |
+| `position_manager.py` | Share-cap accumulation progress, capital + milestones. |
+| `recommendation_engine.py` / `trust_derive.py` | The recommendation trust layer. |
 | `logging_handler.py` | `state.json` I/O; derives the theta ledger + payback meters. |
-| `kill_switch.py` | Per-position RS3M monitoring and exit signals. |
+| `kill_switch.py` | Per-position RS3M-vs-SPY monitoring and exit signals. |
+| `units.py` | The one place the ×100 shares-per-contract factor lives on the backend. |
 
 ### Frontend (`frontend/src/`, React + Tailwind)
 
-`App.jsx` drives five tabs — one home per signal, no duplicates:
+`App.jsx` drives the tabs:
 
-- **Overview** (`Overview`) — the landing digest: regime, action items, the
-  book, positions glance, juice + payback (one `/api/overview` call).
+- **Overview** — the landing digest: regime, action items, the book,
+  positions glance, juice + payback (one `/api/overview` call).
+- **Recommendations** — live ENTER/ROLL/DEFEND/EXIT picks from the trust
+  layer, plus the trust scoreboard.
 - **Scan** (`ScanProgress` + `ReadyToEnter`, full `Scorecard` behind a
   collapse) — find an entry.
 - **Positions** (`PositionTracker` incl. per-card kill-switch strip,
   `PortfolioRisk` collapsed to headlines) — manage the book.
 - **History** (`HistoryTab` incl. the theta ledger + per-week closes) — review
   results.
-- **Payouts** (`PayoutsTab`) — the monthly income-withdrawal view. The payout is
-  the **leftover**: `net juice collected − LEAP extrinsic burn` (the burn reserved
-  to maintain/roll the LEAP), shown with the full breakdown. Covers this month's
-  estimate, last month's payout, month-by-month history, and a per-month
-  finalize → paid record. A payout becomes finalizable the moment its last short
-  of the month closes (or the month ends); a `PAYOUT_READY` push fires then.
+- **Payouts** (`PayoutsTab`) — the monthly income-withdrawal view. The payout
+  is the **leftover**: net juice collected, shown with the full breakdown.
+  Covers this month's estimate, last month's payout, month-by-month history,
+  and a per-month finalize → paid record.
+- **Day Trade** (`DayTradePanel`) — the separate intraday screener/tracker.
+- **Calibration** (`ShadowCalibration`) — the shadow-mode metrics' replay
+  view (see "Shadow mode" above).
 - **Settings** (`SettingsTab`: demo/posture toggles, `LiveTradingSwitch`,
-  `AlertsPanel`, `DataHealth`) — low-frequency controls and admin.
+  `AlertsPanel`, `DataHealth`, `AccountsPanel`) — low-frequency controls and
+  admin.
 
 **Execute** (`ExecuteTab` — entry gate + order ticket) is a flow, not a tab:
 it opens from a Ready-to-Enter pick, a position card, or Scan's "check any
@@ -112,29 +160,33 @@ ticker" button, with a ← Back button to return.
 
 ## API
 
+The full route list lives in `backend/app.py` (~90 routes across scan,
+execute, positions, recommendations, day-trade, accounts, and reconciliation).
+The core CFM loop:
+
 | Route | Purpose |
 |---|---|
 | `GET /api/overview` | One-call landing payload: regime + positions/capital + theta totals/payback + kill-switch, pre-joined (sections fail independently). |
 | `GET /api/regime` | Market regime: status (green/yellow/red), breadth, VIX, SPY trend. |
 | `GET /api/sectors` | Per-sector RS3M, breadth, ATR-expanding, status. |
-| `GET /api/stock-filter?sector=XLK` | Candidates with RS3M vs SPY/Sector, ATR%, consolidating, status. |
-| `POST /api/scan/refresh` · `GET /api/scan/status` | Run the full-universe scan as a **detached server-side job** and poll it. The sweep keeps running even if the browser tab is backgrounded, switched, or closed; a returning client reads the memoized result warm. |
-| `GET /api/entry-gate?ticker=ON` | The 4-level gate, pass/fail per level, verdict. |
-| `GET /api/roll-suggestion?ticker=ON` | Suggested weekly short strike (stock − 1.5×ATR). |
-| `GET /api/roll-options?ticker=ON` | Roll picker data: current short + live buyback, plus every expiration to ROLL_MAX_DTE with nearby strikes (choose week + strike). |
-| `GET /api/earnings?ticker=ON` | Next earnings date (Alpha Vantage, day-cached; `&refresh=1` to force). Manual override via `metadata.earnings_overrides`. |
-| `POST /api/execute` | Execute a CFM action (`buy_leap`/`sell_short`/`close_short`/`close_leap`/`roll_short`). Paper path logs immediately and returns `status:"filled"`; a live single-leg order returns `status:"working"` + `order_id`. |
+| `GET /api/stock-filter?sector=XLK` | Candidates with RS3M vs SPY, ATR%, consolidating, status. |
+| `POST /api/scan/refresh` · `GET /api/scan/status` | Run the full-universe scan as a **detached server-side job** and poll it. |
+| `GET /api/scan/scorecard` | The composite SCORE + verdict per candidate (shadow mode). |
+| `GET /api/scan/ready` | Ready-to-enter shortlist: veto set clear **and** Level 5 (account/juice), right now. |
+| `GET /api/entry-gate?ticker=ON` | The veto set + ranking inputs + entry route for one ticker. |
+| `GET /api/roll-suggestion?ticker=ON` | Suggested weekly short strike (regime × posture table). |
+| `GET /api/roll-options?ticker=ON` | Roll picker data: current short + live buyback, plus every expiration to ROLL_MAX_DTE with nearby strikes. |
+| `GET /api/earnings?ticker=ON` | Next earnings date (Alpha Vantage, day-cached; `&refresh=1` to force). |
+| `POST /api/execute` | Execute a CFM action (`buy_shares`/`sell_shares`/`sell_short`/`close_short`/`roll_short`/`put_opened`/`put_closed`/`put_assigned`). Paper path logs immediately and returns `status:"filled"`; a live order returns `status:"working"` + `order_id`. |
 | `GET /api/order-status?order_id=…` | Poll a live order. On fill it commits the execution (at the real fill price) and returns `filled`; `canceled`/`rejected` when the broker drops it; else `working`. |
 | `POST /api/order-cancel` | Cancel a working order (`{order_id}`) at the broker and clear it. |
-| `GET /api/positions` | Positions (LEAP/share/cap), capital summary, milestones. |
-| `GET /api/coverage?ticker=ON` | Delta-coverage guardrail: LEAP vs short deltas, the 0.50 LEAP floor, and whether the long still covers the short. |
-| `GET /api/theta-ledger` | Net juice (week/month/YTD) + extrinsic payback per position. |
-| `GET /api/payouts` | Monthly payout tracker: current-month estimate + last-month payout + month-by-month history + totals. Payout = net juice (from short closes) − realized LEAP extrinsic burn (from burn marks) = the leftover. Each month is in progress → finalizable (last short closed / month ended) → finalized → paid. |
-| `POST /api/payouts/finalize` · `POST /api/payouts/unfinalize` | Lock in / undo a month's payout once finalizable (`{month, amount?, note?}`; snapshots the amount, refuses a month still earning juice). |
-| `POST /api/payouts/mark-paid` · `POST /api/payouts/unmark-paid` | Record/undo a month's payout as withdrawn (finalizes first if needed). |
-| `GET /api/kill-switch` | Per-position RS3M vs SPY/Sector + exit signals. |
+| `GET /api/positions` | Positions (shares, cap progress), capital summary, milestones. |
+| `GET /api/theta-ledger` | Net juice (week/month/YTD) per position. |
+| `GET /api/payouts` | Monthly payout tracker: current-month estimate + last-month payout + history + totals. |
+| `GET /api/kill-switch` | Per-position RS3M vs SPY + exit signals. |
+| `GET /api/recommendations` · `GET /api/trust-scoreboard` | The recommendation trust layer's live picks and its agreement scoreboard. |
+| `GET /api/daytrade/*` | The separate intraday screener (universe, signals, trades, budget). |
 | `GET/POST /api/state` | Read the full state; POST updates metadata (operator escape hatch, no UI). |
-| `POST /api/refresh/hot` | Force-refresh the hot set (open positions + live entry/earnings candidates) now; the scheduler also runs it every `HOT_REFRESH_MINUTES` in market hours. `/api/data-health` reports the set + last run. |
 | `GET /api/config` | Thresholds, sector universe, Schwab/AV status, live-trading flag. |
 
 ---
@@ -152,7 +204,7 @@ values read `—` until Schwab/Alpha Vantage are configured.
 
 ```bash
 cd frontend && npm install && npm run build   # build the UI
-cd backend && pip install -r requirements.txt && python app.py
+cd backend && pip install -r requirements.txt -c constraints.txt && python app.py
 ```
 
 ---
@@ -168,9 +220,7 @@ cd backend && pip install -r requirements.txt && python app.py
 so a dividend yield `q` lowers the call's delta (`delta = e^(−qT)·N(d1)`). The
 yield is fetched per ticker (Schwab fundamentals → Alpha Vantage overview),
 day-cached, and overridable by hand via `metadata.dividend_overrides` (e.g.
-`{"CSCO": 0.03}`; a value > 1 is read as a percent). The effect is negligible on
-the weekly short but ~1–2% on the 171-DTE LEAP for a ~3% payer — enough to shift
-a strike across the LEAP delta band. Non-payers (`q = 0`) are unaffected.
+`{"CSCO": 0.03}`; a value > 1 is read as a percent).
 
 ### Schwab setup
 
@@ -178,7 +228,9 @@ a strike across the LEAP delta band. Non-payers (`q = 0`) are unaffected.
    callback `https://<your-app>.fly.dev/auth/schwab/callback`.
 2. `fly secrets set SCHWAB_APP_KEY=… SCHWAB_APP_SECRET=…`
 3. Visit `https://<your-app>.fly.dev/auth/schwab`, approve, and the refresh
-   token is stored automatically (in `DATA_DIR/schwab_token.json`).
+   token is stored automatically (in `DATA_DIR/schwab_token.json`, or
+   `schwab_token.account-<id>.json` for a non-primary account with its own
+   Schwab login).
 
 Schwab refresh tokens expire every 7 days and require a fresh browser login;
 `/api/config` reports the token's status. For live order placement (off by
@@ -186,13 +238,15 @@ default), set `CFM_LIVE_TRADING=1` — otherwise executions are captured against
 live prices and logged but no order is transmitted (the honest paper path).
 
 **Live order lifecycle.** With `CFM_LIVE_TRADING=1` and Schwab connected, a
-single-leg action places a real DAY LIMIT order (`buy_leap`→BUY_TO_OPEN,
-`sell_short`→SELL_TO_OPEN, `close_short`→BUY_TO_CLOSE, `close_leap`→SELL_TO_CLOSE)
-and parks it under `state.json` `pending_orders`; it is **not** recorded as an
-execution until it actually fills. The UI toasts the submit, polls
-`/api/order-status` for the fill, and auto-cancels via `/api/order-cancel` if it
-doesn't fill within 3 seconds — so an unfilled, cancelled order leaves no trace.
-Paper mode keeps committing immediately and just toasts the success.
+single-leg action places a real DAY LIMIT order (`buy_shares`→BUY,
+`sell_short`→SELL_TO_OPEN, `close_short`→BUY_TO_CLOSE, `roll_short`→a single
+two-leg NET_CREDIT/NET_DEBIT ticket) and parks it under `state.json`
+`pending_orders`; it is **not** recorded as an execution until it actually
+fills. The UI toasts the submit, polls `/api/order-status` for the fill, and
+auto-cancels via `/api/order-cancel` if it doesn't fill within the configured
+window — so an unfilled, cancelled order leaves no trace. Paper mode keeps
+committing immediately and just toasts the success (clearly labeled RECORDED,
+never "filled" — nothing was sent to the broker).
 
 ### Authentication
 
@@ -239,8 +293,9 @@ fly deploy && fly scale count 1
 ```
 
 **Run exactly one machine.** `state.json` is a single-writer store and a Fly
-volume attaches to one machine — `fly scale count 1`. Pushes to `master` deploy
-via `.github/workflows/fly.yml`.
+volume attaches to one machine — `fly scale count 1`. Pushes to `master`
+deploy via `.github/workflows/fly.yml`, which runs the backend (pytest) and
+frontend (vitest) test suites first — a red suite blocks the deploy.
 
 ---
 
@@ -326,11 +381,14 @@ via a compensating adjustment. The written procedure is
 ## Tests
 
 ```bash
-python -m pytest backend -q
+python -m pytest backend -q       # backend — ~2,000 tests, offline, no provider keys needed
+cd frontend && npm test           # frontend — Vitest, pure-module coverage (units, orderFlow, recWhy)
 ```
 
-Covers the indicator formulas, sector parsing, and the execute → theta-ledger →
-extrinsic-payback flow end to end (offline, no provider keys needed).
+The backend suite covers the indicator formulas, sector parsing, the veto
+set/scoring, and the execute → theta-ledger → extrinsic-payback flow end to
+end. Both suites run in CI (`.github/workflows/fly.yml`) and must pass before
+a push to `master` deploys.
 
 ---
 

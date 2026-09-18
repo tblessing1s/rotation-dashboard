@@ -21,10 +21,10 @@ python -m pip install --quiet --upgrade pip || true
 # web-push feature (lazily imported, not exercised by the tests). Install the
 # full set, but fall back to everything-except-pywebpush so a build failure on
 # that one optional package never blocks session startup.
-if ! python -m pip install --quiet -r backend/requirements.txt pytest; then
+if ! python -m pip install --quiet -r backend/requirements.txt -c backend/constraints.txt pytest; then
   echo "[session-start] Full install failed (likely pywebpush/http-ece build); installing the test-critical subset."
   grep -viE '^[[:space:]]*(#|pywebpush)' backend/requirements.txt \
-    | python -m pip install --quiet -r /dev/stdin pytest
+    | python -m pip install --quiet -r /dev/stdin -c backend/constraints.txt pytest
 fi
 
 # Frontend deps (enables `npm run build` and UI work). Non-fatal if it hiccups.

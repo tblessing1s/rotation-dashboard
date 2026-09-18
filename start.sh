@@ -10,7 +10,7 @@ if [ ! -d ".venv" ]; then
 fi
 source .venv/bin/activate
 pip install --quiet --upgrade pip
-pip install --quiet -r requirements.txt
+pip install --quiet -r requirements.txt -c constraints.txt
 
 # Build the frontend if it hasn't been built, or if source changed after dist.
 needs_frontend_build=0

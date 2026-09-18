@@ -15,8 +15,8 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY backend/requirements.txt ./backend/requirements.txt
-RUN pip install --no-cache-dir -r backend/requirements.txt gunicorn
+COPY backend/requirements.txt backend/constraints.txt ./backend/
+RUN pip install --no-cache-dir -r backend/requirements.txt -c backend/constraints.txt gunicorn
 
 COPY backend/ ./backend/
 # Root-level sector universe (read at startup by sector_data.py via REPO_DIR).
