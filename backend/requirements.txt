@@ -1,8 +1,18 @@
-flask>=3.0
-flask-cors>=4.0
-pandas>=2.0
-numpy>=1.24
-pyarrow>=14.0
-requests>=2.31
-pywebpush>=1.14
-boto3>=1.34
+flask==3.1.3
+flask-cors==6.0.5
+pandas==3.0.6
+numpy==2.4.6
+pyarrow==25.0.1
+requests==2.34.2
+# webpush.py imports these directly (VAPID keypair generation), not just via
+# pywebpush's dependency graph, so they're pinned explicitly rather than left
+# to float in transitively. cffi is cryptography's native-extension dependency
+# — the one that needs a C build toolchain (see the pywebpush note below).
+cryptography==50.0.1
+cffi==2.1.1
+pywebpush==2.5.0
+boto3==1.43.97
+
+# Full transitive pins (this file's own sub-dependencies, plus pytest for the
+# test suite) live in constraints.txt — install with:
+#   pip install -r requirements.txt -c constraints.txt

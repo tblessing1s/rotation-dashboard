@@ -8,7 +8,7 @@ if not exist ".venv" (
 )
 call .venv\Scripts\activate.bat
 pip install --quiet --upgrade pip
-pip install --quiet -r requirements.txt
+pip install --quiet -r requirements.txt -c constraints.txt
 
 set BUILD_FRONTEND=0
 if not exist "..\frontend\dist\index.html" set BUILD_FRONTEND=1

@@ -10,7 +10,7 @@ A full-stack "CFM" options-strategy dashboard (scan → gate → execute → tra
 - **`backend/`** — Python 3.10+ / Flask API. Flat module layout (modules import
   each other by bare name: `import logging_handler`). Entry point: `app.py`.
 - **`frontend/`** — React + Vite + Tailwind SPA. Entry: `src/index.jsx`.
-- **`scripts/`**, root `*.py` — operational helpers (calibration, VAPID keys, etc.).
+- **`scripts/`** — operational helpers (calibration, VAPID keys, etc.).
 
 `state.json` (on the Fly volume at `$DATA_DIR/state.json`, `backend/` locally) is
 the **single source of truth** — per account (see below). The execution log is append-only and immutable;

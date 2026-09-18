@@ -33,6 +33,9 @@ backend/*.json.tmp.*
 backend/scan_rejection_log.json
 # Trailing juice-capacity observations (DATA_DIR; derived, recomputable).
 backend/juice_capacity.json
+# Symbol-genius color-streak history (DATA_DIR; derived from cached bars, recomputable).
+backend/symbol_genius_history.json
+data/symbol_genius_history.json
 backend/gate_telemetry_log/
 data/gate_telemetry_log/
 backend/scan_diff_log.json
