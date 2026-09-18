@@ -438,6 +438,11 @@ def release_pending(now: datetime | None = None, market: dict | None = None,
     """
     now = _coerce_now(now)
     state = log.load_state()
+    # Calendar-derived fields (leap_dte, and short-call dte — see
+    # recompute_derived) only refresh on a write path; a position that sat
+    # untouched since its last roll would otherwise re-validate its trigger
+    # against a stale DTE. In-memory only, nothing is persisted here.
+    log.recompute_derived(state)
     due = settle.due(state, now)
     summary = {"released": 0, "self_canceled": 0, "expired": 0, "executed": 0}
     if not due:
@@ -563,6 +568,10 @@ def run(notify: bool = True, include_entry: bool = True,
         release_summary = release_pending(now=now, notify=notify, dry_run=dry_run)
         # 2) Evaluate fresh (state may have been mutated by the release pass).
         state = log.load_state()
+        # See the same call in release_pending: calendar-derived dte fields only
+        # refresh on a write path, so a position idle since its last roll needs
+        # this before its triggers are evaluated. In-memory only.
+        log.recompute_derived(state)
         # Reconciliation freeze gate (spec §5): while the book diverges from the
         # broker (or holds an unbalanced leg), NO recommendations are generated —
         # acting on unverified state is exactly the failure mode reconciliation

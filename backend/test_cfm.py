@@ -851,6 +851,48 @@ def test_fetch_chain_gives_up_with_a_clear_diagnosis_when_even_the_known_date_40
         oc._fetch_chain("SPCX", known_expiration="2026-09-25")
 
 
+def test_short_call_dte_recomputed_from_calendar_not_frozen_at_sale():
+    """Unlike leap_dte (already recomputed from the calendar every pass), a
+    short call's own `dte` used to be whatever the sell/roll ticket stamped
+    once (executor.py's payload.get("dte", 5)) and never changed afterward —
+    so a call sold with 6 DTE still read "6" the morning it actually expired,
+    which made ROLL_SCHEDULED_WEEKLY (dte <= EXPIRY_WARN_DTE) unreachable by
+    calendar decay alone. recompute_derived must now recompute it from
+    (expiration - today), the same derivation leap_dte already gets."""
+    import logging_handler as log
+    from datetime import datetime, timezone
+
+    today = datetime.now(timezone.utc).date()
+    state = log._default_state()
+    state["positions"] = [{
+        "ticker": "IBIT", "status": "active", "position_type": "SHARES",
+        "shares": {"count": 100, "cost_basis_per_share": 44.51},
+        "short_calls": [{
+            "strike": 43.0, "contracts": 1, "expiration": today.isoformat(),
+            "dte": 6,  # stale — stamped when sold a week ago, never refreshed
+            "entry_premium_total": 200.0, "current_bid": 1.9,
+            "entry_extrinsic_per_share": 1.0,
+        }],
+    }]
+    log.recompute_derived(state)
+    assert state["positions"][0]["short_calls"][0]["dte"] == 0
+
+
+def test_short_call_dte_falls_back_to_stored_value_without_an_expiration():
+    """A leg with no (or an unparseable) expiration keeps its stored dte —
+    same fallback leap_dte already uses — rather than being blanked."""
+    import logging_handler as log
+
+    state = log._default_state()
+    state["positions"] = [{
+        "ticker": "IBIT", "status": "active", "position_type": "SHARES",
+        "shares": {"count": 100, "cost_basis_per_share": 44.51},
+        "short_calls": [{"strike": 43.0, "contracts": 1, "dte": 6}],
+    }]
+    log.recompute_derived(state)
+    assert state["positions"][0]["short_calls"][0]["dte"] == 6
+
+
 def test_occ_symbol_and_order_ticket():
     import schwab_api
     assert schwab_api.occ_option_symbol("AAPL", "2024-09-20", 250) == "AAPL  240920C00250000"
@@ -1056,6 +1098,13 @@ def test_roll_short_closes_old_and_opens_new(monkeypatch, tmp_path):
     import executor
     importlib.reload(executor)
 
+    # to_expiration is pinned to "today + 7" (not a hardcoded literal) — the
+    # new leg's dte is now recomputed from the calendar on every write (see
+    # test_short_call_dte_recomputed_from_calendar_not_frozen_at_sale), so a
+    # fixed past/future date would no longer round-trip to to_dte below.
+    from datetime import datetime, timedelta, timezone
+    to_exp = (datetime.now(timezone.utc).date() + timedelta(days=7)).isoformat()
+
     executor.execute({"action": "buy_leap", "ticker": "ON", "strike": 130,
                       "contracts": 5, "execution_price": 3300, "stock_price": 145,
                       "override_reason": "test fixture"})
@@ -1066,7 +1115,7 @@ def test_roll_short_closes_old_and_opens_new(monkeypatch, tmp_path):
         "action": "roll_short", "ticker": "ON", "contracts": 5,
         "from_strike": 140.5, "close_price_per_share": 2.5,
         "to_strike": 139.0, "premium_per_share": 5.0,
-        "to_expiration": "2026-07-10", "to_dte": 7, "stock_price": 142})
+        "to_expiration": to_exp, "to_dte": 7, "stock_price": 142})
 
     # net credit = new premium total (5.0*5*100=2500) − buyback (2.5*5*100=1250)
     assert res["net_credit"] == 1250.0
@@ -1076,7 +1125,7 @@ def test_roll_short_closes_old_and_opens_new(monkeypatch, tmp_path):
     pos = logging_handler.find_position(state, "ON")
     assert len(pos["short_calls"]) == 1
     new = pos["short_calls"][0]
-    assert new["strike"] == 139.0 and new["expiration"] == "2026-07-10" and new["dte"] == 7
+    assert new["strike"] == 139.0 and new["expiration"] == to_exp and new["dte"] == 7
     # Closing the 140.5 (sold extrinsic 1.5, paid back 1.0) books 0.5/sh*5*100=250.
     assert state["theta_ledger"]["totals"]["ytd"] == 250.0
     assert state["extrinsic_payback"]["ON"]["collected_to_date"] == 250.0
