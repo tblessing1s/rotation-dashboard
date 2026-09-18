@@ -1324,6 +1324,6 @@ def test_a_shares_booking_records_logged_not_live(store, monkeypatch):
 def test_the_non_transmitting_set_is_served_to_the_ui(monkeypatch):
     """Served rather than duplicated in the frontend, so the confirmation dialog
     can never drift from the dispatch that enforces it."""
-    import app as app_module
-    st = app_module._live_trading_status()
+    from blueprints.system_bp import _live_trading_status
+    st = _live_trading_status()
     assert st["non_transmitting_actions"] == sorted(executor.non_transmitting_actions())

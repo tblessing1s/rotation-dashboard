@@ -136,4 +136,4 @@ def test_the_route_is_wired(store):
     import app as app_module
     with app_module.app.test_request_context():
         assert app_module.app.url_map.bind("x").match(
-            "/api/positions/close-empty", method="POST")[0] == "api_close_empty_positions"
+            "/api/positions/close-empty", method="POST")[0] == "positions.api_close_empty_positions"
