@@ -55,6 +55,16 @@ def ingest(now: datetime | None = None, symbols: list[str] | None = None) -> dic
     for symbol in symbols:
         try:
             candles = data_handler.client().get_intraday_bars(symbol, minutes=5)
+            # Some providers pad a same-day intraday response with slots for
+            # the rest of the session that haven't happened yet, carrying the
+            # last traded price forward under a not-yet-reached timestamp.
+            # Blindly taking iloc[-1] would then log a bar dated hours in the
+            # future relative to `now` — frozen at whatever price was current
+            # at fetch time, not the intraday move since. Drop anything not
+            # actually at or before `now` before picking the latest one.
+            candles = candles[candles.index <= now]
+            if candles.empty:
+                raise ValueError("no candle at or before now")
             row = _bar_row(symbol, day, candles.iloc[-1])
         except Exception as e:  # noqa: BLE001 — one symbol's outage must not skip the rest
             errors[symbol] = str(e)
