@@ -254,13 +254,15 @@ function ScreenedTable({ rows }) {
         />
       </div>
       <div className="max-h-64 overflow-y-auto">
-        <table className="w-full min-w-[600px] text-sm">
+        <table className="w-full min-w-[760px] text-sm">
           <thead>
             <tr className="text-left text-[10px] uppercase tracking-wide text-slate-500">
               <th className="py-1 pr-3">Symbol</th>
               <th className="py-1 pr-3 text-right">Price</th>
               <th className="py-1 pr-3 text-right">Avg Volume</th>
               <th className="py-1 pr-3 text-right">ATR%</th>
+              <th className="py-1 pr-3 text-right">Prior High</th>
+              <th className="py-1 pr-3 text-right">Prior Low</th>
               <th className="py-1 pr-3">Status</th>
             </tr>
           </thead>
@@ -271,6 +273,8 @@ function ScreenedTable({ rows }) {
                 <td className="py-1 pr-3 text-right font-mono">{r.price ?? "—"}</td>
                 <td className="py-1 pr-3 text-right font-mono">{r.avg_volume?.toLocaleString() ?? "—"}</td>
                 <td className="py-1 pr-3 text-right font-mono">{r.atr_pct != null ? `${r.atr_pct}%` : "—"}</td>
+                <td className="py-1 pr-3 text-right font-mono text-slate-400">{r.prior_day_high ?? "—"}</td>
+                <td className="py-1 pr-3 text-right font-mono text-slate-400">{r.prior_day_low ?? "—"}</td>
                 <td className="py-1 pr-3 text-[11px]">
                   {r.qualified
                     ? <Pill status="go">qualified</Pill>
@@ -279,7 +283,7 @@ function ScreenedTable({ rows }) {
               </tr>
             ))}
             {!filtered.length && (
-              <tr><td colSpan={5} className="py-2 text-[11px] text-slate-500">No tickers match.</td></tr>
+              <tr><td colSpan={7} className="py-2 text-[11px] text-slate-500">No tickers match.</td></tr>
             )}
           </tbody>
         </table>
