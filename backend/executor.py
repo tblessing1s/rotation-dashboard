@@ -975,7 +975,16 @@ def _apply_adjustment(position: dict, itype: str, strike, qty_delta: int) -> Non
     caller (``_adjustment``) has already verified a target leg exists."""
     if itype == "EQUITY":
         shares = position.setdefault("shares", {"count": 0, "cap": config.SHARE_CAP})
-        shares["count"] = int(shares.get("count") or 0) + qty_delta
+        new_count = int(shares.get("count") or 0) + qty_delta
+        shares["count"] = new_count
+        # Mirror _reduce_shares: a compensating adjustment that empties the
+        # shares with no option legs left closes the position too. Without
+        # this, correcting a shares diff to zero left the position "open"
+        # forever with nothing left to close it — the position kept showing
+        # in the app even after the divergence itself was fixed.
+        if (new_count == 0 and not log.leap_legs(position)
+                and not (position.get("short_calls") or [])):
+            position["status"] = "closed"
         return
     if itype == "OPTION":
         # A short call is stored with a positive contract count but is SHORT, so
@@ -1518,7 +1527,18 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
     position["leap"] = new_leaps[0] if new_leaps else None
     log.recompute_derived(state)
     import reconcile as _rec
+    skipped_equity = []
     for diff_id in (diff_ids or []):
+        # This rebuild REPLACES short_calls/leap_legs only — it never reads or
+        # writes position["shares"] (equity/assignment is handled separately;
+        # see the broker_legs loop above). Marking an EQUITY diff resolved here
+        # would be a lie: the stale share count is untouched and the divergence
+        # still stands, just with its freeze silently lifted. Leave it open so
+        # the operator resolves it with an adjustment or close_shares_assigned.
+        _found_report, _diff = _rec._find_diff(state, diff_id)
+        if _diff is not None and _diff.get("instrument_type") == _rec.EQUITY:
+            skipped_equity.append(diff_id)
+            continue
         try:
             _rec.mark_diff_resolved(state, diff_id, "position_rebuild",
                                     {"execution_id": None})
@@ -1527,7 +1547,8 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
     _rec.reevaluate_freezes(state)
     log.save_state(state)
     return {"success": True, "status": "rebuilt", "ticker": ticker,
-            "short_calls": new_shorts, "leap_legs": new_leaps}
+            "short_calls": new_shorts, "leap_legs": new_leaps,
+            "skipped_equity_diffs": skipped_equity}
 
 
 def _short_extrinsic(premium, entry_price, strike) -> float:

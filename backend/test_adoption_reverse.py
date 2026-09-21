@@ -344,6 +344,48 @@ def test_rebuild_one_shot_with_diff_ids_needs_no_manual_propose_step(store):
     assert pos["needs_review"] is False
 
 
+def test_rebuild_never_marks_an_equity_diff_resolved(store):
+    # The reported incident: the short call was closed cleanly through the app,
+    # but the underlying shares were sold manually at the broker (outside the
+    # app) after a juice check failed. That leaves ONE open diff — the shares
+    # MISSING_AT_BROKER — and clicking "Schwab is correct" bundles it into the
+    # SAME rebuild call as any option diffs. rebuild_position_from_broker only
+    # ever replaces short_calls/leap_legs (never position["shares"]), so before
+    # the fix this silently marked the shares diff "resolved" — lifting the
+    # freeze — while the stale share count sat untouched and the position kept
+    # showing as open. It must instead leave the EQUITY diff open.
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "IBIT", "status": "active", "needs_review": True,
+        "review": {"summary": "shares missing", "diff_ids": ["diff_001"]},
+        "shares": {"count": 100, "cap": 100}, "short_calls": [],
+    })
+    state["reconciliation"] = {
+        "last": {"as_of": "2026-09-08T13:00:00Z", "status": reconcile.DIRTY, "broker_ok": True,
+                 "error": None, "suggested_resolutions": [],
+                 "diffs": [{"id": "diff_001", "classification": reconcile.MISSING_AT_BROKER,
+                            "ticker": "IBIT", "instrument_type": "EQUITY", "strike": None,
+                            "expiry": None, "expected_qty": 100, "broker_qty": None,
+                            "summary": "IBIT shares missing at broker"}]},
+        "history": [], "last_success": "2026-09-08T13:00:00Z"}
+    log.save_state(state)
+
+    res = executor.rebuild_position_from_broker(
+        "IBIT", broker_legs=[], diff_ids=["diff_001"],
+        reason="IBIT aligned to Schwab — broker confirmed correct")
+    assert res["status"] == "rebuilt"
+    assert res["skipped_equity_diffs"] == ["diff_001"]
+
+    state = log.load_state()
+    pos = log.find_position(state, "IBIT")
+    # Shares untouched, freeze still up — the operator still needs a real
+    # resolution (adjustment / close_shares_assigned) for the shares leg.
+    assert pos["shares"]["count"] == 100
+    assert pos["needs_review"] is True
+    d = state["reconciliation"]["last"]["diffs"][0]
+    assert d.get("resolution") is None
+
+
 def test_rebuild_one_shot_refuses_when_entry_price_cant_be_confirmed(store):
     # Without a confident entry price, extrinsic can't be split from intrinsic —
     # _short_extrinsic degrades to "the whole premium is extrinsic," which badly
