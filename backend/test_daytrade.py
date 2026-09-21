@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import threading
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -152,6 +152,22 @@ def test_screen_picks_qualifying_names_and_records_prior_day_levels(tmp_store, m
         assert row["reason"]
 
     assert store.load_screen("2026-09-14")["picks"][0]["symbol"] == "GOOD"
+
+
+def test_screen_date_override_files_under_a_different_date_than_now(tmp_store, monkeypatch):
+    """The scheduler's after-close run needs this: `now` stays the real run
+    time (so computed_at is honest) while the saved file's date is the day
+    the picks are FOR."""
+    frames = {"GOOD": _frame(price=100.0, spread=3.0, volume=2_000_000)}
+    monkeypatch.setattr(universe.data_handler, "get_daily", lambda t, force=False: frames[t])
+
+    result = universe.screen(tickers=list(frames), now=datetime(2026, 9, 18, 21, 45, tzinfo=ET),
+                              date_override=date(2026, 9, 21))
+
+    assert result["date"] == "2026-09-21"
+    assert result["computed_at"].startswith("2026-09-19")  # 21:45 ET == 01:45 UTC next day
+    assert store.load_screen("2026-09-21") is not None
+    assert store.load_screen("2026-09-18") is None
 
 
 def test_screen_caps_picks_at_max_and_ranks_by_avg_volume(tmp_store, monkeypatch):
@@ -411,7 +427,7 @@ def test_maybe_screen_skips_when_no_account_is_enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
     monkeypatch.setattr(settings, "enabled_account_ids", lambda: [])
     called = []
-    monkeypatch.setattr(scheduler, "_run_screen", lambda: called.append(True))
+    monkeypatch.setattr(scheduler, "_run_screen", lambda now: called.append(True))
     monkeypatch.setattr(scheduler, "_last_screen_day", None)
 
     scheduler._maybe_screen(datetime(2026, 9, 14, 17, 0, tzinfo=ET))  # past DAYTRADE_SCREEN_ET
@@ -424,7 +440,7 @@ def test_maybe_screen_skips_once_every_enabled_accounts_trial_is_complete(monkey
     monkeypatch.setattr(settings, "enabled_account_ids", lambda: ["primary", "ira"])
     monkeypatch.setattr(trial, "trial_status", lambda aid: {"status": "complete"})
     called = []
-    monkeypatch.setattr(scheduler, "_run_screen", lambda: called.append(True))
+    monkeypatch.setattr(scheduler, "_run_screen", lambda now: called.append(True))
     monkeypatch.setattr(scheduler, "_last_screen_day", None)
 
     scheduler._maybe_screen(datetime(2026, 9, 14, 17, 0, tzinfo=ET))  # past DAYTRADE_SCREEN_ET
@@ -438,12 +454,35 @@ def test_maybe_screen_runs_while_any_enabled_account_still_has_a_running_trial(m
     monkeypatch.setattr(trial, "trial_status",
                         lambda aid: {"status": "complete" if aid == "primary" else "running"})
     called = []
-    monkeypatch.setattr(scheduler, "_run_screen", lambda: called.append(True))
+    monkeypatch.setattr(scheduler, "_run_screen", lambda now: called.append(True))
     monkeypatch.setattr(scheduler, "_last_screen_day", None)
 
     scheduler._maybe_screen(datetime(2026, 9, 14, 17, 0, tzinfo=ET))
 
     assert called == [True]
+
+
+def test_maybe_screen_files_the_result_under_the_next_trading_day(monkeypatch, tmp_path):
+    """Regression: an after-close run on Friday must be readable by Monday's
+    own bar ingest/signal engine (both look up "today's screen" by exact
+    date match) — filing it under Friday's own date, when it ran, left
+    every trading day's window with nothing to read, forever."""
+    monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
+    monkeypatch.setattr(settings, "enabled_account_ids", lambda: ["primary"])
+    monkeypatch.setattr(trial, "trial_status",
+                        lambda aid: {"status": "running", "completed_trades": 0, "target_trades": 50})
+    monkeypatch.setattr(universe.data_handler, "get_daily",
+                        lambda t, force=False: _frame(price=100.0, spread=3.0, volume=2_000_000))
+    monkeypatch.setattr(universe.daytrade_tickers, "all_tickers", lambda: ["GOOD"])
+    monkeypatch.setattr(scheduler, "_last_screen_day", None)
+
+    friday = datetime(2026, 9, 18, 17, 0, tzinfo=ET)  # past DAYTRADE_SCREEN_ET
+    scheduler._maybe_screen(friday)
+
+    assert store.load_screen("2026-09-18") is None       # not filed under the day it ran
+    monday = store.load_screen("2026-09-21")             # filed for the next trading day
+    assert monday is not None
+    assert monday["picks"][0]["symbol"] == "GOOD"
 
 
 def test_for_each_enabled_account_isolates_one_accounts_exception(monkeypatch):

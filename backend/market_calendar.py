@@ -108,6 +108,14 @@ def is_trading_day(d: date) -> bool:
     return d.weekday() < calendar.SATURDAY and not is_market_holiday(d)
 
 
+def next_trading_day(d: date) -> date:
+    """The next trading day strictly after `d` (skips weekends/holidays)."""
+    nxt = d + timedelta(days=1)
+    while not is_trading_day(nxt):
+        nxt += timedelta(days=1)
+    return nxt
+
+
 def weekly_expiration_on_or_after(d: date) -> date:
     """The weekly option expiration for the week containing/after ``d``: that
     week's Friday, or the last trading day before it when Friday is a holiday

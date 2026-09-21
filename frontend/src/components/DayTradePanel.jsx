@@ -553,6 +553,18 @@ function RMultiBar({ rNow, targetR }) {
   );
 }
 
+// How close an armed setup is to its breakout trigger, 0-100 (null if there's
+// no live price to measure against yet) — the single source both the row's
+// own meter and the panel's "closest to getting traded first" sort read from,
+// so the two can never disagree.
+function armedProgressPct(row) {
+  if (row.current_price == null) return null;
+  const range = Math.abs(row.setup_high - row.setup_low) || 1;
+  return clamp01(row.direction === "long"
+    ? (row.current_price - row.setup_low) / range
+    : (row.setup_high - row.current_price) / range) * 100;
+}
+
 // One row per symbol currently armed (watching for a breakout) or in_trade
 // (open, watching for stop/target) — backend/daytrade/signals.py's
 // current_status, display-only and re-derived from the persisted signals
@@ -564,12 +576,7 @@ function LiveStatusRow({ row }) {
 
   if (row.status === "armed") {
     const trigger = row.direction === "long" ? row.setup_high : row.setup_low;
-    const range = Math.abs(row.setup_high - row.setup_low) || 1;
-    const pct = priceKnown
-      ? clamp01(row.direction === "long"
-          ? (row.current_price - row.setup_low) / range
-          : (row.setup_high - row.current_price) / range) * 100
-      : 0;
+    const pct = armedProgressPct(row) ?? 0;
     return (
       <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
         <div className="mb-1 flex items-center justify-between gap-2 text-xs">
@@ -616,13 +623,26 @@ function LiveStatusRow({ row }) {
   );
 }
 
+// in_trade rows first (already a real trade — the most time-sensitive to
+// watch), then armed rows ranked by how close they are to actually
+// triggering, closest first: "closest to getting traded" at the top.
+const LIVE_STATUS_RANK = { in_trade: 0, armed: 1 };
+function sortLiveStatusRows(rows) {
+  return [...rows].sort((a, b) => {
+    const rankDiff = (LIVE_STATUS_RANK[a.status] ?? 2) - (LIVE_STATUS_RANK[b.status] ?? 2);
+    if (rankDiff !== 0) return rankDiff;
+    if (a.status !== "armed") return 0;
+    return (armedProgressPct(b) ?? -1) - (armedProgressPct(a) ?? -1);
+  });
+}
+
 function LiveStatusPanel({ rows }) {
   if (!rows?.length) {
     return <p className="text-[11px] text-slate-500">Nothing armed or open right now.</p>;
   }
   return (
     <div className="space-y-2">
-      {rows.map((r) => <LiveStatusRow key={r.symbol} row={r} />)}
+      {sortLiveStatusRows(rows).map((r) => <LiveStatusRow key={r.symbol} row={r} />)}
     </div>
   );
 }
@@ -781,6 +801,17 @@ export default function DayTradePanel() {
   const { data: budget } = useApi(() => api.daytradeBudget(), [], 60000);
   const { data: trial } = useApi(() => api.daytradeTrial(), [], 60000);
 
+  // Adaptive poll cadence: the baseline (60s) is fine while nothing's close
+  // to happening, but once a setup is armed (watching for a breakout) or a
+  // trade is actually open, stale-by-a-minute prices are the whole reason to
+  // have this panel open at all. Ratchets down as soon as the picture
+  // changes rather than waiting a full baseline cycle to notice — see the
+  // effect below, which re-derives this from each fetch's own liveStatus.
+  const IDLE_POLL_MS = 60000;
+  const ARMED_POLL_MS = 30000;
+  const IN_TRADE_POLL_MS = 15000;
+  const [pollMs, setPollMs] = React.useState(IDLE_POLL_MS);
+
   const { data, error, loading, reload } = useApi(
     async () => {
       const [universe, signals, trades, prices, liveStatus] = await Promise.all([
@@ -793,8 +824,18 @@ export default function DayTradePanel() {
       return { universe, signals, trades, prices, liveStatus };
     },
     [date],
-    60000, // the strategy's own scheduler ticks every 30s and bars land every 5 min
+    pollMs,
   );
+
+  React.useEffect(() => {
+    if (!data) return;
+    const rows = data.liveStatus?.rows || [];
+    const next = date !== todayISO() ? IDLE_POLL_MS
+      : rows.some((r) => r.status === "in_trade") ? IN_TRADE_POLL_MS
+      : rows.some((r) => r.status === "armed") ? ARMED_POLL_MS
+      : IDLE_POLL_MS;
+    setPollMs((p) => (p === next ? p : next));
+  }, [data, date]);
 
   const trades = React.useMemo(() => Object.values(data?.trades?.trades || {}), [data]);
   const closed = trades.filter((t) => t.status === "closed");
@@ -829,6 +870,12 @@ export default function DayTradePanel() {
             →
           </button>
           <button onClick={reload} className="text-[11px] text-slate-400 hover:text-slate-200">↻</button>
+          <span
+            className="text-[10px] text-slate-500"
+            title="Refresh cadence ratchets down automatically: 60s idle, 30s once a setup is armed, 15s once a trade is open"
+          >
+            every {pollMs / 1000}s
+          </span>
         </div>
       }
     >
