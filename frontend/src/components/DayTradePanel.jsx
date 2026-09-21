@@ -602,7 +602,7 @@ function LiveStatusRow({ row }) {
         <p className="mt-1 text-[11px] text-slate-500">
           {priceKnown ? `${Math.round(pct)}% to breakout` : "no live price yet"} — needs a close{" "}
           {row.direction === "long" ? "above" : "below"} {trigger}
-          {priceKnown ? ` (now ${row.current_price})` : ""}
+          {priceKnown ? ` (bar ${row.current_price} as of ${timeOf(row.current_price_at)})` : ""}
         </p>
       </div>
     );
@@ -628,7 +628,7 @@ function LiveStatusRow({ row }) {
         <>
           <RMultiBar rNow={rNow} targetR={targetR} />
           <p className="mt-1 text-[11px] text-slate-500">
-            {rMult(rNow)} now — stop at -1R ({row.stop}), target at {rMult(targetR)} ({targetPrice})
+            {rMult(rNow)} as of bar {timeOf(row.current_price_at)} — stop at -1R ({row.stop}), target at {rMult(targetR)} ({targetPrice})
           </p>
         </>
       ) : (
