@@ -293,6 +293,14 @@ def _bar_df(when: datetime, price: float) -> pd.DataFrame:
                           "Close": [price], "Volume": [12345.0]}, index=idx)
 
 
+def _bars_df(rows: list[tuple[datetime, float]]) -> pd.DataFrame:
+    idx = pd.DatetimeIndex([w for w, _ in rows])
+    prices = [p for _, p in rows]
+    return pd.DataFrame({"Open": prices, "High": [p + 0.1 for p in prices],
+                          "Low": [p - 0.1 for p in prices], "Close": prices,
+                          "Volume": [12345.0] * len(rows)}, index=idx)
+
+
 def test_bars_ingest_writes_todays_picks_and_dedupes(tmp_store, monkeypatch):
     store.save_screen({"schema_version": 1, "date": "2026-09-14", "computed_at": "x",
                         "picks": [{"symbol": "ABC"}, {"symbol": "XYZ"}], "screened": []})
@@ -329,6 +337,46 @@ def test_bars_ingest_skips_a_failed_symbol_without_dropping_the_rest(tmp_store, 
 def test_bars_ingest_with_no_screener_picks_writes_nothing(tmp_store):
     result = bars.ingest(now=datetime(2026, 9, 14, 9, 35, tzinfo=ET))
     assert result == {"symbols": [], "written": 0, "errors": {}}
+
+
+def test_bars_ingest_ignores_candles_padded_past_now(tmp_store, monkeypatch):
+    """Regression: if the provider pads today's response with not-yet-elapsed
+    slots (carrying the last traded price forward under a future timestamp),
+    iloc[-1] would log a bar hours ahead of `now` and frozen at a stale
+    price. The real, current candle must win even though it isn't last in
+    the frame."""
+    store.save_screen({"schema_version": 1, "date": "2026-09-14", "computed_at": "x",
+                        "picks": [{"symbol": "ABC"}], "screened": []})
+    now = datetime(2026, 9, 14, 9, 35, tzinfo=ET)
+    padded = _bars_df([
+        (datetime(2026, 9, 14, 9, 30, tzinfo=ET), 44.0),
+        (now, 45.0),                                          # the real latest candle
+        (datetime(2026, 9, 14, 15, 55, tzinfo=ET), 44.0),      # padded future slot
+    ])
+    monkeypatch.setattr(bars.data_handler, "client", lambda: _FakeClient({"ABC": padded}))
+
+    result = bars.ingest(now=now)
+
+    assert result["written"] == 1
+    assert result["errors"] == {}
+    loaded = store.load_bars("2026-09-14", "ABC")
+    assert len(loaded) == 1
+    assert loaded[0]["close"] == 45.0
+    assert loaded[0]["datetime"].startswith("2026-09-14T09:35")
+
+
+def test_bars_ingest_errors_when_every_candle_is_in_the_future(tmp_store, monkeypatch):
+    store.save_screen({"schema_version": 1, "date": "2026-09-14", "computed_at": "x",
+                        "picks": [{"symbol": "ABC"}], "screened": []})
+    now = datetime(2026, 9, 14, 9, 35, tzinfo=ET)
+    only_future = _bars_df([(datetime(2026, 9, 14, 15, 55, tzinfo=ET), 44.0)])
+    monkeypatch.setattr(bars.data_handler, "client", lambda: _FakeClient({"ABC": only_future}))
+
+    result = bars.ingest(now=now)
+
+    assert result["written"] == 0
+    assert "ABC" in result["errors"]
+    assert store.load_bars("2026-09-14", "ABC") == []
 
 
 # ===========================================================================
