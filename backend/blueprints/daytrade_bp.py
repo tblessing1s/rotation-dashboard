@@ -82,6 +82,30 @@ def api_daytrade_prices():
         return _err(e)
 
 
+@daytrade_bp.route("/api/daytrade/quotes")
+def api_daytrade_quotes():
+    """TRUE live quotes for the day's screener picks, via
+    data_handler.latest_quotes — the SAME centralized quote path
+    /api/ticker-strip and every other live-price display in the app reads
+    from. Deliberately separate from /prices (the last ingested 5-min bar):
+    the signal engine's own breakout/stop rules need discrete OHLC candles,
+    not a scalar quote, and that log freezes outside the 9:30-11:00 ET
+    ingestion window — fine for the strategy, misleading as "the current
+    price" to an operator watching the screen. This is what should be shown
+    as that. SHARED (not account-scoped), same as /universe and /prices."""
+    try:
+        from datetime import datetime
+        import data_handler
+        import logging_handler as log
+        day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
+        screened = daytrade_store.load_screen(day)
+        symbols = [p["symbol"] for p in (screened or {}).get("picks", [])]
+        quotes = data_handler.latest_quotes(symbols) if symbols else {}
+        return jsonify({"date": day, "as_of": log.utcnow(), "quotes": quotes})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @daytrade_bp.route("/api/daytrade/signals")
 def api_daytrade_signals():
     """Read-only view of the ACTIVE ACCOUNT's signal-engine journal — every
