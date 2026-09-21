@@ -39,6 +39,89 @@ function RefreshQuoteButton({ ticker, afterResolve }) {
   );
 }
 
+// Always-available shares-vs-broker correction — independent of the diff/
+// freeze machinery below. Every OTHER reconciliation resolution path (the
+// diff rows, "Schwab is correct") only ever acts on an OPEN diff for THIS
+// ticker. Once that diff clears — rightly, or via a stale carried-forward
+// "resolved" (see the EQUITY rebuild bug this UI replaces the workaround
+// for) — there is no diff left to click, so a stuck share count had no UI
+// path at all short of an /api/execute call from devtools. This panel needs
+// no diff: the operator states what Schwab actually shows, and it books the
+// same compensating EQUITY adjustment executor._adjustment always has,
+// closing the position too if that empties it out.
+function ShareSyncPanel({ ticker, shareCount, onDone }) {
+  const toast = useToast();
+  const [openForm, setOpenForm] = React.useState(false);
+  const [actual, setActual] = React.useState("");
+  const [reason, setReason] = React.useState("");
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+
+  const submit = async () => {
+    setErr(null);
+    if (actual === "") { setErr("enter the share count Schwab actually shows"); return; }
+    const target = Number(actual);
+    if (!Number.isFinite(target) || target < 0) { setErr("enter a whole number ≥ 0"); return; }
+    const delta = Math.round(target) - shareCount;
+    if (delta === 0) { setErr("that already matches — nothing to correct"); return; }
+    if (!reason.trim()) { setErr("a reason is required"); return; }
+    setBusy(true);
+    try {
+      await api.execute({
+        action: "adjustment", ticker, instrument_type: "EQUITY",
+        quantity_delta: delta, reason: reason.trim(),
+      });
+      toast.show(`${ticker} shares corrected to ${Math.round(target)} (was ${shareCount})`, { type: "success" });
+      setOpenForm(false); setActual(""); setReason("");
+      onDone && onDone();
+    } catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+
+  if (!openForm) {
+    return (
+      <button onClick={() => setOpenForm(true)}
+              title="No active broker diff needed — enter what Schwab actually holds and book the correction directly"
+              className="mb-3 text-[11px] text-slate-500 hover:text-slate-300">
+        Shares don't match Schwab? Correct here →
+      </button>
+    );
+  }
+
+  return (
+    <div className="mb-3 rounded-lg border border-slate-700 bg-slate-950/60 p-3">
+      <p className="text-xs text-slate-300">
+        The app shows <span className="font-semibold text-slate-100">{shareCount}</span> {ticker} shares.
+        Enter what Schwab actually holds — this books a compensating adjustment (no order sent to the
+        broker) and closes the position if that empties it out.
+      </p>
+      <div className="mt-2 flex flex-wrap items-end gap-2">
+        <label className="flex flex-col text-[10px] uppercase tracking-wide text-slate-500">
+          shares at Schwab
+          <input value={actual} onChange={(e) => setActual(e.target.value)} inputMode="numeric"
+                 placeholder="0"
+                 className="mt-0.5 w-24 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-sm text-slate-100 placeholder:text-slate-600" />
+        </label>
+        <label className="flex min-w-[12rem] flex-1 flex-col text-[10px] uppercase tracking-wide text-slate-500">
+          reason (required)
+          <input value={reason} onChange={(e) => setReason(e.target.value)}
+                 placeholder="e.g. sold manually at TOS after a failed juice check"
+                 className="mt-0.5 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-sm text-slate-100 placeholder:text-slate-600" />
+        </label>
+        <button onClick={submit} disabled={busy}
+                className="rounded-lg border border-emerald-700 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/20 disabled:opacity-50">
+          {busy ? "Correcting…" : "Correct shares"}
+        </button>
+        <button onClick={() => { setOpenForm(false); setErr(null); }} disabled={busy}
+                className="rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          Cancel
+        </button>
+      </div>
+      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
 // Reconciliation review panel — shown when the position has open diffs against
 // the broker (state.json vs Schwab). A frozen position (needs_review) blocks new
 // entries/rolls until resolved; closing it is always allowed. The DEFAULT path
@@ -1847,6 +1930,7 @@ function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focus
       {open && (
         <div className="border-t border-slate-800 p-4">
           {/* Active safety alerts — surfaced, never hidden. */}
+          <ShareSyncPanel ticker={p.ticker} shareCount={count} onDone={afterResolve} />
           <ReviewPanel ticker={p.ticker} diffs={diffs} onDone={afterResolve} />
           {p.needs_review && (
             <p className="mb-1 text-xs italic text-rose-400/80">
