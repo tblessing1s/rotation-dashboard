@@ -63,25 +63,29 @@ function detailFor(e) {
 }
 
 // `prices` is the latest INGESTED 5-min bar per symbol (api.daytradePrices —
-// backend/daytrade/store.py's latest_bars), NOT a live quote: it only moves
-// on the DAYTRADE_BAR_INTERVAL_MINUTES (5 min) cadence bars.ingest() runs
-// on, during the 8:30-10:00 CT window — outside that window, or before the
-// first bar lands, there's nothing to show. `price` (the screener's own
-// column) is a DIFFERENT, older number: the prior day's close, stamped once
-// when the screener last ran (nightly, or a manual rescan) — it never moves
-// intraday at all.
-function UniverseTable({ picks, prices }) {
+// backend/daytrade/store.py's latest_bars): discrete OHLC candles for the
+// strategy's own breakout/stop rules, not a live quote — it only moves on
+// the DAYTRADE_BAR_INTERVAL_MINUTES (5 min) cadence bars.ingest() runs on,
+// during the 8:30-10:00 CT window, and freezes outside it. `quotes` is the
+// TRUE current price (api.daytradeQuotes — backend data_handler.latest_
+// quotes, the SAME centralized quote path api.tickerStrip reads from), so
+// it can never disagree with the price shown anywhere else in the app and
+// keeps moving all day. `price` (the screener's own column) is a THIRD,
+// older number: the prior day's close, stamped once when the screener last
+// ran (nightly, or a manual rescan) — it never moves intraday at all.
+function UniverseTable({ picks, prices, quotes }) {
   if (!picks?.length) {
     return <p className="text-[11px] text-slate-500">No qualifying names for this date.</p>;
   }
   return (
     <div className="overflow-x-auto">
-      <table className="w-full min-w-[720px] text-sm">
+      <table className="w-full min-w-[840px] text-sm">
         <thead>
           <tr className="text-left text-[10px] uppercase tracking-wide text-slate-500">
             <th className="py-1 pr-3">Symbol</th>
             <th className="py-1 pr-3 text-right">Price</th>
-            <th className="py-1 pr-3 text-right" title="Latest ingested 5-min bar — updates every 5 min during the 8:30-10:00 CT window">Live</th>
+            <th className="py-1 pr-3 text-right" title="The current quote (data_handler.latest_quotes) — same source as the header ticker strip, updates all session">Live Quote</th>
+            <th className="py-1 pr-3 text-right" title="Latest ingested 5-min bar the strategy's own rules evaluate — updates every 5 min during the 8:30-10:00 CT window only, frozen outside it">Last Bar</th>
             <th className="py-1 pr-3 text-right">Avg Volume</th>
             <th className="py-1 pr-3 text-right">ATR14</th>
             <th className="py-1 pr-3 text-right">ATR%</th>
@@ -92,14 +96,21 @@ function UniverseTable({ picks, prices }) {
         <tbody>
           {picks.map((p) => {
             const live = prices?.[p.symbol];
-            const tone = !live ? "text-slate-500"
+            const barTone = !live ? "text-slate-500"
               : live.close > p.price ? "text-emerald-300"
               : live.close < p.price ? "text-rose-300" : "text-slate-300";
+            const quote = quotes?.[p.symbol];
+            const quoteTone = !quote?.price ? "text-slate-500"
+              : quote.price > p.price ? "text-emerald-300"
+              : quote.price < p.price ? "text-rose-300" : "text-slate-300";
             return (
               <tr key={p.symbol} className="border-t border-slate-800 text-slate-200">
                 <td className="py-1.5 pr-3 font-mono font-semibold">{p.symbol}</td>
                 <td className="py-1.5 pr-3 text-right font-mono">{p.price}</td>
-                <td className={`py-1.5 pr-3 text-right font-mono ${tone}`}>
+                <td className={`py-1.5 pr-3 text-right font-mono ${quoteTone}`}>
+                  {quote?.price ?? "—"}
+                </td>
+                <td className={`py-1.5 pr-3 text-right font-mono ${barTone}`}>
                   {live
                     ? <>{live.close} <span className="text-[10px] text-slate-500">{timeOf(live.datetime)}</span></>
                     : "—"}
@@ -818,14 +829,15 @@ export default function DayTradePanel() {
 
   const { data, error, loading, reload } = useApi(
     async () => {
-      const [universe, signals, trades, prices, liveStatus] = await Promise.all([
+      const [universe, signals, trades, prices, quotes, liveStatus] = await Promise.all([
         api.daytradeUniverse(date),
         api.daytradeSignals(date),
         api.daytradeTrades(date),
         api.daytradePrices(date),
+        api.daytradeQuotes(date),
         api.daytradeLiveStatus(date),
       ]);
-      return { universe, signals, trades, prices, liveStatus };
+      return { universe, signals, trades, prices, quotes, liveStatus };
     },
     [date],
     pollMs,
@@ -932,7 +944,7 @@ export default function DayTradePanel() {
                 </h4>
                 {date === todayISO() && <RescanButton onComplete={reload} />}
               </div>
-              <UniverseTable picks={data.universe.picks} prices={data.prices.prices} />
+              <UniverseTable picks={data.universe.picks} prices={data.prices.prices} quotes={data.quotes.quotes} />
             </section>
 
             <ScreenCoverage universe={data.universe} />

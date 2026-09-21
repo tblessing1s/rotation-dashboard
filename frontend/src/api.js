@@ -142,10 +142,16 @@ export const api = {
   },
   daytradeBars: (symbol, date) =>
     request(`/api/daytrade/bars/${symbol}${date ? `?date=${date}` : ""}`),
-  // The latest ingested 5-min bar per symbol — the sleeve's closest thing to
-  // a live price (the screener's own `price` is a static prior-day close
-  // stamped once at screen time). SHARED, like daytradeUniverse/Bars above.
+  // The latest ingested 5-min bar per symbol — discrete OHLC candles for the
+  // strategy's own breakout/stop rules, NOT a live quote (it freezes outside
+  // the 9:30-11:00 ET ingestion window). Use daytradeQuotes below for "what's
+  // the current price." SHARED, like daytradeUniverse/Bars above.
   daytradePrices: (date) => request(`/api/daytrade/prices${date ? `?date=${date}` : ""}`),
+  // TRUE live quotes for the day's picks — the same centralized quote path
+  // (data_handler.latest_quotes) api.tickerStrip reads from, so this can
+  // never disagree with the price shown anywhere else in the app. SHARED,
+  // like daytradeUniverse/Bars/Prices above.
+  daytradeQuotes: (date) => request(`/api/daytrade/quotes${date ? `?date=${date}` : ""}`),
   // Active account's symbols currently armed/in_trade, for a fill/close
   // proximity meter (backend/daytrade/signals.py's current_status —
   // display-only, re-derived from the persisted signals log, never
