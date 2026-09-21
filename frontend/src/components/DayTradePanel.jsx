@@ -18,10 +18,15 @@ const addDays = (iso, n) => {
   return d.toISOString().slice(0, 10);
 };
 
-const timeOf = (iso) => (iso ? iso.slice(11, 16) : "—");
-// Unlike the bar/event timestamps above (already stamped in ET, so slicing
-// the string is correct), `computed_at` is stored in UTC — this converts to
-// the VIEWER's own local time instead of assuming an offset.
+// Bar/event timestamps are already stamped in ET (market time — see
+// schwab_api.get_intraday_bars), so slicing the string is correct; the " ET"
+// suffix is explicit rather than assumed, since the header ticker strip right
+// above this panel labels ITS times "Z" (UTC) — same-looking bare "HH:MM"
+// values in two different zones side by side is exactly how this got
+// misread as a wrong/frozen price rather than a correctly-labeled ET one.
+const timeOf = (iso) => (iso ? `${iso.slice(11, 16)} ET` : "—");
+// `computed_at` is stored in UTC (unlike the bar/event timestamps above) —
+// this converts to the VIEWER's own local time instead of assuming an offset.
 const localTime = (iso) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—");
 const money = (n) =>
   n == null ? "—" : `${n < 0 ? "-" : ""}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
