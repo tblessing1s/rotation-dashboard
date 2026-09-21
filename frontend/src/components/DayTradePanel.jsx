@@ -208,15 +208,97 @@ const SCREEN_REASON_BUCKETS = [
 // fall short is staleness: the roster grew (an add, or a CSV import) AFTER
 // the last screen ran, and nobody's rescanned since. This compares the last
 // screen's coverage against the roster's CURRENT size to catch exactly that.
+// A Stat that doubles as a filter toggle for the per-ticker drill-down table
+// below it — click a count to see exactly which tickers make it up, click
+// again to close. Same visual weight as the plain Stat it replaces.
+function ClickableStat({ label, value, sub, tone, active, onClick }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`min-w-0 rounded-lg border px-2 py-1 text-left transition ${
+        active ? "border-sky-600 bg-sky-500/10" : "border-transparent hover:border-slate-700 hover:bg-slate-800/40"
+      }`}
+    >
+      <div className="text-xs uppercase tracking-wide text-slate-500">{label}</div>
+      <div className={`text-xl font-semibold leading-tight sm:text-2xl ${tone || "text-slate-100"}`}>{value}</div>
+      {sub && <div className="text-xs text-slate-500">{sub}</div>}
+    </button>
+  );
+}
+
+// Every screened row, pass or fail, filtered down to whichever bucket the
+// user clicked above — this is the "validate the actual tickers" layer: the
+// bucket counts say HOW MANY failed on volume, this says WHICH ones and at
+// what price/volume/ATR%, so a specific "why isn't XYZ trading" is answerable
+// without touching a terminal.
+function ScreenedTable({ rows }) {
+  const [symbolFilter, setSymbolFilter] = React.useState("");
+  const filtered = React.useMemo(() => {
+    const f = symbolFilter.trim().toUpperCase();
+    const matched = f ? rows.filter((r) => r.symbol.includes(f)) : rows;
+    return [...matched].sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }, [rows, symbolFilter]);
+
+  return (
+    <div className="mt-3 space-y-2 rounded-lg border border-slate-800 bg-slate-950/40 p-2">
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-[11px] text-slate-500">
+          {filtered.length} of {rows.length} ticker{rows.length === 1 ? "" : "s"}
+        </p>
+        <input
+          type="text"
+          value={symbolFilter}
+          onChange={(e) => setSymbolFilter(e.target.value)}
+          placeholder="Filter symbol…"
+          className="w-28 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-[11px] text-slate-200"
+        />
+      </div>
+      <div className="max-h-64 overflow-y-auto">
+        <table className="w-full min-w-[600px] text-sm">
+          <thead>
+            <tr className="text-left text-[10px] uppercase tracking-wide text-slate-500">
+              <th className="py-1 pr-3">Symbol</th>
+              <th className="py-1 pr-3 text-right">Price</th>
+              <th className="py-1 pr-3 text-right">Avg Volume</th>
+              <th className="py-1 pr-3 text-right">ATR%</th>
+              <th className="py-1 pr-3">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.map((r) => (
+              <tr key={r.symbol} className="border-t border-slate-800 text-slate-200">
+                <td className="py-1 pr-3 font-mono font-semibold">{r.symbol}</td>
+                <td className="py-1 pr-3 text-right font-mono">{r.price ?? "—"}</td>
+                <td className="py-1 pr-3 text-right font-mono">{r.avg_volume?.toLocaleString() ?? "—"}</td>
+                <td className="py-1 pr-3 text-right font-mono">{r.atr_pct != null ? `${r.atr_pct}%` : "—"}</td>
+                <td className="py-1 pr-3 text-[11px]">
+                  {r.qualified
+                    ? <Pill status="go">qualified</Pill>
+                    : <span className="text-slate-400">{r.reason}</span>}
+                </td>
+              </tr>
+            ))}
+            {!filtered.length && (
+              <tr><td colSpan={5} className="py-2 text-[11px] text-slate-500">No tickers match.</td></tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function ScreenCoverage({ universe }) {
-  const [open, setOpen] = React.useState(false);
+  const [open, setOpen] = React.useState(true);
+  const [drill, setDrill] = React.useState(null); // null | "all" | "qualified" | bucket key
   const { data: roster } = useApi(() => api.daytradeTickers(), [], 60000);
 
   if (!universe?.ran) return null;
 
   const screened = universe.screened || [];
   const total = screened.length;
-  const qualified = screened.filter((r) => r.qualified).length;
+  const qualifiedRows = screened.filter((r) => r.qualified);
+  const qualified = qualifiedRows.length;
   const failed = screened.filter((r) => !r.qualified);
   const buckets = SCREEN_REASON_BUCKETS.map((b) => ({
     ...b,
@@ -226,6 +308,13 @@ function ScreenCoverage({ universe }) {
 
   const rosterTotal = roster?.total;
   const stale = rosterTotal != null && rosterTotal !== total;
+
+  const drillRows =
+    drill === "all" ? screened
+    : drill === "qualified" ? qualifiedRows
+    : drill ? buckets.find((b) => b.key === drill)?.rows || []
+    : null;
+  const toggleDrill = (key) => setDrill((d) => (d === key ? null : key));
 
   return (
     <section>
@@ -248,13 +337,17 @@ function ScreenCoverage({ universe }) {
             </p>
           )}
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
-            <Stat label="Screened" value={total} />
-            <Stat label="Qualified" value={qualified} tone="text-emerald-300" />
+            <ClickableStat label="Screened" value={total} active={drill === "all"} onClick={() => toggleDrill("all")} />
+            <ClickableStat label="Qualified" value={qualified} tone="text-emerald-300"
+                           active={drill === "qualified"} onClick={() => toggleDrill("qualified")} />
             {buckets.map((b) => (
-              <Stat key={b.key} label={b.label} value={b.rows.length}
-                    tone={b.isDataGap && b.rows.length ? "text-amber-300" : "text-slate-100"} />
+              <ClickableStat key={b.key} label={b.label} value={b.rows.length}
+                    tone={b.isDataGap && b.rows.length ? "text-amber-300" : "text-slate-100"}
+                    active={drill === b.key} onClick={() => toggleDrill(b.key)} />
             ))}
           </div>
+          <p className="mt-1.5 text-[11px] text-slate-500">Click any count above to see the actual tickers behind it.</p>
+          {drillRows && <ScreenedTable rows={drillRows} />}
           {dataGaps.length > 0 && (
             <div>
               <p className="mb-1 text-[11px] text-slate-500">
