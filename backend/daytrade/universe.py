@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import config
 import data_handler
@@ -76,10 +76,19 @@ def rank(qualified: list[dict]) -> list[dict]:
     return sorted(qualified, key=lambda r: r["avg_volume"], reverse=True)
 
 
-def screen(tickers: list[str] | None = None, now: datetime | None = None) -> dict:
+def screen(tickers: list[str] | None = None, now: datetime | None = None,
+           date_override: date | None = None) -> dict:
     """Run the nightly screener once and persist the result. Returns the same
-    dict that gets written to disk."""
+    dict that gets written to disk.
+
+    ``date_override`` files the result under a date other than ``now``'s —
+    the scheduler's own after-close run uses this to file under the NEXT
+    trading day (see its module docstring: today's close feeds tomorrow's
+    prior-day levels), since bar ingest and the signal engine both look up
+    "today's screen" by exact date match. An on-demand "Rescan now" leaves
+    this unset and files under today, same-day, as before."""
     now = now or datetime.now(timezone.utc)
+    target_date = date_override or now.date()
     tickers = tickers if tickers is not None else daytrade_tickers.all_tickers()
 
     # Warm the cache for every candidate in parallel (data_handler's 8-worker
@@ -97,7 +106,7 @@ def screen(tickers: list[str] | None = None, now: datetime | None = None) -> dic
 
     result = {
         "schema_version": store.SCHEMA_VERSION,
-        "date": now.strftime("%Y-%m-%d"),
+        "date": target_date.strftime("%Y-%m-%d"),
         "computed_at": now.astimezone(timezone.utc).isoformat(),
         "picks": picks,
         "screened": screened,

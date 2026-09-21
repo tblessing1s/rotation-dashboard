@@ -20,7 +20,11 @@ exception must never skip another's.
 Jobs, all best-effort (logged, never fatal to the tick):
 
   screen        once per trading day, after the close (``DAYTRADE_SCREEN_ET``)
-                — ``daytrade.universe.screen()``, SHARED. Skipped when no
+                — ``daytrade.universe.screen()``, SHARED, filed under the
+                NEXT trading day (today's close is tomorrow's prior-day
+                levels; bar ingest/signals look up "today's screen" by exact
+                date, so filing under today would leave every day's own
+                window with nothing to read). Skipped when no
                 account is enabled, or every enabled account's paper trial
                 is already complete: no screener picks that day means bar
                 ingest and the signal engine have nothing to do for anyone,
@@ -147,12 +151,19 @@ def digest_due(now: datetime, last_day: date | None) -> bool:
 # ---------------------------------------------------------------------------
 # Jobs
 # ---------------------------------------------------------------------------
-def _run_screen() -> None:
+def _run_screen(now: datetime) -> None:
     try:
         from daytrade import universe
-        result = universe.screen()
-        logger.info("daytrade screener: %d pick(s) from %d screened",
-                     len(result["picks"]), len(result["screened"]))
+        # Files under the NEXT trading day, not today: this runs after
+        # today's close, using today's just-completed session as the prior-
+        # day levels for tomorrow's setups (see universe.py's module
+        # docstring) — but bar ingest and the signal engine both look up
+        # "today's screen" by exact date match, so filing under today would
+        # leave every trading day's own window with nothing to read, forever.
+        target = market_calendar.next_trading_day(now.date())
+        result = universe.screen(now=now, date_override=target)
+        logger.info("daytrade screener: %d pick(s) from %d screened, filed for %s",
+                     len(result["picks"]), len(result["screened"]), result["date"])
     except Exception as e:  # noqa: BLE001 — best-effort, never fatal to the tick
         logger.warning("daytrade screener failed: %s", e)
 
@@ -176,7 +187,7 @@ def _maybe_screen(now: datetime) -> None:
             return
     except Exception as e:  # noqa: BLE001 — a settings/trial read failure must not block screening
         logger.warning("daytrade trial status check failed (%s); screening anyway", e)
-    _run_screen()
+    _run_screen(now)
 
 
 def _run_bar_ingest(now: datetime) -> None:

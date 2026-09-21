@@ -48,6 +48,20 @@ def test_is_trading_day():
     assert mc.is_trading_day(date(2026, 4, 3)) is False    # Good Friday
 
 
+def test_next_trading_day_skips_weekend():
+    assert mc.next_trading_day(date(2026, 9, 18)) == date(2026, 9, 21)  # Fri -> Mon
+
+
+def test_next_trading_day_skips_holiday_and_weekend():
+    # Good Friday 2026 (Apr 3) sits inside a run that also crosses the
+    # weekend, so "next" from Thursday Apr 2 must land on Monday Apr 6.
+    assert mc.next_trading_day(date(2026, 4, 2)) == date(2026, 4, 6)
+
+
+def test_next_trading_day_from_an_ordinary_weekday():
+    assert mc.next_trading_day(date(2026, 9, 14)) == date(2026, 9, 15)  # Mon -> Tue
+
+
 # ---- earliest full-week weekly expiration ----------------------------------
 def test_earliest_full_week_expiration_by_weekday():
     from datetime import date
