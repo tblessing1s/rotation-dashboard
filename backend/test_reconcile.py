@@ -403,6 +403,41 @@ def test_resolving_a_missing_leap_by_closing_lifts_the_freeze(store):
     assert p.get("review") is None
 
 
+def test_resolving_a_missing_shares_diff_by_adjustment_closes_the_position(store):
+    # Same shape as the LEAP case above, but for the shares-primary base leg:
+    # shares held in state but sold manually at the broker (outside the app)
+    # show as an EQUITY MISSING_AT_BROKER diff. Correcting it with a
+    # compensating adjustment to zero must ALSO close the position — before
+    # the fix, _apply_adjustment's EQUITY branch only ever zeroed the share
+    # count and never checked for closure (unlike the OPTION/LEAP branch,
+    # which does), so the position stayed "active" with 0 shares and kept
+    # showing in the app as an open position forever.
+    pos = {
+        "ticker": "IBIT", "status": "active", "needs_review": True,
+        "review": {"summary": "shares missing", "diff_ids": ["diff_001"]},
+        "shares": {"count": 100, "cap": 100}, "short_calls": [],
+    }
+    state = log.load_state()
+    state["positions"] = [pos]
+    state["reconciliation"] = {"last": _report_with({
+        "id": "diff_001", "classification": reconcile.MISSING_AT_BROKER, "ticker": "IBIT",
+        "instrument_type": "EQUITY", "strike": None, "expiry": None,
+        "expected_qty": 100, "broker_qty": None, "summary": "IBIT shares missing at broker"}),
+        "history": [], "last_success": "2026-09-08T13:00:00Z"}
+    log.save_state(state)
+
+    out = executor.execute({
+        "action": "adjustment", "ticker": "IBIT", "instrument_type": "EQUITY",
+        "quantity_delta": -100, "reason": "shares sold manually at the broker (TOS)",
+        "linked_diff_id": "diff_001"})
+    assert out["status"] == "adjusted"
+
+    p = log.find_position(log.load_state(), "IBIT")
+    assert p["shares"]["count"] == 0 and p["status"] == "closed"  # position closed out
+    assert not p.get("needs_review")                              # freeze lifted, not stuck
+    assert p.get("review") is None
+
+
 def test_acknowledge_requires_typed_reason_then_lifts_freeze(store):
     state = log.load_state()
     state["positions"] = [_frozen_position()]

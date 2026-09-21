@@ -79,13 +79,22 @@ const WHICH_IS_CORRECT_CLASSES = new Set(["MISSING_AT_BROKER", "UNEXPECTED_AT_BR
 // stale or wrong here, so nothing about the position changes — the diffs are
 // acknowledged (typed reason still required and logged) rather than touched.
 // Deliberately excludes SHORT_STOCK_DETECTED (both sources already agree stock
-// is short — that's a real risk to manage, not a data disagreement) and
+// is short — that's a real risk to manage, not a data disagreement),
 // EXPIRED_WORTHLESS_PENDING (both sources already agree it expired worthless —
-// one-click via "Book expiry" in the per-diff row below).
+// one-click via "Book expiry" in the per-diff row below), and any EQUITY diff
+// (a shares-count divergence): "Schwab is correct" calls rebuild_position_
+// from_broker, which only ever replaces short_calls/leap_legs — it never reads
+// or writes owned shares. Bundling an EQUITY diff's id into that call used to
+// mark it "resolved" (lifting the freeze) without the share count ever
+// changing, which is exactly how a manually-closed-at-the-broker shares
+// position kept showing in the app after the operator confirmed Schwab was
+// right. EQUITY diffs stay on the per-diff row below (Record adjustment /
+// Acknowledge), which actually touches the shares count.
 function WhichIsCorrect({ ticker, diffs, toast, onDone }) {
   const [busy, setBusy] = React.useState(null); // "schwab" | "dashboard" | null
   const [err, setErr] = React.useState(null);
-  const ambiguous = diffs.filter((d) => WHICH_IS_CORRECT_CLASSES.has(d.classification));
+  const ambiguous = diffs.filter((d) => WHICH_IS_CORRECT_CLASSES.has(d.classification)
+    && d.instrument_type !== "EQUITY");
   if (ambiguous.length === 0) return null;
   const ids = ambiguous.map((d) => d.id);
 
