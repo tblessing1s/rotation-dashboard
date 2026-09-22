@@ -91,6 +91,13 @@ export const api = {
   // and poll its status. The refresh POST returns immediately.
   scanRefresh: () => request("/api/scan/refresh", { method: "POST" }),
   scanStatus: () => request("/api/scan/status"),
+  // One-time bootstrap of the trailing juice-CAPACITY history (juice_capacity.py)
+  // by replaying the scan's juice math over cached bars, so capacity reads on
+  // day one instead of ~a month from now. Same detached-job shape as
+  // scanRefresh/scanStatus: POST kicks it off, GET polls.
+  juiceCapacityBackfill: (opts = {}) =>
+    request("/api/scan/juice-capacity-backfill", { method: "POST", body: JSON.stringify(opts) }),
+  juiceCapacityBackfillStatus: () => request("/api/scan/juice-capacity-backfill/status"),
   // Calibration rollup over the append-only scan rejection log — including the
   // SHADOW income-floor pass/fail tallies per profile. Read-only telemetry.
   scanRejectionStats: (window) =>

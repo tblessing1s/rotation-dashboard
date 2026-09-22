@@ -148,6 +148,69 @@ function ShadowFloorTable({ floor, reasons }) {
   );
 }
 
+// One-time bootstrap of the trailing juice-CAPACITY history (juice_capacity.py):
+// replays the scan's own juice math over each symbol's already-cached daily
+// bars, so a name's capacity median is measurable on day one instead of
+// reading INSUFFICIENT_HISTORY for ~a month while daily scans accrue it one
+// observation at a time. A full-universe replay is a multi-minute, CPU-bound
+// job, so it runs as a detached server-side job — same shape as CFM's own
+// ScanProgress and the day-trade screener's RescanButton: POST kicks it off,
+// a short poll follows it to completion. Never runs on its own; this button
+// is the only thing that starts it.
+function BackfillCapacityButton() {
+  const [st, setSt] = React.useState(null);
+  const pollRef = React.useRef(null);
+
+  const poll = React.useCallback(async () => {
+    let s;
+    try { s = await api.juiceCapacityBackfillStatus(); } catch { return; } // transient — next tick retries
+    setSt(s);
+    if (!s.running) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  const run = async () => {
+    try {
+      const s = await api.juiceCapacityBackfill();
+      setSt(s);
+      if (s.running && !pollRef.current) pollRef.current = setInterval(poll, 2500);
+    } catch (e) {
+      setSt({ status: "error", error: String(e.message || e) });
+    }
+  };
+
+  React.useEffect(() => () => { if (pollRef.current) clearInterval(pollRef.current); }, []);
+
+  const busy = !!st?.running;
+  const result = st?.status === "done" ? st.result : null;
+  return (
+    <div className="flex items-center gap-2">
+      {busy && <span className="text-[11px] text-amber-300">Backfilling…</span>}
+      {!busy && st?.status === "error" && (
+        <span className="text-[11px] text-rose-300" title={st.error}>Backfill failed</span>
+      )}
+      {!busy && result && (
+        <span
+          className="text-[11px] text-slate-500"
+          title={`${result.skipped?.length || 0} symbol(s) skipped (see server log for why).`}
+        >
+          {result.symbols} symbol(s), {result.observations} observation(s) backfilled
+        </span>
+      )}
+      <button
+        onClick={run}
+        disabled={busy}
+        title="Replay the scan's juice math over cached bars to bootstrap the capacity median for every symbol that doesn't already have it — offline, opt-in, never overwrites a live observation"
+        className="rounded border border-slate-700 px-2 py-0.5 text-[11px] text-slate-400 hover:text-slate-200 disabled:opacity-40"
+      >
+        {busy ? <Spinner size="h-3 w-3" /> : "Backfill juice capacity"}
+      </button>
+    </div>
+  );
+}
+
 function BindingBars({ counts, total }) {
   const entries = Object.entries(counts || {});
   if (!entries.length) {
@@ -224,6 +287,17 @@ export default function ShadowCalibration() {
         graduation decision would rest on, not a recommendation to change
         anything now.
       </p>
+
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
+        <span className="text-[11px] text-slate-400">
+          Trailing juice{" "}
+          <span className="font-semibold text-violet-300">juice_capacity</span>{" "}
+          (a separate shadow metric, shown per-name on the Scan tab) starts
+          empty and fills in one observation per symbol per day — this replays
+          it over cached bars instead of waiting.
+        </span>
+        <BackfillCapacityButton />
+      </div>
 
       {loading && <Spinner />}
       {error && <ErrorState error={error} onRetry={reload} />}

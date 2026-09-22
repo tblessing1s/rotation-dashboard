@@ -512,6 +512,67 @@ def backfill(tickers: list[str] | None = None, *, force: bool = False,
         return {"ok": False, "error": str(e)}
 
 
+# ---------------------------------------------------------------------------
+# Background runner — a one-time bootstrap over the whole universe is a
+# multi-minute, CPU-bound replay (every cached bar of every symbol), so it is
+# kicked off the same way ``screening.start_background_scan`` decouples the
+# full-universe sweep from its triggering request: a detached daemon thread,
+# deduped (one backfill at a time), polled rather than awaited. Still offline/
+# opt-in by contract — nothing calls ``start_background_backfill`` on its own;
+# an operator (or the maintenance UI) has to ask for it.
+# ---------------------------------------------------------------------------
+_backfill_thread: threading.Thread | None = None
+_backfill_guard = threading.Lock()
+_backfill_state: dict = {"status": "idle", "started_at": None, "finished_at": None,
+                         "result": None, "error": None}
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _run_background_backfill(tickers=None, force: bool = False, step: int = 1) -> None:
+    result = backfill(tickers, force=force, step=step)
+    with _backfill_guard:
+        _backfill_state.update(
+            status="done" if result.get("ok") else "error",
+            finished_at=_now_iso(),
+            result=result if result.get("ok") else None,
+            error=None if result.get("ok") else result.get("error"),
+        )
+
+
+def start_background_backfill(tickers: list[str] | None = None, *,
+                              force: bool = False, step: int = 1) -> dict:
+    """Kick the capacity backfill in a detached daemon thread if one isn't
+    already running, and return the status immediately. Idempotent: a
+    concurrent call while a backfill is in flight just returns the current
+    status rather than starting a second one."""
+    global _backfill_thread
+    with _backfill_guard:
+        if _backfill_thread is not None and _backfill_thread.is_alive():
+            return dict(_backfill_state, running=True)
+        _backfill_state.update(status="running", started_at=_now_iso(),
+                               finished_at=None, error=None, result=None)
+        _backfill_thread = threading.Thread(
+            target=_run_background_backfill,
+            kwargs={"tickers": tickers, "force": force, "step": step},
+            name="juice-capacity-backfill", daemon=True)
+        _backfill_thread.start()
+        return dict(_backfill_state, running=True)
+
+
+def backfill_status() -> dict:
+    """Current background-backfill state for the client to poll: idle /
+    running / done / error, the start/finish stamps, and the last run's
+    per-symbol summary once it lands."""
+    with _backfill_guard:
+        running = _backfill_thread is not None and _backfill_thread.is_alive()
+        st = dict(_backfill_state)
+    st["running"] = running
+    return st
+
+
 def summary(window: int | None = None) -> dict:
     """A calibration-oriented rollup over the store: how many names are measurable
     yet, and how their capacity sits against the shares juice floor.
