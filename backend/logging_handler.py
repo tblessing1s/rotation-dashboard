@@ -1339,9 +1339,125 @@ def recompute_derived(state: dict) -> dict:
                 # History tab / juice-journal CSV. Copied from the buy_leap.
                 "entry_context": entry.get("entry_context"),
                 "entry_summary": entry_context.summary(entry.get("entry_context")),
+                "structure": position_types.LEAP_PMCC_LEGACY,
                 "wash_sale": None,
             })
             del open_cycle[t]
+
+    # SHARES-primary cycle records — the shares-base analog of the buy_leap ->
+    # close_leap window above. Nothing has derived a closed-cycle record for a
+    # SHARES position since the v20 migration made shares the active base leg:
+    # this loop was simply never added when buy_leap/close_leap stopped being
+    # the only way in and out of a position, so "Closed cycles" (win rate, avg
+    # return, avg juice/week) has been silently empty for every shares-primary
+    # exit, no matter how it closed. A cycle opens on the FIRST buy_shares for a
+    # ticker with no cycle already open (later buy_shares calls are scale-ins —
+    # ADD to the running cycle rather than starting a new one, since shares
+    # support multi-lot entries the LEAP diagonal never did) and closes the
+    # moment the running share count — tracked purely from this replay, exactly
+    # like open_cycle above, since the position mirror only reflects the CURRENT
+    # state, not what was open at each historical point — returns to zero via
+    # sell_shares, close_shares_assigned, or a reconciliation EQUITY adjustment.
+    # An adjustment carries no trade price (it is a correction, not a fill), so
+    # a cycle closed that way books no realized P&L for it and is coded
+    # RECONCILIATION rather than left with a fabricated exit reason.
+    shares_cycles: list[dict] = []
+    open_shares_cycle: dict[str, dict] = {}
+
+    def _close_shares_cycle(t: str, exit_exec: dict) -> None:
+        cyc = open_shares_cycle.pop(t)
+        entry = cyc["entry"]
+        capital = round(cyc["capital"], 2)
+        gross_juice = round(cyc["juice"], 2)
+        realized = round(cyc["realized"], 2)
+        roll_nets = [p["sell"] - p["buy"] for p in cyc["roll_pairs"].values()
+                     if "sell" in p and "buy" in p]
+        roll_net = round(sum(roll_nets), 2)
+        roll_drag = round(sum(n for n in roll_nets if n < 0), 2)
+        net_result = round(realized + gross_juice, 2)
+        d_in = _parse_day(entry.get("date"))
+        d_out = _parse_day(exit_exec.get("date"))
+        days_held = (d_out - d_in).days if d_in and d_out else None
+        net_return_pct = round(net_result / capital * 100, 2) if capital else None
+        exit_reason = cyc.get("last_exit_reason")
+        shares_cycles.append({
+            "id": None,  # assigned once merged + sorted with the LEAP cycles below
+            "ticker": t,
+            "entry_date": str(entry.get("date", ""))[:10],
+            "exit_date": str(exit_exec.get("date", ""))[:10],
+            "days_held": days_held,
+            "capital_deployed": capital,
+            "gross_juice": gross_juice,
+            "roll_count": len(cyc["roll_pairs"]),
+            "roll_net": roll_net,
+            "roll_drag": roll_drag,
+            "leap_pnl": realized,  # realized shares P&L — same field name as the
+                                    # LEAP cycle's long-leg P&L so the History tab,
+                                    # aggregates(), and the CSV/MD export need no
+                                    # per-structure branching.
+            "net_result": net_result,
+            "net_return_pct": net_return_pct,
+            "target_range_pct": [config.CYCLE_RETURN_MIN * 100, config.CYCLE_RETURN_MAX * 100],
+            "target_met": (net_return_pct is not None
+                           and net_return_pct >= config.CYCLE_RETURN_MIN * 100),
+            "exit_reason": (exit_reason if exit_reasons.is_valid(exit_reason)
+                            else exit_reasons.ExitReason.LEGACY_UNRECORDED),
+            "exit_note": cyc.get("last_exit_note"),
+            "exit_metrics": exit_exec.get("exit_metrics"),
+            "entry_context": entry.get("entry_context"),
+            "entry_summary": entry_context.summary(entry.get("entry_context")),
+            "structure": position_types.SHARES,
+            "wash_sale": None,
+        })
+
+    for e in execs:
+        t = e.get("ticker", "")
+        a = e.get("action")
+        if a == "buy_shares":
+            cyc = open_shares_cycle.get(t)
+            if cyc is None:
+                cyc = open_shares_cycle[t] = {
+                    "entry": e, "capital": 0.0, "juice": 0.0, "realized": 0.0,
+                    "shares_open": 0, "roll_pairs": {},
+                    "last_exit_reason": None, "last_exit_note": None,
+                }
+            cyc["capital"] += float(e.get("execution_total") or 0)
+            cyc["shares_open"] += int(e.get("qty") or 0)
+            continue
+        cyc = open_shares_cycle.get(t)
+        if not cyc:
+            continue
+        rid = e.get("roll_id")
+        if a == "close_short":
+            cyc["juice"] += float(e.get("net_juice_total") or 0)
+            if rid:
+                cyc["roll_pairs"].setdefault(rid, {})["buy"] = float(e.get("close_total") or 0)
+        elif a == "sell_short" and rid:
+            cyc["roll_pairs"].setdefault(rid, {})["sell"] = float(e.get("premium_total") or 0)
+        elif a in ("sell_shares", "close_shares_assigned"):
+            cyc["shares_open"] -= int(e.get("qty") or 0)
+            cyc["realized"] += float(e.get("realized_pnl") or 0)
+            cyc["last_exit_reason"] = e.get("exit_reason") or cyc["last_exit_reason"]
+            cyc["last_exit_note"] = e.get("exit_note") or cyc["last_exit_note"]
+            if cyc["shares_open"] <= 0:
+                _close_shares_cycle(t, e)
+        elif a == "adjustment" and (e.get("instrument_type") or "").upper() == "EQUITY":
+            delta = int(round(float(e.get("quantity_delta") or 0)))
+            cyc["shares_open"] += delta
+            if delta < 0:
+                cyc["last_exit_reason"] = exit_reasons.ExitReason.RECONCILIATION
+                cyc["last_exit_note"] = e.get("reason") or cyc["last_exit_note"]
+            if cyc["shares_open"] <= 0:
+                _close_shares_cycle(t, e)
+
+    # Merge + re-sort chronologically by exit so "newest first" (history.view)
+    # stays correct once LEAP and SHARES cycles are interleaved, then renumber —
+    # ids are a derived, per-run convenience (recomputed every call, like every
+    # other field here), never a stored cross-run key.
+    cycles.extend(shares_cycles)
+    cycles.sort(key=lambda c: (c["exit_date"] or "", c["entry_date"] or ""))
+    for i, c in enumerate(cycles):
+        c["id"] = f"cycle_{i + 1:03d}"
 
     # Wash-sale flagging (visibility only, not tax software): a loss-closing
     # cycle re-entered in the same underlying within the window is flagged;
@@ -1355,13 +1471,22 @@ def recompute_derived(state: dict) -> dict:
     window = timedelta(days=config.WASH_SALE_WINDOW_DAYS)
     buys_by_ticker: dict[str, list] = {}      # ticker -> [(exec_index, ts)]
     close_by_cycle: dict[str, tuple] = {}     # "ticker|exit_date" -> (exec_index, ts)
+    # SHARES base actions join the same two dicts as their LEAP equivalents — a
+    # loss-closing shares cycle re-bought within the window is exactly as much a
+    # wash sale as a re-bought LEAP. A partial-trim sell_shares/adjustment that
+    # did NOT close a cycle simply has no cycle at that ticker|date to match
+    # against below, so it's harmless for it to land in close_by_cycle too.
     for i, e in enumerate(execs):
         ts = _parse_ts(e.get("date"))
         if ts is None:
             continue
-        if e.get("action") == "buy_leap":
+        action = e.get("action")
+        if action in ("buy_leap", "buy_shares"):
             buys_by_ticker.setdefault(e.get("ticker", ""), []).append((i, ts))
-        elif e.get("action") == "close_leap":
+        elif action == "close_leap":
+            close_by_cycle[f"{e.get('ticker', '')}|{e.get('date', '')[:10]}"] = (i, ts)
+        elif action in ("sell_shares", "close_shares_assigned") or (
+                action == "adjustment" and (e.get("instrument_type") or "").upper() == "EQUITY"):
             close_by_cycle[f"{e.get('ticker', '')}|{e.get('date', '')[:10]}"] = (i, ts)
     for c in cycles:
         if c["leap_pnl"] >= 0:

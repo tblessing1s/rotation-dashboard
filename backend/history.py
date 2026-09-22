@@ -67,7 +67,7 @@ _WEEK_COLS = ["week", "ticker", "extrinsic_sold", "extrinsic_paid_back", "net_ju
 # The cycle columns include the coded exit reason + note and a COMPACT entry-
 # context summary (verdict, regime, IV rank, RS3M pair). The full snapshot is
 # not in the CSV — it's available per cycle via the /api/history detail.
-_CYCLE_COLS = ["id", "ticker", "entry_date", "exit_date", "days_held",
+_CYCLE_COLS = ["id", "ticker", "structure", "entry_date", "exit_date", "days_held",
                "capital_deployed", "gross_juice", "roll_count", "roll_net",
                "roll_drag", "leap_pnl", "net_result", "net_return_pct",
                "target_met", "exit_reason", "exit_note",
