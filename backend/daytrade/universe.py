@@ -31,9 +31,18 @@ logger = logging.getLogger("cfm.daytrade")
 
 def _evaluate(symbol: str) -> dict:
     """One ticker's screener readout. Never raises — a fetch failure is
-    recorded as a failed candidate, not a crash of the whole nightly sweep."""
+    recorded as a failed candidate, not a crash of the whole nightly sweep.
+
+    force=True: get_daily's 12h cache is fine for a read-heavy path like a
+    scan, but wrong here — the screener's whole job is to capture the most
+    recently COMPLETED session's high/low/close, and a same-day cache entry
+    (e.g. from an earlier "Rescan now" before that session even closed) can
+    be under 12h old while still predating today's close. Without this, the
+    after-close scheduled run can silently re-serve that stale pre-close
+    frame instead of the real closing data, and every screen after it keeps
+    inheriting the same frozen prior-day levels."""
     try:
-        df = data_handler.get_daily(symbol)
+        df = data_handler.get_daily(symbol, force=True)
     except Exception as e:  # noqa: BLE001 — one bad symbol must not sink the sweep
         return {"symbol": symbol, "qualified": False, "reason": f"data unavailable: {e}"}
     if df is None or df.empty:
@@ -97,8 +106,11 @@ def screen(tickers: list[str] | None = None, now: datetime | None = None,
     # get_daily() calls run one at a time, and on a cold cache (e.g. right
     # after importing a large CSV of names never fetched before) that means
     # serial, rate-limited network calls — minutes instead of seconds for a
-    # roster in the hundreds/thousands.
-    data_handler.prefetch(tickers)
+    # roster in the hundreds/thousands. force=True to match _evaluate's own
+    # force=True below — otherwise this warms the cache respecting the 12h
+    # TTL, _evaluate force-fetches anyway, and the parallel warm-up was
+    # wasted work instead of where the real fetching happens.
+    data_handler.prefetch(tickers, force=True)
 
     screened = [_evaluate(t) for t in tickers]
     qualified = [r for r in screened if r.get("qualified")]
