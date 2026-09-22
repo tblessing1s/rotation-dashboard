@@ -195,6 +195,103 @@ def test_sell_shares_books_realized_pnl(store):
     assert log.find_position(st, "KO")["shares"]["count"] == 0
 
 
+# ---- SHARES closed-cycle records (Closed cycles / History tab) ---------------
+# Before this coverage, "Closed cycles" (win rate, avg return, avg juice/week)
+# was silently empty for EVERY shares-primary exit — the derivation in
+# logging_handler.recompute_derived only ever watched for buy_leap -> close_leap,
+# which no shares position uses. These pin the shares-base analog.
+def test_shares_cycle_recorded_on_full_exit_via_sell_shares(store):
+    _buy_shares("KO", 100, 50.0)
+    executor.execute({"action": "sell_shares", "ticker": "KO", "qty": 100,
+                      "price_per_share": 55.0, "stock_price": 55.0})
+    st = log.load_state()
+    assert len(st["cycles"]) == 1
+    c = st["cycles"][0]
+    assert c["ticker"] == "KO"
+    assert c["structure"] == position_types.SHARES
+    assert c["capital_deployed"] == 5000.0
+    assert c["gross_juice"] == 0.0            # no covered calls sold
+    assert c["leap_pnl"] == 500.0             # realized shares P&L, same field
+    assert c["net_result"] == 500.0
+    assert c["net_return_pct"] == 10.0
+    # No exit_reason was passed to sell_shares -> not a recognized coded reason.
+    assert c["exit_reason"] == exit_reasons.ExitReason.LEGACY_UNRECORDED
+
+    hist = log.load_state()
+    import history
+    view = history.view(hist)
+    assert view["aggregates"]["count"] == 1
+    assert view["aggregates"]["win_rate"] == 100.0
+
+
+def test_shares_cycle_recorded_on_called_away_assignment(store):
+    _buy_shares("KO", 200, 60.0)
+    _sell_short("KO", 62.0, 2, 1.0, 60.0)
+    executor.execute({"action": "close_shares_assigned", "ticker": "KO",
+                      "strike": 62.0, "contracts": 2, "stock_price": 63.0})
+    st = log.load_state()
+    close = next(e for e in st["executions"] if e["action"] == "close_short")
+    c = st["cycles"][0]
+    assert c["ticker"] == "KO"
+    assert c["exit_reason"] == exit_reasons.ExitReason.CALLED_AWAY
+    assert c["leap_pnl"] == 400.0                       # proceeds 62*200 vs 60 cost basis
+    assert c["gross_juice"] == close["net_juice_total"]  # the assignment's own close_short
+    assert c["net_result"] == round(400.0 + close["net_juice_total"], 2)
+
+
+def test_shares_cycle_sums_capital_across_scale_ins(store):
+    _buy_shares("KO", 200, 60.0)
+    _buy_shares("KO", 100, 63.0)  # scale-in before any exit
+    executor.execute({"action": "sell_shares", "ticker": "KO", "qty": 300,
+                      "price_per_share": 65.0, "stock_price": 65.0})
+    c = log.load_state()["cycles"][0]
+    assert c["capital_deployed"] == round(200 * 60 + 100 * 63, 2)
+
+
+def test_shares_cycle_closed_via_reconciliation_adjustment(store):
+    # The reported incident this closes the loop on: shares sold manually at the
+    # broker (outside the app), corrected here with a compensating EQUITY
+    # adjustment rather than a real sell_shares fill. No trade price exists for
+    # it, so the cycle books zero realized P&L rather than a fabricated one, and
+    # is coded RECONCILIATION instead of LEGACY_UNRECORDED.
+    _buy_shares("IBIT", 100, 60.0)
+    executor.execute({"action": "adjustment", "ticker": "IBIT", "instrument_type": "EQUITY",
+                      "quantity_delta": -100,
+                      "reason": "shares sold manually at the broker (TOS)"})
+    st = log.load_state()
+    assert log.find_position(st, "IBIT")["status"] == "closed"
+    assert len(st["cycles"]) == 1
+    c = st["cycles"][0]
+    assert c["ticker"] == "IBIT"
+    assert c["capital_deployed"] == 6000.0
+    assert c["leap_pnl"] == 0.0
+    assert c["net_result"] == 0.0
+    assert c["exit_reason"] == exit_reasons.ExitReason.RECONCILIATION
+    assert c["exit_note"] == "shares sold manually at the broker (TOS)"
+
+
+def test_shares_cycle_wash_sale_flagged_on_reentry(store):
+    _buy_shares("KO", 100, 60.0)
+    executor.execute({"action": "sell_shares", "ticker": "KO", "qty": 100,
+                      "price_per_share": 55.0, "stock_price": 55.0})  # loss: -500
+    _buy_shares("KO", 100, 56.0)  # same-day reentry -> inside the wash-sale window
+    c = log.load_state()["cycles"][0]
+    assert c["leap_pnl"] == -500.0
+    assert c["wash_sale"]["status"] == "flagged"
+    assert c["wash_sale"]["loss"] == -500.0
+
+
+def test_shares_cycle_not_closed_by_a_partial_trim(store):
+    # Selling PART of the position must not close (or fabricate a P&L for) a
+    # cycle — only the running share count reaching zero does.
+    _buy_shares("KO", 300, 60.0)
+    executor.execute({"action": "sell_shares", "ticker": "KO", "qty": 100,
+                      "price_per_share": 65.0, "stock_price": 65.0})
+    st = log.load_state()
+    assert st["cycles"] == []
+    assert log.find_position(st, "KO")["shares"]["count"] == 200
+
+
 # ---- Burn / payback provably absent for SHARES -------------------------------
 def test_shares_have_no_payback_meter_but_legacy_do(store):
     _buy_shares("KO", 100, 60.0)                    # SHARES
