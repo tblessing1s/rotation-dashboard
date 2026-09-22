@@ -219,6 +219,11 @@ def api_scan_ready():
                 "route": r.get("route"),
                 "juice_weekly_pct": r.get("juice_weekly_pct"),
                 "net_juice_weekly_pct": r.get("net_juice_weekly_pct"),
+                # SHADOW, zero authority (juice_capacity.py) — the trailing MEDIAN
+                # of the same full-week estimate, so a compressed or one-off
+                # inflated spot read doesn't stand in for what the name actually
+                # pays over time. Ranking/gating above never reads this field.
+                "juice_capacity": r.get("juice_capacity"),
                 "earnings_date": r.get("earnings_date"),
                 "earnings_trigger": r.get("earnings_trigger"),
                 "level5": l5,
