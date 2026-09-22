@@ -60,6 +60,10 @@ def _screen_path(day: str) -> str:
     return os.path.join(STORE_DIR, f"{day}.json")
 
 
+def _screen_health_path() -> str:
+    return os.path.join(STORE_DIR, "screen_health.json")
+
+
 def _bars_path(day: str) -> str:
     return os.path.join(STORE_DIR, f"{day}.bars.jsonl")
 
@@ -93,6 +97,40 @@ def load_screen(day: str) -> dict | None:
         return None
     with open(path, encoding="utf-8") as fh:
         return json.load(fh)
+
+
+def save_screen_health(entry: dict) -> None:
+    """Overwrite the one 'last successful screen' record — not a history,
+    just the single latest success, keyed by trigger ("scheduled" | "manual")
+    so the SCHEDULED after-close run's own health (the thing an operator
+    actually needs to trust — "did last night's job really run" — without
+    watching the app around 4:45pm ET) is never masked by an unrelated manual
+    "Rescan now" click. Same atomic-write shape as save_screen."""
+    _ensure_dir()
+    path = _screen_health_path()
+    with _lock:
+        current = load_screen_health()
+        current[entry["trigger"]] = entry
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(current, fh, indent=2, sort_keys=True, default=str)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+
+
+def load_screen_health() -> dict:
+    """{"scheduled": {...}, "manual": {...}} — each present only once a
+    screen has actually succeeded with that trigger. Never raises: a
+    missing/corrupt file just means "no recorded success yet"."""
+    path = _screen_health_path()
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return {}
 
 
 def append_bars(day: str, rows: list[dict]) -> int:

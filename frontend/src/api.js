@@ -140,6 +140,11 @@ export const api = {
   // CFM's own universe: POST kicks it off and returns immediately, GET polls.
   daytradeUniverseRescan: () => request("/api/daytrade/universe/rescan", { method: "POST" }),
   daytradeUniverseRescanStatus: () => request("/api/daytrade/universe/rescan/status"),
+  // Last successful screen per trigger ("scheduled" — the once-per-trading-
+  // day after-close job — vs "manual" — the last Rescan-now click) — the
+  // operator's actual "did last night's job run" answer. SHARED, like
+  // daytradeUniverse/Prices.
+  daytradeScreenHealth: () => request("/api/daytrade/screen-health"),
   daytradeSignals: (date, symbol) => {
     const q = new URLSearchParams();
     if (date) q.set("date", date);

@@ -161,7 +161,7 @@ def _run_screen(now: datetime) -> None:
         # "today's screen" by exact date match, so filing under today would
         # leave every trading day's own window with nothing to read, forever.
         target = market_calendar.next_trading_day(now.date())
-        result = universe.screen(now=now, date_override=target)
+        result = universe.screen(now=now, date_override=target, trigger="scheduled")
         logger.info("daytrade screener: %d pick(s) from %d screened, filed for %s",
                      len(result["picks"]), len(result["screened"]), result["date"])
     except Exception as e:  # noqa: BLE001 — best-effort, never fatal to the tick
