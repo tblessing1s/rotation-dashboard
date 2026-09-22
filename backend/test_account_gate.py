@@ -599,6 +599,26 @@ def test_scan_ready_sorts_multiple_ready_rows_by_juice_descending(isolated_state
     assert [r["ticker"] for r in body["eligible"]] == ["HIGH", "LOW"]
 
 
+def test_scan_ready_passes_through_juice_capacity_shadow_field(isolated_state, monkeypatch):
+    """juice_capacity (backend/juice_capacity.py) is computed on the sweep row
+    and must ride through to the entry unmodified — additive, zero authority,
+    never consulted by the eligible/blocked split above it."""
+    from metrics import scorecard as scorecard_metrics
+    import app as app_module
+
+    cap = {"capacity_wk_pct": 1.42, "status": "OK", "obs": 40,
+          "shadow": True, "blocking": False}
+    rows = [{"ticker": "AAA", "sector": "XLK", "verdict": "ELIGIBLE",
+             "juice_weekly_pct": 1.0, "earnings_date": None, "juice_capacity": cap}]
+    monkeypatch.setattr(scorecard_metrics, "scorecard_warm",
+                        lambda price_overrides=None: {"as_of": "x", "results": rows})
+    monkeypatch.setattr(account_gate, "evaluate_many", lambda tickers, contracts=None: {
+        t: {"pass": True, "blocking_failures": []} for t in tickers})
+
+    body = app_module.app.test_client().get("/api/scan/ready").get_json()
+    assert body["eligible"][0]["juice_capacity"] == cap
+
+
 def test_scan_ready_fetches_live_quote_on_demand_so_go_clears(isolated_state, monkeypatch):
     # A GO name that the tiered poller never quoted (not on-deck) must get a live
     # quote fetched on demand during the scan, so it clears instead of being held

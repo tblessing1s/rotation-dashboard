@@ -1,4 +1,4 @@
-"""Scan (regime scorecard, gate telemetry, structure) (11 routes) — split out of the former monolithic app.py."""
+"""Scan (regime scorecard, gate telemetry, structure) (12 routes) — split out of the former monolithic app.py."""
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
@@ -420,6 +420,46 @@ def api_scan_candidate_universe():
     try:
         import candidate_universe
         return jsonify(candidate_universe.report())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@scan_bp.route("/api/scan/juice-capacity-backfill", methods=["POST"])
+def api_juice_capacity_backfill():
+    """Bootstrap the trailing juice-CAPACITY history (juice_capacity.py) by
+    replaying the scan's own juice math over each symbol's already-cached daily
+    bars — an exact reconstruction of what the scan WOULD have shown on each
+    past date, not an approximation. Without this, a name's capacity median
+    (SHADOW, zero authority) reads INSUFFICIENT_HISTORY until ~a month of daily
+    scans has accrued it one observation at a time.
+
+    A full-universe replay is a multi-minute, CPU-bound job, so it runs the
+    same way the full scan sweep does: a detached daemon thread, deduped (one
+    backfill at a time), the response returning immediately and the client
+    polling /api/scan/juice-capacity-backfill/status. Optional JSON body:
+    {tickers: [...]} to scope it, {force: true} to re-replay names that
+    already carry backfilled history, {step: N} to sample every Nth cached bar
+    (cheaper, coarser). Never wired into the nightly sweep — an operator (or
+    this endpoint) has to ask for it."""
+    body = request.get_json(silent=True) or {}
+    raw = body.get("tickers")
+    tickers = ([str(t).strip().upper() for t in raw if str(t).strip()]
+              if isinstance(raw, list) else None)
+    try:
+        import juice_capacity
+        return jsonify(juice_capacity.start_background_backfill(
+            tickers, force=bool(body.get("force")), step=int(body.get("step") or 1)))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@scan_bp.route("/api/scan/juice-capacity-backfill/status")
+def api_juice_capacity_backfill_status():
+    """Poll the background capacity backfill: idle / running / done / error,
+    timestamps, and the last run's per-symbol summary once it lands."""
+    try:
+        import juice_capacity
+        return jsonify(juice_capacity.backfill_status())
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

@@ -426,6 +426,136 @@ def test_backfill_is_anchored_at_bar_zero(store, monkeypatch):
 
 
 # ===========================================================================
+# 7.5 Background runner — detached, deduped, pollable (scan_bp.py's
+#     POST/GET .../juice-capacity-backfill wraps this directly)
+# ===========================================================================
+@pytest.fixture
+def bg(monkeypatch):
+    """A clean background-runner slate. start_background_backfill mutates the
+    module-global thread/state IN PLACE, so a fresh object per test (restored
+    by monkeypatch afterward) is what keeps tests from leaking a live thread
+    or a stale status into one another."""
+    monkeypatch.setattr(jc, "_backfill_thread", None, raising=False)
+    monkeypatch.setattr(jc, "_backfill_state",
+                        {"status": "idle", "started_at": None, "finished_at": None,
+                         "result": None, "error": None}, raising=False)
+    yield
+
+
+def test_backfill_status_starts_idle(bg):
+    assert jc.backfill_status() == {
+        "status": "idle", "started_at": None, "finished_at": None,
+        "result": None, "error": None, "running": False,
+    }
+
+
+def test_start_background_backfill_runs_to_completion(shares_mode, store, bg, monkeypatch):
+    import data_handler
+    import dividends
+    df = pd.read_parquet(os.path.join(FIX_STRUCT, "early_advance_low_juice.parquet"))
+    monkeypatch.setattr(data_handler, "get_daily", lambda t, force=False: df)
+    monkeypatch.setattr(dividends, "cached_annual_yield_pct", lambda t, state=None: None)
+
+    st = jc.start_background_backfill(["LOWVOL"])
+    assert st["running"] is True and st["status"] == "running"
+
+    jc._backfill_thread.join(timeout=10)
+    final = jc.backfill_status()
+    assert final["running"] is False and final["status"] == "done"
+    assert final["result"]["ok"] and final["result"]["symbols"] == 1
+    assert final["result"]["observations"] > 200
+    # The same store a direct jc.backfill(["LOWVOL"]) call would have written —
+    # the background runner is a thin wrapper, not a second code path.
+    assert jc.series("LOWVOL")[-1]["source"] == jc.SOURCE_BACKFILL_BAR_REPLAY
+
+
+def test_start_background_backfill_dedupes_concurrent_calls(store, bg, monkeypatch):
+    """A call that lands while a backfill is already in flight must not start
+    a second thread or a second backfill() — it only reports the in-flight
+    status. Deterministic via a fake backfill() gated by threading.Events
+    rather than a timing race."""
+    import threading
+    calls = []
+    started = threading.Event()
+    release = threading.Event()
+
+    def _fake_backfill(tickers=None, force=False, step=1):
+        calls.append((tuple(tickers or []), force, step))
+        started.set()
+        assert release.wait(timeout=5)
+        return {"ok": True, "symbols": 1, "observations": 10, "skipped": []}
+
+    monkeypatch.setattr(jc, "backfill", _fake_backfill)
+
+    st1 = jc.start_background_backfill(["AAA"])
+    assert st1["running"] is True
+    assert started.wait(timeout=5)
+
+    st2 = jc.start_background_backfill(["BBB"])  # concurrent — must dedupe
+    assert st2["running"] is True and st2["status"] == "running"
+
+    release.set()
+    jc._backfill_thread.join(timeout=5)
+    final = jc.backfill_status()
+    assert final["status"] == "done"
+    assert final["result"]["symbols"] == 1
+    assert calls == [(("AAA",), False, 1)]  # only the FIRST call's args ran
+
+
+def test_start_background_backfill_records_a_failure(store, bg, monkeypatch):
+    monkeypatch.setattr(jc, "backfill", lambda tickers=None, force=False, step=1:
+                        {"ok": False, "error": "boom"})
+    st = jc.start_background_backfill(["AAA"])
+    assert st["running"] is True
+    jc._backfill_thread.join(timeout=5)
+    final = jc.backfill_status()
+    assert final["status"] == "error"
+    assert final["error"] == "boom"
+    assert final["result"] is None
+
+
+# ---- HTTP wiring: POST kicks it off, GET polls (scan_bp.py) ---------------
+def test_route_starts_backfill_and_forwards_body(bg, monkeypatch):
+    import app as app_module
+
+    captured = {}
+    def _fake_start(tickers, *, force=False, step=1):
+        captured.update(tickers=tickers, force=force, step=step)
+        return {"status": "running", "running": True}
+    monkeypatch.setattr(jc, "start_background_backfill", _fake_start)
+
+    client = app_module.app.test_client()
+    resp = client.post("/api/scan/juice-capacity-backfill",
+                       json={"tickers": ["aaa", "bbb"], "force": True, "step": 5})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "running", "running": True}
+    assert captured == {"tickers": ["AAA", "BBB"], "force": True, "step": 5}
+
+
+def test_route_defaults_to_whole_universe_no_force_step_one(bg, monkeypatch):
+    import app as app_module
+
+    captured = {}
+    def _fake_start(tickers, *, force=False, step=1):
+        captured.update(tickers=tickers, force=force, step=step)
+        return {"status": "running", "running": True}
+    monkeypatch.setattr(jc, "start_background_backfill", _fake_start)
+
+    resp = app_module.app.test_client().post("/api/scan/juice-capacity-backfill")
+    assert resp.status_code == 200
+    assert captured == {"tickers": None, "force": False, "step": 1}
+
+
+def test_route_status_polls_backfill_status(bg, monkeypatch):
+    import app as app_module
+    monkeypatch.setattr(jc, "backfill_status",
+                        lambda: {"status": "done", "running": False, "result": {"symbols": 3}})
+    resp = app_module.app.test_client().get("/api/scan/juice-capacity-backfill/status")
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "done", "running": False, "result": {"symbols": 3}}
+
+
+# ===========================================================================
 # 8. NO AUTHORITY — the load-bearing invariant
 # ===========================================================================
 _AUTHORITY_KEYS = ("verdict", "verdict_reasons", "binding", "triggers",
