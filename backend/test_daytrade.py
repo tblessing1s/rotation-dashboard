@@ -63,6 +63,29 @@ def test_load_screen_missing_day_returns_none(tmp_store):
     assert store.load_screen("2026-01-01") is None
 
 
+def test_load_screen_health_with_no_file_returns_empty_dict(tmp_store):
+    assert store.load_screen_health() == {}
+
+
+def test_save_screen_health_keys_by_trigger_without_clobbering(tmp_store):
+    store.save_screen_health({"trigger": "scheduled", "succeeded_at": "2026-09-21T21:25:00+00:00",
+                               "date": "2026-09-22", "picks": 12, "screened": 1298})
+    store.save_screen_health({"trigger": "manual", "succeeded_at": "2026-09-22T13:14:00+00:00",
+                               "date": "2026-09-22", "picks": 10, "screened": 1298})
+
+    health = store.load_screen_health()
+
+    assert health["scheduled"]["picks"] == 12
+    assert health["manual"]["picks"] == 10
+
+    # A later scheduled success overwrites only the scheduled entry.
+    store.save_screen_health({"trigger": "scheduled", "succeeded_at": "2026-09-22T21:25:00+00:00",
+                               "date": "2026-09-23", "picks": 15, "screened": 1298})
+    health = store.load_screen_health()
+    assert health["scheduled"]["date"] == "2026-09-23"
+    assert health["manual"]["date"] == "2026-09-22"  # untouched
+
+
 def test_append_and_load_bars_filters_by_symbol(tmp_store):
     store.append_bars("2026-09-14", [
         {"symbol": "ABC", "datetime": "2026-09-14T13:30:00+00:00", "close": 45.0},
@@ -193,6 +216,22 @@ def test_screen_prefetches_and_evaluates_with_force_true(tmp_store, monkeypatch)
 
     assert calls["prefetch_force"] is True
     assert calls["get_daily_force"] == [True]
+
+
+def test_screen_records_success_under_its_own_trigger(tmp_store, monkeypatch):
+    monkeypatch.setattr(universe.data_handler, "get_daily",
+                        lambda t, force=False: _frame(price=100.0, spread=3.0, volume=2_000_000))
+
+    universe.screen(tickers=["GOOD"], now=datetime(2026, 9, 14, tzinfo=ET), trigger="scheduled")
+    health = store.load_screen_health()
+    assert health["scheduled"]["date"] == "2026-09-14"
+    assert health["scheduled"]["picks"] == 1
+    assert "manual" not in health
+
+    universe.screen(tickers=["GOOD"], now=datetime(2026, 9, 15, tzinfo=ET))  # default trigger="manual"
+    health = store.load_screen_health()
+    assert health["manual"]["date"] == "2026-09-15"
+    assert health["scheduled"]["date"] == "2026-09-14"  # untouched by the manual run
 
 
 def test_screen_date_override_files_under_a_different_date_than_now(tmp_store, monkeypatch):
@@ -572,6 +611,10 @@ def test_maybe_screen_files_the_result_under_the_next_trading_day(monkeypatch, t
     monday = store.load_screen("2026-09-21")             # filed for the next trading day
     assert monday is not None
     assert monday["picks"][0]["symbol"] == "GOOD"
+
+    health = store.load_screen_health()
+    assert health["scheduled"]["date"] == "2026-09-21"
+    assert "manual" not in health
 
 
 def test_for_each_enabled_account_isolates_one_accounts_exception(monkeypatch):

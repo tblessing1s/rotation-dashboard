@@ -28,6 +28,13 @@ const timeOf = (iso) => (iso ? `${iso.slice(11, 16)} ET` : "—");
 // `computed_at` is stored in UTC (unlike the bar/event timestamps above) —
 // this converts to the VIEWER's own local time instead of assuming an offset.
 const localTime = (iso) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—");
+// Same UTC->viewer-local conversion as localTime, but with the date too —
+// "last successful scan" can be from a day other than today (an overnight
+// job that hasn't fired since, or one that failed last night), so a bare
+// time alone would be ambiguous about which day it's from.
+const localDateTime = (iso) => (iso
+  ? new Date(iso).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })
+  : "—");
 const money = (n) =>
   n == null ? "—" : `${n < 0 ? "-" : ""}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const rMult = (n) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}R`);
@@ -131,6 +138,26 @@ function UniverseTable({ picks, prices, quotes }) {
         </tbody>
       </table>
     </div>
+  );
+}
+
+// "Did last night's automated job actually run" — the ONE thing that answers
+// that without watching the app around 4:45pm ET. Separate from the manual
+// success line: a Rescan-now click succeeding must never make it LOOK like
+// the scheduled job is healthy when it silently isn't (see universe.screen's
+// trigger param / store.save_screen_health).
+function ScreenHealthLine({ health }) {
+  const scheduled = health?.scheduled;
+  const manual = health?.manual;
+  return (
+    <p className="text-[11px] text-slate-500">
+      {scheduled
+        ? <>Last overnight scan <span className="text-slate-300">{localDateTime(scheduled.succeeded_at)}</span> — {scheduled.picks} picks from {scheduled.screened} screened</>
+        : <span className="text-amber-300">No successful overnight scan recorded yet</span>}
+      {manual && (
+        <span className="text-slate-600"> · last manual {localDateTime(manual.succeeded_at)}</span>
+      )}
+    </p>
   );
 }
 
@@ -815,11 +842,12 @@ export default function DayTradePanel() {
     finally { setToggleBusy(false); }
   }
 
-  // Live sizing budget and trial progress — independent of `date` (both are
-  // always "right now"/"overall"), so they get their own poll rather than
-  // riding the per-date fetch below.
+  // Live sizing budget, trial progress, and last-successful-screen health —
+  // independent of `date` (all "right now"/"overall"), so they get their own
+  // poll rather than riding the per-date fetch below.
   const { data: budget } = useApi(() => api.daytradeBudget(), [], 60000);
   const { data: trial } = useApi(() => api.daytradeTrial(), [], 60000);
+  const { data: screenHealth, reload: reloadScreenHealth } = useApi(() => api.daytradeScreenHealth(), [], 60000);
 
   // Adaptive poll cadence: the baseline (60s) is fine while nothing's close
   // to happening, but once a setup is armed (watching for a breakout) or a
@@ -947,8 +975,11 @@ export default function DayTradePanel() {
                 <h4 className="text-xs font-semibold text-slate-300">
                   {data.universe.ran ? "Screener picks" : "Screener hasn't run for this date"}
                 </h4>
-                {date === todayISO() && <RescanButton onComplete={reload} />}
+                {date === todayISO() && (
+                  <RescanButton onComplete={() => { reload(); reloadScreenHealth(); }} />
+                )}
               </div>
+              <ScreenHealthLine health={screenHealth} />
               <UniverseTable picks={data.universe.picks} prices={data.prices.prices} quotes={data.quotes.quotes} />
             </section>
 

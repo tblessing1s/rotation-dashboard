@@ -86,7 +86,7 @@ def rank(qualified: list[dict]) -> list[dict]:
 
 
 def screen(tickers: list[str] | None = None, now: datetime | None = None,
-           date_override: date | None = None) -> dict:
+           date_override: date | None = None, trigger: str = "manual") -> dict:
     """Run the nightly screener once and persist the result. Returns the same
     dict that gets written to disk.
 
@@ -95,7 +95,12 @@ def screen(tickers: list[str] | None = None, now: datetime | None = None,
     trading day (see its module docstring: today's close feeds tomorrow's
     prior-day levels), since bar ingest and the signal engine both look up
     "today's screen" by exact date match. An on-demand "Rescan now" leaves
-    this unset and files under today, same-day, as before."""
+    this unset and files under today, same-day, as before.
+
+    ``trigger`` ("scheduled" | "manual") records this run's success
+    separately per trigger (store.save_screen_health) — an operator's actual
+    question is "did LAST NIGHT'S automated job run," which a manual
+    "Rescan now" success must never quietly answer for it."""
     now = now or datetime.now(timezone.utc)
     target_date = date_override or now.date()
     tickers = tickers if tickers is not None else daytrade_tickers.all_tickers()
@@ -124,6 +129,13 @@ def screen(tickers: list[str] | None = None, now: datetime | None = None,
         "screened": screened,
     }
     store.save_screen(result)
+    store.save_screen_health({
+        "trigger": trigger,
+        "succeeded_at": datetime.now(timezone.utc).isoformat(),
+        "date": result["date"],
+        "picks": len(picks),
+        "screened": len(screened),
+    })
     if len(picks) < config.DAYTRADE_UNIVERSE_MIN:
         logger.warning("daytrade screener: only %d name(s) qualified (rule 1 wants %d-%d)",
                         len(picks), config.DAYTRADE_UNIVERSE_MIN, config.DAYTRADE_UNIVERSE_MAX)

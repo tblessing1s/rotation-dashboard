@@ -54,6 +54,19 @@ def api_daytrade_universe_rescan_status():
         return _err(e)
 
 
+@daytrade_bp.route("/api/daytrade/screen-health")
+def api_daytrade_screen_health():
+    """Last successful screener run, by trigger ("scheduled" — the once-per-
+    trading-day after-close job, i.e. this app's answer to "did last night's
+    job actually run" — and "manual" — the last "Rescan now" click). Empty
+    for a trigger that has never succeeded. SHARED, like /universe and
+    /prices."""
+    try:
+        return jsonify(daytrade_store.load_screen_health())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @daytrade_bp.route("/api/daytrade/bars/<symbol>")
 def api_daytrade_bars(symbol: str):
     """Phase 1 read-only view of the day-trade sleeve's ingested 5-min bars
