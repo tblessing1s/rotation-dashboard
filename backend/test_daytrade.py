@@ -154,6 +154,47 @@ def test_screen_picks_qualifying_names_and_records_prior_day_levels(tmp_store, m
     assert store.load_screen("2026-09-14")["picks"][0]["symbol"] == "GOOD"
 
 
+def test_screen_forces_a_fresh_fetch_past_get_dailys_12h_cache(tmp_store, monkeypatch):
+    """Regression: the screener's whole job is to capture the most recently
+    COMPLETED session's high/low/close. get_daily's 12h cache is fine for a
+    read-heavy path, but wrong here — a same-day-earlier cache entry (e.g.
+    from a pre-market "Rescan now") can be under 12h old while still
+    predating today's close, and a non-forced read would silently keep
+    serving that stale pre-close frame forever after."""
+    stale = _frame(price=90.0, spread=3.0, volume=2_000_000)   # what a non-forced read would serve
+    fresh = _frame(price=100.0, spread=3.0, volume=2_000_000)  # the actual just-closed session
+
+    def fake_get_daily(t, force=False):
+        return fresh if force else stale
+    monkeypatch.setattr(universe.data_handler, "get_daily", fake_get_daily)
+
+    result = universe.screen(tickers=["GOOD"], now=datetime(2026, 9, 14, tzinfo=ET))
+
+    assert result["screened"][0]["price"] == 100.0
+
+
+def test_screen_prefetches_and_evaluates_with_force_true(tmp_store, monkeypatch):
+    """The parallel prefetch warm-up must force too, or it warms the cache
+    respecting the stale-same-day entry while _evaluate force-fetches
+    anyway — wasting the parallel warm-up instead of doing the real fetching
+    there."""
+    calls: dict = {}
+
+    def fake_prefetch(tickers, force=False):
+        calls["prefetch_force"] = force
+    monkeypatch.setattr(universe.data_handler, "prefetch", fake_prefetch)
+
+    def fake_get_daily(t, force=False):
+        calls.setdefault("get_daily_force", []).append(force)
+        return _frame(price=100.0, spread=3.0, volume=2_000_000)
+    monkeypatch.setattr(universe.data_handler, "get_daily", fake_get_daily)
+
+    universe.screen(tickers=["GOOD"], now=datetime(2026, 9, 14, tzinfo=ET))
+
+    assert calls["prefetch_force"] is True
+    assert calls["get_daily_force"] == [True]
+
+
 def test_screen_date_override_files_under_a_different_date_than_now(tmp_store, monkeypatch):
     """The scheduler's after-close run needs this: `now` stays the real run
     time (so computed_at is honest) while the saved file's date is the day
