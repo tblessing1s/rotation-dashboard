@@ -37,6 +37,37 @@ const REASON_LABELS = {
 
 const label = (id) => REASON_LABELS[id] || id;
 
+// Trailing juice CAPACITY — SHADOW, zero authority (backend/juice_capacity.py).
+// The spot juice%/wk above is always priced as one full Friday-to-Friday week
+// (never a partial week with most of the extrinsic already decayed away), but
+// it is still a single day's read: a name in a quiet IV stretch can spot-read
+// well above what it actually pays on average. This badge is the trailing
+// MEDIAN of that same full-week estimate — median, not mean, so it isn't
+// dragged around by a handful of unusually rich or thin weeks either. It
+// ranks nothing and blocks nothing; it exists purely so "what does this
+// actually average" is visible next to "what does it read today".
+function CapacityBadge({ capacity }) {
+  if (!capacity) return null;
+  if (capacity.status !== "OK") {
+    return (
+      <span
+        title={`Trailing juice capacity not measured yet — needs ${capacity.min_obs} daily reads (has ${capacity.obs}). Not "no juice"; just not enough history.`}
+        className="rounded bg-slate-800/60 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-slate-500"
+      >
+        cap —
+      </span>
+    );
+  }
+  return (
+    <span
+      title={`Trailing juice CAPACITY (SHADOW, no authority): median combined weekly yield over the last ${capacity.obs} trading day(s) read (window ${capacity.window_days}d). This is what the name has actually averaged, not today's spot estimate.`}
+      className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums text-violet-300"
+    >
+      cap {fmt(capacity.capacity_wk_pct, 2)}%/wk
+    </span>
+  );
+}
+
 // Route badge — advisory only. This says how the entry would be made, never that
 // it should be. No order is constructed from it anywhere.
 function RouteBadge({ route }) {
@@ -155,6 +186,7 @@ export default function ReadyToEnter({ onSelectStock, refreshKey, scanRunning })
                       : `Weekly juice on one FULL Friday-to-Friday week — the same basis for every name, whatever day the scan runs.${r.first_call_expiration ? ` First call: exp ${r.first_call_expiration} (${r.first_call_dte} DTE)${r.first_call_pct_to_expiry != null ? `, ≈ ${fmt(r.first_call_pct_to_expiry, 2)}% to expiry` : ""}.` : ""}`}>
                 {fmt(r.juice_weekly_pct, 2)}%/wk
               </span>
+              <CapacityBadge capacity={r.juice_capacity} />
               <span className="text-xs text-slate-600">{r.sector}</span>
             </li>
           ))}
