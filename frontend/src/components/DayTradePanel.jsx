@@ -18,15 +18,16 @@ const addDays = (iso, n) => {
   return d.toISOString().slice(0, 10);
 };
 
-// Bar/event timestamps are already stamped in ET (market time — see
-// schwab_api.get_intraday_bars), so slicing the string is correct; the " ET"
-// suffix is explicit rather than assumed, since the header ticker strip right
-// above this panel labels ITS times "Z" (UTC) — same-looking bare "HH:MM"
-// values in two different zones side by side is exactly how this got
-// misread as a wrong/frozen price rather than a correctly-labeled ET one.
-const timeOf = (iso) => (iso ? `${iso.slice(11, 16)} ET` : "—");
-// `computed_at` is stored in UTC (unlike the bar/event timestamps above) —
-// this converts to the VIEWER's own local time instead of assuming an offset.
+// Every timestamp this panel shows — bar/event times (stamped in ET, see
+// schwab_api.get_intraday_bars) and computed_at (stamped in UTC) alike —
+// carries its own real UTC offset in the ISO string, so `new Date(iso)`
+// parses it correctly regardless of source zone, and toLocaleTimeString
+// renders it in the VIEWER's own local time (whatever their OS/browser is
+// set to — DST-correct automatically, unlike hardcoding a fixed offset).
+// Bare local time, no zone suffix, matches this file's one convention: a
+// labeled zone ("Z" on the header ticker strip above this panel) only when
+// something is deliberately NOT local — see git history for why an earlier
+// version showed raw ET here instead and it read as a frozen/wrong price.
 const localTime = (iso) => (iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "—");
 // Same UTC->viewer-local conversion as localTime, but with the date too —
 // "last successful scan" can be from a day other than today (an overnight
@@ -124,7 +125,7 @@ function UniverseTable({ picks, prices, quotes }) {
                 </td>
                 <td className={`py-1.5 pr-3 text-right font-mono ${barTone}`}>
                   {live
-                    ? <>{live.close} <span className="text-[10px] text-slate-500">{timeOf(live.datetime)}</span></>
+                    ? <>{live.close} <span className="text-[10px] text-slate-500">{localTime(live.datetime)}</span></>
                     : "—"}
                 </td>
                 <td className="py-1.5 pr-3 text-right font-mono">{p.avg_volume?.toLocaleString()}</td>
@@ -634,7 +635,7 @@ function LiveStatusRow({ row }) {
         <p className="mt-1 text-[11px] text-slate-500">
           {priceKnown ? `${Math.round(pct)}% to breakout` : "no live price yet"} — needs a close{" "}
           {row.direction === "long" ? "above" : "below"} {trigger}
-          {priceKnown ? ` (bar ${row.current_price} as of ${timeOf(row.current_price_at)})` : ""}
+          {priceKnown ? ` (bar ${row.current_price} as of ${localTime(row.current_price_at)})` : ""}
         </p>
       </div>
     );
@@ -660,7 +661,7 @@ function LiveStatusRow({ row }) {
         <>
           <RMultiBar rNow={rNow} targetR={targetR} />
           <p className="mt-1 text-[11px] text-slate-500">
-            {rMult(rNow)} as of bar {timeOf(row.current_price_at)} — stop at -1R ({row.stop}), target at {rMult(targetR)} ({targetPrice})
+            {rMult(rNow)} as of bar {localTime(row.current_price_at)} — stop at -1R ({row.stop}), target at {rMult(targetR)} ({targetPrice})
           </p>
         </>
       ) : (
@@ -716,7 +717,7 @@ function SignalFeed({ events }) {
             const meta = EVENT_META[e.event] || { label: e.event, status: "unknown" };
             return (
               <tr key={e.id || `${e.symbol}-${e.event}-${e.at}`} className="border-t border-slate-800 text-slate-200">
-                <td className="py-1.5 pr-3 font-mono text-[11px] text-slate-400">{timeOf(e.at)}</td>
+                <td className="py-1.5 pr-3 font-mono text-[11px] text-slate-400">{localTime(e.at)}</td>
                 <td className="py-1.5 pr-3 font-mono font-semibold">{e.symbol}</td>
                 <td className="py-1.5 pr-3"><Pill status={meta.status}>{meta.label}</Pill></td>
                 <td className={`py-1.5 pr-3 font-mono text-[11px] uppercase ${e.direction === "long" ? "text-emerald-300" : e.direction === "short" ? "text-rose-300" : "text-slate-500"}`}>
@@ -759,7 +760,7 @@ function TradeLog({ trades }) {
                 {t.direction}
               </td>
               <td className="py-1.5 pr-3 font-mono text-[11px]">
-                {t.entry.price} · {t.entry.size}sh · {timeOf(t.entry.at)}
+                {t.entry.price} · {t.entry.size}sh · {localTime(t.entry.at)}
               </td>
               <td className="py-1.5 pr-3 text-[11px] text-slate-400">
                 {t.exits.length
