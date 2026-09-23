@@ -459,6 +459,51 @@ def test_bars_ingest_errors_when_every_candle_is_in_the_future(tmp_store, monkey
     assert store.load_bars("2026-09-14", "ABC") == []
 
 
+def test_bars_ingest_ignores_a_whole_prior_trading_days_candles(tmp_store, monkeypatch):
+    """Regression: right at/after today's open, before today's own candles
+    exist yet, a provider can hand back an entirely PRIOR day's full session
+    instead of today's partial one. Every one of those candles is trivially
+    `<= now` (they're all in the past) — a `<= now` filter alone lets the
+    whole stale session through, and iloc[-1] picks yesterday's last candle
+    (~15:55-16:00 ET) as if it were today's latest. Must be dated `day`, not
+    merely not-in-the-future."""
+    store.save_screen({"schema_version": 1, "date": "2026-09-14", "computed_at": "x",
+                        "picks": [{"symbol": "ABC"}], "screened": []})
+    now = datetime(2026, 9, 14, 9, 35, tzinfo=ET)
+    prior_day_only = _bars_df([
+        (datetime(2026, 9, 11, 9, 30, tzinfo=ET), 40.0),
+        (datetime(2026, 9, 11, 15, 55, tzinfo=ET), 44.0),   # yesterday's last candle
+    ])
+    monkeypatch.setattr(bars.data_handler, "client", lambda: _FakeClient({"ABC": prior_day_only}))
+
+    result = bars.ingest(now=now)
+
+    assert result["written"] == 0
+    assert "ABC" in result["errors"]
+    assert store.load_bars("2026-09-14", "ABC") == []
+
+
+def test_bars_ingest_picks_todays_candle_over_a_mixed_prior_day_batch(tmp_store, monkeypatch):
+    """The companion positive case: when the response mixes a real prior-day
+    tail with a genuine today candle, the today candle must win — the fix
+    isn't "reject anything old," it's "the latest candle must be FOR today"."""
+    store.save_screen({"schema_version": 1, "date": "2026-09-14", "computed_at": "x",
+                        "picks": [{"symbol": "ABC"}], "screened": []})
+    now = datetime(2026, 9, 14, 9, 40, tzinfo=ET)
+    mixed = _bars_df([
+        (datetime(2026, 9, 11, 15, 55, tzinfo=ET), 44.0),   # yesterday's last candle
+        (datetime(2026, 9, 14, 9, 35, tzinfo=ET), 46.5),    # today's real candle
+    ])
+    monkeypatch.setattr(bars.data_handler, "client", lambda: _FakeClient({"ABC": mixed}))
+
+    result = bars.ingest(now=now)
+
+    assert result["written"] == 1
+    loaded = store.load_bars("2026-09-14", "ABC")
+    assert loaded[0]["close"] == 46.5
+    assert loaded[0]["datetime"].startswith("2026-09-14T09:35")
+
+
 # ===========================================================================
 # scheduler.py — pure predicates
 # ===========================================================================
