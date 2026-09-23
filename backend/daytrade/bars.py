@@ -55,16 +55,26 @@ def ingest(now: datetime | None = None, symbols: list[str] | None = None) -> dic
     for symbol in symbols:
         try:
             candles = data_handler.client().get_intraday_bars(symbol, minutes=5)
-            # Some providers pad a same-day intraday response with slots for
-            # the rest of the session that haven't happened yet, carrying the
-            # last traded price forward under a not-yet-reached timestamp.
-            # Blindly taking iloc[-1] would then log a bar dated hours in the
-            # future relative to `now` — frozen at whatever price was current
-            # at fetch time, not the intraday move since. Drop anything not
-            # actually at or before `now` before picking the latest one.
-            candles = candles[candles.index <= now]
+            # Two distinct provider failure modes, neither caught by a bare
+            # `<= now` check alone:
+            #  1. Padding — a same-day response includes slots for the rest
+            #     of the session that haven't happened yet, carrying the
+            #     last traded price forward under a not-yet-reached
+            #     timestamp. `<= now` catches this one.
+            #  2. An entirely PRIOR trading day — e.g. right at/after today's
+            #     open, before today's own candles exist yet, the provider
+            #     hands back yesterday's full session instead of today's
+            #     partial one. Every one of those candles is trivially
+            #     `<= now` (they're all in the past), so `<= now` alone lets
+            #     a whole stale session straight through — iloc[-1] then
+            #     picks yesterday's last candle (typically ~15:55-16:00 ET)
+            #     as if it were today's latest, and the signal engine, which
+            #     correctly never sees a real in-window candle for today,
+            #     silently never evaluates the symbol at all. Require BOTH:
+            #     not after `now`, AND actually dated `day`.
+            candles = candles[(candles.index <= now) & (candles.index.strftime("%Y-%m-%d") == day)]
             if candles.empty:
-                raise ValueError("no candle at or before now")
+                raise ValueError("no candle for today at or before now")
             row = _bar_row(symbol, day, candles.iloc[-1])
         except Exception as e:  # noqa: BLE001 — one symbol's outage must not skip the rest
             errors[symbol] = str(e)
