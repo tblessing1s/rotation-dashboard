@@ -21,6 +21,7 @@ function UniverseCheck() {
   const [manage, setManage] = React.useState(false);
   const [sectors, setSectors] = React.useState(null);
   const [form, setForm] = React.useState({ ticker: "", sector: "" });
+  const [removeInput, setRemoveInput] = React.useState("");
   const [msg, setMsg] = React.useState(null);
 
   const run = async (weeklies) => {
@@ -64,6 +65,19 @@ function UniverseCheck() {
       // Drop it from the currently displayed dead-list without a full re-check.
       setRes((r) => r && !r.error ? { ...r, no_data: r.no_data.filter((d) => d.ticker !== ticker) } : r);
     } catch (e) { setMsg({ err: String(e.message || e) }); }
+  };
+
+  // Remove-by-name: the dead-ticker ✕ buttons only ever cover names a "Check
+  // universe" run happened to flag (no DAILY-BAR data) — a ticker whose bars
+  // are fine but whose QUOTE fetch keeps failing (a different, quote-only
+  // provider issue) never shows up there at all, and until now there was no
+  // other way in this panel to remove an arbitrary known-bad ticker without
+  // running a check first and hoping it got flagged.
+  const removeByName = async () => {
+    const ticker = removeInput.trim().toUpperCase();
+    if (!ticker) return;
+    await removeTicker(ticker);
+    setRemoveInput("");
   };
 
   const syncFromSeed = async () => {
@@ -141,6 +155,21 @@ function UniverseCheck() {
               Sync from seed
             </button>
             <span className="text-xs text-slate-600">to fix a ticker, remove the old and add the new</span>
+          </div>
+          <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-slate-800 pt-2">
+            <input
+              value={removeInput}
+              onChange={(e) => setRemoveInput(e.target.value.toUpperCase())}
+              onKeyDown={(e) => e.key === "Enter" && removeByName()}
+              placeholder="TICKER"
+              className="w-28 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-sm text-slate-100 placeholder:text-slate-600"
+            />
+            <button onClick={removeByName} disabled={!removeInput.trim()}
+                    title="Remove this ticker from the universe by name — no need to run a check first"
+                    className="rounded border border-rose-800 bg-rose-500/10 px-2.5 py-1 text-sm font-semibold text-rose-300 hover:bg-rose-500/20 disabled:opacity-50">
+              Remove
+            </button>
+            <span className="text-xs text-slate-600">doesn't need a "Check universe" run first — use this for a ticker whose quotes keep failing but whose daily bars are fine, which the check below won't catch</span>
           </div>
           {msg && (
             <p className={`mt-1 text-xs ${msg.err ? "text-rose-400" : "text-emerald-300"}`}>{msg.err || msg.ok}</p>
