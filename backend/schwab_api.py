@@ -17,6 +17,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
@@ -48,6 +49,7 @@ PRICE_HISTORY_URL = "https://api.schwabapi.com/marketdata/v1/pricehistory"
 QUOTES_URL = "https://api.schwabapi.com/marketdata/v1/quotes"
 OPTION_CHAIN_URL = "https://api.schwabapi.com/marketdata/v1/chains"
 INSTRUMENTS_URL = "https://api.schwabapi.com/marketdata/v1/instruments"
+_ET = ZoneInfo("America/New_York")
 ACCOUNTS_BASE = "https://api.schwabapi.com/trader/v1"
 
 REFRESH_TOKEN_TTL_DAYS = 7
@@ -592,18 +594,27 @@ class SchwabClient:
         return df
 
     def get_intraday_bars(self, symbol: str, minutes: int = 5) -> pd.DataFrame:
-        """Intraday candles for the CURRENT trading day only (periodType=day,
-        period=1) — the day-trade sleeve's signal window is same-day, so there
-        is no need (yet) for a multi-day intraday history the way
-        get_daily_bars covers a year. Index stays tz-aware US/Eastern (unlike
-        get_daily_bars, which normalizes to a bare date) — an intraday
-        candle's TIME is the point."""
+        """Intraday candles for the CURRENT trading day only. Index stays
+        tz-aware US/Eastern (unlike get_daily_bars, which normalizes to a
+        bare date) — an intraday candle's TIME is the point.
+
+        Bounded by explicit startDate/endDate (today's ET midnight -> now),
+        NOT periodType=day + period=1 — that combination leaves "which day"
+        to Schwab's own judgment, observed in production to sometimes mean
+        "the most recently COMPLETE trading day" rather than today's still-
+        in-progress session, silently handing back yesterday's candles under
+        no error at all. Same startDate-driven shape get_daily_bars already
+        uses, so there's no day left for Schwab to interpret."""
         schwab_symbol = SYMBOL_MAP.get(symbol, symbol)
+        now_et = datetime.now(_ET)
+        midnight_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
         resp = _request(
             "get", PRICE_HISTORY_URL,
             headers=self._auth_headers(),
-            params={"symbol": schwab_symbol, "periodType": "day", "period": 1,
+            params={"symbol": schwab_symbol, "periodType": "day",
                     "frequencyType": "minute", "frequency": minutes,
+                    "startDate": int(midnight_et.timestamp() * 1000),
+                    "endDate": int(now_et.timestamp() * 1000),
                     "needExtendedHoursData": "false"},
             timeout=30,
         )
