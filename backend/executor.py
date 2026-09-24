@@ -1877,6 +1877,19 @@ def _compute_txn_changes(e: dict, ed: dict) -> dict:
         # (see adopt_broker_trade), which otherwise silently misattributes
         # its juice to the wrong per-week/per-month bucket.
         ch["date"] = str(ed["date"]).strip()
+
+    if a in ("buy_shares", "sell_shares"):
+        # Shares have no strike/expiration — just qty + price. The History
+        # table reuses its QTY column (normally "contracts") for this.
+        if ed.get("contracts") not in (None, ""):
+            ch["qty"] = int(round(float(ed["contracts"])))
+        price = _ff(ed.get("price"))
+        if price is not None:
+            qty = ch.get("qty", e.get("qty") or 0)
+            ch["price_per_share"] = round(price, 4)
+            ch["execution_total"] = round(price * qty, 2)
+        return ch
+
     if ed.get("strike") not in (None, ""):
         ch["strike"] = float(ed["strike"])
     if ed.get("contracts") not in (None, ""):

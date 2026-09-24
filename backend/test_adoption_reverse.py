@@ -767,3 +767,33 @@ def test_save_transactions_corrects_a_misdated_adopted_close_into_its_real_week(
     ibit_weeks = {w["week"]: w for w in saved["theta_ledger"]["weeks"] if w["ticker"] == "IBIT"}
     assert "2026-W38" in ibit_weeks           # now bucketed into its real fill week
     assert ibit_weeks["2026-W38"]["net_juice"] > 0
+
+
+def test_save_transactions_corrects_a_share_fills_price_qty_and_date(store):
+    """CONFIRMED LIVE: a manually-entered buy_shares execution can be flat
+    wrong (e.g. carrying a DIFFERENT account's fill price) with no strike/
+    expiration to anchor an edit against — save_transactions must still be
+    able to correct its price/qty/date, the same append-only way."""
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "s1", "action": "buy_shares", "ticker": "SPCX", "qty": 100,
+         "price_per_share": 140.32, "execution_total": 14032.0,
+         "date": "2026-09-02T13:49:42Z", "mode": "live"},
+    ]
+    state["positions"].append({"ticker": "SPCX", "status": "open",
+                               "shares": {"count": 100, "cost_basis_per_share": 140.32},
+                               "leap_legs": [], "short_calls": []})
+    log.save_state(state)
+
+    executor.save_transactions(
+        [{"id": "s1", "contracts": 100, "price": 144.09, "date": "2026-09-01"}], ticker="SPCX")
+
+    saved = log.load_state()
+    orig = next(e for e in saved["executions"] if e["id"] == "s1")
+    assert orig["price_per_share"] == 140.32   # APPEND-ONLY: original untouched
+    assert orig["date"] == "2026-09-02T13:49:42Z"
+
+    s1 = next(e for e in log.derived_executions(saved) if e["id"] == "s1")
+    assert s1["price_per_share"] == 144.09
+    assert s1["execution_total"] == round(144.09 * 100, 2)
+    assert s1["date"] == "2026-09-01"

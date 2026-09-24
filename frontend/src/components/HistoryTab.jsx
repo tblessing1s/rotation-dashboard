@@ -384,9 +384,15 @@ function cell(v) {
 // pair (edit either, the other computes). Save applies the edits AND derives the
 // open position from the transactions — the transactions are the source of truth.
 // The covered-call legs — everything this table edits is per-share already, so
-// no unit conversion happens on the way in or out.
-const _FILL = new Set(["sell_short", "close_short"]);
+// no unit conversion happens on the way in or out. Plain share fills
+// (buy_shares/sell_shares) are included too — they have no strike/expiration/
+// extrinsic, just a price and a qty (shown in the same QTY column as
+// contracts), but their date and price are just as correctable as an
+// option leg's.
+const _FILL = new Set(["sell_short", "close_short", "buy_shares", "sell_shares"]);
+const _SHARE_ACTION = new Set(["buy_shares", "sell_shares"]);
 function _price(e) {
+  if (_SHARE_ACTION.has(e.action)) return e.price_per_share;
   return e.action === "sell_short" ? e.premium_per_share : e.close_price_per_share;
 }
 function _extr(e) {
@@ -395,9 +401,11 @@ function _extr(e) {
   return null;
 }
 function _toRow(e) {
+  const isShare = _SHARE_ACTION.has(e.action);
   return {
     id: e.id, date: (e.date || "").slice(0, 10), action: e.action,
     isOpen: e.action === "sell_short",
+    isShare,
     // A close whose original open fell outside the ingestion window (or
     // predates this app tracking the position) books extrinsic_sold=0 at
     // adoption time with no way to fix it — this lets the operator supply
@@ -405,7 +413,9 @@ function _toRow(e) {
     // own price/stock (extrinsic_paid_back), which is a separate number.
     editableExtrinsic: e.action === "close_short",
     source: e.source, roll: e.roll_group_id,
-    strike: e.strike ?? "", contracts: e.contracts ?? 1, expiration: e.expiration || "",
+    strike: isShare ? "" : (e.strike ?? ""),
+    contracts: isShare ? (e.qty ?? 0) : (e.contracts ?? 1),
+    expiration: isShare ? "" : (e.expiration || ""),
     price: _price(e) ?? "", stock_price: e.stock_price ?? "", extrinsic: _extr(e) ?? "",
     stock_source: e.stock_price_source, stock_at_placement: e.stock_price_at_placement,
     stock_at_fill: e.stock_price_at_fill, fill_time: e.fill_time,
@@ -503,9 +513,20 @@ function TransactionEditor() {
                          className={`${inp} w-24 font-sans`} />
                 </td>
                 <td className="py-1 pr-2 text-amber-300">{r.action}</td>
-                <td className="py-1 pr-2"><input value={r.strike} onChange={(e) => set(i, "strike", e.target.value)} className={`${inp} w-16`} /></td>
-                <td className="py-1 pr-2"><input value={r.contracts} onChange={(e) => set(i, "contracts", e.target.value)} className={`${inp} w-10`} /></td>
-                <td className="py-1 pr-2"><input value={r.expiration} placeholder="YYYY-MM-DD" onChange={(e) => set(i, "expiration", e.target.value)} className={`${inp} w-28`} /></td>
+                <td className="py-1 pr-2">
+                  <input value={r.strike} disabled={r.isShare} placeholder={r.isShare ? "—" : undefined}
+                         onChange={(e) => set(i, "strike", e.target.value)}
+                         className={`${inp} w-16 ${r.isShare ? "opacity-40" : ""}`} />
+                </td>
+                <td className="py-1 pr-2">
+                  <input value={r.contracts} title={r.isShare ? "shares (qty)" : "contracts"}
+                         onChange={(e) => set(i, "contracts", e.target.value)} className={`${inp} w-10`} />
+                </td>
+                <td className="py-1 pr-2">
+                  <input value={r.expiration} placeholder={r.isShare ? "—" : "YYYY-MM-DD"} disabled={r.isShare}
+                         onChange={(e) => set(i, "expiration", e.target.value)}
+                         className={`${inp} w-28 ${r.isShare ? "opacity-40" : ""}`} />
+                </td>
                 <td className="py-1 pr-2"><input value={r.price} onChange={(e) => set(i, "price", e.target.value)} className={`${inp} w-20`} /></td>
                 <td className="py-1 pr-2">
                   <input value={r.stock_price} placeholder={r.isOpen ? "underlying" : "—"} disabled={!r.isOpen}
