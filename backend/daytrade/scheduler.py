@@ -19,17 +19,19 @@ exception must never skip another's.
 
 Jobs, all best-effort (logged, never fatal to the tick):
 
-  screen        once per trading day, after the close (``DAYTRADE_SCREEN_ET``)
-                — ``daytrade.universe.screen()``, SHARED, filed under the
-                NEXT trading day (today's close is tomorrow's prior-day
-                levels; bar ingest/signals look up "today's screen" by exact
-                date, so filing under today would leave every day's own
-                window with nothing to read). Skipped when no
-                account is enabled, or every enabled account's paper trial
-                is already complete: no screener picks that day means bar
-                ingest and the signal engine have nothing to do for anyone,
-                so gating the screener alone quietly stops the whole
-                pipeline for future days.
+  screen        once per trading day, pre-market (``DAYTRADE_SCREEN_ET``, well
+                before ``DAYTRADE_WINDOW_START_ET``) — ``daytrade.universe.
+                screen()``, SHARED, filed under TODAY (the morning it's
+                actually for), using the most recently completed session
+                (yesterday's, or further back over a weekend/holiday) for
+                today's prior-day levels — bar ingest/signals look up
+                "today's screen" by exact date, so filing under any other
+                date would leave the day's own window with nothing to read.
+                Skipped when no account is enabled, or every enabled
+                account's paper trial is already complete: no screener picks
+                that day means bar ingest and the signal engine have nothing
+                to do for anyone, so gating the screener alone quietly stops
+                the whole pipeline for future days.
   bar ingest    every ``DAYTRADE_BAR_INTERVAL_MINUTES`` during the Rule 2
                 signal window (``DAYTRADE_WINDOW_START_ET``-``_END_ET``) —
                 ``daytrade.bars.ingest()``, SHARED.
@@ -154,14 +156,16 @@ def digest_due(now: datetime, last_day: date | None) -> bool:
 def _run_screen(now: datetime) -> None:
     try:
         from daytrade import universe
-        # Files under the NEXT trading day, not today: this runs after
-        # today's close, using today's just-completed session as the prior-
-        # day levels for tomorrow's setups (see universe.py's module
-        # docstring) — but bar ingest and the signal engine both look up
-        # "today's screen" by exact date match, so filing under today would
-        # leave every trading day's own window with nothing to read, forever.
-        target = market_calendar.next_trading_day(now.date())
-        result = universe.screen(now=now, date_override=target, trigger="scheduled")
+        # Files under TODAY (now.date(), screen()'s own default — no
+        # date_override needed): DAYTRADE_SCREEN_ET is a PRE-MARKET time, so
+        # this runs the morning of the trading day it's for, using the most
+        # recently completed session (yesterday's, from data_handler.
+        # get_daily) as today's prior-day levels — bar ingest and the signal
+        # engine both look up "today's screen" by exact date match, so this
+        # has to land under the date it'll actually be read under.
+        # _maybe_screen already confirmed now.date() is a trading day before
+        # calling this.
+        result = universe.screen(now=now, trigger="scheduled")
         logger.info("daytrade screener: %d pick(s) from %d screened, filed for %s",
                      len(result["picks"]), len(result["screened"]), result["date"])
     except Exception as e:  # noqa: BLE001 — best-effort, never fatal to the tick

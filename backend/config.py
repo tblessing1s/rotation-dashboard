@@ -773,9 +773,14 @@ DAYTRADE_WINDOW_END_ET = "11:00"
 # 5-min bar ingestion cadence during the window.
 DAYTRADE_BAR_INTERVAL_MINUTES = 5
 
-# Nightly screener run time (ET, after the close) — mirrors the
-# once-per-day-after-threshold shape of alert_scheduler.maintenance_due.
-DAYTRADE_SCREEN_ET = "16:45"
+# Nightly screener run time (ET, pre-market — before DAYTRADE_WINDOW_START_ET)
+# — mirrors the once-per-day-after-threshold shape of alert_scheduler.
+# maintenance_due. Runs the MORNING of the trading day it's for (files under
+# now.date() itself, see daytrade/scheduler.py's _run_screen), not the
+# evening before: by 4 AM ET the prior session's daily bar is fully settled
+# (no late corrections a right-after-close run could still catch), and any
+# provider data lag from the prior evening has had hours to clear.
+DAYTRADE_SCREEN_ET = "04:00"
 
 # Rule 3 — setup: a 5-min candle closing beyond the prior-day level on volume
 # at/above this multiple of the symbol's average 5-min volume. "Average 5-min
@@ -803,11 +808,33 @@ DAYTRADE_FULL_TARGET_R = 2.0
 # Rule 7 — risk: % of account risked per trade (sized off the stop distance),
 # max trades/day, and the day-stop trigger (two losing trades OR cumulative
 # R at/above DAYTRADE_DAILY_STOP_R halts new entries for the rest of the day
-# — existing signals already in flight still play out).
+# — existing signals already in flight still play out). The trades/day cap
+# is a THROUGHPUT limit, not a risk limit — DAYTRADE_MAX_LOSSES_PER_DAY and
+# DAYTRADE_DAILY_STOP_R are the independent guardrails that actually bound a
+# bad day's loss (still just 2 losing trades = ~2% of equity, regardless of
+# this cap), so raising it only lets a genuinely good day capture more of
+# the valid setups instead of stopping early — it doesn't raise worst-case
+# downside. DAYTRADE_MAX_POSITION_PCT below is the independent guardrail
+# for a DIFFERENT failure mode — a single trade's dollar notional dwarfing
+# the others' — that raising this throughput cap doesn't touch either.
 DAYTRADE_RISK_PCT = 1.0
-DAYTRADE_MAX_TRADES_PER_DAY = 2
+DAYTRADE_MAX_TRADES_PER_DAY = 10
 DAYTRADE_MAX_LOSSES_PER_DAY = 2
 DAYTRADE_DAILY_STOP_R = 2.0
+# Position-size ceiling — independent of the risk cap above and the
+# trades/day throughput cap: even at DAYTRADE_RISK_PCT, a stop tight
+# relative to price (a low-volatility stock, or just a small ATR that day)
+# can request a share count whose dollar notional is most of the whole
+# account for the very same 1% intended risk — no cap above already catches
+# that, since risk-based sizing only bounds risk, not size. daytrade/
+# signals.py's _enter_trade caps notional at this % of account equity per
+# trade, on top of (never instead of) the risk cap, so position sizes land
+# in a comparable range across trades rather than one outlier consuming the
+# day's budget — the "N wins out of DAYTRADE_MAX_TRADES_PER_DAY to break
+# even" math assumes trades are comparably sized. Deliberately NOT derived
+# from DAYTRADE_MAX_TRADES_PER_DAY (trades close same-day and capital
+# recycles — the day's slots don't need to all be funded at once).
+DAYTRADE_MAX_POSITION_PCT = 20.0
 # FALLBACK ONLY as of daytrade/budget.py: the scheduler sizes off the primary
 # book's real dry-powder deploy capacity (position_manager.capital_summary()
 # ["deployable"]) on every run, and only falls back to this static figure
@@ -831,8 +858,9 @@ DAYTRADE_TRIAL_TRADES = 50
 
 # Daily performance digest send time (ET) — see daytrade/digest.py /
 # scheduler.py's _maybe_daily_digest. Same once-per-day-after-threshold
-# shape as DAYTRADE_SCREEN_ET, a bit later so the day's session has fully
-# wrapped (the window itself ends at DAYTRADE_WINDOW_END_ET, ~11:00 ET).
+# shape as DAYTRADE_SCREEN_ET, but anchored to the trading session instead
+# of the screener: comfortably after DAYTRADE_WINDOW_END_ET (~11:00 ET) so
+# the day's results have fully wrapped before summarizing them.
 DAYTRADE_DIGEST_ET = "17:00"
 
 

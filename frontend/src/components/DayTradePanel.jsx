@@ -142,8 +142,8 @@ function UniverseTable({ picks, prices, quotes }) {
   );
 }
 
-// "Did last night's automated job actually run" — the ONE thing that answers
-// that without watching the app around 4:45pm ET. Separate from the manual
+// "Did this morning's automated job actually run" — the ONE thing that
+// answers that without watching the app around 4am ET. Separate from the manual
 // success line: a Rescan-now click succeeding must never make it LOOK like
 // the scheduled job is healthy when it silently isn't (see universe.screen's
 // trigger param / store.save_screen_health).
@@ -153,8 +153,8 @@ function ScreenHealthLine({ health }) {
   return (
     <p className="text-[11px] text-slate-500">
       {scheduled
-        ? <>Last overnight scan <span className="text-slate-300">{localDateTime(scheduled.succeeded_at)}</span> — {scheduled.picks} picks from {scheduled.screened} screened</>
-        : <span className="text-amber-300">No successful overnight scan recorded yet</span>}
+        ? <>Last morning scan <span className="text-slate-300">{localDateTime(scheduled.succeeded_at)}</span> — {scheduled.picks} picks from {scheduled.screened} screened</>
+        : <span className="text-amber-300">No successful morning scan recorded yet</span>}
       {manual && (
         <span className="text-slate-600"> · last manual {localDateTime(manual.succeeded_at)}</span>
       )}
@@ -849,6 +849,8 @@ export default function DayTradePanel() {
   const { data: budget } = useApi(() => api.daytradeBudget(), [], 60000);
   const { data: trial } = useApi(() => api.daytradeTrial(), [], 60000);
   const { data: screenHealth, reload: reloadScreenHealth } = useApi(() => api.daytradeScreenHealth(), [], 60000);
+  // A process-wide constant, not per-request state — fetch once, no poll.
+  const { data: ruleConfig } = useApi(() => api.daytradeConfig(), [], null);
 
   // Adaptive poll cadence: the baseline (60s) is fine while nothing's close
   // to happening, but once a setup is armed (watching for a breakout) or a
@@ -956,10 +958,14 @@ export default function DayTradePanel() {
             <Stat
               label="Budget"
               value={budget ? money(budget.amount) : "—"}
-              sub={budget ? (budget.source === "dry_powder" ? budget.detail : `fallback — ${budget.detail}`) : "loading…"}
+              sub={budget
+                ? `${budget.source === "dry_powder" ? budget.detail : `fallback — ${budget.detail}`}` +
+                  (ruleConfig ? ` · max ${ruleConfig.max_position_pct}%/trade` : "")
+                : "loading…"}
               tone={budget?.source === "fallback" ? "text-amber-300" : "text-slate-100"}
             />
-            <Stat label="Trades taken" value={trades.length} sub={`max 2/day`} />
+            <Stat label="Trades taken" value={trades.length}
+                  sub={ruleConfig ? `max ${ruleConfig.max_trades_per_day}/day` : "max —/day"} />
             <Stat label="Cumulative R" value={rMult(cumulativeR)} tone={toneFor(cumulativeR)} />
             <Stat label="Realized P&L" value={money(realizedPnl)} tone={toneFor(realizedPnl)} />
             <Stat

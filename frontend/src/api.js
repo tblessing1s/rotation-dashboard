@@ -145,6 +145,10 @@ export const api = {
   // operator's actual "did last night's job run" answer. SHARED, like
   // daytradeUniverse/Prices.
   daytradeScreenHealth: () => request("/api/daytrade/screen-health"),
+  // The handful of DAYTRADE_* tunables the UI displays as text (e.g. "max
+  // N/day") — reads the live value instead of a hardcoded string that a
+  // config change could silently leave lying. SHARED, like the above.
+  daytradeConfig: () => request("/api/daytrade/config"),
   daytradeSignals: (date, symbol) => {
     const q = new URLSearchParams();
     if (date) q.set("date", date);

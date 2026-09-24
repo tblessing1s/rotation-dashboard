@@ -19,8 +19,9 @@ STATE MACHINE (per symbol, independent of the other picks):
        +----------------------------+----------------------------+
 
 A symbol returns to ``watching`` after a trade resolves or a setup expires —
-"Max 2 trades/day" (rule 7) is an ACCOUNT-WIDE cap (one account's own day)
-enforced by the shared ``_Day`` guardrail state, not a one-trade-per-symbol
+the trades/day cap (rule 7, ``config.DAYTRADE_MAX_TRADES_PER_DAY``) is an
+ACCOUNT-WIDE cap (one account's own day) enforced by the shared ``_Day``
+guardrail state, not a one-trade-per-symbol
 limit.
 
 THIS IS A REPLAY, NOT A LIVE STREAM: there is no persisted mid-day machine
@@ -194,13 +195,22 @@ def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict,
     requested_entry = sym.setup_high if sym.direction == "long" else sym.setup_low
     risk_per_share = sym.risk_per_share
     risk_amount = day_state.account_equity * (config.DAYTRADE_RISK_PCT / 100.0)
-    requested_size = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
+    risk_based_size = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
+    # Cap notional too, not just risk (config.DAYTRADE_MAX_POSITION_PCT): a
+    # tight stop (small risk_per_share relative to price) can request a
+    # share count whose dollar size dwarfs a wide-stop setup's, even though
+    # both risk the same 1% — this only ever pulls the size DOWN from the
+    # risk-based figure, it never raises risk above DAYTRADE_RISK_PCT.
+    notional_cap = day_state.account_equity * (config.DAYTRADE_MAX_POSITION_PCT / 100.0)
+    notional_based_size = int(notional_cap // requested_entry) if requested_entry > 0 else 0
+    requested_size = min(risk_based_size, notional_based_size)
     if requested_size <= 0:
-        # 1% of the current budget doesn't buy even one share at this risk
-        # distance — e.g. the funding book's dry powder is at or near zero
-        # (daytrade/budget.py). A real trade here would be a size-0 no-op
-        # that still consumed one of the day's two slots; skip it outright
-        # instead, the same as any other guardrail block.
+        # Either 1% of the current budget doesn't buy even one share at this
+        # risk distance, or the per-trade notional cap doesn't — e.g. the
+        # funding book's dry powder is at or near zero (daytrade/budget.py).
+        # A real trade here would be a size-0 no-op that still consumed one
+        # of the day's trade slots; skip it outright instead, the same as
+        # any other guardrail block.
         sym.status = "watching"
         return _event(bar["date"], bar["symbol"], "entry_skipped", bar["datetime"],
                       direction=sym.direction, reason="no budget available", trade_id=sym.trade_id)

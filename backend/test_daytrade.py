@@ -509,8 +509,8 @@ def test_bars_ingest_picks_todays_candle_over_a_mixed_prior_day_batch(tmp_store,
 # ===========================================================================
 def test_screen_due_fires_once_per_trading_day_after_threshold():
     threshold = datetime.strptime(config.DAYTRADE_SCREEN_ET, "%H:%M")
-    before = datetime(2026, 9, 14, threshold.hour, threshold.minute - 1)
     at = datetime(2026, 9, 14, threshold.hour, threshold.minute)
+    before = at - timedelta(minutes=1)
 
     assert scheduler.screen_due(before, None) is False
     assert scheduler.screen_due(at, None) is True
@@ -635,11 +635,15 @@ def test_maybe_screen_runs_while_any_enabled_account_still_has_a_running_trial(m
     assert called == [True]
 
 
-def test_maybe_screen_files_the_result_under_the_next_trading_day(monkeypatch, tmp_path):
-    """Regression: an after-close run on Friday must be readable by Monday's
-    own bar ingest/signal engine (both look up "today's screen" by exact
-    date match) — filing it under Friday's own date, when it ran, left
-    every trading day's window with nothing to read, forever."""
+def test_maybe_screen_files_the_result_under_todays_own_date(monkeypatch, tmp_path):
+    """Regression (and change of behavior): DAYTRADE_SCREEN_ET is a
+    PRE-MARKET time, so the scheduled run happens the morning OF the
+    trading day it's for — it must file under THAT day (today), not the
+    next one, since bar ingest/signals look up "today's screen" by exact
+    date match. (An earlier design ran this job after the close instead,
+    filing under the next trading day for the same reason; moving the run
+    to pre-market let the prior session's daily bar settle overnight
+    first, and simplified this to "just file under today.")"""
     monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
     monkeypatch.setattr(settings, "enabled_account_ids", lambda: ["primary"])
     monkeypatch.setattr(trial, "trial_status",
@@ -649,13 +653,12 @@ def test_maybe_screen_files_the_result_under_the_next_trading_day(monkeypatch, t
     monkeypatch.setattr(universe.daytrade_tickers, "all_tickers", lambda: ["GOOD"])
     monkeypatch.setattr(scheduler, "_last_screen_day", None)
 
-    friday = datetime(2026, 9, 18, 17, 0, tzinfo=ET)  # past DAYTRADE_SCREEN_ET
-    scheduler._maybe_screen(friday)
+    monday = datetime(2026, 9, 21, 4, 0, tzinfo=ET)  # at/past DAYTRADE_SCREEN_ET, pre-market
+    scheduler._maybe_screen(monday)
 
-    assert store.load_screen("2026-09-18") is None       # not filed under the day it ran
-    monday = store.load_screen("2026-09-21")             # filed for the next trading day
-    assert monday is not None
-    assert monday["picks"][0]["symbol"] == "GOOD"
+    result = store.load_screen("2026-09-21")             # filed for TODAY, not tomorrow
+    assert result is not None
+    assert result["picks"][0]["symbol"] == "GOOD"
 
     health = store.load_screen_health()
     assert health["scheduled"]["date"] == "2026-09-21"
