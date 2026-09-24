@@ -148,6 +148,40 @@ def test_entry_triggers_on_break_of_setup_candle_high(tmp_store):
     assert entry["size"] > 0
 
 
+def test_entry_size_is_capped_by_notional_not_just_risk(tmp_store):
+    """risk_per_share here is a tight $1.00 (ATR14=4.0 / DAYTRADE_STOP_ATR_
+    DIVISOR=4.0) against a ~$101.50 entry — 1% risk on the default $5000
+    equity alone would request 50 shares (~$5075, essentially the whole
+    account for a nominally 1%-risk trade). DAYTRADE_MAX_POSITION_PCT (20%
+    of equity = $1000) should cap it well below that instead."""
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _setup_bars() + [
+        _bar("ABC", "09:40", 101.6, 102, 101.4, 101.8, 50_000),
+    ])
+
+    events = _events()
+
+    entry = events[1]
+    assert entry["event"] == "entry"
+    assert entry["size"] == 9  # floor(1000 / 101.5), well under the 50 risk-based shares
+
+
+def test_entry_is_skipped_when_the_notional_cap_alone_rounds_to_zero_shares(tmp_store, monkeypatch):
+    """Same shape as the zero-budget case above, but tripped by the notional
+    cap instead of the risk cap — DAYTRADE_MAX_POSITION_PCT so tight it
+    can't afford even 1 share, even though risk-based sizing alone would."""
+    monkeypatch.setattr(config, "DAYTRADE_MAX_POSITION_PCT", 0.5)  # 0.5% of $5000 = $25
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _setup_bars() + [
+        _bar("ABC", "09:40", 101.6, 102, 101.4, 101.8, 50_000),
+    ])
+
+    events = _events()
+
+    assert _event_types(events) == ["setup", "entry_skipped"]
+    assert events[1]["reason"] == "no budget available"
+
+
 def test_entry_is_skipped_not_taken_at_zero_size_when_the_budget_is_zero(tmp_store):
     """A day-trade budget of $0 (daytrade/budget.py: the funding book has no
     dry powder right now) must not silently take a size-0 trade — that would
@@ -519,8 +553,11 @@ def test_run_day_writes_a_matching_trade_log_row(tmp_store):
     assert [e["kind"] for e in trade["exits"]] == ["half_target", "final_target"]
     assert trade["status"] == "closed"
     assert trade["realized_r"] == pytest.approx(1.5)
-    # entry size 50 (see PaperAdapter tests) -> half 25 @ +1, remainder 25 @ +2
-    assert trade["realized_pnl"] == pytest.approx(25 * 1.0 + 25 * 2.0)
+    # risk-based size would be 50, but DAYTRADE_MAX_POSITION_PCT (20% of the
+    # default $5000 equity = $1000) caps notional at entry ~101.5 -> size 9
+    # -> half 4 @ +1, remainder 5 @ +2
+    assert trade["entry"]["size"] == 9
+    assert trade["realized_pnl"] == pytest.approx(4 * 1.0 + 5 * 2.0)
 
 
 def test_run_day_trade_log_is_idempotent_across_repeated_calls(tmp_store):

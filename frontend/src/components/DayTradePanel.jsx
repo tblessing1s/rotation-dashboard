@@ -958,7 +958,10 @@ export default function DayTradePanel() {
             <Stat
               label="Budget"
               value={budget ? money(budget.amount) : "—"}
-              sub={budget ? (budget.source === "dry_powder" ? budget.detail : `fallback — ${budget.detail}`) : "loading…"}
+              sub={budget
+                ? `${budget.source === "dry_powder" ? budget.detail : `fallback — ${budget.detail}`}` +
+                  (ruleConfig ? ` · max ${ruleConfig.max_position_pct}%/trade` : "")
+                : "loading…"}
               tone={budget?.source === "fallback" ? "text-amber-300" : "text-slate-100"}
             />
             <Stat label="Trades taken" value={trades.length}

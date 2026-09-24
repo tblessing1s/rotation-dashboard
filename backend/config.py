@@ -814,11 +814,27 @@ DAYTRADE_FULL_TARGET_R = 2.0
 # bad day's loss (still just 2 losing trades = ~2% of equity, regardless of
 # this cap), so raising it only lets a genuinely good day capture more of
 # the valid setups instead of stopping early — it doesn't raise worst-case
-# downside.
+# downside. DAYTRADE_MAX_POSITION_PCT below is the independent guardrail
+# for a DIFFERENT failure mode — a single trade's dollar notional dwarfing
+# the others' — that raising this throughput cap doesn't touch either.
 DAYTRADE_RISK_PCT = 1.0
 DAYTRADE_MAX_TRADES_PER_DAY = 10
 DAYTRADE_MAX_LOSSES_PER_DAY = 2
 DAYTRADE_DAILY_STOP_R = 2.0
+# Position-size ceiling — independent of the risk cap above and the
+# trades/day throughput cap: even at DAYTRADE_RISK_PCT, a stop tight
+# relative to price (a low-volatility stock, or just a small ATR that day)
+# can request a share count whose dollar notional is most of the whole
+# account for the very same 1% intended risk — no cap above already catches
+# that, since risk-based sizing only bounds risk, not size. daytrade/
+# signals.py's _enter_trade caps notional at this % of account equity per
+# trade, on top of (never instead of) the risk cap, so position sizes land
+# in a comparable range across trades rather than one outlier consuming the
+# day's budget — the "N wins out of DAYTRADE_MAX_TRADES_PER_DAY to break
+# even" math assumes trades are comparably sized. Deliberately NOT derived
+# from DAYTRADE_MAX_TRADES_PER_DAY (trades close same-day and capital
+# recycles — the day's slots don't need to all be funded at once).
+DAYTRADE_MAX_POSITION_PCT = 20.0
 # FALLBACK ONLY as of daytrade/budget.py: the scheduler sizes off the primary
 # book's real dry-powder deploy capacity (position_manager.capital_summary()
 # ["deployable"]) on every run, and only falls back to this static figure
