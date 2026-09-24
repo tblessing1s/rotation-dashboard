@@ -143,6 +143,20 @@ def parse_transaction(txn: dict) -> tuple[dict | None, str | None]:
     legs = [_leg_from_transfer_item(it) for it in items
             if (it.get("instrument") or {}).get("assetType", "").upper() in ("OPTION", "EQUITY")]
     if not legs:
+        # A TRADE row where no item carries an instrument at all (a pure fee/
+        # interest line) is a legitimate silent no-op. But an item that DOES
+        # carry an instrument + assetType Schwab actually sent — just one this
+        # code doesn't recognize (an ETF, mutual fund, fixed income, etc.) —
+        # must never vanish the same way: that is exactly how the dividend-type
+        # gap above went undetected until it was found by hand. Surface it as a
+        # loud parse issue instead of a silent drop.
+        unrecognized = sorted({
+            (it.get("instrument") or {}).get("assetType", "").upper()
+            for it in items if (it.get("instrument") or {}).get("assetType")
+        } - {"OPTION", "EQUITY"})
+        if unrecognized:
+            return None, (f"transaction {txn_id} has an unrecognized instrument type "
+                          f"({', '.join(unrecognized)}) — not ingested; needs a code fix")
         return None, None  # a TRADE with no option/equity leg (e.g. a pure fee row)
     fees = sum(_num(it.get("cost"), 0.0) or 0.0 for it in items
                if (it.get("feeType") or "").upper() and not (it.get("instrument") or {}).get("assetType"))

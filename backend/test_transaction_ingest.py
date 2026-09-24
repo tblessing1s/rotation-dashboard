@@ -84,6 +84,29 @@ def test_non_trade_transaction_skipped():
     assert rec is None and err is None
 
 
+def test_pure_fee_trade_row_is_silently_skipped():
+    """A TRADE row whose only item is a fee (no instrument at all) is a
+    legitimate no-op — nothing was actually traded."""
+    fee_only = {"feeType": "COMMISSION", "cost": 0.65}
+    rec, err = ingest.parse_transaction(_txn("F1", None, [fee_only]))
+    assert rec is None and err is None
+
+
+def test_unrecognized_instrument_type_is_a_loud_error_not_a_silent_drop():
+    """A TRADE row whose item DOES carry a real instrument + assetType — just
+    one this code doesn't recognize (e.g. an ETF Schwab classifies outside
+    OPTION/EQUITY) — must surface as a parse error, never vanish the same way
+    a harmless fee row does. Regression for exactly the failure mode that let
+    the DIVIDEND_TYPES gap go undetected: a real trade silently dropped with
+    no trace anywhere in the ingestion report."""
+    etf_item = {"instrument": {"assetType": "COLLECTIVE_INVESTMENT", "symbol": "IBIT"},
+                "amount": -100, "price": 48.7601, "cost": 4875.89}
+    rec, err = ingest.parse_transaction(_txn("E1", None, [etf_item]))
+    assert rec is None
+    assert "COLLECTIVE_INVESTMENT" in err
+    assert "E1" in err
+
+
 def test_transaction_without_id_is_an_error():
     rec, err = ingest.parse_transaction(_txn(None, "O1", [_opt_item("ABC", "2026-07-17", 110.0, -1, 1.0, "OPENING")]))
     assert rec is None and "activityId" in err
