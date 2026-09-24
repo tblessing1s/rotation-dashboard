@@ -1353,7 +1353,7 @@ def record_manual_roll(ticker: str, from_strike, buyback_per_share, to_strike,
                        premium_per_share, stock_price, *, to_expiration=None,
                        from_expiration=None, from_contracts: int = 1, to_contracts: int = 1,
                        from_diff_id: str | None = None, to_diff_id: str | None = None,
-                       reason: str | None = None) -> dict:
+                       reason: str | None = None, when: str | None = None) -> dict:
     """Record an already-executed out-of-band roll (buy-to-close ``from_strike`` +
     sell-to-open ``to_strike``) into state, economics from the operator's captured
     fills + the roll-time underlying price. The builders compute BOTH legs'
@@ -1361,7 +1361,14 @@ def record_manual_roll(ticker: str, from_strike, buyback_per_share, to_strike,
     nothing is hand-entered beyond the fills you saw at the broker. Booked as one
     linked roll, tagged ``source: broker_manual``, mode ``live`` (it happened at the
     real account) but NEVER transmitted. Optionally clears the reconcile diffs it
-    resolves."""
+    resolves.
+
+    ``when`` is the ROLL'S OWN real broker date (e.g. "2026-09-16"), not today —
+    CONFIRMED LIVE alongside the identical gap in adopt_broker_trade: leaving it
+    unset falls back to log.append_execution's setdefault("date", utcnow()), so
+    a roll recorded today for something that happened weeks ago would otherwise
+    silently misattribute its juice to today's per-week bucket. Defaults to
+    today only when the roll genuinely happened just now."""
     import reconcile
     import transaction_ingest as ingest
 
@@ -1387,6 +1394,8 @@ def record_manual_roll(ticker: str, from_strike, buyback_per_share, to_strike,
         execution, apply = _build_leg(payload, ticker, action, payload["strike"],
                                       payload["contracts"], payload["stock_price"])
         execution["mode"] = "live"
+        if when:
+            execution["date"] = when
         execution["price_source"] = "broker_manual_roll"
         execution["fill_assumption"] = "broker"
         execution["source"] = ingest.SOURCE_BROKER_MANUAL
@@ -1868,6 +1877,19 @@ def _compute_txn_changes(e: dict, ed: dict) -> dict:
         # (see adopt_broker_trade), which otherwise silently misattributes
         # its juice to the wrong per-week/per-month bucket.
         ch["date"] = str(ed["date"]).strip()
+
+    if a in ("buy_shares", "sell_shares"):
+        # Shares have no strike/expiration — just qty + price. The History
+        # table reuses its QTY column (normally "contracts") for this.
+        if ed.get("contracts") not in (None, ""):
+            ch["qty"] = int(round(float(ed["contracts"])))
+        price = _ff(ed.get("price"))
+        if price is not None:
+            qty = ch.get("qty", e.get("qty") or 0)
+            ch["price_per_share"] = round(price, 4)
+            ch["execution_total"] = round(price * qty, 2)
+        return ch
+
     if ed.get("strike") not in (None, ""):
         ch["strike"] = float(ed["strike"])
     if ed.get("contracts") not in (None, ""):
