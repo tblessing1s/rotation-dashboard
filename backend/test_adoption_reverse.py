@@ -194,6 +194,34 @@ def test_record_manual_roll_computes_both_extrinsics(store):
                if e.get("action") in ("close_short", "sell_short"))
 
 
+def test_record_manual_roll_stamps_the_real_date_not_today(store):
+    """CONFIRMED LIVE, same gap as adopt_broker_trade: record_manual_roll never
+    set "date" on either leg, so both fell back to log.append_execution's
+    setdefault("date", utcnow()) — a roll recorded today for something that
+    happened weeks ago silently misattributed its juice to today's per-week
+    bucket. "when" fixes this for both legs of the roll."""
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "SPCX", "status": "open", "shares": {"count": 100},
+        "leap_legs": [],
+        "short_calls": [{"strike": 140.0, "contracts": 1, "expiration": "2026-09-18",
+                         "entry_extrinsic_per_share": 11.85}]})
+    log.save_state(state)
+
+    res = executor.record_manual_roll(
+        "SPCX", from_strike=140.0, buyback_per_share=9.84, to_strike=138.0,
+        premium_per_share=12.69, stock_price=147.0, to_expiration="2026-09-25",
+        from_expiration="2026-09-18", when="2026-09-16")
+    assert res["status"] == "recorded"
+
+    state = log.load_state()
+    execs = [e for e in state["executions"] if e.get("action") in ("close_short", "sell_short")]
+    assert execs and all(e["date"] == "2026-09-16" for e in execs)
+
+    weeks = {w["week"] for w in state["theta_ledger"]["weeks"] if w["ticker"] == "SPCX"}
+    assert "2026-W38" in weeks   # the real roll week, not today's
+
+
 # ---------------------------------------------------------------------------
 # Rebuild a tangled position from broker truth (the XLK cleanup)
 # ---------------------------------------------------------------------------

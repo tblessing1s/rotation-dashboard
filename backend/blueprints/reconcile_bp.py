@@ -85,7 +85,8 @@ def api_record_manual_roll():
             from_expiration=p.get("from_expiration"),
             from_contracts=int(p.get("from_contracts") or 1),
             to_contracts=int(p.get("to_contracts") or 1),
-            from_diff_id=p.get("from_diff_id"), to_diff_id=p.get("to_diff_id")))
+            from_diff_id=p.get("from_diff_id"), to_diff_id=p.get("to_diff_id"),
+            when=p.get("when")))
     except (ValueError, TypeError, KeyError) as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001

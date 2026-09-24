@@ -644,12 +644,15 @@ function SkippedDetail({ rows, onReleased }) {
 // Record an already-executed out-of-band roll (e.g. rolled in thinkorSwim). The
 // backend computes BOTH legs' extrinsic from the roll-time underlying price, so
 // only the fills are entered. Stock price can be derived from the new leg's
-// premium + extrinsic when it isn't known directly.
+// premium + extrinsic when it isn't known directly. CONFIRMED LIVE: "when" (the
+// roll's real date) matters — left blank, both legs stamp with TODAY, silently
+// misattributing the roll's juice to today's per-week bucket instead of the
+// week it actually happened in.
 function ManualRollForm({ onDone }) {
   const [open, setOpen] = React.useState(false);
   const [f, setF] = React.useState({
     ticker: "", from_strike: "", buyback_per_share: "", to_strike: "",
-    to_premium: "", to_extrinsic: "", stock_price: "", to_expiration: "" });
+    to_premium: "", to_extrinsic: "", stock_price: "", to_expiration: "", when: "" });
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState(null);
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.value }));
@@ -668,6 +671,7 @@ function ManualRollForm({ onDone }) {
         from_strike: Number(f.from_strike), buyback_per_share: Number(f.buyback_per_share),
         to_strike: Number(f.to_strike), to_premium: Number(f.to_premium),
         to_expiration: f.to_expiration || null,
+        when: f.when || null,
       };
       if (f.stock_price) body.stock_price = Number(f.stock_price);
       else if (f.to_extrinsic) body.to_extrinsic = Number(f.to_extrinsic);
@@ -687,6 +691,10 @@ function ManualRollForm({ onDone }) {
       {open && (
         <div className="mt-2 grid grid-cols-2 gap-2">
           <label className="text-[11px] text-slate-500">Ticker<input className={inp} value={f.ticker} onChange={set("ticker")} placeholder="XLK" /></label>
+          <label className="text-[11px] text-slate-500">
+            Roll date (real, not today)
+            <input className={inp} value={f.when} onChange={set("when")} placeholder="YYYY-MM-DD" />
+          </label>
           <label className="text-[11px] text-slate-500">New expiry<input className={inp} value={f.to_expiration} onChange={set("to_expiration")} placeholder="2026-07-24" /></label>
           <label className="text-[11px] text-slate-500">Closed strike (buy-to-close)<input className={inp} value={f.from_strike} onChange={set("from_strike")} placeholder="183" /></label>
           <label className="text-[11px] text-slate-500">Buyback $/sh<input className={inp} value={f.buyback_per_share} onChange={set("buyback_per_share")} placeholder="0.40" /></label>
