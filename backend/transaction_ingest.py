@@ -598,7 +598,8 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
     mutation of ``state``. Returns the ingestion report:
 
       {as_of, fetched, parsed, matched:[...], proposals:[...],
-       skipped_duplicates:[txn_id...], errors:[...]}
+       skipped_duplicates:[txn_id...], skipped_detail:[{transaction_id, ticker,
+       source, order_id, proposal_id, ingested_at}...], errors:[...]}
 
     ``matched``   — groups whose orderId the app already knows (source: app):
                     the fill confirms an existing app order; ingestion records the
@@ -618,11 +619,26 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
     matched: list[dict] = []
     proposals: list[dict] = []
     skipped: list[str] = []
+    # WHY each duplicate was already ingested — a group that never became a
+    # matched/proposed row is otherwise invisible: it just silently disappears
+    # on every re-run, indistinguishable from "there was nothing here" without
+    # this. Ledger detail included so a transaction wrongly marked "matched"
+    # from a broken order-link (the app's own order never got its fill
+    # recorded) is diagnosable from the ingestion report itself, not a guess.
+    already_ledger = state.get("ingested_transactions") or {}
+    skipped_detail: list[dict] = []
 
     for g in groups:
         fresh_txn_ids = [t for t in g["transaction_ids"] if t not in already]
         dup_txn_ids = [t for t in g["transaction_ids"] if t in already]
         skipped.extend(dup_txn_ids)
+        for tid in dup_txn_ids:
+            rec = already_ledger.get(str(tid)) or {}
+            skipped_detail.append({
+                "transaction_id": tid, "ticker": _underlying(g["legs"]),
+                "source": rec.get("source"), "order_id": rec.get("order_id"),
+                "proposal_id": rec.get("proposal_id"), "ingested_at": rec.get("ingested_at"),
+            })
         if not fresh_txn_ids:
             continue  # every leg of this group already ingested — idempotent no-op
 
@@ -675,6 +691,7 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
         # These are discrepancies, not proposals: they require a human to look.
         "unrecognized_put_activity": unrecognized_on_open_puts(feed, _open_puts),
         "skipped_duplicates": skipped,
+        "skipped_detail": skipped_detail,
         "errors": errors,
     }
 
@@ -707,7 +724,7 @@ def _persist_report(state: dict, report: dict) -> None:
     on."""
     ing = state.setdefault("ingestion", {"last": None, "proposals": []})
     ing["last"] = {k: report[k] for k in ("as_of", "fetched", "parsed",
-                                          "skipped_duplicates", "errors")}
+                                          "skipped_duplicates", "skipped_detail", "errors")}
     ing["last"]["matched"] = len(report["matched"])
     ing["last"]["proposals"] = len(report["proposals"])
     if report.get("errors"):
@@ -794,7 +811,7 @@ def run_ingestion(state: dict | None = None, persist: bool = True,
             feed = fetch_transactions()
         except Exception as e:  # noqa: BLE001 — isolate the fetch failure
             report = {"as_of": as_of, "fetched": 0, "parsed": 0, "matched": [],
-                      "proposals": [], "skipped_duplicates": [],
+                      "proposals": [], "skipped_duplicates": [], "skipped_detail": [],
                       "errors": [f"transactions fetch failed: {e}"], "broker_ok": False}
             logger.warning("transaction ingestion fetch failed: %s", e)
             return report
