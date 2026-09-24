@@ -1222,6 +1222,11 @@ def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
         state = log.load_state()
         position = _ensure_position(state, ticker)
         position_update(position)
+        # An adopted close/sell can be the leg that empties a position (e.g.
+        # the final sell_shares of a full exit) — same cleanup _commit already
+        # does after every normal fill, so adoption doesn't leave a stale
+        # empty shell on the Positions tab needing a manual "clear" afterward.
+        _close_if_empty(position)
         log.recompute_derived(state)
         log.save_state(state)
 
@@ -1252,7 +1257,21 @@ def _leg_is_close(leg: dict) -> bool:
 
 
 def _adopt_action_for_leg(leg: dict):
-    """Map one broker leg to an app action, or None for a leg not booked here."""
+    """Map one broker leg to an app action, or None for a leg not booked here.
+
+    CONFIRMED LIVE (2026-09-24): this used to return None for every non-OPTION
+    leg — a plain share buy/sell was "surfaced but booked via adjustment, not
+    here," except nothing else ever booked it either (an adjustment needs a
+    reconciliation diff to attach to, which a same-value transaction never
+    creates). Adopting an equity-only proposal silently created ZERO
+    executions while the proposal still dropped off the list and the call
+    still returned success=True — a real out-of-band share sale, with its
+    real price already captured by ingestion, vanished exactly like it was
+    never adopted at all. Shares-primary (CLAUDE.md) means a plain buy_shares/
+    sell_shares leg is exactly as real a fill as an option leg; it gets the
+    same treatment."""
+    if leg.get("asset_type") == "EQUITY":
+        return "buy_shares" if (leg.get("amount") or 0) > 0 else "sell_shares"
     if leg.get("asset_type") != "OPTION":
         return None
     buying = (leg.get("amount") or 0) > 0
@@ -1270,6 +1289,13 @@ def _adopt_payload_for_leg(leg, ticker, action, stock_price, roll_group_id, prop
     price = float(leg.get("price") or 0)
     strike = leg.get("strike")
     expiry = leg.get("expiry")
+    if action in ("buy_shares", "sell_shares"):
+        # A share leg's fill price IS the underlying price at that moment —
+        # no intrinsic/extrinsic split to derive, unlike an option leg.
+        qty = int(abs(leg.get("amount") or 0))
+        total = abs(float(leg.get("cost") or 0)) or price * qty
+        return {"ticker": ticker, "qty": qty, "price_per_share": price,
+               "execution_total": round(total, 2), "stock_price": price}
     # Best-effort underlying price for the intrinsic/extrinsic split (no new
     # provider call): a cached close for the trade day, else the caller-supplied
     # value, else None. Never hand-entered.
