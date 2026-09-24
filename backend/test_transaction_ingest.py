@@ -49,6 +49,13 @@ def _opt_item(underlying, expiry, strike, amount, price, effect, call=True):
     }
 
 
+def _equity_item(symbol, amount, price):
+    return {
+        "instrument": {"assetType": "EQUITY", "symbol": symbol},
+        "amount": amount, "price": price, "cost": -amount * price,
+    }
+
+
 def _txn(txn_id, order_id, items, time="2026-07-10T15:30:00Z", ttype="TRADE"):
     return {"activityId": txn_id, "orderId": order_id, "type": ttype, "time": time,
             "netAmount": sum(i["cost"] for i in items), "transferItems": items}
@@ -362,6 +369,63 @@ def test_adopt_broker_manual_roll_links_both_legs(store):
     pos = log.find_position(state, "ABC")
     strikes = {sc["strike"] for sc in pos["short_calls"]}
     assert strikes == {105.0}
+
+
+def test_adopt_broker_manual_sell_shares_closes_position_and_execution(store):
+    """CONFIRMED LIVE regression: adopting a plain share-sale proposal used to
+    silently book NOTHING — adopt_broker_trade only ever handled OPTION legs,
+    so an equity leg fell through _adopt_action_for_leg returning None and was
+    just skipped, while the call still reported success=True and dropped the
+    proposal from the list. A real closing trade, with its real price already
+    captured by ingestion, vanished with no error and no execution behind it.
+    A closing sell_shares here must also empty and close the position (the
+    same cleanup a normal fill gets via _commit) and complete the shares
+    cycle so it actually shows up in History's Cycle log."""
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "IBIT", "status": "open", "position_type": "SHARES",
+        "shares": {"count": 100, "cost_basis_per_share": 44.51},
+        "short_calls": [],
+    })
+    state.setdefault("executions", []).append({
+        "ticker": "IBIT", "action": "buy_shares", "qty": 100,
+        "price_per_share": 44.51, "execution_total": 4451.0, "date": "2026-09-08",
+    })
+    log.save_state(state)
+
+    feed = [_txn("S1", "OS1", [_equity_item("IBIT", -100, 48.7601)])]
+    ingest.run_ingestion(feed=feed)
+    state = log.load_state()
+    proposals = state["ingestion"]["proposals"]
+    assert len(proposals) == 1
+    pid = proposals[0]["proposal_id"]
+
+    res = executor.adopt_broker_trade(pid)
+    assert res["success"]
+    assert len(res["execution_ids"]) == 1
+
+    state = log.load_state()
+    ex = state["executions"][-1]
+    assert ex["action"] == "sell_shares"
+    assert ex["qty"] == 100
+    assert ex["price_per_share"] == 48.7601
+    assert ex["source"] == ingest.SOURCE_BROKER_MANUAL
+    assert ex["transaction_id"] == "S1"
+
+    pos = log.find_position(state, "IBIT")
+    assert pos["shares"]["count"] == 0
+    assert pos["status"] == "closed"   # _close_if_empty cleanup, same as a normal fill
+
+    # dedupe ledger + proposal cleared, same as any other adoption.
+    assert state["ingested_transactions"]["S1"]["source"] == ingest.SOURCE_BROKER_MANUAL
+    assert not state["ingestion"]["proposals"]
+
+    # the shares cycle closes too, once both ends of the round trip are real
+    # executions — this is what makes it show up in History's Cycle log.
+    cycles = state["cycles"]
+    assert len(cycles) == 1
+    assert cycles[0]["ticker"] == "IBIT"
+    assert cycles[0]["exit_date"] is not None
 
 
 # ---------------------------------------------------------------------------
