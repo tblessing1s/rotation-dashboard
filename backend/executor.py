@@ -1891,13 +1891,28 @@ def _compute_txn_changes(e: dict, ed: dict) -> dict:
     elif a == "close_short":
         if price is not None:
             ch["close_price_per_share"] = round(price, 4)
+        # A close whose original open was never captured (e.g. permanently
+        # outside the ingestion lookback window, or the opening trade
+        # happened before this app tracked the position at all) books
+        # extrinsic_sold=0 at adoption time — CONFIRMED LIVE — with no way to
+        # fix it afterward through the generic price/stock/extrinsic linking
+        # above, which computes the CLOSE side (extrinsic_paid_back) off the
+        # close's OWN stock price, not the missing ENTRY side. A dedicated
+        # entry_extrinsic edit (separate field, deliberately NOT the generic
+        # "extrinsic" the linking block above already consumed for sell_short/
+        # buy_leap) lets the operator supply the real number after the fact —
+        # e.g. from the broker record of the original sale.
+        entry_ext = _ff(ed.get("entry_extrinsic"))
+        if entry_ext is not None:
+            ch["extrinsic_sold"] = round(entry_ext, 4)
         # Re-derive the close economics from the (possibly edited) close price,
-        # underlying, and strike so net juice never goes stale — mirrors _close_short.
+        # underlying, strike, and entry extrinsic so net juice never goes stale
+        # — mirrors _close_short.
         cps = ch.get("close_price_per_share", _ff(e.get("close_price_per_share")))
         stk = ch.get("stock_price", _ff(e.get("stock_price")))
         if cps is not None and stk is not None:
             paid_ps = max(cps - max(stk - strike, 0.0), 0.0)
-            sold_ps = float(e.get("extrinsic_sold") or 0)
+            sold_ps = ch.get("extrinsic_sold", float(e.get("extrinsic_sold") or 0))
             ch["extrinsic_paid_back"] = round(paid_ps, 4)
             ch["net_juice"] = round(sold_ps - paid_ps, 4)
             ch["net_juice_total"] = round((sold_ps - paid_ps) * c * 100, 2)
