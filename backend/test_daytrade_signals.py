@@ -411,6 +411,91 @@ def test_run_day_with_no_bars_returns_no_events(tmp_store):
 
 
 # ===========================================================================
+# Rehydration across runs — account_equity/entries_enabled are LIVE inputs
+# that can change between two calls on the SAME day (dry powder moves, the
+# trial completes mid-day). A later call's current gate must never
+# retroactively reinterpret a bar an earlier call already decided on —
+# see signals._rehydrate's own docstring for the failure mode this guards.
+# ===========================================================================
+def test_budget_drying_up_between_runs_does_not_orphan_an_open_trade(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars())
+    first = _events(now="09:41", account_equity=1000.0)
+    assert _event_types(first) == ["setup", "entry"]
+
+    # Dry powder has since gone to zero (e.g. CFM's own book spent it) —
+    # this run must still resolve the ALREADY-open trade, not relabel its
+    # entry bar "entry_skipped" and abandon it.
+    store.append_bars(DAY, [
+        _bar("ABC", "09:45", 101, 101.2, 100.4, 100.6, 30_000),  # low <= stop(100.5)
+    ])
+    second = _events(now="09:50", account_equity=0.0)
+
+    assert _event_types(second) == ["setup", "entry", "stop_out"]
+    assert second[-1]["r"] == -1.0
+    trade = next(iter(store.load_trades(DAY, ACCOUNT).values()))
+    assert trade["status"] == "closed"
+
+
+def test_entries_disabled_between_runs_still_resolves_an_open_trade(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars())
+    first = _events(now="09:41", entries_enabled=True)
+    assert _event_types(first) == ["setup", "entry"]
+
+    # The paper trial completes mid-day (another account's trade closed it,
+    # or this one's own #50 did) — entries_enabled flips False. The already-
+    # open trade must still get its target/stop/cutoff, per run_day's own
+    # documented promise.
+    store.append_bars(DAY, [
+        _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),   # target1
+        _bar("ABC", "09:50", 103, 103.6, 102.9, 103.5, 20_000),   # target2
+    ])
+    second = _events(now="09:55", entries_enabled=False)
+
+    assert _event_types(second) == ["setup", "entry", "half_target", "final_target"]
+    assert second[-1]["r"] == pytest.approx(1.5)
+
+
+def test_trades_taken_count_persists_across_separate_calls(tmp_store, monkeypatch):
+    """The 2-trades/day cap must hold even when the 2 trades were taken in
+    an EARLIER call and this call starts with a fresh in-memory _Day —
+    trades_taken has to be rehydrated from the journal, not reset to 0."""
+    monkeypatch.setattr(config, "DAYTRADE_MAX_LOSSES_PER_DAY", 99)  # isolate the trade-count cap
+    _save_screen([_pick("A", 100, 90), _pick("B", 100, 90), _pick("C", 100, 90)])
+    store.append_bars(DAY, _losing_trade_bars("A", "09:30", "09:35", "09:40", "09:45")
+                       + _losing_trade_bars("B", "09:50", "09:55", "10:00", "10:05"))
+    first = _events(now="10:10")
+    assert _event_types(first) == ["setup", "entry", "stop_out", "setup", "entry", "stop_out"]
+
+    # A fresh call, on its own fresh _Day — must still remember 2 trades
+    # were already taken today.
+    store.append_bars(DAY, _setup_only_bars("C", "10:10", "10:15"))
+    second = _events(now="10:20")
+    c_events = [e for e in second if e["symbol"] == "C"]
+    assert _event_types(c_events) == ["setup_skipped"]
+    assert c_events[0]["reason"] == "max trades/day reached"
+
+
+def test_armed_setup_survives_a_gate_flip_and_still_rechecks_gate_at_entry(tmp_store):
+    """The setup itself must not be re-derived (and so not contradicted) by
+    a later call's different gate — but the entry trigger, a genuinely NEW
+    decision, correctly still sees the CURRENT gate when it's reached."""
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _setup_bars())
+    first = _events(now="09:38", entries_enabled=True)
+    assert _event_types(first) == ["setup"]
+
+    store.append_bars(DAY, [_bar("ABC", "09:40", 101.6, 102, 101.4, 101.8, 50_000)])
+    second = _events(now="09:41", entries_enabled=False)
+
+    # No duplicate/contradictory "setup_skipped" for the already-armed setup —
+    # just the one new, correct decision at the entry trigger.
+    assert _event_types(second) == ["setup", "entry_skipped"]
+    assert second[-1]["reason"] == "paper trial complete — no new entries"
+
+
+# ===========================================================================
 # Phase 3 — execution adapter / trade log wiring
 # ===========================================================================
 def test_run_day_writes_a_matching_trade_log_row(tmp_store):

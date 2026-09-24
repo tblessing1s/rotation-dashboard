@@ -23,11 +23,22 @@ A symbol returns to ``watching`` after a trade resolves or a setup expires —
 enforced by the shared ``_Day`` guardrail state, not a one-trade-per-symbol
 limit.
 
-THIS IS A REPLAY, NOT A LIVE STREAM: ``run_day`` recomputes the whole day's
-events from the stored bars every time it's called (idempotent — new events
-are diffed against what's already journaled by ``id`` before appending), the
-same "re-run is cheap and correct" trade-off Phase 1's scheduler already
-makes for the screener. There is no persisted mid-day machine state.
+THIS IS A REPLAY, NOT A LIVE STREAM: there is no persisted mid-day machine
+state as its own object — instead, each call to ``run_day`` first
+RECONSTRUCTS that state (which symbols are armed/in_trade, with what
+entry/stop/target, plus the day's trades-taken/losses/cumulative-R) from
+what's already journaled for this account+day (see ``_rehydrate``), then
+only evaluates bars strictly after the last one already reflected there.
+This matters because ``account_equity`` and ``entries_enabled`` are LIVE
+inputs that can change between two calls on the SAME day (dry powder moves,
+the trial completes mid-day) — without rehydration, a later call's
+from-scratch replay of an EARLIER bar could reach a different decision than
+the one already journaled for it (a budget that dried up would relabel an
+already-"entry" bar "entry_skipped", silently orphaning that open trade
+forever). Rehydration confines the current gate to genuinely NEW decisions
+only, never a bar a past run already committed to. New events are still
+diffed against what's already journaled by ``id`` before appending, so a
+call that finds nothing new to do is a cheap no-op.
 
 FILLS GO THROUGH ``daytrade/adapters.py`` (Phase 3): every entry/exit this
 engine decides on is a REQUEST to an ``ExecutionAdapter`` (default
@@ -39,11 +50,14 @@ engine only ever uses the returned ``Fill``, never the request, for the
 price/size it books. The adapter is also the day's trade log; see its
 module docstring for how that differs from this module's signals journal.
 
-REPLAY-SAFE ADAPTER CALLS: because a re-run replays bars this engine has
-already seen, ``enter``/``exit`` are idempotent on the adapter side (keyed
-by trade_id and by trade_id+kind+at respectively) — calling them again for
-an already-recorded fill is a no-op, not a double-fill or a double-counted
-P&L. See ``PaperAdapter`` for the dedup.
+REPLAY-SAFE ADAPTER CALLS: rehydration means a bar already reflected in the
+journal is no longer re-processed at all in a later run, so its adapter call
+isn't normally repeated either — but ``enter``/``exit`` are ALSO idempotent
+on the adapter side regardless (keyed by trade_id and by trade_id+kind+at
+respectively), as a second line of defense against a partial write (events
+journaled but the adapter's own trade log didn't finish, or vice versa):
+calling them again for an already-recorded fill is a no-op, not a
+double-fill or a double-counted P&L. See ``PaperAdapter`` for the dedup.
 
 RULE 3's "average 5-min volume" baseline is a Phase-2 interpretation call —
 see ``_avg_prior_volume`` and the config.py comment above
@@ -347,6 +361,75 @@ def _finalize_open_trades(symbols: dict[str, _Symbol], day_state: _Day, day: str
     return events
 
 
+def _rehydrate(existing: list[dict], symbols: dict[str, _Symbol], day_state: _Day) -> dict[str, str]:
+    """Reconstruct in-memory state from what's ALREADY journaled for this
+    account+day, so THIS run's current account_equity/entries_enabled only
+    ever governs a genuinely NEW decision — never a bar a past run already
+    decided on. Returns {symbol: last_event_at}; the caller skips any bar at
+    or before that timestamp for that symbol, since it's already reflected.
+
+    Why this is needed: run_day re-derives the whole day from raw bars every
+    call, with no other persisted mid-day state. account_equity is a LIVE
+    read of the account's real dry powder and entries_enabled flips once the
+    paper trial hits its target — both can legitimately change between two
+    runs on the SAME day. Without rehydration, a later run's from-scratch
+    replay can relabel an already-"entry" bar "entry_skipped" (budget went
+    to 0) or an already-"setup" bar "setup_skipped" (trial completed) —
+    contradicting what was already journaled. Worse than a relabeling: the
+    symbol then never reaches "in_trade" in THAT run's model, so it never
+    gets evaluated for a stop/target/cutoff exit either — an already-open
+    trade sits in the journal (and trades.json) as open forever, never
+    counts toward the trial, and directly contradicts this function's own
+    "still resolves any trade already open" promise (see run_day's
+    docstring) — the code did not actually keep that promise before this.
+
+    Why it's safe to do unconditionally: _resolve_trade and the armed
+    trigger/expiry check (_triggered, candles_waited) are pure price/candle-
+    count logic with NO gate dependency, so replaying them from rehydrated
+    state for every bar since is deterministic no matter how many times
+    this reruns. The ONE gate-dependent moment — an armed setup actually
+    becoming a trade, in _enter_trade — still re-checks the CURRENT gate
+    when its bar is reached in the replay below, which is correct, not a
+    bug: a genuinely new commitment should see the current world, not a
+    stale snapshot of it from whenever it first armed."""
+    resume_at: dict[str, str] = {}
+    for e in existing:
+        symbol = e.get("symbol")
+        sym = symbols.get(symbol)
+        if sym is None:
+            continue
+        kind, at = e["event"], e.get("at")
+        if kind == "setup":
+            sym.status = "armed"
+            sym.direction = e.get("direction")
+            sym.setup_high, sym.setup_low = e.get("high"), e.get("low")
+            sym.setup_at = at
+            sym.trade_id = f"{symbol}:setup:{at}"  # matches _process_bar's own construction
+            sym.candles_waited = 0
+        elif kind in ("expired", "entry_skipped"):
+            sym.status = "watching"
+        elif kind == "entry":
+            sym.status = "in_trade"
+            sym.direction = e.get("direction")
+            sym.entry, sym.stop = e.get("entry"), e.get("stop")
+            sym.target1, sym.target2 = e.get("target1"), e.get("target2")
+            sym.size = e.get("size")
+            sym.trade_id = e.get("trade_id")
+            sym.entry_at = at
+            sym.half_taken = False
+            day_state.trades_taken += 1
+        elif kind == "half_target":
+            sym.half_taken = True
+        elif kind in ("breakeven_exit", "final_target", "stop_out", "time_cutoff"):
+            sym.status = "watching"
+            r = e.get("r")
+            if r is not None:
+                day_state.record_trade_result(r)
+        if at:
+            resume_at[symbol] = at
+    return resume_at
+
+
 def run_day(day: str, account_id: str, now: datetime | None = None,
             account_equity: float | None = None,
             adapter: adapters.ExecutionAdapter | None = None,
@@ -362,9 +445,10 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
     seam. ``entries_enabled=False`` (the scheduler passes this once
     daytrade.trial.trial_status(account_id) says THIS account's paper trial
     has hit its target) blocks every NEW setup/entry for the day but still
-    resolves any trade already open — see _Day.block_reason. Returns
-    ``{"date", "events"}`` — every event journaled for this account today,
-    oldest first."""
+    resolves any trade already open — see _Day.block_reason and, for how
+    "already open" survives a gate flip between calls, ``_rehydrate``.
+    Returns ``{"date", "events"}`` — every event journaled for this account
+    today, oldest first."""
     now = now or datetime.now(ET)
     account_equity = config.DAYTRADE_ACCOUNT_EQUITY if account_equity is None else account_equity
     adapter = adapter if adapter is not None else adapters.get_adapter(day, account_id)
@@ -380,13 +464,20 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
     if not symbols:
         return {"date": day, "events": []}
 
+    existing = store.load_signals(day, account_id)
+    day_state = _Day(account_equity, entries_enabled=entries_enabled)
+    resume_at = _rehydrate(existing, symbols, day_state)
+
     bars = [b for b in store.load_bars(day) if b.get("symbol") in symbols]
     bars.sort(key=lambda b: (_parse_at(b["datetime"]), b["symbol"]))
 
-    day_state = _Day(account_equity, entries_enabled=entries_enabled)
     new_events: list[dict] = []
     for bar in bars:
-        sym = symbols[bar["symbol"]]
+        symbol = bar["symbol"]
+        cutoff = resume_at.get(symbol)
+        if cutoff and bar["datetime"] <= cutoff:
+            continue  # already reflected in the rehydrated state above
+        sym = symbols[symbol]
         new_events.extend(_process_bar(sym, day_state, bar, day, adapter))
 
     window_over = now.strftime("%H:%M") >= config.DAYTRADE_WINDOW_END_ET
@@ -395,7 +486,6 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
 
     adapter.flush()
 
-    existing = store.load_signals(day, account_id)
     existing_ids = {e.get("id") for e in existing}
     to_write = [e for e in new_events if e["id"] not in existing_ids]
     if to_write:
