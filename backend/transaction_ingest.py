@@ -46,6 +46,8 @@ ACT_SELL_SHORT = "sell_short"
 ACT_CLOSE_SHORT = "close_short"
 ACT_BUY_LEAP = "buy_leap"
 ACT_CLOSE_LEAP = "close_leap"
+ACT_BUY_SHARES = "buy_shares"
+ACT_SELL_SHARES = "sell_shares"
 ACT_UNKNOWN = "unknown"
 
 # Schwab instruction -> position effect we care about. LIVE_VERIFY: confirm the
@@ -452,11 +454,19 @@ def infer_action(legs: list[dict]) -> str:
     """Infer the logical action a group of legs represents. Deep-ITM long calls
     (buy/sell to open/close with a positive/negative amount) map to leap legs; the
     short-call legs map to sell/close short; a close-call + open-call pair is a
-    roll. LIVE_VERIFY: distinguishing a LEAP long-call open from a covered-call
+    roll. A lone equity leg is the shares-primary base leg (buy_shares/
+    sell_shares) — CONFIRMED LIVE: before this, a plain share sale fell through
+    to ACT_UNKNOWN and the generic "SHORT STOCK appeared out-of-band —
+    assignment likely" warning, alarming language meant for actual unexplained
+    short stock, not a legitimate closing sale of a real long position.
+    LIVE_VERIFY: distinguishing a LEAP long-call open from a covered-call
     short-call open relies on position effect + instruction, which is why adoption
     still routes through the operator (who confirms the action)."""
     opts = [l for l in legs if l["asset_type"] == "OPTION"]
     if not opts:
+        equity = [l for l in legs if l["asset_type"] == "EQUITY"]
+        if len(equity) == 1:
+            return ACT_BUY_SHARES if (equity[0]["amount"] or 0) > 0 else ACT_SELL_SHARES
         return ACT_UNKNOWN
     opens = [l for l in opts if l["position_effect"] == "OPENING"
              or _instruction_of(l) in _OPENING]
@@ -611,6 +621,14 @@ def _exposure(action: str, legs: list[dict]) -> str:
     if action == ACT_CLOSE_LEAP:
         return ("a long call (LEAP) was closed out-of-band — any remaining short call may be "
                 "UNCOVERED (naked). Review immediately.")
+    if action == ACT_BUY_SHARES:
+        return "shares were bought out-of-band — the base lot for this book's engine"
+    if action == ACT_SELL_SHARES:
+        return "shares were sold out-of-band — closing or trimming the base lot"
+    # Reached only when a group's action genuinely couldn't be classified (not
+    # the normal single-equity-leg case above, which is now buy_shares/
+    # sell_shares) — an actual unexplained short stock appearance is rare and
+    # does warrant this loud a warning.
     if any(l["asset_type"] == "EQUITY" and (l["amount"] or 0) < 0 for l in legs):
         return "SHORT STOCK appeared out-of-band — assignment likely; review immediately"
     return f"out-of-band trade with {len(opts)} option leg(s) — review"

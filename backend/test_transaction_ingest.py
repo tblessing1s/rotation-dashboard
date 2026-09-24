@@ -136,7 +136,12 @@ def test_etf_leg_parses_as_equity_with_ticker_resolved(store):
     report = ingest.build_report([_txn("E1", "OE1", [etf_item, currency_item])], log.load_state())
     assert not report["matched"]
     assert len(report["proposals"]) == 1
-    assert report["proposals"][0]["ticker"] == "IBIT"
+    proposal = report["proposals"][0]
+    assert proposal["ticker"] == "IBIT"
+    # Not ACT_UNKNOWN / the generic "SHORT STOCK... assignment likely" scare
+    # text — a plain closing sale is now recognized for what it is.
+    assert proposal["action"] == ingest.ACT_SELL_SHARES
+    assert "sold out-of-band" in proposal["exposure"]
 
 
 def test_transaction_without_id_is_an_error():
@@ -155,6 +160,24 @@ def test_group_by_order_links_roll_legs():
     assert g["order_id"] == "ORD9"
     assert set(g["transaction_ids"]) == {"Tc", "To"}
     assert ingest.infer_action(g["legs"]) == ingest.ACT_ROLL
+
+
+def test_lone_equity_leg_infers_shares_action_not_unknown():
+    """CONFIRMED LIVE regression: a plain share sale (closing a real long
+    position) used to infer_action() as ACT_UNKNOWN (it only ever looked at
+    OPTION legs), which _exposure() then rendered as the generic "SHORT STOCK
+    appeared out-of-band — assignment likely; review immediately" — alarming,
+    wrong language for a legitimate closing sale. A lone equity leg must infer
+    buy_shares/sell_shares, with matching plain-language exposure text."""
+    sell_legs = [ingest._leg_from_transfer_item(_equity_item("IBIT", -100, 48.7601))]
+    sell = ingest.infer_action(sell_legs)
+    assert sell == ingest.ACT_SELL_SHARES
+    assert "sold out-of-band" in ingest._exposure(sell, sell_legs)
+
+    buy_legs = [ingest._leg_from_transfer_item(_equity_item("IBIT", 100, 44.51))]
+    buy = ingest.infer_action(buy_legs)
+    assert buy == ingest.ACT_BUY_SHARES
+    assert "bought out-of-band" in ingest._exposure(buy, buy_legs)
 
 
 # ---------------------------------------------------------------------------
