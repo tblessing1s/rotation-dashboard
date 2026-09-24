@@ -773,9 +773,14 @@ DAYTRADE_WINDOW_END_ET = "11:00"
 # 5-min bar ingestion cadence during the window.
 DAYTRADE_BAR_INTERVAL_MINUTES = 5
 
-# Nightly screener run time (ET, after the close) — mirrors the
-# once-per-day-after-threshold shape of alert_scheduler.maintenance_due.
-DAYTRADE_SCREEN_ET = "16:45"
+# Nightly screener run time (ET, pre-market — before DAYTRADE_WINDOW_START_ET)
+# — mirrors the once-per-day-after-threshold shape of alert_scheduler.
+# maintenance_due. Runs the MORNING of the trading day it's for (files under
+# now.date() itself, see daytrade/scheduler.py's _run_screen), not the
+# evening before: by 4 AM ET the prior session's daily bar is fully settled
+# (no late corrections a right-after-close run could still catch), and any
+# provider data lag from the prior evening has had hours to clear.
+DAYTRADE_SCREEN_ET = "04:00"
 
 # Rule 3 — setup: a 5-min candle closing beyond the prior-day level on volume
 # at/above this multiple of the symbol's average 5-min volume. "Average 5-min
@@ -831,8 +836,9 @@ DAYTRADE_TRIAL_TRADES = 50
 
 # Daily performance digest send time (ET) — see daytrade/digest.py /
 # scheduler.py's _maybe_daily_digest. Same once-per-day-after-threshold
-# shape as DAYTRADE_SCREEN_ET, a bit later so the day's session has fully
-# wrapped (the window itself ends at DAYTRADE_WINDOW_END_ET, ~11:00 ET).
+# shape as DAYTRADE_SCREEN_ET, but anchored to the trading session instead
+# of the screener: comfortably after DAYTRADE_WINDOW_END_ET (~11:00 ET) so
+# the day's results have fully wrapped before summarizing them.
 DAYTRADE_DIGEST_ET = "17:00"
 
 

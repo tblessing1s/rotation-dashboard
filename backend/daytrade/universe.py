@@ -90,12 +90,16 @@ def screen(tickers: list[str] | None = None, now: datetime | None = None,
     """Run the nightly screener once and persist the result. Returns the same
     dict that gets written to disk.
 
-    ``date_override`` files the result under a date other than ``now``'s —
-    the scheduler's own after-close run uses this to file under the NEXT
-    trading day (see its module docstring: today's close feeds tomorrow's
-    prior-day levels), since bar ingest and the signal engine both look up
-    "today's screen" by exact date match. An on-demand "Rescan now" leaves
-    this unset and files under today, same-day, as before.
+    ``date_override`` files the result under a date other than ``now``'s.
+    The scheduler's own pre-market run (see its module docstring) doesn't
+    need this — it already runs the morning OF the trading day it's for, so
+    ``now.date()`` (the default below) is exactly right — but it stays
+    available for tests, backfills, or any future schedule shape that again
+    runs on a different calendar day than the one it's filing for (bar
+    ingest and the signal engine both look up "today's screen" by exact
+    date match, so getting this wrong silently starves that day's window).
+    An on-demand "Rescan now" also leaves this unset and files under today,
+    same-day, as before.
 
     ``trigger`` ("scheduled" | "manual") records this run's success
     separately per trigger (store.save_screen_health) — an operator's actual

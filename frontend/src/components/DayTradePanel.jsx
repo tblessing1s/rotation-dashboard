@@ -142,8 +142,8 @@ function UniverseTable({ picks, prices, quotes }) {
   );
 }
 
-// "Did last night's automated job actually run" — the ONE thing that answers
-// that without watching the app around 4:45pm ET. Separate from the manual
+// "Did this morning's automated job actually run" — the ONE thing that
+// answers that without watching the app around 4am ET. Separate from the manual
 // success line: a Rescan-now click succeeding must never make it LOOK like
 // the scheduled job is healthy when it silently isn't (see universe.screen's
 // trigger param / store.save_screen_health).
@@ -153,8 +153,8 @@ function ScreenHealthLine({ health }) {
   return (
     <p className="text-[11px] text-slate-500">
       {scheduled
-        ? <>Last overnight scan <span className="text-slate-300">{localDateTime(scheduled.succeeded_at)}</span> — {scheduled.picks} picks from {scheduled.screened} screened</>
-        : <span className="text-amber-300">No successful overnight scan recorded yet</span>}
+        ? <>Last morning scan <span className="text-slate-300">{localDateTime(scheduled.succeeded_at)}</span> — {scheduled.picks} picks from {scheduled.screened} screened</>
+        : <span className="text-amber-300">No successful morning scan recorded yet</span>}
       {manual && (
         <span className="text-slate-600"> · last manual {localDateTime(manual.succeeded_at)}</span>
       )}
