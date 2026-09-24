@@ -556,13 +556,55 @@ function IngestionPanel() {
       )}
       <ManualRollForm onDone={() => { reload(); reloadAdoptions(); }} />
       {data?.last && (
-        <p className="mt-2 text-[11px] text-slate-500">
-          Last ingest: {data.last.matched ?? 0} matched, {data.last.proposals ?? 0} proposed
-          {data.last.as_of ? ` · ${data.last.as_of.replace("T", " ").replace("Z", "")}` : ""}
-          {(data.last.errors || []).length > 0 ? ` · ${data.last.errors.length} parse issue(s)` : ""}
-        </p>
+        <>
+          <p className="mt-2 text-[11px] text-slate-500">
+            Last ingest: {data.last.fetched ?? 0} fetched, {data.last.parsed ?? 0} parsed,{" "}
+            {data.last.matched ?? 0} matched, {data.last.proposals ?? 0} proposed,{" "}
+            {(data.last.skipped_duplicates || []).length} already-ingested
+            {data.last.as_of ? ` · ${data.last.as_of.replace("T", " ").replace("Z", "")}` : ""}
+            {(data.last.errors || []).length > 0 ? ` · ${data.last.errors.length} parse issue(s)` : ""}
+          </p>
+          {(data.last.errors || []).length > 0 && (
+            <ul className="mt-1 space-y-0.5">
+              {data.last.errors.map((e, i) => (
+                <li key={i} className="text-[11px] text-amber-300/90">⚠ {e}</li>
+              ))}
+            </ul>
+          )}
+          {(data.last.skipped_detail || []).length > 0 && (
+            <SkippedDetail rows={data.last.skipped_detail} />
+          )}
+        </>
       )}
       {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
+// Every "already-ingested" transaction, and WHY — otherwise a broker fill
+// that got wrongly marked ingested (e.g. an app order whose fill never
+// actually landed) silently skips classification on every re-run forever,
+// indistinguishable from "there was nothing here." This makes that visible.
+function SkippedDetail({ rows }) {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="mt-1">
+      <button onClick={() => setOpen((o) => !o)}
+              className="text-[11px] uppercase tracking-wide text-slate-500 hover:text-slate-300">
+        {open ? "▾" : "▸"} {rows.length} already-ingested transaction{rows.length > 1 ? "s" : ""} — why
+      </button>
+      {open && (
+        <ul className="mt-1 space-y-0.5 font-mono text-[11px] text-slate-500">
+          {rows.map((r, i) => (
+            <li key={i}>
+              {r.transaction_id} ({r.ticker || "?"}) — {r.source || "unknown"}
+              {r.order_id ? ` · app order ${r.order_id}` : ""}
+              {r.proposal_id ? ` · adopted as ${r.proposal_id}` : ""}
+              {r.ingested_at ? ` · ${String(r.ingested_at).replace("T", " ").replace("Z", "")}` : ""}
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

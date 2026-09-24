@@ -182,6 +182,15 @@ def test_reingest_is_idempotent(store):
     r2 = ingest.run_ingestion(feed=feed)
     assert not r2["matched"] and not r2["proposals"]
     assert r2["skipped_duplicates"] == ["T1"]
+    # WHY it was skipped is visible too, not just that it was — this is what
+    # lets an operator tell "confirmed app fill" apart from "wrongly marked
+    # ingested with no execution behind it" from the ingestion report alone.
+    assert len(r2["skipped_detail"]) == 1
+    detail = r2["skipped_detail"][0]
+    assert detail["transaction_id"] == "T1"
+    assert detail["ticker"] == "ABC"
+    assert detail["source"] == "app"
+    assert detail["order_id"] == "O1"
     # ledger has exactly one entry for T1.
     state = log.load_state()
     assert list(state["ingested_transactions"].keys()) == ["T1"]
