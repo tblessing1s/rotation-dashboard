@@ -1202,6 +1202,18 @@ def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
         px = payload.get("stock_price")
         execution, position_update = _build_leg(payload, ticker, action, strike, contracts, px)
         execution["mode"] = "live"  # it happened at the REAL account (just not app-transmitted)
+        # CONFIRMED LIVE: none of the _build_leg builders set "date" — they're
+        # normally called at the moment of a real fill, where log.append_
+        # execution's setdefault("date", utcnow()) is exactly right. Adoption
+        # is the opposite case: the trade happened whenever the BROKER filled
+        # it, days or weeks before the operator gets around to adopting it.
+        # Leaving this unset stamped every adopted execution with today's date
+        # — silently misattributing its juice to today's per-week/per-month
+        # bucket instead of the real one it happened in (logging_handler.
+        # bucket_datetime reads this same "date" field for both the theta
+        # ledger and Payouts). The broker's own transaction time is right
+        # here on the proposal.
+        execution["date"] = proposal.get("time") or log.utcnow()
         execution["price_source"] = "broker_transaction"
         execution["fill_assumption"] = "broker"
         execution["source"] = ingest.SOURCE_BROKER_MANUAL
@@ -1848,6 +1860,14 @@ def _compute_txn_changes(e: dict, ed: dict) -> dict:
     on an appended ``txn_correction`` record and overlay the target at derive time."""
     ch: dict = {}
     a = e.get("action")
+    if ed.get("date"):
+        # Only the date PREFIX is ever read downstream (bucket_datetime /
+        # _parse_ymd take the first 10 chars) — no need to fabricate a time
+        # component. Fixes an adopted broker-manual execution stamped with
+        # the adoption moment instead of the broker's own real fill date
+        # (see adopt_broker_trade), which otherwise silently misattributes
+        # its juice to the wrong per-week/per-month bucket.
+        ch["date"] = str(ed["date"]).strip()
     if ed.get("strike") not in (None, ""):
         ch["strike"] = float(ed["strike"])
     if ed.get("contracts") not in (None, ""):
