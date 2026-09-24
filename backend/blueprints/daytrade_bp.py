@@ -1,4 +1,4 @@
-"""Day-trade sleeve (14 routes) — split out of the former monolithic app.py."""
+"""Day-trade sleeve (17 routes) — split out of the former monolithic app.py."""
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
@@ -6,6 +6,7 @@ from flask import Blueprint, jsonify, request
 from api_common import _err
 
 import accounts
+import config
 from daytrade import scheduler as daytrade_scheduler
 from daytrade import store as daytrade_store
 
@@ -57,14 +58,30 @@ def api_daytrade_universe_rescan_status():
 @daytrade_bp.route("/api/daytrade/screen-health")
 def api_daytrade_screen_health():
     """Last successful screener run, by trigger ("scheduled" — the once-per-
-    trading-day after-close job, i.e. this app's answer to "did last night's
-    job actually run" — and "manual" — the last "Rescan now" click). Empty
-    for a trigger that has never succeeded. SHARED, like /universe and
-    /prices."""
+    trading-day pre-market job, i.e. this app's answer to "did this
+    morning's job actually run" — and "manual" — the last "Rescan now"
+    click). Empty for a trigger that has never succeeded. SHARED, like
+    /universe and /prices."""
     try:
         return jsonify(daytrade_store.load_screen_health())
     except Exception as e:  # noqa: BLE001
         return _err(e)
+
+
+@daytrade_bp.route("/api/daytrade/config")
+def api_daytrade_config():
+    """The handful of DAYTRADE_* tunables the UI displays as text (rather
+    than reading via a dedicated field) — a single source so a config
+    change (e.g. raising the trades/day cap) can't leave a hardcoded
+    display string quietly lying about the actual rule. SHARED (not
+    account-scoped): these are process-wide constants, not per-account
+    state."""
+    return jsonify({
+        "risk_pct": config.DAYTRADE_RISK_PCT,
+        "max_trades_per_day": config.DAYTRADE_MAX_TRADES_PER_DAY,
+        "max_losses_per_day": config.DAYTRADE_MAX_LOSSES_PER_DAY,
+        "daily_stop_r": config.DAYTRADE_DAILY_STOP_R,
+    })
 
 
 @daytrade_bp.route("/api/daytrade/bars/<symbol>")

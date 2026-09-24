@@ -849,6 +849,8 @@ export default function DayTradePanel() {
   const { data: budget } = useApi(() => api.daytradeBudget(), [], 60000);
   const { data: trial } = useApi(() => api.daytradeTrial(), [], 60000);
   const { data: screenHealth, reload: reloadScreenHealth } = useApi(() => api.daytradeScreenHealth(), [], 60000);
+  // A process-wide constant, not per-request state — fetch once, no poll.
+  const { data: ruleConfig } = useApi(() => api.daytradeConfig(), [], null);
 
   // Adaptive poll cadence: the baseline (60s) is fine while nothing's close
   // to happening, but once a setup is armed (watching for a breakout) or a
@@ -959,7 +961,8 @@ export default function DayTradePanel() {
               sub={budget ? (budget.source === "dry_powder" ? budget.detail : `fallback — ${budget.detail}`) : "loading…"}
               tone={budget?.source === "fallback" ? "text-amber-300" : "text-slate-100"}
             />
-            <Stat label="Trades taken" value={trades.length} sub={`max 2/day`} />
+            <Stat label="Trades taken" value={trades.length}
+                  sub={ruleConfig ? `max ${ruleConfig.max_trades_per_day}/day` : "max —/day"} />
             <Stat label="Cumulative R" value={rMult(cumulativeR)} tone={toneFor(cumulativeR)} />
             <Stat label="Realized P&L" value={money(realizedPnl)} tone={toneFor(realizedPnl)} />
             <Stat

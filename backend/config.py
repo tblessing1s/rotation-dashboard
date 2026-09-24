@@ -808,9 +808,15 @@ DAYTRADE_FULL_TARGET_R = 2.0
 # Rule 7 — risk: % of account risked per trade (sized off the stop distance),
 # max trades/day, and the day-stop trigger (two losing trades OR cumulative
 # R at/above DAYTRADE_DAILY_STOP_R halts new entries for the rest of the day
-# — existing signals already in flight still play out).
+# — existing signals already in flight still play out). The trades/day cap
+# is a THROUGHPUT limit, not a risk limit — DAYTRADE_MAX_LOSSES_PER_DAY and
+# DAYTRADE_DAILY_STOP_R are the independent guardrails that actually bound a
+# bad day's loss (still just 2 losing trades = ~2% of equity, regardless of
+# this cap), so raising it only lets a genuinely good day capture more of
+# the valid setups instead of stopping early — it doesn't raise worst-case
+# downside.
 DAYTRADE_RISK_PCT = 1.0
-DAYTRADE_MAX_TRADES_PER_DAY = 2
+DAYTRADE_MAX_TRADES_PER_DAY = 10
 DAYTRADE_MAX_LOSSES_PER_DAY = 2
 DAYTRADE_DAILY_STOP_R = 2.0
 # FALLBACK ONLY as of daytrade/budget.py: the scheduler sizes off the primary

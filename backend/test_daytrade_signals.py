@@ -331,7 +331,8 @@ def _setup_only_bars(symbol: str, t_seed: str, t_setup: str) -> list[dict]:
 
 
 def test_a_third_setup_is_skipped_once_max_trades_per_day_is_reached(tmp_store, monkeypatch):
-    monkeypatch.setattr(config, "DAYTRADE_MAX_LOSSES_PER_DAY", 99)  # isolate the trade-count cap
+    monkeypatch.setattr(config, "DAYTRADE_MAX_TRADES_PER_DAY", 2)  # isolate the trade-count cap
+    monkeypatch.setattr(config, "DAYTRADE_MAX_LOSSES_PER_DAY", 99)
     monkeypatch.setattr(config, "DAYTRADE_DAILY_STOP_R", 99.0)
     _save_screen([_pick("A", 100, 90), _pick("B", 100, 90), _pick("C", 100, 90)])
     bars = (_losing_trade_bars("A", "09:30", "09:35", "09:40", "09:45")
@@ -458,10 +459,11 @@ def test_entries_disabled_between_runs_still_resolves_an_open_trade(tmp_store):
 
 
 def test_trades_taken_count_persists_across_separate_calls(tmp_store, monkeypatch):
-    """The 2-trades/day cap must hold even when the 2 trades were taken in
-    an EARLIER call and this call starts with a fresh in-memory _Day —
+    """The trades/day cap must hold even when the trades were taken in an
+    EARLIER call and this call starts with a fresh in-memory _Day —
     trades_taken has to be rehydrated from the journal, not reset to 0."""
-    monkeypatch.setattr(config, "DAYTRADE_MAX_LOSSES_PER_DAY", 99)  # isolate the trade-count cap
+    monkeypatch.setattr(config, "DAYTRADE_MAX_TRADES_PER_DAY", 2)  # isolate the trade-count cap
+    monkeypatch.setattr(config, "DAYTRADE_MAX_LOSSES_PER_DAY", 99)
     _save_screen([_pick("A", 100, 90), _pick("B", 100, 90), _pick("C", 100, 90)])
     store.append_bars(DAY, _losing_trade_bars("A", "09:30", "09:35", "09:40", "09:45")
                        + _losing_trade_bars("B", "09:50", "09:55", "10:00", "10:05"))
