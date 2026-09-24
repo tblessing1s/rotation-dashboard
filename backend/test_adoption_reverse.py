@@ -668,3 +668,35 @@ def test_save_transactions_recomputes_close_net_juice(store):
     assert c1["extrinsic_paid_back"] == 1.10            # OTM -> whole price is time value
     assert c1["net_juice"] == round(3.0 - 1.10, 4)      # sold - paid, per share
     assert c1["net_juice_total"] == round((3.0 - 1.10) * 2 * 100, 2)  # * contracts * 100
+
+
+def test_save_transactions_corrects_a_closes_missing_entry_extrinsic(store):
+    """CONFIRMED LIVE: a close whose original open was never captured (outside
+    the ingestion lookback window, or predates this app tracking the position)
+    books extrinsic_sold=0 at adoption time. entry_extrinsic is the dedicated
+    fix for exactly that — separate from "extrinsic" (which only applies to a
+    sell_short/buy_leap's own linked stock<->extrinsic derivation) so editing
+    it never corrupts the close's own stock_price."""
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "c2", "action": "close_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "close_price_per_share": 2.54, "stock_price": 45.525,
+         "extrinsic_sold": 0.0, "extrinsic_paid_back": 0.015, "net_juice_total": -1.5,
+         "mode": "live"},
+    ]
+    state["positions"].append({"ticker": "IBIT", "status": "open", "shares": {"count": 0},
+                               "leap_legs": [], "short_calls": []})
+    log.save_state(state)
+
+    executor.save_transactions([{"id": "c2", "entry_extrinsic": 2.02}], ticker="IBIT")
+
+    saved = log.load_state()
+    orig = next(e for e in saved["executions"] if e["id"] == "c2")
+    assert orig["extrinsic_sold"] == 0.0     # APPEND-ONLY: original untouched
+    assert orig["stock_price"] == 45.525     # the close's OWN stock price, unaffected
+
+    c2 = next(e for e in log.derived_executions(saved) if e["id"] == "c2")
+    assert c2["extrinsic_sold"] == 2.02
+    assert c2["extrinsic_paid_back"] == 0.015     # re-derived from the (unedited) close price/stock
+    assert c2["net_juice"] == round(2.02 - 0.015, 4)
+    assert c2["net_juice_total"] == round((2.02 - 0.015) * 1 * 100, 2)

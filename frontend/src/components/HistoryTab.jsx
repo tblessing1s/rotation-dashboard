@@ -390,12 +390,20 @@ function _price(e) {
   return e.action === "sell_short" ? e.premium_per_share : e.close_price_per_share;
 }
 function _extr(e) {
-  return e.action === "sell_short" ? e.entry_extrinsic_per_share : null;
+  if (e.action === "sell_short") return e.entry_extrinsic_per_share;
+  if (e.action === "close_short") return e.extrinsic_sold;
+  return null;
 }
 function _toRow(e) {
   return {
     id: e.id, date: (e.date || "").slice(0, 10), action: e.action,
     isOpen: e.action === "sell_short",
+    // A close whose original open fell outside the ingestion window (or
+    // predates this app tracking the position) books extrinsic_sold=0 at
+    // adoption time with no way to fix it — this lets the operator supply
+    // the real entry extrinsic after the fact, without touching the close's
+    // own price/stock (extrinsic_paid_back), which is a separate number.
+    editableExtrinsic: e.action === "close_short",
     source: e.source, roll: e.roll_group_id,
     strike: e.strike ?? "", contracts: e.contracts ?? 1, expiration: e.expiration || "",
     price: _price(e) ?? "", stock_price: e.stock_price ?? "", extrinsic: _extr(e) ?? "",
@@ -435,7 +443,13 @@ function TransactionEditor() {
 
   const set = (i, k, v) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, [k]: v } : r));
   const onStock = (i, v) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, stock_price: v, extrinsic: _calcExt(r, v) } : r));
-  const onExt = (i, v) => setRows((rs) => rs.map((r, j) => j === i ? { ...r, extrinsic: v, stock_price: _calcStock(r, v) } : r));
+  // A close row's "extrinsic" edits the missing ENTRY side directly (no
+  // linked stock derivation — that's the close's own stock_price, a
+  // different number) rather than the entry-stock<->extrinsic link used for
+  // an open (sell_short) row.
+  const onExt = (i, v) => setRows((rs) => rs.map((r, j) => j === i
+    ? (r.editableExtrinsic ? { ...r, extrinsic: v } : { ...r, extrinsic: v, stock_price: _calcStock(r, v) })
+    : r));
 
   const save = async () => {
     setBusy(true); setMsg(null);
@@ -445,7 +459,9 @@ function TransactionEditor() {
         expiration: r.expiration || null,
         price: r.price === "" ? null : Number(r.price),
         stock_price: r.stock_price === "" ? null : Number(r.stock_price),
-        extrinsic: r.extrinsic === "" ? null : Number(r.extrinsic),
+        ...(r.editableExtrinsic
+          ? { entry_extrinsic: r.extrinsic === "" ? null : Number(r.extrinsic) }
+          : { extrinsic: r.extrinsic === "" ? null : Number(r.extrinsic) }),
       }));
       const res = await api.saveTransactions(edits);
       setMsg(`Saved ${res.edited} transaction(s); position derived for ${(res.tickers || []).join(", ") || "—"}.`);
@@ -494,8 +510,12 @@ function TransactionEditor() {
                               atFill={r.stock_at_fill} fillTime={r.fill_time} />
                 </td>
                 <td className="py-1 pr-2">
-                  <input value={r.extrinsic} placeholder={r.isOpen ? "extrinsic" : "—"} disabled={!r.isOpen}
-                         onChange={(e) => onExt(i, e.target.value)} className={`${inp} w-24 ${r.isOpen ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
+                  <input value={r.extrinsic}
+                         placeholder={r.isOpen ? "extrinsic" : r.editableExtrinsic ? "entry extrinsic" : "—"}
+                         disabled={!r.isOpen && !r.editableExtrinsic}
+                         title={r.editableExtrinsic ? "The entry extrinsic this close's original open sold — fill in if it shows $0 because that open was never captured (outside the ingestion window, etc.)" : undefined}
+                         onChange={(e) => onExt(i, e.target.value)}
+                         className={`${inp} w-24 ${(r.isOpen || r.editableExtrinsic) ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
                 </td>
                 <td className="py-1 pr-2 font-sans text-slate-600">{r.roll || ""}</td>
               </tr>
