@@ -700,3 +700,42 @@ def test_save_transactions_corrects_a_closes_missing_entry_extrinsic(store):
     assert c2["extrinsic_paid_back"] == 0.015     # re-derived from the (unedited) close price/stock
     assert c2["net_juice"] == round(2.02 - 0.015, 4)
     assert c2["net_juice_total"] == round((2.02 - 0.015) * 1 * 100, 2)
+
+
+def test_save_transactions_corrects_a_misdated_adopted_close_into_its_real_week(store):
+    """CONFIRMED LIVE: adopt_broker_trade never stamped "date" on an adopted
+    execution, so log.append_execution's setdefault fell back to the adoption
+    moment (today) instead of the broker's real historical fill date — every
+    adopted trade's juice silently bucketed into TODAY's per-week/per-month
+    row instead of the week it actually happened in. A date correction must
+    move it into the right bucket in the theta ledger."""
+    import logging_handler as lh
+
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "c3", "action": "close_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "close_price_per_share": 2.54, "stock_price": 45.525,
+         "extrinsic_sold": 2.02, "extrinsic_paid_back": 0.015, "net_juice_total": 200.5,
+         "mode": "live", "date": "2026-09-24T18:00:00Z"},  # wrongly stamped adoption day
+    ]
+    state["positions"].append({"ticker": "IBIT", "status": "open", "shares": {"count": 0},
+                               "leap_legs": [], "short_calls": []})
+    log.save_state(state)
+
+    lh.recompute_derived(state)
+    log.save_state(state)
+    before = log.load_state()
+    wrong_weeks = {w["week"] for w in before["theta_ledger"]["weeks"] if w["ticker"] == "IBIT"}
+    assert "2026-W38" not in wrong_weeks  # the real fill week isn't there yet
+
+    executor.save_transactions([{"id": "c3", "date": "2026-09-18"}], ticker="IBIT")
+
+    saved = log.load_state()
+    orig = next(e for e in saved["executions"] if e["id"] == "c3")
+    assert orig["date"] == "2026-09-24T18:00:00Z"     # APPEND-ONLY: original untouched
+    c3 = next(e for e in log.derived_executions(saved) if e["id"] == "c3")
+    assert c3["date"] == "2026-09-18"
+
+    ibit_weeks = {w["week"]: w for w in saved["theta_ledger"]["weeks"] if w["ticker"] == "IBIT"}
+    assert "2026-W38" in ibit_weeks           # now bucketed into its real fill week
+    assert ibit_weeks["2026-W38"]["net_juice"] > 0

@@ -457,6 +457,7 @@ function TransactionEditor() {
       const edits = rows.map((r) => ({
         id: r.id, strike: Number(r.strike), contracts: Number(r.contracts),
         expiration: r.expiration || null,
+        date: r.date || null,
         price: r.price === "" ? null : Number(r.price),
         stock_price: r.stock_price === "" ? null : Number(r.stock_price),
         ...(r.editableExtrinsic
@@ -495,7 +496,12 @@ function TransactionEditor() {
           <tbody className="font-mono text-slate-300">
             {rows.map((r, i) => (
               <tr key={r.id} className="border-t border-slate-800/50">
-                <td className="py-1 pr-2 font-sans text-slate-500">{r.date}</td>
+                <td className="py-1 pr-2">
+                  <input value={r.date} placeholder="YYYY-MM-DD"
+                         title="The date this fill bucketed juice into (per-week/per-month). An adopted broker-manual trade defaults to when it was adopted, not when it actually happened — correct it to the real broker fill date if they differ."
+                         onChange={(e) => set(i, "date", e.target.value)}
+                         className={`${inp} w-24 font-sans`} />
+                </td>
                 <td className="py-1 pr-2 text-amber-300">{r.action}</td>
                 <td className="py-1 pr-2"><input value={r.strike} onChange={(e) => set(i, "strike", e.target.value)} className={`${inp} w-16`} /></td>
                 <td className="py-1 pr-2"><input value={r.contracts} onChange={(e) => set(i, "contracts", e.target.value)} className={`${inp} w-10`} /></td>
