@@ -53,6 +53,17 @@ ACT_UNKNOWN = "unknown"
 _OPENING = {"BUY_TO_OPEN", "SELL_TO_OPEN"}
 _CLOSING = {"BUY_TO_CLOSE", "SELL_TO_CLOSE"}
 
+# assetType values that trade like a plain share (buy N, sell N, no strike or
+# expiry) and are normalized to "EQUITY" everywhere past this parse boundary.
+# CONFIRMED LIVE (2026-09-24): Schwab classifies an ETF's own transactionItems
+# under "COLLECTIVE_INVESTMENT", not "EQUITY" — an individual stock is
+# "EQUITY". Before this was found, an ETF buy/sell (e.g. IBIT) fell outside
+# the old OPTION/EQUITY filter entirely and was silently dropped with no
+# trace by the "pure fee row" no-op path, exactly like the once-undetected
+# DIVIDEND_TYPES gap. Extend this set (never widen the bare "EQUITY" check
+# elsewhere) if another such type is confirmed.
+_EQUITY_LIKE = {"EQUITY", "COLLECTIVE_INVESTMENT"}
+
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -78,6 +89,9 @@ def _leg_from_transfer_item(item: dict) -> dict:
     """
     inst = item.get("instrument") or {}
     asset = (inst.get("assetType") or "").upper()
+    if asset in _EQUITY_LIKE:
+        asset = "EQUITY"  # normalize the ETF/fund synonym so every downstream
+                          # check (asset_type == "EQUITY") needs to know only one spelling
     symbol = (inst.get("symbol") or "").strip()
     amount = _num(item.get("amount"), 0.0) or 0.0           # signed contract/share count
     price = _num(item.get("price"))                          # per-share/contract fill price
@@ -85,6 +99,15 @@ def _leg_from_transfer_item(item: dict) -> dict:
     pos_effect = (item.get("positionEffect") or "").upper()  # OPENING / CLOSING
     fee_type = (item.get("feeType") or "").upper()
 
+    # An option leg's "underlying" is its underlyingSymbol (a different ticker
+    # from the option's own OCC symbol); a plain share leg (EQUITY, including
+    # a normalized ETF) has no underlyingSymbol field at all — ITS ticker IS
+    # its own symbol. Falling back here, once, fixes ticker resolution for
+    # every equity-only group at the source instead of patching each of
+    # _underlying()/_summ_leg() separately.
+    underlying = (inst.get("underlyingSymbol") or "").upper() or None
+    if underlying is None and asset == "EQUITY" and symbol:
+        underlying = symbol.upper()
     leg = {
         "symbol": symbol,
         "asset_type": asset,
@@ -93,7 +116,7 @@ def _leg_from_transfer_item(item: dict) -> dict:
         "cost": cost,
         "position_effect": pos_effect,
         "fee_type": fee_type or None,
-        "underlying": (inst.get("underlyingSymbol") or "").upper() or None,
+        "underlying": underlying,
         "put_call": None,
         "strike": _num(inst.get("strikePrice")),
         "expiry": None,
@@ -141,19 +164,20 @@ def parse_transaction(txn: dict) -> tuple[dict | None, str | None]:
     order_id = txn.get("orderId")
     items = txn.get("transferItems") or txn.get("transactionItems") or []
     legs = [_leg_from_transfer_item(it) for it in items
-            if (it.get("instrument") or {}).get("assetType", "").upper() in ("OPTION", "EQUITY")]
+            if (it.get("instrument") or {}).get("assetType", "").upper() in ({"OPTION"} | _EQUITY_LIKE)]
     if not legs:
         # A TRADE row where no item carries an instrument at all (a pure fee/
-        # interest line) is a legitimate silent no-op. But an item that DOES
-        # carry an instrument + assetType Schwab actually sent — just one this
-        # code doesn't recognize (an ETF, mutual fund, fixed income, etc.) —
-        # must never vanish the same way: that is exactly how the dividend-type
-        # gap above went undetected until it was found by hand. Surface it as a
-        # loud parse issue instead of a silent drop.
+        # interest line, or a CURRENCY settlement leg alongside a recognized
+        # one — see the filter above) is a legitimate silent no-op. But an
+        # item that DOES carry an instrument + assetType Schwab actually sent
+        # — just one this code doesn't recognize (fixed income, an option on
+        # futures, etc.) — must never vanish the same way: that is exactly
+        # how the DIVIDEND_TYPES gap went undetected until it was found by
+        # hand. Surface it as a loud parse issue instead of a silent drop.
         unrecognized = sorted({
             (it.get("instrument") or {}).get("assetType", "").upper()
             for it in items if (it.get("instrument") or {}).get("assetType")
-        } - {"OPTION", "EQUITY"})
+        } - {"OPTION"} - _EQUITY_LIKE)
         if unrecognized:
             return None, (f"transaction {txn_id} has an unrecognized instrument type "
                           f"({', '.join(unrecognized)}) — not ingested; needs a code fix")
@@ -498,6 +522,9 @@ def ingested_ids(state: dict) -> set[str]:
 # instruction. Mirrors executor.INSTRUCTION inverted; used to dedupe a broker
 # fill against an execution the app ALREADY holds.
 def _leg_action(leg: dict) -> str | None:
+    if leg.get("asset_type") == "EQUITY":
+        buying = (leg.get("amount") or 0) > 0
+        return "buy_shares" if buying else "sell_shares"
     if leg.get("asset_type") != "OPTION":
         return None
     buying = (leg.get("amount") or 0) > 0
@@ -518,36 +545,50 @@ def _exec_key(ticker, action, strike, expiry, contracts) -> tuple:
 
 
 def existing_execution_keys(state: dict) -> dict[tuple, int]:
-    """A multiset of (ticker, action, strike, expiry, contracts) keys the app has
-    ALREADY booked as executions. A broker leg whose key is present here is a fill
-    the app already has — it must be CONFIRMED, never surfaced for adoption (that
-    was the duplicate-leg defect). Count-valued so N identical legs match N booked
-    executions, not one."""
+    """A multiset of (ticker, action, strike, expiry, contracts-or-qty) keys the
+    app has ALREADY booked as executions. A broker leg whose key is present here
+    is a fill the app already has — it must be CONFIRMED, never surfaced for
+    adoption (that was the duplicate-leg defect). Count-valued so N identical
+    legs match N booked executions, not one. Covers both the option actions and
+    the shares-primary base-leg actions (buy_shares/sell_shares), keyed by qty
+    with no strike/expiry — a plain share fill needs the same real-booking
+    verification an option leg gets, not just a known Schwab order id (an order
+    the app placed and tracked is not proof its fill was ever turned into an
+    execution — see the ``is_app`` note in ``build_report``)."""
     keys: dict[tuple, int] = {}
     for e in state.get("executions") or []:
         action = e.get("action")
-        if action not in ("sell_short", "close_short", "buy_leap", "close_leap"):
+        if action in ("sell_short", "close_short", "buy_leap", "close_leap"):
+            k = _exec_key(e.get("ticker"), action, e.get("strike"),
+                          e.get("expiration"), e.get("contracts"))
+        elif action in ("buy_shares", "sell_shares"):
+            k = _exec_key(e.get("ticker"), action, None, None, e.get("qty"))
+        else:
             continue
-        k = _exec_key(e.get("ticker"), action, e.get("strike"),
-                      e.get("expiration"), e.get("contracts"))
         keys[k] = keys.get(k, 0) + 1
     return keys
 
 
 def _group_already_booked(legs: list[dict], exec_keys: dict[tuple, int]) -> bool:
-    """True when EVERY option leg of a group corresponds to an execution the app
-    already holds (consuming counts so a genuinely-new second identical leg is not
-    swallowed by one booked leg). Equity legs (assignments) never count as booked —
-    those are always surfaced."""
-    opt_legs = [l for l in legs if l["asset_type"] == "OPTION"]
-    if not opt_legs:
+    """True when EVERY option or plain-share leg of a group corresponds to an
+    execution the app already holds (consuming counts so a genuinely-new second
+    identical leg is not swallowed by one booked leg). A leg this function
+    can't classify (assignments never reach here — see build_report's TRADE-
+    only gate) makes the whole group unverified, never counted as booked."""
+    relevant = [l for l in legs if l["asset_type"] in ("OPTION", "EQUITY")]
+    if not relevant:
         return False
     remaining = dict(exec_keys)
     ticker = _underlying(legs)
-    for leg in opt_legs:
+    for leg in relevant:
         action = _leg_action(leg)
-        k = _exec_key(ticker, action, leg.get("strike"), leg.get("expiry"),
-                      abs(leg.get("amount") or 0))
+        if action is None:
+            return False
+        if leg["asset_type"] == "OPTION":
+            k = _exec_key(ticker, action, leg.get("strike"), leg.get("expiry"),
+                          abs(leg.get("amount") or 0))
+        else:
+            k = _exec_key(ticker, action, None, None, abs(leg.get("amount") or 0))
         if remaining.get(k, 0) <= 0:
             return False
         remaining[k] -= 1
@@ -643,12 +684,18 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
             continue  # every leg of this group already ingested — idempotent no-op
 
         action = infer_action(g["legs"])
-        # A broker fill is "already ours" when EITHER its Schwab orderId is a known
-        # app order OR every leg corresponds to an execution the app already booked
-        # (the latter guards the duplicate-leg defect: an app fill whose orderId
-        # didn't link must be CONFIRMED, never offered for adoption).
-        is_app = ((g["order_id"] is not None and str(g["order_id"]) in known_orders)
-                  or _group_already_booked(g["legs"], exec_keys))
+        # A broker fill is "already ours" ONLY when every leg corresponds to an
+        # execution the app already booked (content-verified via exec_keys) —
+        # NEVER on a known Schwab orderId alone. A known orderId means the app
+        # PLACED the order; it is not proof the fill ever got turned into an
+        # execution (order polling can die between submission and fill, same
+        # failure _enrich_proposals_from_journal already recovers for). Trusting
+        # the orderId alone silently marked a real, unbooked broker fill "matched"
+        # — permanently buried in the dedupe ledger with no execution behind it,
+        # since a matched fill books nothing further by design. This was a real,
+        # confirmed incident, not a hypothetical: see the session notes.
+        app_order_known = g["order_id"] is not None and str(g["order_id"]) in known_orders
+        is_app = _group_already_booked(g["legs"], exec_keys)
         common = {
             "order_id": g["order_id"],
             "group_key": g["group_key"],
@@ -661,17 +708,23 @@ def build_report(feed: list, state: dict, as_of: str | None = None) -> dict:
             "leg_summaries": [_summ_leg(l) for l in g["legs"]],
         }
         if is_app:
-            by = (f"app order {g['order_id']}" if g["order_id"] and str(g["order_id"]) in known_orders
-                  else "an execution the app already booked")
+            by = f"app order {g['order_id']}" if app_order_known else "an execution the app already booked"
             matched.append(dict(common, source=SOURCE_APP,
                                 summary=f"broker fill confirms {by}"))
         else:
             pid = f"adopt_{g['group_key']}".replace(":", "_")
+            # A known app order that still isn't content-verified is exactly the
+            # lost-fill case: say so, so adopting it doesn't read as "why is my
+            # own order showing up as out-of-band."
+            lost_fill_note = (" — this order was placed from the app, but its fill "
+                              "was never recorded here; adopting will book it now"
+                              if app_order_known else "")
             proposals.append(dict(
                 common, source=SOURCE_BROKER_MANUAL, proposal_id=pid,
                 exposure=_exposure(action, g["legs"]),
                 summary=(f"out-of-band {action} on {_underlying(g['legs']) or '?'} "
-                         f"(broker order {g['order_id'] or 'n/a'}) — adopt to book it")))
+                         f"(broker order {g['order_id'] or 'n/a'}) — adopt to book it"
+                         f"{lost_fill_note}")))
 
     _open_puts = open_put_legs(state)
     return {
@@ -714,6 +767,26 @@ def record_ingested(state: dict, transaction_id: str, *, source: str,
         "proposal_id": proposal_id,
         "ingested_at": _utcnow(),
     }
+
+
+def release_ingested(state: dict, transaction_ids: list[str]) -> list[str]:
+    """Remove transaction ids from the dedupe ledger so the NEXT ingestion run
+    re-classifies them from scratch, instead of skipping them as duplicates
+    forever. For recovering a transaction that was wrongly marked ``matched``
+    by the pre-fix ``is_app`` (a known Schwab order id alone, with no execution
+    ever actually booked) — that transaction is otherwise buried permanently,
+    since a matched fill books nothing further by design.
+
+    Safe either way: releasing a transaction that WAS genuinely already booked
+    just makes the next ingest re-verify it via ``_group_already_booked``
+    (content-based, not order-id-based) and it re-matches as before; nothing is
+    deleted from ``state["executions"]`` — only the dedupe marker. Returns the
+    ids actually found and removed."""
+    ledger = state.get("ingested_transactions") or {}
+    removed = [tid for tid in transaction_ids if str(tid) in ledger]
+    for tid in removed:
+        del ledger[str(tid)]
+    return removed
 
 
 def _persist_report(state: dict, report: dict) -> None:
