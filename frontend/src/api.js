@@ -403,6 +403,12 @@ export const api = {
   adoptions: () => request("/api/ingestion/adoptions"),
   reverseAdoption: (proposalId) =>
     request("/api/ingestion/reverse", { method: "POST", body: JSON.stringify({ proposal_id: proposalId }) }),
+  // Un-forget an already-ingested transaction id (removes only the dedupe
+  // marker) so the next "Ingest now" re-classifies it instead of silently
+  // skipping it as a duplicate forever — recovery for one wrongly marked
+  // "matched" by a known-but-unfulfilled app order id.
+  releaseIngested: (transactionIds) =>
+    request("/api/ingestion/release", { method: "POST", body: JSON.stringify({ transaction_ids: transactionIds }) }),
   alertSettings: (patch) =>
     request("/api/alerts/settings", { method: "POST", body: JSON.stringify(patch) }),
   pushVapidKey: () => request("/api/push/vapid-key"),

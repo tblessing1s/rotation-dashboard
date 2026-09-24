@@ -572,7 +572,7 @@ function IngestionPanel() {
             </ul>
           )}
           {(data.last.skipped_detail || []).length > 0 && (
-            <SkippedDetail rows={data.last.skipped_detail} />
+            <SkippedDetail rows={data.last.skipped_detail} onReleased={run} />
           )}
         </>
       )}
@@ -585,8 +585,22 @@ function IngestionPanel() {
 // that got wrongly marked ingested (e.g. an app order whose fill never
 // actually landed) silently skips classification on every re-run forever,
 // indistinguishable from "there was nothing here." This makes that visible.
-function SkippedDetail({ rows }) {
+// Each row is a transaction the dedupe ledger says is already accounted for.
+// "app" + an order_id but NO proposal_id is the risky shape: it means a known
+// Schwab order id alone was once enough to mark it matched, with no guarantee
+// an execution was ever actually booked (the bug this session found and
+// fixed). "Release" un-forgets it so the next ingest re-verifies it for real
+// (content-based, not order-id-based) — safe either way, since a genuinely
+// already-booked transaction just re-matches.
+function SkippedDetail({ rows, onReleased }) {
   const [open, setOpen] = React.useState(false);
+  const [busy, setBusy] = React.useState(null);
+  const release = async (ids) => {
+    setBusy(ids.join(","));
+    try { await api.releaseIngested(ids); onReleased && onReleased(); }
+    finally { setBusy(null); }
+  };
+  const unverified = rows.filter((r) => r.source === "app" && !r.proposal_id);
   return (
     <div className="mt-1">
       <button onClick={() => setOpen((o) => !o)}
@@ -594,16 +608,34 @@ function SkippedDetail({ rows }) {
         {open ? "▾" : "▸"} {rows.length} already-ingested transaction{rows.length > 1 ? "s" : ""} — why
       </button>
       {open && (
-        <ul className="mt-1 space-y-0.5 font-mono text-[11px] text-slate-500">
-          {rows.map((r, i) => (
-            <li key={i}>
-              {r.transaction_id} ({r.ticker || "?"}) — {r.source || "unknown"}
-              {r.order_id ? ` · app order ${r.order_id}` : ""}
-              {r.proposal_id ? ` · adopted as ${r.proposal_id}` : ""}
-              {r.ingested_at ? ` · ${String(r.ingested_at).replace("T", " ").replace("Z", "")}` : ""}
-            </li>
-          ))}
-        </ul>
+        <>
+          {unverified.length > 1 && (
+            <button onClick={() => release(unverified.map((r) => r.transaction_id))}
+                    disabled={!!busy}
+                    className="mt-1 rounded-full border border-amber-700 bg-amber-900/40 px-2 py-0.5 text-[11px] font-semibold text-amber-200 hover:bg-amber-900/70 disabled:opacity-50">
+              {busy ? "Releasing…" : `Release all ${unverified.length} unverified — re-check on next ingest`}
+            </button>
+          )}
+          <ul className="mt-1 space-y-0.5 font-mono text-[11px] text-slate-500">
+            {rows.map((r, i) => {
+              const risky = r.source === "app" && !r.proposal_id;
+              return (
+                <li key={i} className={risky ? "text-amber-300/80" : undefined}>
+                  {r.transaction_id} ({r.ticker || "?"}) — {r.source || "unknown"}
+                  {r.order_id ? ` · app order ${r.order_id}` : ""}
+                  {r.proposal_id ? ` · adopted as ${r.proposal_id}` : ""}
+                  {r.ingested_at ? ` · ${String(r.ingested_at).replace("T", " ").replace("Z", "")}` : ""}
+                  {risky && (
+                    <button onClick={() => release([r.transaction_id])} disabled={!!busy}
+                            className="ml-2 rounded border border-amber-700 px-1 text-amber-300 hover:bg-amber-900/40 disabled:opacity-50">
+                      release
+                    </button>
+                  )}
+                </li>
+              );
+            })}
+          </ul>
+        </>
       )}
     </div>
   );

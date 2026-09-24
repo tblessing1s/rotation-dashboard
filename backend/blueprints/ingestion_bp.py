@@ -1,4 +1,4 @@
-"""Transaction ingestion (Schwab executions -> state, spec §4) (4 routes) — split out of the former monolithic app.py."""
+"""Transaction ingestion (Schwab executions -> state, spec §4) (5 routes) — split out of the former monolithic app.py."""
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
@@ -72,6 +72,30 @@ def api_ingestion_reverse():
         return jsonify(executor.reverse_adoption(proposal_id, payload.get("reason")))
     except ValueError as e:
         return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@ingestion_bp.route("/api/ingestion/release", methods=["POST"])
+def api_ingestion_release():
+    """Un-forget one or more transaction ids from the dedupe ledger so the next
+    ingestion run re-classifies them instead of silently skipping them as
+    duplicates — recovery for a transaction wrongly marked "matched" by a
+    known-but-unfulfilled app order id (see transaction_ingest.release_ingested).
+    Removes only the dedupe marker; nothing in the immutable execution log is
+    touched. Safe to call on a transaction that really was already booked — the
+    next ingest just re-verifies it via content match and it matches again."""
+    payload = request.get_json(silent=True) or {}
+    transaction_ids = payload.get("transaction_ids") or []
+    if not transaction_ids:
+        return jsonify({"error": "transaction_ids is required"}), 400
+    try:
+        import transaction_ingest as ingest
+
+        def _release(state):
+            removed = ingest.release_ingested(state, transaction_ids)
+            return {"released": removed}
+        return jsonify(log.mutate_state(_release))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

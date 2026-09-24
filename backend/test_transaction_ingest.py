@@ -94,17 +94,42 @@ def test_pure_fee_trade_row_is_silently_skipped():
 
 def test_unrecognized_instrument_type_is_a_loud_error_not_a_silent_drop():
     """A TRADE row whose item DOES carry a real instrument + assetType — just
-    one this code doesn't recognize (e.g. an ETF Schwab classifies outside
-    OPTION/EQUITY) — must surface as a parse error, never vanish the same way
-    a harmless fee row does. Regression for exactly the failure mode that let
-    the DIVIDEND_TYPES gap go undetected: a real trade silently dropped with
-    no trace anywhere in the ingestion report."""
+    one this code doesn't recognize — must surface as a parse error, never
+    vanish the same way a harmless fee row does. Regression for exactly the
+    failure mode that let the DIVIDEND_TYPES gap go undetected: a real trade
+    silently dropped with no trace anywhere in the ingestion report."""
+    bond_item = {"instrument": {"assetType": "FIXED_INCOME", "symbol": "912796XY5"},
+                "amount": -1000, "price": 99.5, "cost": 995.00}
+    rec, err = ingest.parse_transaction(_txn("E1", None, [bond_item]))
+    assert rec is None
+    assert "FIXED_INCOME" in err
+
+
+def test_etf_leg_parses_as_equity_with_ticker_resolved(store):
+    """CONFIRMED LIVE (2026-09-24): Schwab classifies an ETF's own transaction
+    legs under assetType "COLLECTIVE_INVESTMENT", not "EQUITY" — this is what
+    silently dropped a real IBIT share sale before it was found and fixed.
+    A COLLECTIVE_INVESTMENT leg must parse exactly like a plain equity leg,
+    including ticker resolution — a share leg has no underlyingSymbol field
+    (that's option-only), so its own instrument symbol must be used instead.
+    A CURRENCY settlement leg riding alongside it (also seen live) must be
+    silently ignored, not treated as a second, unrecognized instrument."""
     etf_item = {"instrument": {"assetType": "COLLECTIVE_INVESTMENT", "symbol": "IBIT"},
                 "amount": -100, "price": 48.7601, "cost": 4875.89}
-    rec, err = ingest.parse_transaction(_txn("E1", None, [etf_item]))
-    assert rec is None
-    assert "COLLECTIVE_INVESTMENT" in err
-    assert "E1" in err
+    currency_item = {"instrument": {"assetType": "CURRENCY", "symbol": "USD"},
+                     "amount": 4875.89, "cost": 0.0}
+    rec, err = ingest.parse_transaction(_txn("E1", "OE1", [etf_item, currency_item]))
+    assert err is None
+    assert len(rec["legs"]) == 1
+    leg = rec["legs"][0]
+    assert leg["asset_type"] == "EQUITY"
+    assert leg["underlying"] == "IBIT"
+    assert leg["amount"] == -100
+
+    report = ingest.build_report([_txn("E1", "OE1", [etf_item, currency_item])], log.load_state())
+    assert not report["matched"]
+    assert len(report["proposals"]) == 1
+    assert report["proposals"][0]["ticker"] == "IBIT"
 
 
 def test_transaction_without_id_is_an_error():
@@ -130,8 +155,13 @@ def test_group_by_order_links_roll_legs():
 # ---------------------------------------------------------------------------
 def test_matched_fill_tagged_source_app_and_recorded(store):
     state = log.load_state()
-    # The app knows order O1 (it lives in order_receipts).
+    # The app knows order O1 (it lives in order_receipts) AND actually booked
+    # the execution at fill time — both must be true for "matched" (see the
+    # next test for the case where only the order id is known).
     state.setdefault("order_receipts", []).append({"order_id": "O1", "ticker": "ABC"})
+    state.setdefault("executions", []).append({
+        "ticker": "ABC", "action": "sell_short", "strike": 110.0,
+        "expiration": "2026-07-17", "contracts": 2})
     log.save_state(state)
 
     feed = [_sell_short_txn("T1", "O1")]
@@ -142,6 +172,33 @@ def test_matched_fill_tagged_source_app_and_recorded(store):
     # matched transaction id is now in the dedupe ledger (source app).
     state = log.load_state()
     assert state["ingested_transactions"]["T1"]["source"] == ingest.SOURCE_APP
+
+
+def test_known_app_order_with_no_booked_execution_is_a_proposal_not_matched(store):
+    """Regression for a real production incident: a known Schwab order id
+    (the app placed it — it's in order_receipts) is NOT proof its fill ever
+    got turned into an execution — order polling can die between submission
+    and fill. Trusting the order id alone used to mark this "matched",
+    permanently burying a real, unbooked broker fill in the dedupe ledger
+    with no execution behind it (a matched fill books nothing further by
+    design). It must surface as an adoptable proposal instead, with a note
+    that it was placed from the app."""
+    state = log.load_state()
+    state.setdefault("order_receipts", []).append({"order_id": "O1", "ticker": "ABC"})
+    # Deliberately NO matching execution in state["executions"].
+    log.save_state(state)
+
+    feed = [_sell_short_txn("T1", "O1")]
+    report = ingest.run_ingestion(feed=feed)
+    assert not report["matched"]
+    assert len(report["proposals"]) == 1
+    p = report["proposals"][0]
+    assert p["source"] == ingest.SOURCE_BROKER_MANUAL
+    assert "placed from the app" in p["summary"]
+
+    # not recorded as ingested — it must keep resurfacing until adopted.
+    state = log.load_state()
+    assert "T1" not in state["ingested_transactions"]
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +231,9 @@ def test_out_of_band_roll_surfaces_one_linked_proposal(store):
 def test_reingest_is_idempotent(store):
     state = log.load_state()
     state.setdefault("order_receipts", []).append({"order_id": "O1"})
+    state.setdefault("executions", []).append({
+        "ticker": "ABC", "action": "sell_short", "strike": 110.0,
+        "expiration": "2026-07-17", "contracts": 2})
     log.save_state(state)
     feed = [_sell_short_txn("T1", "O1")]
 
@@ -194,6 +254,41 @@ def test_reingest_is_idempotent(store):
     # ledger has exactly one entry for T1.
     state = log.load_state()
     assert list(state["ingested_transactions"].keys()) == ["T1"]
+
+
+def test_release_ingested_lets_a_wrongly_matched_transaction_be_reclassified(store):
+    """release_ingested is the recovery tool for a transaction the OLD
+    (pre-fix) logic wrongly marked "matched" on a known order id alone, with
+    no execution ever actually booked — permanently buried, since a matched
+    fill books nothing further. Releasing it removes only the dedupe marker;
+    the next ingest re-verifies it for real and it correctly becomes an
+    adoptable proposal instead of silently staying lost."""
+    state = log.load_state()
+    state.setdefault("order_receipts", []).append({"order_id": "O1"})
+    # Simulate the pre-fix bug's aftermath directly: dedupe-recorded as
+    # "matched", but no execution behind it.
+    ingest.record_ingested(state, "T1", source=ingest.SOURCE_APP, order_id="O1")
+    log.save_state(state)
+
+    feed = [_sell_short_txn("T1", "O1")]
+    stuck = ingest.run_ingestion(feed=feed)
+    assert not stuck["matched"] and not stuck["proposals"]
+    assert stuck["skipped_duplicates"] == ["T1"]
+
+    state = log.load_state()
+    removed = ingest.release_ingested(state, ["T1"])
+    assert removed == ["T1"]
+    assert "T1" not in state["ingested_transactions"]
+    log.save_state(state)
+
+    recovered = ingest.run_ingestion(feed=feed)
+    assert not recovered["matched"]
+    assert len(recovered["proposals"]) == 1
+    assert recovered["proposals"][0]["transaction_ids"] == ["T1"]
+
+    # Releasing a transaction id the ledger never had is a harmless no-op.
+    state = log.load_state()
+    assert ingest.release_ingested(state, ["NOPE"]) == []
 
 
 # ---------------------------------------------------------------------------
