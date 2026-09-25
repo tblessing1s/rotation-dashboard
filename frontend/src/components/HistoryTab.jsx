@@ -398,6 +398,7 @@ function _price(e) {
 function _extr(e) {
   if (e.action === "sell_short") return e.entry_extrinsic_per_share;
   if (e.action === "close_short") return e.extrinsic_sold;
+  if (e.action === "sell_shares") return e.cost_basis_per_share;
   return null;
 }
 function _toRow(e) {
@@ -412,6 +413,10 @@ function _toRow(e) {
     // the real entry extrinsic after the fact, without touching the close's
     // own price/stock (extrinsic_paid_back), which is a separate number.
     editableExtrinsic: e.action === "close_short",
+    // Same idea, share-side: a sell adopted before its own buy was recovered
+    // had no real cost basis to compute realized_pnl from and booked it off
+    // $0 — this lets the operator supply the real cost basis after the fact.
+    editableCostBasis: e.action === "sell_shares",
     source: e.source, roll: e.roll_group_id,
     strike: isShare ? "" : (e.strike ?? ""),
     contracts: isShare ? (e.qty ?? 0) : (e.contracts ?? 1),
@@ -502,7 +507,7 @@ export function _editsForSave(rows, original) {
     setIfChanged("price", r.price, o.price, "", Number);
     setIfChanged("stock_price", r.stock_price, o.stock_price, "", Number);
     if (String(r.extrinsic ?? "") !== String(o.extrinsic ?? "")) {
-      const key = r.editableExtrinsic ? "entry_extrinsic" : "extrinsic";
+      const key = r.editableExtrinsic ? "entry_extrinsic" : r.editableCostBasis ? "cost_basis" : "extrinsic";
       ed[key] = r.extrinsic === "" ? null : Number(r.extrinsic);
       changed = true;
     }
@@ -552,7 +557,7 @@ function TransactionEditor() {
   // different number) rather than the entry-stock<->extrinsic link used for
   // an open (sell_short) row.
   const onExt = (i, v) => setRows((rs) => rs.map((r, j) => j === i
-    ? (r.editableExtrinsic ? { ...r, extrinsic: v } : { ...r, extrinsic: v, stock_price: _calcStock(r, v) })
+    ? ((r.editableExtrinsic || r.editableCostBasis) ? { ...r, extrinsic: v } : { ...r, extrinsic: v, stock_price: _calcStock(r, v) })
     : r));
 
   const save = async () => {
@@ -625,13 +630,16 @@ function TransactionEditor() {
                 </td>
                 <td className="py-1 pr-2">
                   <input value={r.extrinsic}
-                         placeholder={r.isOpen ? "extrinsic" : r.editableExtrinsic ? "entry extrinsic" : "—"}
-                         disabled={r.extrinsicLocked || (!r.isOpen && !r.editableExtrinsic)}
+                         placeholder={r.isOpen ? "extrinsic" : r.editableExtrinsic ? "entry extrinsic"
+                           : r.editableCostBasis ? "cost basis" : "—"}
+                         disabled={r.extrinsicLocked || (!r.isOpen && !r.editableExtrinsic && !r.editableCostBasis)}
                          title={r.extrinsicLocked
                            ? `Locked to its matched open's own extrinsic (${r.link}) — nothing to type, they can't disagree`
-                           : r.editableExtrinsic ? "The entry extrinsic this close's original open sold — fill in if it shows $0 because that open was never captured (outside the ingestion window, etc.)" : undefined}
+                           : r.editableExtrinsic ? "The entry extrinsic this close's original open sold — fill in if it shows $0 because that open was never captured (outside the ingestion window, etc.)"
+                           : r.editableCostBasis ? "Per-share cost basis this sale's realized P&L is computed from — fill in if it looks like $0/the full sale proceeds because the matching buy wasn't on record yet when this sale was adopted"
+                           : undefined}
                          onChange={(e) => onExt(i, e.target.value)}
-                         className={`${inp} w-24 ${r.extrinsicLocked ? "opacity-60" : (r.isOpen || r.editableExtrinsic) ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
+                         className={`${inp} w-24 ${r.extrinsicLocked ? "opacity-60" : (r.isOpen || r.editableExtrinsic || r.editableCostBasis) ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
                 </td>
                 <td className="py-1 pr-2 font-sans text-slate-600">
                   {r.roll || (r.link

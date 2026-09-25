@@ -927,6 +927,36 @@ def test_save_transactions_corrects_a_share_fills_price_qty_and_date(store):
     assert s1["date"] == "2026-09-01"
 
 
+def test_save_transactions_corrects_a_sells_missing_cost_basis(store):
+    """CONFIRMED LIVE: adopting a sell_shares before its own buy_shares was
+    recovered leaves realized_pnl booked off a $0 (or otherwise stale) cost
+    basis — silently inflating it to ~the full sale proceeds, which then
+    inflates a shares cycle's return% by the same amount. cost_basis is the
+    dedicated fix for exactly that, the sell-side twin of entry_extrinsic."""
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "sell1", "action": "sell_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 48.7601, "execution_total": 4876.01,
+         "cost_basis_per_share": 0.0, "realized_pnl": 4876.01,
+         "date": "2026-09-24", "mode": "live"},
+    ]
+    state["positions"].append({"ticker": "IBIT", "status": "closed",
+                               "shares": {"count": 0, "cost_basis_per_share": None},
+                               "leap_legs": [], "short_calls": []})
+    log.save_state(state)
+
+    executor.save_transactions([{"id": "sell1", "cost_basis": 44.51}], ticker="IBIT")
+
+    saved = log.load_state()
+    orig = next(e for e in saved["executions"] if e["id"] == "sell1")
+    assert orig["cost_basis_per_share"] == 0.0     # APPEND-ONLY: original untouched
+    assert orig["realized_pnl"] == 4876.01
+
+    sell1 = next(e for e in log.derived_executions(saved) if e["id"] == "sell1")
+    assert sell1["cost_basis_per_share"] == 44.51
+    assert sell1["realized_pnl"] == round(4876.01 - 44.51 * 100, 2)   # == 425.01
+
+
 # ---------------------------------------------------------------------------
 # Out-of-order shares recovery: the live mirror drifts, replay/rebuild fixes it
 # ---------------------------------------------------------------------------

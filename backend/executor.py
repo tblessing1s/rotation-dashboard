@@ -2087,6 +2087,24 @@ def _compute_txn_changes(e: dict, ed: dict) -> dict:
             qty = ch.get("qty", e.get("qty") or 0)
             ch["price_per_share"] = round(price, 4)
             ch["execution_total"] = round(price * qty, 2)
+        if a == "sell_shares":
+            # CONFIRMED LIVE: a sell_shares adopted before its own buy_shares
+            # was recovered had no real cost basis to compute realized_pnl
+            # from (the position's shares mirror was still empty at that
+            # moment) — it booked realized_pnl off a $0 cost basis, silently
+            # inflating it to ~the full sale proceeds. rebuild_shares_from_log
+            # fixes the position's cost basis going forward but can't rewrite
+            # this already-booked execution's own frozen realized_pnl — this
+            # is the dedicated fix, the sell-side twin of a close_short's
+            # entry_extrinsic correction.
+            cost_basis = _ff(ed.get("cost_basis"))
+            if cost_basis is not None:
+                ch["cost_basis_per_share"] = round(cost_basis, 4)
+            cps = ch.get("cost_basis_per_share", _ff(e.get("cost_basis_per_share")))
+            proceeds = ch.get("execution_total", _ff(e.get("execution_total")))
+            qty_final = ch.get("qty", e.get("qty") or 0)
+            if cps is not None and proceeds is not None:
+                ch["realized_pnl"] = round(proceeds - cps * qty_final, 2)
         return ch
 
     if ed.get("strike") not in (None, ""):
