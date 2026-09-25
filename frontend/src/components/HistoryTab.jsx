@@ -462,12 +462,50 @@ function _calcStock(r, ext) {
   return +(strike + Math.max(perShare - Number(ext), 0)).toFixed(2);
 }
 
+// Only the rows the operator actually touched belong in a save. Every row was
+// previously sent on every save (price/stock_price/extrinsic all pre-filled,
+// never blank) — CONFIRMED LIVE: since the backend applies whatever a present
+// field says with no comparison against the current value, resaving an
+// untouched close_short row re-submitted its on-screen extrinsic as a fresh
+// "correction" every time, silently able to zero out a correctly-derived
+// extrinsic_sold the moment that field ever displayed 0 (including from the
+// stale pre-correction view /api/executions/raw returned before that was
+// fixed). Diffing against the snapshot taken at load makes an untouched row
+// a no-op, not a resend.
+export function _editsForSave(rows, original) {
+  const edits = [];
+  for (const r of rows) {
+    const o = original[r.id] || {};
+    const ed = { id: r.id };
+    let changed = false;
+    const setIfChanged = (key, cur, orig, blank, transform) => {
+      if (String(cur ?? "") === String(orig ?? "")) return;
+      ed[key] = cur === blank ? null : transform(cur);
+      changed = true;
+    };
+    setIfChanged("strike", r.strike, o.strike, undefined, Number);
+    setIfChanged("contracts", r.contracts, o.contracts, undefined, Number);
+    setIfChanged("expiration", r.expiration, o.expiration, "", (v) => v || null);
+    setIfChanged("date", r.date, o.date, "", (v) => v || null);
+    setIfChanged("price", r.price, o.price, "", Number);
+    setIfChanged("stock_price", r.stock_price, o.stock_price, "", Number);
+    if (String(r.extrinsic ?? "") !== String(o.extrinsic ?? "")) {
+      const key = r.editableExtrinsic ? "entry_extrinsic" : "extrinsic";
+      ed[key] = r.extrinsic === "" ? null : Number(r.extrinsic);
+      changed = true;
+    }
+    if (changed) edits.push(ed);
+  }
+  return edits;
+}
+
 function TransactionEditor() {
   const { data, reload } = useApi(api.executionsRaw, [], null);
   const [rows, setRows] = React.useState(null);
   const [busy, setBusy] = React.useState(false);
   const [msg, setMsg] = React.useState(null);
   const loadedRef = React.useRef(null);
+  const originalRef = React.useRef({});   // id -> row as loaded, to diff a save against
 
   React.useEffect(() => {
     if (data && loadedRef.current !== data) {
@@ -479,7 +517,9 @@ function TransactionEditor() {
       // instant this table reloaded, even though it was already applied
       // everywhere else (ledgers, Payouts).
       const byId = data.corrected_by_id || {};
-      setRows(_linkPairs(fills.slice().reverse().map((e) => _toRow(byId[e.id] || e))));  // oldest first, like a trade log
+      const built = _linkPairs(fills.slice().reverse().map((e) => _toRow(byId[e.id] || e)));  // oldest first, like a trade log
+      setRows(built);
+      originalRef.current = Object.fromEntries(built.map((r) => [r.id, r]));
     }
   }, [data]);
 
@@ -498,16 +538,8 @@ function TransactionEditor() {
   const save = async () => {
     setBusy(true); setMsg(null);
     try {
-      const edits = rows.map((r) => ({
-        id: r.id, strike: Number(r.strike), contracts: Number(r.contracts),
-        expiration: r.expiration || null,
-        date: r.date || null,
-        price: r.price === "" ? null : Number(r.price),
-        stock_price: r.stock_price === "" ? null : Number(r.stock_price),
-        ...(r.editableExtrinsic
-          ? { entry_extrinsic: r.extrinsic === "" ? null : Number(r.extrinsic) }
-          : { extrinsic: r.extrinsic === "" ? null : Number(r.extrinsic) }),
-      }));
+      const edits = _editsForSave(rows, originalRef.current);
+      if (edits.length === 0) { setMsg("No changes to save."); return; }
       const res = await api.saveTransactions(edits);
       setMsg(`Saved ${res.edited} transaction(s); position derived for ${(res.tickers || []).join(", ") || "—"}.`);
       loadedRef.current = null;   // allow reseed from fresh data
