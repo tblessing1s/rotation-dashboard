@@ -293,6 +293,10 @@ export const api = {
   accountValueHistory: () => request("/api/account-value-history"),
   // Raw executions + live position legs, for the History validation table.
   executionsRaw: () => request("/api/executions/raw"),
+  // Durable order journal (outside state.json) — real captured stock prices for
+  // broker orders the app itself placed, filterable by ticker.
+  orderJournal: (ticker) =>
+    request(`/api/executions/order-journal${ticker ? `?ticker=${encodeURIComponent(ticker)}` : ""}`),
   // Single-spot position editor: directly set a position's legs.
   setPositionLegs: (ticker, legs, reason) =>
     request("/api/positions/set-legs", { method: "POST", body: JSON.stringify({ ticker, legs, reason }) }),

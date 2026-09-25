@@ -1,4 +1,4 @@
-"""Execution log (raw records, void, verify-fills) (3 routes) — split out of the former monolithic app.py."""
+"""Execution log (raw records, void, verify-fills, order journal) (4 routes) — split out of the former monolithic app.py."""
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
@@ -49,6 +49,24 @@ def api_executions_void():
         return jsonify(executor.void_executions(ids, payload.get("reason")))
     except ValueError as e:
         return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@executions_bp.route("/api/executions/order-journal")
+def api_executions_order_journal():
+    """The durable order journal (outside state.json, survives a lost/edited
+    execution) — read-only, newest first. Filter with ?ticker= to check whether
+    a real broker order for that name ever captured a stock price, e.g. to
+    recover the underlying price at a historical fill without shell/flyctl
+    access to the Fly volume the journal lives on."""
+    ticker = (request.args.get("ticker") or "").strip().upper()
+    limit = int(request.args.get("limit") or 200)
+    try:
+        entries = list(reversed(log.order_journal_entries()))
+        if ticker:
+            entries = [e for e in entries if str(e.get("ticker") or "").upper() == ticker]
+        return jsonify({"entries": entries[:limit], "total_matched": len(entries)})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
