@@ -486,6 +486,64 @@ def test_rebuild_with_diff_ids_empties_a_fully_closed_position(store):
     assert pos["short_calls"] == [] and pos["needs_review"] is False
 
 
+def test_rebuild_from_broker_re_closes_a_position_with_nothing_left(store):
+    """CONFIRMED LIVE: clearing a position's last stray leg via "Schwab is
+    correct — align to broker" left it showing OPEN in the Positions tab
+    (positions_view filters purely on status != "closed") — this rebuild path
+    replaced short_calls/leap_legs but never re-derived status, unlike
+    rebuild_shares_from_log / rebuild_short_calls_from_log, which already do."""
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "IBIT", "status": "active", "needs_review": True,
+        "review": {"summary": "phantom short", "diff_ids": ["diff_001"]},
+        "shares": {"count": 0, "cap": 100},
+        "short_calls": [{"strike": 43.0, "contracts": 1, "expiration": "2026-09-18"}],
+    })
+    state["reconciliation"] = {
+        "last": {"as_of": "2026-09-25T13:00:00Z", "status": reconcile.DIRTY, "broker_ok": True,
+                 "error": None, "suggested_resolutions": [],
+                 "diffs": [{"id": "diff_001", "classification": reconcile.MISSING_AT_BROKER,
+                            "ticker": "IBIT", "instrument_type": "OPTION", "strike": 43.0,
+                            "expiry": "2026-09-18", "expected_qty": 1, "broker_qty": 0,
+                            "summary": "43 call missing at broker"}]},
+        "history": [], "last_success": "2026-09-25T13:00:00Z"}
+    log.save_state(state)
+
+    executor.rebuild_position_from_broker("IBIT", broker_legs=[], diff_ids=["diff_001"])
+
+    pos = log.find_position(log.load_state(), "IBIT")
+    assert pos["short_calls"] == []
+    assert pos["status"] == "closed"
+
+
+def test_rebuild_from_broker_keeps_a_position_active_when_shares_remain(store):
+    """The same rebuild clearing an option leg must NOT close a position that
+    still genuinely holds shares — status only follows to "closed" when
+    everything (shares, short_calls, leap_legs, short_puts) is empty."""
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "SPCX", "status": "active", "needs_review": True,
+        "review": {"summary": "phantom short", "diff_ids": ["diff_001"]},
+        "shares": {"count": 100, "cap": 100},
+        "short_calls": [{"strike": 138.0, "contracts": 1, "expiration": "2026-09-18"}],
+    })
+    state["reconciliation"] = {
+        "last": {"as_of": "2026-09-08T13:00:00Z", "status": reconcile.DIRTY, "broker_ok": True,
+                 "error": None, "suggested_resolutions": [],
+                 "diffs": [{"id": "diff_001", "classification": reconcile.MISSING_AT_BROKER,
+                            "ticker": "SPCX", "instrument_type": "OPTION", "strike": 138.0,
+                            "expiry": "2026-09-18", "expected_qty": 1, "broker_qty": 0,
+                            "summary": "138 call missing at broker"}]},
+        "history": [], "last_success": "2026-09-08T13:00:00Z"}
+    log.save_state(state)
+
+    executor.rebuild_position_from_broker("SPCX", broker_legs=[], diff_ids=["diff_001"])
+
+    pos = log.find_position(log.load_state(), "SPCX")
+    assert pos["short_calls"] == []
+    assert pos["status"] == "active"
+
+
 def test_rebuild_without_diff_ids_still_refuses_an_empty_broker_read(store):
     # The exploratory dry-run path (no diff_ids) keeps the fail-closed guard —
     # an empty broker read here has no report confirming it's real, so it could

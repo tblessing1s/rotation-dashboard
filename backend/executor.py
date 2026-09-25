@@ -1572,6 +1572,16 @@ def rebuild_position_from_broker(ticker: str, broker_legs: list | None = None,
     position["short_calls"] = new_shorts
     position["leap_legs"] = new_leaps
     position["leap"] = new_leaps[0] if new_leaps else None
+    # CONFIRMED LIVE: replacing the legs alone left a position "open" in the
+    # Positions tab (positions_view filters purely on status != "closed") even
+    # after a rebuild cleared its last stray leg to empty — this is the one
+    # rebuild path that never re-derived status (rebuild_shares_from_log /
+    # rebuild_short_calls_from_log both already do). Mirrors their check.
+    position["status"] = "closed" if (
+        not new_shorts and not new_leaps
+        and not int((position.get("shares") or {}).get("count") or 0)
+        and not (position.get("short_puts") or [])
+    ) else "active"
     log.recompute_derived(state)
     import reconcile as _rec
     skipped_equity = []
