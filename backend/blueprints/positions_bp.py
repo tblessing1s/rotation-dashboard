@@ -1,4 +1,4 @@
-"""Positions (track) (7 routes) — split out of the former monolithic app.py."""
+"""Positions (track) (8 routes) — split out of the former monolithic app.py."""
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
@@ -150,6 +150,25 @@ def api_rebuild_shares():
         return jsonify({"error": "ticker is required"}), 400
     try:
         return jsonify(executor.rebuild_shares_from_log(ticker, payload.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@positions_bp.route("/api/positions/rebuild-short-calls", methods=["POST"])
+def api_rebuild_short_calls():
+    """Replace a position's live short_calls mirror with a full DATE-order FIFO
+    replay of its sell_short/close_short executions — the short-calls twin of
+    rebuild-shares: fixes a leg stuck "open" because its close was booked
+    before the matching open existed on the position (see
+    executor.rebuild_short_calls_from_log)."""
+    payload = request.get_json(silent=True) or {}
+    ticker = (payload.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify(executor.rebuild_short_calls_from_log(ticker, payload.get("reason")))
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001
