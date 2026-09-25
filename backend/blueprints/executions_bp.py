@@ -16,10 +16,19 @@ def api_executions_raw():
     """Raw, unprocessed data for validation: the append-only execution log
     (newest first, capped) plus each position's LIVE derived legs (short_calls /
     leap_legs / shares). Read-only. Lets the operator eyeball exactly what state
-    holds — e.g. spot a duplicate short leg or a leg with no entry extrinsic."""
+    holds — e.g. spot a duplicate short leg or a leg with no entry extrinsic.
+
+    Also returns ``corrected_by_id``: the same executions with any saved
+    ``txn_correction`` overlaid (see logging_handler.derived_executions) — what
+    the History editor should reseed its rows from after a save. The raw
+    ``executions`` list deliberately stays pre-correction (this route's own
+    validation purpose), so a saved correction otherwise looked reverted the
+    instant the editor reloaded from it, even though it was already applied
+    everywhere else (ledgers, Payouts)."""
     try:
         state = log.load_state()
         execs = list(reversed(state.get("executions", [])))[:300]
+        corrected_by_id = {str(e["id"]): e for e in log.derived_executions(state) if e.get("id")}
         positions = [{
             "ticker": p.get("ticker"),
             "status": p.get("status"),
@@ -28,7 +37,7 @@ def api_executions_raw():
             "leap_legs": log.leap_legs(p),
             "shares": p.get("shares") or {},
         } for p in state.get("positions", [])]
-        return jsonify({"executions": execs, "positions": positions,
+        return jsonify({"executions": execs, "corrected_by_id": corrected_by_id, "positions": positions,
                         "execution_count": len(state.get("executions", []))})
     except Exception as e:  # noqa: BLE001
         return _err(e)
