@@ -439,10 +439,14 @@ function IngestionPanel() {
   // adopted short. The broker record carries the option price, never the
   // underlying, and a cached daily close only exists for a past trade day.
   const [fillPx, setFillPx] = React.useState({});
+  // A one-off deeper pull past the standing 7-day window, for recovering a
+  // trade placed through the broker's own platform (not this app) far enough
+  // back the normal daily ingestion never saw it. Blank = normal window.
+  const [lookback, setLookback] = React.useState("");
 
   const run = async () => {
     setBusy(true); setErr(null);
-    try { await api.runIngestion(); await reload(); await reloadAdoptions(); }
+    try { await api.runIngestion(lookback ? Number(lookback) : undefined); await reload(); await reloadAdoptions(); }
     catch (e) { setErr(String(e.message || e)); }
     finally { setBusy(false); }
   };
@@ -469,12 +473,17 @@ function IngestionPanel() {
   const adoptions = (adoptData?.adoptions || []).filter((a) => a.reversible);
   return (
     <div className="mt-4 border-t border-slate-800 pt-3">
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-2">
         <span className="text-xs uppercase tracking-wide text-slate-500">Broker execution ingestion</span>
-        <button onClick={run} disabled={busy}
-                className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
-          {busy ? "Ingesting…" : "Ingest now"}
-        </button>
+        <div className="flex items-center gap-2">
+          <input value={lookback} onChange={(e) => setLookback(e.target.value.replace(/\D/g, ""))}
+                 placeholder="days back (7)" title="Pull further back than the normal 7-day window — for a trade placed on the broker's own platform long enough ago the daily ingestion never saw it. Leave blank for the normal window."
+                 className="w-24 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-200" />
+          <button onClick={run} disabled={busy}
+                  className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+            {busy ? "Ingesting…" : "Ingest now"}
+          </button>
+        </div>
       </div>
       {proposals.length === 0 && (
         <p className="mt-2 text-xs text-slate-500">

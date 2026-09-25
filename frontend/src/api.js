@@ -392,7 +392,11 @@ export const api = {
   repollPendingOrders: () => request("/api/orders/repoll", { method: "POST" }),
   // Execution ingestion from Schwab transactions (spec §4).
   ingestion: () => request("/api/ingestion"),
-  runIngestion: () => request("/api/ingestion", { method: "POST" }),
+  runIngestion: (lookbackDays) =>
+    request("/api/ingestion", {
+      method: "POST",
+      body: JSON.stringify(lookbackDays ? { lookback_days: lookbackDays } : {}),
+    }),
   // Adopt one out-of-band broker trade (a proposal) into state.json.
   // stockPrice (optional) is the underlying at fill time — it sets the
   // intrinsic/extrinsic split of an adopted short; without it the whole premium

@@ -665,3 +665,51 @@ def test_order_journal_route_empty_ticker_returns_no_entries(store):
     client = app_module.app.test_client()
     body = client.get("/api/executions/order-journal?ticker=ZZZ").get_json()
     assert body["entries"] == [] and body["total_matched"] == 0
+
+
+# ---- ingestion's one-off deeper lookback -----------------------------------
+def test_run_ingestion_default_window_matches_config(store, monkeypatch):
+    seen = {}
+
+    def fake_fetch(lookback_days=None):
+        seen["lookback_days"] = lookback_days
+        return []
+    monkeypatch.setattr(ingest, "fetch_transactions", fake_fetch)
+    ingest.run_ingestion(lookback_days=17)
+    assert seen["lookback_days"] == 17
+
+
+def test_start_end_window_overrides_and_caps_lookback(monkeypatch):
+    from datetime import datetime, timezone
+    monkeypatch.setattr(config, "INGESTION_LOOKBACK_DAYS", 7)
+
+    start7, end7 = ingest._start_end_window()
+    start17, _ = ingest._start_end_window(17)
+    start_capped, _ = ingest._start_end_window(9999)
+
+    def _days_back(start, end):
+        return (datetime.strptime(end, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+                - datetime.strptime(start, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)).days
+
+    assert _days_back(start7, end7) == 7
+    assert _days_back(start17, end7) == 17
+    assert _days_back(start_capped, end7) == ingest.INGESTION_MAX_LOOKBACK_DAYS
+
+
+def test_ingestion_route_pulls_a_deeper_window_and_finds_an_old_out_of_band_trade(store, monkeypatch):
+    import app as app_module
+
+    seen = {}
+
+    def fake_fetch(lookback_days=None):
+        seen["lookback_days"] = lookback_days
+        return [_sell_short_txn("OLD1", "TOS-OLD", contracts=1, price=2.02, strike=43.0)]
+    monkeypatch.setattr(ingest, "fetch_transactions", fake_fetch)
+
+    client = app_module.app.test_client()
+    resp = client.post("/api/ingestion", json={"lookback_days": 30})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert seen["lookback_days"] == 30
+    assert len(body["proposals"]) == 1
+    assert body["proposals"][0]["transaction_ids"] == ["OLD1"]
