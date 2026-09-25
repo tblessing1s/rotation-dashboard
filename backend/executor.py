@@ -1701,6 +1701,112 @@ def set_position_legs(ticker: str, legs: list, reason: str | None = None) -> dic
             "short_calls": new_shorts, "leap_legs": new_leaps}
 
 
+_SHARE_ACTIONS = ("buy_shares", "sell_shares", "close_shares_assigned")
+
+
+def _replay_shares(execs: list[dict]) -> dict:
+    """The shares dict a full DATE-order replay of ``execs`` implies — the
+    weighted-average cost-basis math _buy_shares/_reduce_shares already apply,
+    just replayed from scratch in chronological order instead of insertion
+    order. ``execs`` must already be filtered to one ticker's buy_shares/
+    sell_shares/close_shares_assigned executions; any other action is ignored."""
+    count = 0
+    cost_basis = None
+    records: list[dict] = []
+    for e in sorted(execs, key=lambda e: (str(e.get("date") or ""), str(e.get("id") or ""))):
+        action = e.get("action")
+        if action not in _SHARE_ACTIONS:
+            continue
+        qty = int(e.get("qty") or 0)
+        if action == "buy_shares":
+            price = float(e.get("price_per_share") or 0)
+            new_count = count + qty
+            if new_count > 0:
+                cost_basis = round(((count * (cost_basis or 0)) + qty * price) / new_count, 4)
+            count = new_count
+            records.append({
+                "date": str(e.get("date") or "")[:10], "qty": qty,
+                "price": round(price, 4), "source": e.get("source") or "app",
+                "execution_id": e.get("id"),
+            })
+        else:  # sell_shares, close_shares_assigned
+            count = max(count - qty, 0)
+            if count == 0:
+                cost_basis = None
+    cap = config.SHARE_CAP
+    return {"count": count, "cost_basis_per_share": cost_basis, "cap": cap,
+            "pct_to_cap": round(count / cap * 100) if cap else 0,
+            "acquisition_records": records}
+
+
+def replay_shares_from_log(ticker: str, state: dict | None = None) -> dict:
+    """Read-only: the shares dict a full replay of ``ticker``'s transaction log
+    implies, independent of whatever the position's live shares mirror
+    currently holds. Used both to detect a drifted mirror (api_executions_raw)
+    and to actually fix one (rebuild_shares_from_log)."""
+    state = state or log.load_state()
+    ticker = (ticker or "").upper()
+    execs = [e for e in log.derived_executions(state)
+             if (e.get("ticker") or "").upper() == ticker and e.get("action") in _SHARE_ACTIONS]
+    return _replay_shares(execs)
+
+
+def rebuild_shares_from_log(ticker: str, reason: str | None = None) -> dict:
+    """Reconciliation repair for the one thing rebuild_position_from_broker
+    deliberately never touches: owned shares (see its docstring / the
+    PositionTracker comment on WhichIsCorrect — bundling an EQUITY diff into
+    that call used to mark it "resolved" with the share count never actually
+    changing).
+
+    The live shares mirror is updated INCREMENTALLY at commit time (see
+    _buy_shares/_reduce_shares): each execution applies its effect on top of
+    whatever the position currently holds. Correct as long as every execution
+    arrives in the order it actually happened — true for a live fill, and
+    normally true for an adoption too. CONFIRMED LIVE: it breaks when a
+    historical trade is recovered (e.g. via ingestion's deeper lookback,
+    logging_handler.order_journal_lookup) after LATER trades for the same
+    ticker were already processed — the recovered buy_shares just adds its
+    quantity on top of the CURRENT count, which already reflects a sale that,
+    chronologically, hadn't happened yet. There is no way for an incremental
+    apply() to "insert" the recovered trade back where it belongs; the
+    running count silently nets out wrong, with no error.
+
+    This replaces the shares mirror with a full replay of the ticker's
+    buy_shares/sell_shares/close_shares_assigned executions in DATE order —
+    the one thing an incremental apply() can't do after the fact. Append-only
+    audit marker (mirrors set_position_legs/rebuild_position_from_broker);
+    derived ledgers recompute (they were never wrong — they already derive
+    fresh from the log on every read; only this live mirror drifts)."""
+    ticker = (ticker or "").upper()
+    if not ticker:
+        raise ValueError("ticker is required")
+    state = log.load_state()
+    if log.find_position(state, ticker) is None:
+        raise ValueError(f"no {ticker} position in state to rebuild")
+    new_shares = replay_shares_from_log(ticker, state)
+
+    log.append_execution({
+        "ticker": ticker, "action": "position_rebuild", "mode": "live",
+        "reason": (reason or f"rebuilt {ticker} shares from the transaction log, date order").strip(),
+        "source": "manual_edit", "detail": {"count": new_shares["count"]},
+    })
+
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if position is None:
+        raise ValueError(f"no {ticker} position in state to rebuild")
+    position["shares"] = new_shares
+    position["status"] = "closed" if (
+        new_shares["count"] == 0 and not log.leap_legs(position)
+        and not (position.get("short_calls") or []) and not (position.get("short_puts") or [])
+    ) else "active"
+    log.recompute_derived(state)
+    import reconcile
+    reconcile.reevaluate_freezes(state)
+    log.save_state(state)
+    return {"success": True, "status": "saved", "ticker": ticker, "shares": new_shares}
+
+
 def repair_leap_cost_scale(ticker: str, reason: str | None = None) -> dict:
     """One-click fix for a LEAP whose ``cost_basis`` was stored PER SHARE instead
     of the full per-contract-total dollars (the ~100× understatement that makes

@@ -699,6 +699,60 @@ function ClosedPositionLegRepair({ positions, onRepaired }) {
   );
 }
 
+// The live shares mirror is updated incrementally (one execution's effect
+// applied on top of whatever the position currently holds) — correct as long
+// as every execution arrives in the order it actually happened. Recovering a
+// historical buy_shares/sell_shares (e.g. via ingestion's deeper lookback)
+// after LATER trades for the same ticker were already processed breaks that:
+// the recovered trade's quantity lands on top of a count that, chronologically,
+// shouldn't have moved past it yet. expected_shares_count (a full date-order
+// replay of the log, computed server-side) catches the drift; this offers the
+// one-click fix. Silent whenever the two already agree — every ordinary position.
+function SharesDriftRepair({ positions, onRepaired }) {
+  const [busy, setBusy] = React.useState(null);
+  const drifted = (positions || []).filter(
+    (p) => Number((p.shares || {}).count || 0) !== Number(p.expected_shares_count ?? (p.shares || {}).count ?? 0));
+  if (drifted.length === 0) return null;
+
+  const rebuild = async (ticker, from, to) => {
+    if (!window.confirm(`${ticker}'s live share count (${from}) disagrees with what the transaction log `
+      + `implies (${to}) — rebuild it from the log? This replaces the shares mirror only (append-only, audited); `
+      + "the transaction log itself is untouched."))
+      return;
+    setBusy(ticker);
+    try {
+      await api.rebuildShares(ticker, "shares mirror drifted from an out-of-order trade recovery");
+      await onRepaired();
+    } catch (e) { window.alert(String(e.message || e)); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <div className="mb-3 rounded-lg border border-amber-700/60 bg-amber-950/20 p-3">
+      <p className="text-xs font-semibold text-amber-300">
+        {drifted.length} position{drifted.length > 1 ? "s" : ""} whose live share count disagrees with the
+        transaction log — likely a historical trade recovered out of chronological order.
+      </p>
+      <ul className="mt-2 space-y-1">
+        {drifted.map((p) => {
+          const current = Number((p.shares || {}).count || 0);
+          const expected = Number(p.expected_shares_count ?? current);
+          return (
+            <li key={p.ticker} className="flex items-center gap-2 text-xs">
+              <span className="font-semibold text-slate-200">{p.ticker}</span>
+              <span className="text-slate-500">shows {current} shares · log implies {expected}</span>
+              <button onClick={() => rebuild(p.ticker, current, expected)} disabled={busy === p.ticker}
+                      className="ml-auto rounded-full border border-amber-700 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 disabled:opacity-50">
+                {busy === p.ticker ? "Rebuilding…" : "Rebuild from log"}
+              </button>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
 function RawData() {
   const { data, error, reload } = useApi(api.executionsRaw, [], null);
   const [msg, setMsg] = React.useState(null);
@@ -752,6 +806,7 @@ function RawData() {
       )}
       {msg && <p className="mb-2 text-xs text-slate-300">{msg}</p>}
       <ClosedPositionLegRepair positions={data?.positions} onRepaired={reload} />
+      <SharesDriftRepair positions={data?.positions} onRepaired={reload} />
       <div className="overflow-x-auto">
         <table className="w-full whitespace-nowrap text-xs">
           <thead>

@@ -29,14 +29,25 @@ def api_executions_raw():
         state = log.load_state()
         execs = list(reversed(state.get("executions", [])))[:300]
         corrected_by_id = {str(e["id"]): e for e in log.derived_executions(state) if e.get("id")}
-        positions = [{
-            "ticker": p.get("ticker"),
-            "status": p.get("status"),
-            "needs_review": bool(p.get("needs_review")),
-            "short_calls": p.get("short_calls") or [],
-            "leap_legs": log.leap_legs(p),
-            "shares": p.get("shares") or {},
-        } for p in state.get("positions", [])]
+        positions = []
+        for p in state.get("positions", []):
+            ticker = p.get("ticker")
+            # What a full DATE-order replay of the transaction log implies —
+            # vs. the live mirror (below), which is updated incrementally and
+            # can drift after a historical trade is recovered out of order
+            # (see executor.rebuild_shares_from_log). Absent (never wrong) the
+            # instant the two agree, so this stays quiet for every ordinary
+            # position.
+            expected = executor.replay_shares_from_log(ticker, state)
+            positions.append({
+                "ticker": ticker,
+                "status": p.get("status"),
+                "needs_review": bool(p.get("needs_review")),
+                "short_calls": p.get("short_calls") or [],
+                "leap_legs": log.leap_legs(p),
+                "shares": p.get("shares") or {},
+                "expected_shares_count": expected["count"],
+            })
         return jsonify({"executions": execs, "corrected_by_id": corrected_by_id, "positions": positions,
                         "execution_count": len(state.get("executions", []))})
     except Exception as e:  # noqa: BLE001
