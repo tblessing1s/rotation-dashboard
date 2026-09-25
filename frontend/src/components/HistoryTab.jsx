@@ -403,7 +403,7 @@ function _extr(e) {
 function _toRow(e) {
   const isShare = _SHARE_ACTION.has(e.action);
   return {
-    id: e.id, date: (e.date || "").slice(0, 10), action: e.action,
+    id: e.id, ticker: e.ticker, date: (e.date || "").slice(0, 10), action: e.action,
     isOpen: e.action === "sell_short",
     isShare,
     // A close whose original open fell outside the ingestion window (or
@@ -420,6 +420,34 @@ function _toRow(e) {
     stock_source: e.stock_price_source, stock_at_placement: e.stock_price_at_placement,
     stock_at_fill: e.stock_price_at_fill, fill_time: e.fill_time,
   };
+}
+// Display-only pairing for a plain (non-roll) open/close of the same strike —
+// e.g. an adopted historical open that landed far from its close in this
+// insertion-ordered table. Deliberately NOT roll_group_id: that field feeds
+// roll_ledger's cost/whipsaw analytics (rolls count, net, ATR validation), and
+// this pair never rolled — same strike closed, nothing opened alongside it. A
+// key with more than one open or close for the same strike+expiration is
+// ambiguous (e.g. reopened after an early exit) and is left unlinked rather
+// than guessed.
+function _linkPairs(rows) {
+  const groups = new Map();
+  rows.forEach((r, i) => {
+    if (r.roll || r.isShare || (r.action !== "sell_short" && r.action !== "close_short")) return;
+    const key = `${r.ticker}|${r.strike}|${r.expiration}`;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(i);
+  });
+  const out = rows.slice();
+  for (const idxs of groups.values()) {
+    const opens = idxs.filter((i) => out[i].action === "sell_short");
+    const closes = idxs.filter((i) => out[i].action === "close_short");
+    if (opens.length === 1 && closes.length === 1) {
+      const label = `${out[opens[0]].ticker} ${out[opens[0]].strike}C`;
+      out[opens[0]] = { ...out[opens[0]], link: label };
+      out[closes[0]] = { ...out[closes[0]], link: label };
+    }
+  }
+  return out;
 }
 function _calcExt(r, stock) {
   // price and extrinsic are both per-share.
@@ -445,7 +473,7 @@ function TransactionEditor() {
     if (data && loadedRef.current !== data) {
       loadedRef.current = data;
       const fills = (data.executions || []).filter((e) => _FILL.has(e.action) && !e.reversed_by && !e.excluded);
-      setRows(fills.slice().reverse().map(_toRow));  // oldest first, like a trade log
+      setRows(_linkPairs(fills.slice().reverse().map(_toRow)));  // oldest first, like a trade log
     }
   }, [data]);
 
@@ -500,7 +528,7 @@ function TransactionEditor() {
       <div className="overflow-x-auto">
         <table className="w-full whitespace-nowrap text-xs">
           <thead><tr className="text-left uppercase tracking-wide text-slate-500">
-            {["date", "action", "strike", "qty", "expiration", "price", "entry stock", "stock source", "extrinsic", "roll"].map((h) =>
+            {["date", "ticker", "action", "strike", "qty", "expiration", "price", "entry stock", "stock source", "extrinsic", "roll"].map((h) =>
               <th key={h} className="py-1.5 pr-2">{h}</th>)}
           </tr></thead>
           <tbody className="font-mono text-slate-300">
@@ -512,6 +540,7 @@ function TransactionEditor() {
                          onChange={(e) => set(i, "date", e.target.value)}
                          className={`${inp} w-24 font-sans`} />
                 </td>
+                <td className="py-1 pr-2 font-sans font-semibold text-slate-300">{r.ticker}</td>
                 <td className="py-1 pr-2 text-amber-300">{r.action}</td>
                 <td className="py-1 pr-2">
                   <input value={r.strike} disabled={r.isShare} placeholder={r.isShare ? "—" : undefined}
@@ -544,10 +573,14 @@ function TransactionEditor() {
                          onChange={(e) => onExt(i, e.target.value)}
                          className={`${inp} w-24 ${(r.isOpen || r.editableExtrinsic) ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
                 </td>
-                <td className="py-1 pr-2 font-sans text-slate-600">{r.roll || ""}</td>
+                <td className="py-1 pr-2 font-sans text-slate-600">
+                  {r.roll || (r.link
+                    ? <span className="text-sky-400" title={`Same-strike open/close pair, wherever each row sorts — ${r.link}`}>↔ {r.link}</span>
+                    : "")}
+                </td>
               </tr>
             ))}
-            {rows.length === 0 && <tr><td colSpan={10} className="py-6 text-center font-sans text-slate-500">No transactions.</td></tr>}
+            {rows.length === 0 && <tr><td colSpan={11} className="py-6 text-center font-sans text-slate-500">No transactions.</td></tr>}
           </tbody>
         </table>
       </div>
