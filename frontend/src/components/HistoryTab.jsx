@@ -523,6 +523,23 @@ function TransactionEditor() {
   const [msg, setMsg] = React.useState(null);
   const loadedRef = React.useRef(null);
   const originalRef = React.useRef({});   // id -> row as loaded, to diff a save against
+  // Retroactively linking two separately-adopted legs as one roll (see
+  // executor.link_as_roll) — a close row's chosen candidate open, and which
+  // row is mid-request. Keyed by the close row's id.
+  const [linkSel, setLinkSel] = React.useState({});
+  const [linkBusy, setLinkBusy] = React.useState(null);
+
+  const linkRoll = async (closeRow) => {
+    const openId = linkSel[closeRow.id];
+    if (!openId) return;
+    setLinkBusy(closeRow.id);
+    try {
+      await api.linkAsRoll(closeRow.id, openId,
+        `linked retroactively — recovered legs from one broker roll (${closeRow.ticker})`);
+      await reload();
+    } catch (e) { window.alert(String(e.message || e)); }
+    finally { setLinkBusy(null); }
+  };
 
   React.useEffect(() => {
     if (data && loadedRef.current !== data) {
@@ -644,7 +661,29 @@ function TransactionEditor() {
                 <td className="py-1 pr-2 font-sans text-slate-600">
                   {r.roll || (r.link
                     ? <span className="text-sky-400" title={`Same-strike open/close pair, wherever each row sorts — ${r.link}`}>↔ {r.link}</span>
-                    : "")}
+                    : r.action === "close_short" ? (() => {
+                        const candidates = rows.filter((o) => o.action === "sell_short" && o.ticker === r.ticker
+                          && !o.roll && !o.link && o.id !== r.id);
+                        if (candidates.length === 0) return "";
+                        return (
+                          <span className="flex items-center gap-1 font-sans normal-case">
+                            <select value={linkSel[r.id] || ""} onChange={(e) => setLinkSel((s) => ({ ...s, [r.id]: e.target.value }))}
+                                    title="Recovered separately through ingestion? Link this close to the open it actually rolled into — a labeling-only fix, no dollar figures change."
+                                    className="rounded border border-slate-700 bg-slate-900/60 px-1 py-0.5 text-[11px] text-slate-300">
+                              <option value="">link as roll…</option>
+                              {candidates.map((o) => (
+                                <option key={o.id} value={o.id}>{o.strike}C {o.date}</option>
+                              ))}
+                            </select>
+                            {linkSel[r.id] && (
+                              <button onClick={() => linkRoll(r)} disabled={linkBusy === r.id}
+                                      className="rounded border border-amber-700 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/20 disabled:opacity-50">
+                                {linkBusy === r.id ? "…" : "Link"}
+                              </button>
+                            )}
+                          </span>
+                        );
+                      })() : "")}
                 </td>
               </tr>
             ))}

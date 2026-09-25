@@ -1,4 +1,4 @@
-"""Execution log (raw records, void, verify-fills, order journal) (4 routes) — split out of the former monolithic app.py."""
+"""Execution log (raw records, void, verify-fills, order journal, roll linking) (5 routes) — split out of the former monolithic app.py."""
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
@@ -92,6 +92,27 @@ def api_executions_order_journal():
         if ticker:
             entries = [e for e in entries if str(e.get("ticker") or "").upper() == ticker]
         return jsonify({"entries": entries[:limit], "total_matched": len(entries)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@executions_bp.route("/api/executions/link-roll", methods=["POST"])
+def api_link_roll():
+    """Retroactively tag an already-booked close_short + sell_short pair as one
+    linked roll (shared roll_id) — for two legs recovered separately through
+    ingestion/adoption that were actually one deliberate roll action at the
+    broker. Labeling only (roll_ledger's roll_count/roll_net/roll_drag and a
+    cycle's roll bookkeeping) — no dollar figure changes either way. See
+    executor.link_as_roll."""
+    payload = request.get_json(silent=True) or {}
+    close_id = payload.get("close_id")
+    open_id = payload.get("open_id")
+    if not close_id or not open_id:
+        return jsonify({"error": "close_id and open_id are required"}), 400
+    try:
+        return jsonify(executor.link_as_roll(close_id, open_id, payload.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

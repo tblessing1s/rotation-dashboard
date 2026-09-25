@@ -1900,6 +1900,69 @@ def rebuild_short_calls_from_log(ticker: str, reason: str | None = None) -> dict
     return {"success": True, "status": "saved", "ticker": ticker, "short_calls": new_shorts}
 
 
+def _next_retroactive_roll_id(state: dict) -> str:
+    """Like _next_roll_id, but scans the CORRECTED view (derived_executions),
+    not raw state — a retroactively-linked roll_id lives only in a
+    txn_correction overlay, never written onto a raw execution, so counting
+    raw close_shorts (what _next_roll_id does for a live roll ticket) would
+    hand out the same id twice across two separate link_as_roll calls."""
+    used = {e.get("roll_id") for e in log.derived_executions(state) if e.get("roll_id")}
+    n = 0
+    while True:
+        n += 1
+        candidate = f"roll_{n:03d}"
+        if candidate not in used:
+            return candidate
+
+
+def link_as_roll(close_id: str, open_id: str, reason: str | None = None) -> dict:
+    """Retroactively tag an already-booked close_short + sell_short pair as one
+    linked roll (shared roll_id/roll_group_id) — for two legs recovered
+    SEPARATELY (each its own out-of-band ingestion proposal) that were
+    actually one deliberate roll action at the broker. Ingestion has no way to
+    know two independently-surfaced transactions were the same roll, so
+    nothing links them on its own; this is the operator confirming it after
+    the fact.
+
+    Purely a labeling correction, same append-only txn_correction mechanism as
+    any other History edit: it only affects roll_ledger's roll_count/roll_net/
+    roll_drag and a cycle's roll_pairs bookkeeping. Every dollar figure
+    (extrinsic, juice, net_juice per week) is already correct and untouched
+    either way — this never changes what a position is worth."""
+    state = log.load_state()
+    execs_by_id = {str(e.get("id")): e for e in log.derived_executions(state)}
+    close = execs_by_id.get(str(close_id))
+    open_ = execs_by_id.get(str(open_id))
+    if close is None:
+        raise ValueError(f"no execution {close_id!r} found")
+    if open_ is None:
+        raise ValueError(f"no execution {open_id!r} found")
+    if close.get("action") != "close_short":
+        raise ValueError(f"{close_id} is a {close.get('action')}, not a close_short")
+    if open_.get("action") != "sell_short":
+        raise ValueError(f"{open_id} is a {open_.get('action')}, not a sell_short")
+    if (close.get("ticker") or "").upper() != (open_.get("ticker") or "").upper():
+        raise ValueError("both legs must be the same ticker")
+    if close.get("roll_id") or open_.get("roll_id"):
+        raise ValueError("one or both legs are already linked to a roll")
+
+    roll_id = _next_retroactive_roll_id(state)
+    reason = (reason or "linked retroactively — recovered legs from one broker roll").strip()
+    for eid, leg in ((str(close_id), "close"), (str(open_id), "open")):
+        log.append_execution({
+            "action": log.TXN_CORRECTION_ACTION, "ticker": close.get("ticker"),
+            "corrects": eid,
+            "changes": {"roll_id": roll_id, "roll_group_id": roll_id,
+                       "roll_leg": leg, "roll_reason": reason},
+            "reason": reason,
+        })
+    state = log.load_state()
+    log.recompute_derived(state)
+    log.save_state(state)
+    return {"success": True, "status": "linked", "roll_id": roll_id,
+            "close_id": str(close_id), "open_id": str(open_id)}
+
+
 def repair_leap_cost_scale(ticker: str, reason: str | None = None) -> dict:
     """One-click fix for a LEAP whose ``cost_basis`` was stored PER SHARE instead
     of the full per-contract-total dollars (the ~100× understatement that makes
