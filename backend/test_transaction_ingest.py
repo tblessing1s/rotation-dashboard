@@ -627,3 +627,41 @@ def test_adoption_prefers_the_operator_price_over_the_journal(store):
     assert res["stock_price"] == 110.5 and res["stock_price_source"] == "supplied"
     ex = log.load_state()["executions"][-1]
     assert ex["stock_price"] == 110.5 and ex["stock_price_source"] == "supplied"
+
+
+# ---- GET /api/executions/order-journal -------------------------------------
+def test_order_journal_route_filters_by_ticker_newest_first(store):
+    import app as app_module
+
+    log.append_order_journal({"event": "placed", "order_id": "O1", "ticker": "SPCX",
+                              "action": "sell_short", "stock_price": 137.2,
+                              "price_source": "schwab"})
+    log.append_order_journal({"event": "filled", "order_id": "O1", "ticker": "SPCX",
+                              "action": "sell_short", "stock_price": 137.5,
+                              "price_source": "fill_quote:schwab"})
+    log.append_order_journal({"event": "filled", "order_id": "O2", "ticker": "ABC",
+                              "action": "sell_short", "stock_price": 50.0,
+                              "price_source": "schwab"})
+
+    client = app_module.app.test_client()
+    resp = client.get("/api/executions/order-journal?ticker=spcx")
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["total_matched"] == 2
+    assert [e["order_id"] for e in body["entries"]] == ["O1", "O1"]
+    # newest first
+    assert body["entries"][0]["event"] == "filled"
+    assert body["entries"][0]["stock_price"] == 137.5
+
+    all_body = client.get("/api/executions/order-journal").get_json()
+    assert all_body["total_matched"] == 3
+
+
+def test_order_journal_route_empty_ticker_returns_no_entries(store):
+    import app as app_module
+
+    log.append_order_journal({"event": "filled", "order_id": "O1", "ticker": "ABC",
+                              "stock_price": 50.0})
+    client = app_module.app.test_client()
+    body = client.get("/api/executions/order-journal?ticker=ZZZ").get_json()
+    assert body["entries"] == [] and body["total_matched"] == 0

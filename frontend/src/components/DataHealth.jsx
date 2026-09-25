@@ -835,6 +835,73 @@ function LiveFillVerify() {
   );
 }
 
+// Looks up the durable order journal (orders.jsonl, outside state.json) by
+// ticker — the only place a real broker order's captured stock price survives
+// a lost/corrected execution. Read-only; lets the operator check whether a
+// historical fill has a recoverable stock price without shell/flyctl access
+// to the Fly volume the journal lives on.
+function OrderJournalLookup() {
+  const [ticker, setTicker] = React.useState("");
+  const [res, setRes] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+
+  const run = async () => {
+    setBusy(true); setRes(null);
+    try { setRes(await api.orderJournal(ticker.trim())); }
+    catch (e) { setRes({ error: String(e.message || e) }); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Order journal lookup</span>
+        <div className="flex items-center gap-2">
+          <input value={ticker} onChange={(e) => setTicker(e.target.value.toUpperCase())}
+                 onKeyDown={(e) => e.key === "Enter" && run()}
+                 placeholder="Ticker (blank = all)"
+                 className="w-36 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-200" />
+          <button onClick={run} disabled={busy}
+                  title="Search the durable order journal for real captured stock prices at broker fills"
+                  className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+            {busy ? "Searching…" : "Search"}
+          </button>
+        </div>
+      </div>
+      {res?.error && <p className="mt-2 text-sm text-rose-400">{res.error}</p>}
+      {res && !res.error && (
+        <div className="mt-2 text-sm">
+          {res.entries.length === 0 ? (
+            <p className="text-slate-500">
+              No journal entries{ticker ? ` for ${ticker}` : ""} — nothing was ever placed from this app
+              for that name, so there's no recoverable stock price here.
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {res.entries.map((e, i) => (
+                <li key={i} className="rounded bg-slate-900/60 px-2 py-1 text-xs">
+                  <span className="font-semibold text-slate-200">{e.ticker || "?"}</span>
+                  <span className="text-slate-500"> · {e.event || "?"} · order {e.order_id || "?"}</span>
+                  <span className="text-slate-500"> · {(e.at || "").replace("T", " ").slice(0, 16)}</span>
+                  {e.action && <span className="text-slate-500"> · {e.action}</span>}
+                  <div className="mt-0.5">
+                    {e.stock_price != null ? (
+                      <span className="text-emerald-300">stock price {fmt(e.stock_price, 2)}
+                        {e.price_source ? ` (${e.price_source})` : ""}</span>
+                    ) : (
+                      <span className="text-slate-600">no stock price captured on this line</span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Tiered market-data scheduler: today's API budget per provider, the shed level
 // (Tier 3 -> Tier 2 -> Tier 1 cadence; Tier 0 never), staleness of the live-quote
 // store, and any active escalations. Reads the blocks already on /api/data-health.
@@ -1029,6 +1096,7 @@ export default function DataHealth() {
       {!data?.demo && <PendingOrdersPanel />}
       {!data?.demo && <IngestionPanel />}
       {!data?.demo && <LiveFillVerify />}
+      {!data?.demo && <OrderJournalLookup />}
       {!data?.demo && <UniverseCheck />}
     </Card>
   );
