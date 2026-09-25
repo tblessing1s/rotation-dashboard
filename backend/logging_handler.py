@@ -1277,9 +1277,23 @@ def recompute_derived(state: dict) -> dict:
         except (TypeError, ValueError):
             return None
 
+    # CONFIRMED LIVE: both cycle-building loops below (LEAP and SHARES) replay
+    # `execs` to track "what's currently open per ticker" the same way the live
+    # position mirror does — which means they inherit the exact same
+    # insertion-order fragility rebuild_shares_from_log/rebuild_short_calls_
+    # from_log exist to fix on the live mirror (see executor.py): a historical
+    # buy_shares recovered (adopted) AFTER its own later sell_shares was
+    # already appended hits the sell FIRST during replay, finds nothing open to
+    # close (silently skipped), then opens a cycle on the buy that the already-
+    # passed sell can never close — a real, fully-closed position that never
+    # produces a closed-cycle record at all. A local DATE-order copy for just
+    # these two loops fixes it without touching the wash-sale loop below, which
+    # deliberately keys off append order (its own comment explains why).
+    cycle_execs = sorted(execs, key=lambda e: (str(e.get("date") or ""), str(e.get("id") or "")))
+
     cycles: list[dict] = []
     open_cycle: dict[str, dict] = {}
-    for e in execs:
+    for e in cycle_execs:
         t = e.get("ticker", "")
         a = e.get("action")
         if a == "buy_leap":
@@ -1410,7 +1424,7 @@ def recompute_derived(state: dict) -> dict:
             "wash_sale": None,
         })
 
-    for e in execs:
+    for e in cycle_execs:
         t = e.get("ticker", "")
         a = e.get("action")
         if a == "buy_shares":

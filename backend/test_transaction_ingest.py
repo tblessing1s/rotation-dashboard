@@ -416,7 +416,11 @@ def test_adopt_broker_manual_sell_shares_closes_position_and_execution(store):
     })
     log.save_state(state)
 
-    feed = [_txn("S1", "OS1", [_equity_item("IBIT", -100, 48.7601)])]
+    # A closing sale must postdate the buy it closes — recompute_derived's
+    # cycle builder replays executions in DATE order (see logging_handler.py),
+    # not insertion order, so a sale dated before its own buy would net out
+    # backwards, same as it would in reality.
+    feed = [_txn("S1", "OS1", [_equity_item("IBIT", -100, 48.7601)], time="2026-09-24T18:39:31Z")]
     ingest.run_ingestion(feed=feed)
     state = log.load_state()
     proposals = state["ingestion"]["proposals"]
