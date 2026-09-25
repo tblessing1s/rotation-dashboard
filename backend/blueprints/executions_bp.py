@@ -39,6 +39,10 @@ def api_executions_raw():
             # instant the two agree, so this stays quiet for every ordinary
             # position.
             expected = executor.replay_shares_from_log(ticker, state)
+            # Same idea, one leg over: which short calls a FIFO replay of
+            # sell_short/close_short says should still be open (see
+            # executor.rebuild_short_calls_from_log).
+            expected_shorts = executor.replay_short_calls(ticker, state)
             positions.append({
                 "ticker": ticker,
                 "status": p.get("status"),
@@ -47,6 +51,7 @@ def api_executions_raw():
                 "leap_legs": log.leap_legs(p),
                 "shares": p.get("shares") or {},
                 "expected_shares_count": expected["count"],
+                "expected_short_calls": expected_shorts,
             })
         return jsonify({"executions": execs, "corrected_by_id": corrected_by_id, "positions": positions,
                         "execution_count": len(state.get("executions", []))})

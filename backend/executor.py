@@ -1807,6 +1807,89 @@ def rebuild_shares_from_log(ticker: str, reason: str | None = None) -> dict:
     return {"success": True, "status": "saved", "ticker": ticker, "shares": new_shares}
 
 
+def replay_short_calls(ticker: str, state: dict | None = None) -> list[dict]:
+    """The short_calls that SHOULD currently be open, from a full DATE-order
+    FIFO pairing of this ticker's sell_short/close_short executions (keyed by
+    strike + expiration, so same-strike weeklies across different expirations
+    never cross-pair) — independent of the live short_calls mirror.
+
+    The same drift as replay_shares_from_log, one leg over: a close_short
+    booked when its matching open wasn't yet on the position (outside the
+    ingestion window, adopted before the open was recovered) has nothing to
+    remove — CONFIRMED LIVE, the open recovered afterward just appends a leg
+    that real life already closed, with no later event able to take it back
+    off. This replay is what a rebuild replaces the live mirror with."""
+    state = state or log.load_state()
+    ticker = (ticker or "").upper()
+    execs = [e for e in log.derived_executions(state)
+             if (e.get("ticker") or "").upper() == ticker and e.get("action") in ("sell_short", "close_short")]
+    execs.sort(key=lambda e: (str(e.get("date") or ""), str(e.get("id") or "")))
+    queues: dict[tuple, list[dict]] = {}   # (strike, expiration) -> FIFO open legs
+    for e in execs:
+        key = (e.get("strike"), e.get("expiration"))
+        if e.get("action") == "sell_short":
+            queues.setdefault(key, []).append({
+                "strike": e.get("strike"), "contracts": int(e.get("contracts") or 0),
+                "open_date": str(e.get("date") or "")[:10], "expiration": e.get("expiration"),
+                "dte": 5, "entry_extrinsic_per_share": e.get("entry_extrinsic_per_share"),
+                "entry_premium_total": e.get("premium_total"),
+                "current_bid": e.get("premium_per_share"), "current_cost": e.get("premium_total"),
+            })
+        else:  # close_short
+            need = int(e.get("contracts") or 0)
+            queue = queues.get(key) or []
+            while need > 0 and queue:
+                leg = queue[0]
+                take = min(need, leg["contracts"])
+                leg["contracts"] -= take
+                need -= take
+                if leg["contracts"] <= 0:
+                    queue.pop(0)
+    return [leg for queue in queues.values() for leg in queue if leg["contracts"] > 0]
+
+
+def rebuild_short_calls_from_log(ticker: str, reason: str | None = None) -> dict:
+    """Reconciliation repair, the short-calls twin of rebuild_shares_from_log:
+    replaces the live short_calls mirror with a full DATE-order FIFO replay of
+    the ticker's sell_short/close_short executions (replay_short_calls) — the
+    fix for a leg stuck open because its close was booked before the open
+    existed on the position (see replay_short_calls's docstring). Reconcile's
+    "Schwab is correct" already fixes this too when a live broker fetch is
+    available and the diff surfaces the leg as MISSING_AT_BROKER; this is the
+    log-only equivalent, for when reconcile hasn't run yet or the drift needs
+    to be caught before it ever reaches the broker's own truth. Append-only
+    audit marker; derived ledgers recompute."""
+    ticker = (ticker or "").upper()
+    if not ticker:
+        raise ValueError("ticker is required")
+    state = log.load_state()
+    if log.find_position(state, ticker) is None:
+        raise ValueError(f"no {ticker} position in state to rebuild")
+    new_shorts = replay_short_calls(ticker, state)
+
+    log.append_execution({
+        "ticker": ticker, "action": "position_rebuild", "mode": "live",
+        "reason": (reason or f"rebuilt {ticker} short calls from the transaction log, date order").strip(),
+        "source": "manual_edit", "detail": {"open_legs": len(new_shorts)},
+    })
+
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if position is None:
+        raise ValueError(f"no {ticker} position in state to rebuild")
+    position["short_calls"] = new_shorts
+    position["status"] = "closed" if (
+        not new_shorts and not log.leap_legs(position)
+        and not int((position.get("shares") or {}).get("count") or 0)
+        and not (position.get("short_puts") or [])
+    ) else "active"
+    log.recompute_derived(state)
+    import reconcile
+    reconcile.reevaluate_freezes(state)
+    log.save_state(state)
+    return {"success": True, "status": "saved", "ticker": ticker, "short_calls": new_shorts}
+
+
 def repair_leap_cost_scale(ticker: str, reason: str | None = None) -> dict:
     """One-click fix for a LEAP whose ``cost_basis`` was stored PER SHARE instead
     of the full per-contract-total dollars (the ~100× understatement that makes

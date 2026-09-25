@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { _editsForSave, _linkPairs } from "./HistoryTab.jsx";
+import { _editsForSave, _legsKey, _linkPairs } from "./HistoryTab.jsx";
 
 // CONFIRMED LIVE: every row was previously resubmitted on every save (price/
 // stock_price/extrinsic are always pre-filled, never blank), and the backend
@@ -141,5 +141,31 @@ describe("_linkPairs", () => {
     const original = Object.fromEntries(plain.map((r) => [r.id, r]));
     const edits = _editsForSave(linked, original);
     expect(edits).toEqual([{ id: "close1", entry_extrinsic: 0.67 }]);
+  });
+});
+
+describe("_legsKey", () => {
+  it("matches identical leg sets regardless of order", () => {
+    const a = [{ strike: 43, contracts: 1, expiration: "2026-09-18" },
+               { strike: 44, contracts: 1, expiration: "2026-09-25" }];
+    const b = [{ strike: 44, contracts: 1, expiration: "2026-09-25" },
+               { strike: 43, contracts: 1, expiration: "2026-09-18" }];
+    expect(_legsKey(a)).toBe(_legsKey(b));
+  });
+
+  it("differs when a stray leg is present on one side (the drift this catches)", () => {
+    const live = [{ strike: 43, contracts: 1, expiration: "2026-09-18" }];
+    const expected = [];   // the log says this leg already closed
+    expect(_legsKey(live)).not.toBe(_legsKey(expected));
+  });
+
+  it("treats an empty/undefined leg list the same way", () => {
+    expect(_legsKey([])).toBe(_legsKey(undefined));
+  });
+
+  it("differs on a contracts-quantity mismatch even at the same strike/expiration", () => {
+    const a = [{ strike: 43, contracts: 1, expiration: "2026-09-18" }];
+    const b = [{ strike: 43, contracts: 2, expiration: "2026-09-18" }];
+    expect(_legsKey(a)).not.toBe(_legsKey(b));
   });
 });

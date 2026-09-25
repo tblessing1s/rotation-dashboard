@@ -992,3 +992,109 @@ def test_executions_raw_route_flags_a_drifted_shares_mirror(store):
     ibit_after = next(p for p in after["positions"] if p["ticker"] == "IBIT")
     assert ibit_after["shares"]["count"] == 0
     assert ibit_after["expected_shares_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# The short-calls twin: a leg stuck open because its close was booked before
+# the matching open existed on the position
+# ---------------------------------------------------------------------------
+def test_replay_short_calls_closes_a_leg_whose_close_predates_its_recovered_open(store):
+    """CONFIRMED LIVE: the close was adopted (booked) when there was no open
+    43C leg on the position to remove — nothing to consume. The open, recovered
+    later, just appends a fresh leg on top, with no later event able to take it
+    back off. A full date-order replay must still net it to closed."""
+    state = log.load_state()
+    # Inserted CLOSE first, OPEN second — the exact incident.
+    state["executions"] += [
+        {"id": "close1", "action": "close_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "expiration": "2026-09-18", "close_price_per_share": 2.54,
+         "stock_price": 45.525, "extrinsic_sold": 0.67, "date": "2026-09-18", "mode": "live"},
+        {"id": "open1", "action": "sell_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "expiration": "2026-09-18", "premium_per_share": 2.02,
+         "premium_total": 202.0, "stock_price": 44.35, "entry_extrinsic_per_share": 0.67,
+         "date": "2026-09-08", "mode": "live"},
+    ]
+    log.save_state(state)
+
+    assert executor.replay_short_calls("IBIT") == []
+
+
+def test_replay_short_calls_leaves_a_genuinely_open_leg_alone(store):
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "open1", "action": "sell_short", "ticker": "IBIT", "strike": 44.0,
+         "contracts": 1, "expiration": "2026-10-02", "premium_per_share": 1.73,
+         "premium_total": 173.0, "stock_price": 45.27, "entry_extrinsic_per_share": 0.46,
+         "date": "2026-09-25", "mode": "live"},
+    ]
+    log.save_state(state)
+
+    legs = executor.replay_short_calls("IBIT")
+    assert len(legs) == 1 and legs[0]["strike"] == 44.0 and legs[0]["contracts"] == 1
+
+
+def test_rebuild_short_calls_from_log_clears_a_stray_leg_and_reports_derived_ledgers(store):
+    """The live mirror carries a stray 43C leg (the drifted state after the
+    open was recovered) — rebuild replaces it with the replay (empty) and
+    re-closes the position when nothing else is open."""
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "close1", "action": "close_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "expiration": "2026-09-18", "close_price_per_share": 2.54,
+         "stock_price": 45.525, "extrinsic_sold": 0.67, "date": "2026-09-18", "mode": "live"},
+        {"id": "open1", "action": "sell_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "expiration": "2026-09-18", "premium_per_share": 2.02,
+         "premium_total": 202.0, "stock_price": 44.35, "entry_extrinsic_per_share": 0.67,
+         "date": "2026-09-08", "mode": "live"},
+    ]
+    state["positions"].append({
+        "ticker": "IBIT", "status": "active",
+        "shares": {"count": 0, "cost_basis_per_share": None, "cap": 100,
+                   "pct_to_cap": 0, "acquisition_records": []},
+        "leap_legs": [],
+        "short_calls": [{"strike": 43.0, "contracts": 1, "expiration": "2026-09-18",
+                         "entry_extrinsic_per_share": 0.67}]})
+    log.save_state(state)
+
+    res = executor.rebuild_short_calls_from_log("IBIT")
+    assert res["short_calls"] == []
+
+    saved = log.load_state()
+    pos = log.find_position(saved, "IBIT")
+    assert pos["short_calls"] == []
+    assert pos["status"] == "closed"
+    assert any(e.get("action") == "position_rebuild" and e.get("ticker") == "IBIT"
+              for e in saved["executions"])
+    # The original close_short/sell_short executions are untouched.
+    assert next(e for e in saved["executions"] if e["id"] == "close1")["strike"] == 43.0
+    assert next(e for e in saved["executions"] if e["id"] == "open1")["strike"] == 43.0
+
+
+def test_executions_raw_route_exposes_expected_short_calls(store):
+    import app as app_module
+
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "close1", "action": "close_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "expiration": "2026-09-18", "close_price_per_share": 2.54,
+         "stock_price": 45.525, "extrinsic_sold": 0.67, "date": "2026-09-18", "mode": "live"},
+        {"id": "open1", "action": "sell_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "expiration": "2026-09-18", "premium_per_share": 2.02,
+         "premium_total": 202.0, "stock_price": 44.35, "entry_extrinsic_per_share": 0.67,
+         "date": "2026-09-08", "mode": "live"},
+    ]
+    state["positions"].append({
+        "ticker": "IBIT", "status": "active",
+        "shares": {"count": 0}, "leap_legs": [],
+        "short_calls": [{"strike": 43.0, "contracts": 1, "expiration": "2026-09-18"}]})
+    log.save_state(state)
+
+    client = app_module.app.test_client()
+    body = client.get("/api/executions/raw").get_json()
+    ibit = next(p for p in body["positions"] if p["ticker"] == "IBIT")
+    assert len(ibit["short_calls"]) == 1
+    assert ibit["expected_short_calls"] == []
+
+    resp = client.post("/api/positions/rebuild-short-calls", json={"ticker": "IBIT"})
+    assert resp.status_code == 200
+    assert resp.get_json()["short_calls"] == []

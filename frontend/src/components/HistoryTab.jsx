@@ -753,6 +753,63 @@ function SharesDriftRepair({ positions, onRepaired }) {
   );
 }
 
+// Short-calls twin of the shares drift check above: a close_short booked
+// before its matching open existed on the position has nothing to remove, so
+// a later-recovered open just appends a leg real life already closed — with
+// no later event able to take it back off. expected_short_calls (a full
+// date-order FIFO replay of sell_short/close_short) catches it.
+export function _legsKey(legs) {
+  return (legs || [])
+    .map((l) => `${l.strike}|${l.contracts}|${l.expiration || ""}`)
+    .sort()
+    .join(",");
+}
+function ShortCallsDriftRepair({ positions, onRepaired }) {
+  const [busy, setBusy] = React.useState(null);
+  const drifted = (positions || []).filter(
+    (p) => p.expected_short_calls !== undefined && _legsKey(p.short_calls) !== _legsKey(p.expected_short_calls));
+  if (drifted.length === 0) return null;
+
+  const rebuild = async (ticker) => {
+    if (!window.confirm(`${ticker}'s live short-call legs disagree with what the transaction log implies — `
+      + "rebuild from the log? This replaces short_calls only (append-only, audited); the transaction log itself is untouched."))
+      return;
+    setBusy(ticker);
+    try {
+      await api.rebuildShortCalls(ticker, "short_calls mirror drifted from an out-of-order trade recovery");
+      await onRepaired();
+    } catch (e) { window.alert(String(e.message || e)); }
+    finally { setBusy(null); }
+  };
+
+  const describe = (legs) => (legs && legs.length
+    ? legs.map((l) => `${l.strike}C x${l.contracts} exp ${l.expiration}`).join(", ")
+    : "none open");
+
+  return (
+    <div className="mb-3 rounded-lg border border-amber-700/60 bg-amber-950/20 p-3">
+      <p className="text-xs font-semibold text-amber-300">
+        {drifted.length} position{drifted.length > 1 ? "s" : ""} whose live short-call legs disagree with the
+        transaction log — likely a close recovered before its matching open, or vice versa.
+      </p>
+      <ul className="mt-2 space-y-1">
+        {drifted.map((p) => (
+          <li key={p.ticker} className="flex items-center gap-2 text-xs">
+            <span className="font-semibold text-slate-200">{p.ticker}</span>
+            <span className="text-slate-500">
+              shows {describe(p.short_calls)} · log implies {describe(p.expected_short_calls)}
+            </span>
+            <button onClick={() => rebuild(p.ticker)} disabled={busy === p.ticker}
+                    className="ml-auto rounded-full border border-amber-700 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 disabled:opacity-50">
+              {busy === p.ticker ? "Rebuilding…" : "Rebuild from log"}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function RawData() {
   const { data, error, reload } = useApi(api.executionsRaw, [], null);
   const [msg, setMsg] = React.useState(null);
@@ -807,6 +864,7 @@ function RawData() {
       {msg && <p className="mb-2 text-xs text-slate-300">{msg}</p>}
       <ClosedPositionLegRepair positions={data?.positions} onRepaired={reload} />
       <SharesDriftRepair positions={data?.positions} onRepaired={reload} />
+      <ShortCallsDriftRepair positions={data?.positions} onRepaired={reload} />
       <div className="overflow-x-auto">
         <table className="w-full whitespace-nowrap text-xs">
           <thead>

@@ -305,6 +305,11 @@ export const api = {
   // of chronological order (see executor.rebuild_shares_from_log).
   rebuildShares: (ticker, reason) =>
     request("/api/positions/rebuild-shares", { method: "POST", body: JSON.stringify({ ticker, reason }) }),
+  // Same, for short calls: replaces the live short_calls mirror with a full
+  // date-order FIFO replay of sell_short/close_short (see
+  // executor.rebuild_short_calls_from_log).
+  rebuildShortCalls: (ticker, reason) =>
+    request("/api/positions/rebuild-short-calls", { method: "POST", body: JSON.stringify({ ticker, reason }) }),
   // Editable transaction table: apply per-transaction edits + derive position.
   saveTransactions: (edits, ticker) =>
     request("/api/transactions/save", { method: "POST", body: JSON.stringify({ edits, ticker }) }),
