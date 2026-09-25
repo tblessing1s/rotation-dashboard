@@ -659,31 +659,42 @@ function TransactionEditor() {
                          className={`${inp} w-24 ${r.extrinsicLocked ? "opacity-60" : (r.isOpen || r.editableExtrinsic || r.editableCostBasis) ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
                 </td>
                 <td className="py-1 pr-2 font-sans text-slate-600">
-                  {r.roll || (r.link
-                    ? <span className="text-sky-400" title={`Same-strike open/close pair, wherever each row sorts — ${r.link}`}>↔ {r.link}</span>
-                    : r.action === "close_short" ? (() => {
-                        const candidates = rows.filter((o) => o.action === "sell_short" && o.ticker === r.ticker
-                          && !o.roll && !o.link && o.id !== r.id);
-                        if (candidates.length === 0) return "";
-                        return (
-                          <span className="flex items-center gap-1 font-sans normal-case">
-                            <select value={linkSel[r.id] || ""} onChange={(e) => setLinkSel((s) => ({ ...s, [r.id]: e.target.value }))}
-                                    title="Recovered separately through ingestion? Link this close to the open it actually rolled into — a labeling-only fix, no dollar figures change."
-                                    className="rounded border border-slate-700 bg-slate-900/60 px-1 py-0.5 text-[11px] text-slate-300">
-                              <option value="">link as roll…</option>
-                              {candidates.map((o) => (
-                                <option key={o.id} value={o.id}>{o.strike}C {o.date}</option>
-                              ))}
-                            </select>
-                            {linkSel[r.id] && (
-                              <button onClick={() => linkRoll(r)} disabled={linkBusy === r.id}
-                                      className="rounded border border-amber-700 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/20 disabled:opacity-50">
-                                {linkBusy === r.id ? "…" : "Link"}
-                              </button>
-                            )}
-                          </span>
-                        );
-                      })() : "")}
+                  {r.roll ? r.roll : (() => {
+                    // A close row can carry BOTH a same-strike pair tag (its
+                    // own recovered open, informational) AND still be
+                    // eligible to roll-link into a DIFFERENT strike's open —
+                    // the two describe different, compatible facts, so
+                    // showing the tag must never hide the picker.
+                    const linkTag = r.link && (
+                      <span className="text-sky-400" title={`Same-strike open/close pair, wherever each row sorts — ${r.link}`}>↔ {r.link}</span>
+                    );
+                    if (r.action !== "close_short") return linkTag || "";
+                    // Roll-eligible = not yet roll-linked; already being a
+                    // same-strike pair's open/close (r.link/o.link) doesn't
+                    // disqualify either side.
+                    const candidates = rows.filter((o) => o.action === "sell_short" && o.ticker === r.ticker
+                      && !o.roll && o.id !== r.id);
+                    if (candidates.length === 0) return linkTag || "";
+                    return (
+                      <span className="flex flex-wrap items-center gap-1 normal-case">
+                        {linkTag}
+                        <select value={linkSel[r.id] || ""} onChange={(e) => setLinkSel((s) => ({ ...s, [r.id]: e.target.value }))}
+                                title="Recovered separately through ingestion? Link this close to the open it actually rolled into — a labeling-only fix, no dollar figures change."
+                                className="rounded border border-slate-700 bg-slate-900/60 px-1 py-0.5 text-[11px] text-slate-300">
+                          <option value="">link as roll…</option>
+                          {candidates.map((o) => (
+                            <option key={o.id} value={o.id}>{o.strike}C {o.date}</option>
+                          ))}
+                        </select>
+                        {linkSel[r.id] && (
+                          <button onClick={() => linkRoll(r)} disabled={linkBusy === r.id}
+                                  className="rounded border border-amber-700 bg-amber-500/10 px-1.5 py-0.5 text-[11px] font-semibold text-amber-300 hover:bg-amber-500/20 disabled:opacity-50">
+                            {linkBusy === r.id ? "…" : "Link"}
+                          </button>
+                        )}
+                      </span>
+                    );
+                  })()}
                 </td>
               </tr>
             ))}
