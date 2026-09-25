@@ -766,6 +766,40 @@ def test_save_transactions_corrects_a_closes_missing_entry_extrinsic(store):
     assert c2["net_juice_total"] == round((2.02 - 0.015) * 1 * 100, 2)
 
 
+def test_executions_raw_route_shows_a_saved_correction_via_corrected_by_id(store):
+    """CONFIRMED LIVE: /api/executions/raw returned only the pre-correction
+    executions — the History editor reseeds its rows from this same route after
+    every save, so a just-saved entry_extrinsic correction looked reverted to
+    its original value the instant the table reloaded, even though it was
+    already applied everywhere else (ledgers, Payouts). corrected_by_id is the
+    fix: the same executions with every txn_correction overlaid."""
+    import app as app_module
+
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "c2", "action": "close_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "close_price_per_share": 2.54, "stock_price": 45.525,
+         "extrinsic_sold": 0.0, "extrinsic_paid_back": 0.015, "net_juice_total": -1.5,
+         "mode": "live"},
+    ]
+    log.save_state(state)
+
+    client = app_module.app.test_client()
+    before = client.get("/api/executions/raw").get_json()
+    assert before["corrected_by_id"]["c2"]["extrinsic_sold"] == 0.0
+    # The raw list stays pre-correction on purpose (this route's own validation
+    # use) — only corrected_by_id should reflect a save.
+    raw_c2 = next(e for e in before["executions"] if e["id"] == "c2")
+    assert raw_c2["extrinsic_sold"] == 0.0
+
+    executor.save_transactions([{"id": "c2", "entry_extrinsic": 2.02}], ticker="IBIT")
+
+    after = client.get("/api/executions/raw").get_json()
+    assert after["corrected_by_id"]["c2"]["extrinsic_sold"] == 2.02
+    raw_c2_after = next(e for e in after["executions"] if e["id"] == "c2")
+    assert raw_c2_after["extrinsic_sold"] == 0.0  # untouched, append-only
+
+
 def test_save_transactions_corrects_a_misdated_adopted_close_into_its_real_week(store):
     """CONFIRMED LIVE: adopt_broker_trade never stamped "date" on an adopted
     execution, so log.append_execution's setdefault fell back to the adoption

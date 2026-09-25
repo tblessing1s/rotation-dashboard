@@ -473,7 +473,13 @@ function TransactionEditor() {
     if (data && loadedRef.current !== data) {
       loadedRef.current = data;
       const fills = (data.executions || []).filter((e) => _FILL.has(e.action) && !e.reversed_by && !e.excluded);
-      setRows(_linkPairs(fills.slice().reverse().map(_toRow)));  // oldest first, like a trade log
+      // Reseed each row from its CORRECTED view (any saved txn_correction
+      // overlaid) — not the raw pre-correction record /api/executions/raw
+      // otherwise returns. Without this, a saved edit looked reverted the
+      // instant this table reloaded, even though it was already applied
+      // everywhere else (ledgers, Payouts).
+      const byId = data.corrected_by_id || {};
+      setRows(_linkPairs(fills.slice().reverse().map((e) => _toRow(byId[e.id] || e))));  // oldest first, like a trade log
     }
   }, [data]);
 
