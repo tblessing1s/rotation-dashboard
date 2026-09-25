@@ -16,11 +16,23 @@ def api_ingestion():
     """GET: the last ingestion summary + open out-of-band adoption proposals.
     POST: run ingestion now (pulls Schwab transactions; dedupe by transaction id).
     Matched fills confirm app orders; out-of-band trades surface as proposals for
-    one-click adoption — never auto-booked (NO_AUTO_REMEDIATION)."""
+    one-click adoption — never auto-booked (NO_AUTO_REMEDIATION). An optional JSON
+    body {"lookback_days": N} pulls a deeper one-off window (e.g. to recover a
+    trade placed through the broker's own platform long enough ago the normal
+    daily window never saw it) without changing the standing default."""
     if request.method == "POST":
+        payload = request.get_json(silent=True) or {}
+        lookback_days = payload.get("lookback_days")
+        if lookback_days not in (None, ""):
+            try:
+                lookback_days = int(lookback_days)
+            except (TypeError, ValueError):
+                return jsonify({"error": "lookback_days must be a number"}), 400
+        else:
+            lookback_days = None
         try:
             import transaction_ingest
-            return jsonify(transaction_ingest.run_ingestion())
+            return jsonify(transaction_ingest.run_ingestion(lookback_days=lookback_days))
         except Exception as e:  # noqa: BLE001
             return _err(e)
     state = log.load_state()

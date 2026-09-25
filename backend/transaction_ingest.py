@@ -839,14 +839,25 @@ def _persist_report(state: dict, report: dict) -> None:
 # ---------------------------------------------------------------------------
 # Fetch wrapper
 # ---------------------------------------------------------------------------
-def _start_end_window() -> tuple[str, str]:
+# The widest a one-off deeper pull may reach back — well past
+# INGESTION_LOOKBACK_DAYS for the rare case of recovering a trade placed
+# out-of-band long enough ago the normal daily window never saw it (e.g. one
+# filled through the broker's own platform instead of this app). Dedupe by
+# transaction id makes an overlapping wider pull always idempotent, so this is
+# safe to use ad hoc — it is not a change to the standing daily window.
+INGESTION_MAX_LOOKBACK_DAYS = 90
+
+
+def _start_end_window(lookback_days: int | None = None) -> tuple[str, str]:
     from datetime import timedelta
     now = datetime.now(timezone.utc)
-    start = now - timedelta(days=int(config.INGESTION_LOOKBACK_DAYS))
+    days = int(config.INGESTION_LOOKBACK_DAYS) if lookback_days is None else int(lookback_days)
+    days = max(1, min(days, INGESTION_MAX_LOOKBACK_DAYS))
+    start = now - timedelta(days=days)
     return (start.strftime("%Y-%m-%dT%H:%M:%SZ"), now.strftime("%Y-%m-%dT%H:%M:%SZ"))
 
 
-def fetch_transactions() -> list:
+def fetch_transactions(lookback_days: int | None = None) -> list:
     """Live Schwab transactions call, isolated so tests monkeypatch it."""
     import accounts
     import data_handler
@@ -854,7 +865,7 @@ def fetch_transactions() -> list:
     # Ingest the transactions of THIS book's brokerage account only — pulling a
     # sibling account's fills would propose them for adoption into the wrong book.
     account_hash = accounts.broker_hash(client)
-    start, end = _start_end_window()
+    start, end = _start_end_window(lookback_days)
     return client.get_transactions(account_hash, start_date=start, end_date=end)
 
 
@@ -887,11 +898,14 @@ def _enrich_proposals_from_journal(report: dict) -> None:
 
 
 def run_ingestion(state: dict | None = None, persist: bool = True,
-                  feed: list | None = None) -> dict:
+                  feed: list | None = None, lookback_days: int | None = None) -> dict:
     """Pull the Schwab transactions feed, classify it, and (by default) persist
     the dedupe ledger + surfaced proposals. Idempotent: re-running skips already
     ingested transaction ids. A fetch failure returns a report with the error and
-    touches nothing (like reconcile's failure report)."""
+    touches nothing (like reconcile's failure report). ``lookback_days`` overrides
+    the standing INGESTION_LOOKBACK_DAYS window for this one run only (capped at
+    INGESTION_MAX_LOOKBACK_DAYS) — for recovering a trade placed out-of-band far
+    enough back the normal daily window never saw it."""
     import logging_handler as log
 
     owns_state = state is None
@@ -899,7 +913,9 @@ def run_ingestion(state: dict | None = None, persist: bool = True,
 
     if feed is None:
         try:
-            feed = fetch_transactions()
+            # Keep the common (no-override) path a zero-arg call — existing test
+            # doubles for fetch_transactions take no parameters.
+            feed = fetch_transactions() if lookback_days is None else fetch_transactions(lookback_days)
         except Exception as e:  # noqa: BLE001 — isolate the fetch failure
             report = {"as_of": as_of, "fetched": 0, "parsed": 0, "matched": [],
                       "proposals": [], "skipped_duplicates": [], "skipped_detail": [],
