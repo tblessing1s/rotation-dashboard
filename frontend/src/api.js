@@ -300,6 +300,11 @@ export const api = {
   // Single-spot position editor: directly set a position's legs.
   setPositionLegs: (ticker, legs, reason) =>
     request("/api/positions/set-legs", { method: "POST", body: JSON.stringify({ ticker, legs, reason }) }),
+  // Replace a position's owned-shares mirror with a full date-order replay of
+  // its transaction log — fixes drift from a historical trade recovered out
+  // of chronological order (see executor.rebuild_shares_from_log).
+  rebuildShares: (ticker, reason) =>
+    request("/api/positions/rebuild-shares", { method: "POST", body: JSON.stringify({ ticker, reason }) }),
   // Editable transaction table: apply per-transaction edits + derive position.
   saveTransactions: (edits, ticker) =>
     request("/api/transactions/save", { method: "POST", body: JSON.stringify({ edits, ticker }) }),

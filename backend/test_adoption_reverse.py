@@ -867,3 +867,128 @@ def test_save_transactions_corrects_a_share_fills_price_qty_and_date(store):
     assert s1["price_per_share"] == 144.09
     assert s1["execution_total"] == round(144.09 * 100, 2)
     assert s1["date"] == "2026-09-01"
+
+
+# ---------------------------------------------------------------------------
+# Out-of-order shares recovery: the live mirror drifts, replay/rebuild fixes it
+# ---------------------------------------------------------------------------
+def test_replay_shares_from_log_nets_out_regardless_of_insertion_order(store):
+    """CONFIRMED LIVE: a buy recovered (adopted) AFTER its own later sell was
+    already booked lands its +qty on top of whatever the live mirror holds
+    RIGHT NOW — which already reflects the sell. replay_shares_from_log must
+    still net out to the real, date-order truth regardless of which order the
+    two executions were appended to the log in."""
+    state = log.load_state()
+    # Inserted SELL first, BUY second — the exact out-of-order recovery case
+    # (the buy's real date predates the sell, but it's appended to the log later).
+    state["executions"] += [
+        {"id": "sell1", "action": "sell_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 48.7601, "execution_total": 4876.01, "date": "2026-09-24",
+         "cost_basis_per_share": 44.51, "realized_pnl": 425.01, "mode": "live"},
+        {"id": "buy1", "action": "buy_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 44.51, "execution_total": 4451.0, "date": "2026-09-08", "mode": "live"},
+    ]
+    log.save_state(state)
+
+    replayed = executor.replay_shares_from_log("IBIT")
+    assert replayed["count"] == 0
+    assert replayed["cost_basis_per_share"] is None
+    assert len(replayed["acquisition_records"]) == 1
+    assert replayed["acquisition_records"][0]["execution_id"] == "buy1"
+
+
+def test_rebuild_shares_from_log_fixes_a_drifted_live_mirror(store):
+    """The live shares mirror is updated incrementally at commit time — CONFIRMED
+    LIVE: adopting the buy after the sell was already processed added its qty on
+    top of the CURRENT (post-sell) count instead of the count that existed at the
+    buy's real date, leaving the position showing 100 shares "held" though they
+    were fully sold weeks ago. rebuild_shares_from_log replaces the mirror with
+    the date-order replay and re-closes the position."""
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "sell1", "action": "sell_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 48.7601, "execution_total": 4876.01, "date": "2026-09-24",
+         "cost_basis_per_share": 44.51, "realized_pnl": 425.01, "mode": "live"},
+        {"id": "buy1", "action": "buy_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 44.51, "execution_total": 4451.0, "date": "2026-09-08", "mode": "live"},
+    ]
+    # The DRIFTED live mirror: exactly what the incremental apply() produces
+    # when the buy is adopted after the sell (100 - 100 then + 100 = 100).
+    state["positions"].append({
+        "ticker": "IBIT", "status": "active",
+        "shares": {"count": 100, "cost_basis_per_share": 44.51, "cap": 100,
+                   "pct_to_cap": 100, "acquisition_records": []},
+        "leap_legs": [], "short_calls": []})
+    log.save_state(state)
+
+    res = executor.rebuild_shares_from_log("IBIT")
+    assert res["shares"]["count"] == 0
+
+    saved = log.load_state()
+    pos = log.find_position(saved, "IBIT")
+    assert pos["shares"]["count"] == 0
+    assert pos["shares"]["cost_basis_per_share"] is None
+    assert pos["status"] == "closed"   # no shares, no legs -> correctly closed
+    assert any(e.get("action") == "position_rebuild" and e.get("ticker") == "IBIT"
+              for e in saved["executions"])
+    # The original executions are untouched (append-only).
+    assert next(e for e in saved["executions"] if e["id"] == "buy1")["qty"] == 100
+    assert next(e for e in saved["executions"] if e["id"] == "sell1")["qty"] == 100
+
+
+def test_rebuild_shares_from_log_reactivates_a_position_that_should_be_open(store):
+    """A rebuild that nets to a nonzero count must (re)activate the position —
+    mirroring _buy_shares's own status handling — not leave it stuck 'closed'
+    with real shares sitting on it."""
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "buy1", "action": "buy_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 44.51, "execution_total": 4451.0, "date": "2026-09-08", "mode": "live"},
+    ]
+    state["positions"].append({
+        "ticker": "IBIT", "status": "closed",
+        "shares": {"count": 0, "cost_basis_per_share": None, "cap": 100,
+                   "pct_to_cap": 0, "acquisition_records": []},
+        "leap_legs": [], "short_calls": []})
+    log.save_state(state)
+
+    executor.rebuild_shares_from_log("IBIT")
+    pos = log.find_position(log.load_state(), "IBIT")
+    assert pos["shares"]["count"] == 100
+    assert pos["status"] == "active"
+
+
+def test_executions_raw_route_flags_a_drifted_shares_mirror(store):
+    """CONFIRMED LIVE: the diagnostic surfaces the drift (expected_shares_count
+    vs. the live shares.count) so the operator sees it without having to notice
+    an impossible-looking Positions card first."""
+    import app as app_module
+
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "sell1", "action": "sell_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 48.7601, "execution_total": 4876.01, "date": "2026-09-24", "mode": "live"},
+        {"id": "buy1", "action": "buy_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 44.51, "execution_total": 4451.0, "date": "2026-09-08", "mode": "live"},
+    ]
+    state["positions"].append({
+        "ticker": "IBIT", "status": "active",
+        "shares": {"count": 100, "cost_basis_per_share": 44.51, "cap": 100,
+                   "pct_to_cap": 100, "acquisition_records": []},
+        "leap_legs": [], "short_calls": []})
+    log.save_state(state)
+
+    client = app_module.app.test_client()
+    body = client.get("/api/executions/raw").get_json()
+    ibit = next(p for p in body["positions"] if p["ticker"] == "IBIT")
+    assert ibit["shares"]["count"] == 100
+    assert ibit["expected_shares_count"] == 0
+
+    resp = client.post("/api/positions/rebuild-shares", json={"ticker": "IBIT"})
+    assert resp.status_code == 200
+    assert resp.get_json()["shares"]["count"] == 0
+
+    after = client.get("/api/executions/raw").get_json()
+    ibit_after = next(p for p in after["positions"] if p["ticker"] == "IBIT")
+    assert ibit_after["shares"]["count"] == 0
+    assert ibit_after["expected_shares_count"] == 0

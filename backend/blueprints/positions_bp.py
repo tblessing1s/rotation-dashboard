@@ -1,4 +1,4 @@
-"""Positions (track) (6 routes) — split out of the former monolithic app.py."""
+"""Positions (track) (7 routes) — split out of the former monolithic app.py."""
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
@@ -131,6 +131,25 @@ def api_set_position_legs():
     try:
         return jsonify(executor.set_position_legs(ticker, payload.get("legs") or [],
                                                   payload.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@positions_bp.route("/api/positions/rebuild-shares", methods=["POST"])
+def api_rebuild_shares():
+    """Replace a position's owned-shares mirror with a full DATE-order replay of
+    its buy_shares/sell_shares/close_shares_assigned executions — the fix for a
+    historical trade recovered (adopted) after later trades for the same ticker
+    were already processed, which the live mirror's incremental apply() has no
+    way to correctly re-order after the fact (see executor.rebuild_shares_from_log)."""
+    payload = request.get_json(silent=True) or {}
+    ticker = (payload.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify(executor.rebuild_shares_from_log(ticker, payload.get("reason")))
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001
