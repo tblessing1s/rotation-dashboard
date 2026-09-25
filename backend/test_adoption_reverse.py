@@ -1186,3 +1186,108 @@ def test_executions_raw_route_exposes_expected_short_calls(store):
     resp = client.post("/api/positions/rebuild-short-calls", json={"ticker": "IBIT"})
     assert resp.status_code == 200
     assert resp.get_json()["short_calls"] == []
+
+
+# ---------------------------------------------------------------------------
+# Retroactively linking two separately-adopted legs as one roll
+# ---------------------------------------------------------------------------
+def test_link_as_roll_ties_two_separately_adopted_legs_together(store):
+    """CONFIRMED LIVE: IBIT's 43C close and 44C open were each recovered
+    through ingestion as INDEPENDENT out-of-band trades — nothing ever tagged
+    them with a shared roll_id, so roll_ledger/the cycle's roll bookkeeping
+    read 0 rolls even though it was really one deliberate roll at the broker.
+    link_as_roll is the operator confirming that after the fact — labeling
+    only, no dollar figure changes."""
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "close1", "action": "close_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "expiration": "2026-09-18", "close_price_per_share": 2.54,
+         "close_total": 254.0, "stock_price": 45.525, "extrinsic_sold": 0.67,
+         "date": "2026-09-18", "mode": "live"},
+        {"id": "open1", "action": "sell_short", "ticker": "IBIT", "strike": 44.0,
+         "contracts": 1, "expiration": "2026-09-25", "premium_per_share": 1.73,
+         "premium_total": 173.0, "stock_price": 45.27, "entry_extrinsic_per_share": 0.46,
+         "date": "2026-09-18", "mode": "live"},
+    ]
+    log.save_state(state)
+
+    res = executor.link_as_roll("close1", "open1")
+    assert res["status"] == "linked"
+    roll_id = res["roll_id"]
+
+    saved = log.load_state()
+    # APPEND-ONLY: the raw executions carry no roll_id at all.
+    assert "roll_id" not in next(e for e in saved["executions"] if e["id"] == "close1")
+    assert "roll_id" not in next(e for e in saved["executions"] if e["id"] == "open1")
+
+    corrected = {e["id"]: e for e in log.derived_executions(saved)}
+    assert corrected["close1"]["roll_id"] == roll_id
+    assert corrected["close1"]["roll_group_id"] == roll_id
+    assert corrected["open1"]["roll_id"] == roll_id
+
+    rolls = saved["roll_ledger"]["rolls"]
+    assert len(rolls) == 1
+    assert rolls[0]["from_strike"] == 43.0 and rolls[0]["to_strike"] == 44.0
+    assert rolls[0]["net"] == round(173.0 - 254.0, 2)
+
+
+def test_link_as_roll_refuses_a_second_link_on_an_already_linked_leg(store):
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "close1", "action": "close_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "expiration": "2026-09-18", "close_price_per_share": 2.54,
+         "date": "2026-09-18", "mode": "live"},
+        {"id": "open1", "action": "sell_short", "ticker": "IBIT", "strike": 44.0,
+         "contracts": 1, "expiration": "2026-09-25", "premium_per_share": 1.73,
+         "date": "2026-09-18", "mode": "live"},
+        {"id": "open2", "action": "sell_short", "ticker": "IBIT", "strike": 45.0,
+         "contracts": 1, "expiration": "2026-10-02", "premium_per_share": 1.10,
+         "date": "2026-09-19", "mode": "live"},
+    ]
+    log.save_state(state)
+
+    executor.link_as_roll("close1", "open1")
+    with pytest.raises(ValueError, match="already linked"):
+        executor.link_as_roll("close1", "open2")
+
+
+def test_link_as_roll_refuses_mismatched_tickers_or_wrong_actions(store):
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "close1", "action": "close_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "expiration": "2026-09-18", "date": "2026-09-18", "mode": "live"},
+        {"id": "open1", "action": "sell_short", "ticker": "SPCX", "strike": 144.0,
+         "contracts": 1, "expiration": "2026-09-25", "date": "2026-09-18", "mode": "live"},
+        {"id": "buy1", "action": "buy_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 44.51, "date": "2026-09-08", "mode": "live"},
+    ]
+    log.save_state(state)
+
+    with pytest.raises(ValueError, match="same ticker"):
+        executor.link_as_roll("close1", "open1")
+    with pytest.raises(ValueError, match="not a sell_short"):
+        executor.link_as_roll("close1", "buy1")
+
+
+def test_link_roll_route(store):
+    import app as app_module
+
+    state = log.load_state()
+    state["executions"] += [
+        {"id": "close1", "action": "close_short", "ticker": "IBIT", "strike": 43.0,
+         "contracts": 1, "expiration": "2026-09-18", "close_price_per_share": 2.54,
+         "close_total": 254.0, "date": "2026-09-18", "mode": "live"},
+        {"id": "open1", "action": "sell_short", "ticker": "IBIT", "strike": 44.0,
+         "contracts": 1, "expiration": "2026-09-25", "premium_per_share": 1.73,
+         "premium_total": 173.0, "date": "2026-09-18", "mode": "live"},
+    ]
+    log.save_state(state)
+
+    client = app_module.app.test_client()
+    resp = client.post("/api/executions/link-roll", json={"close_id": "close1", "open_id": "open1"})
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["status"] == "linked"
+
+    resp2 = client.post("/api/executions/link-roll", json={})
+    assert resp2.status_code == 400

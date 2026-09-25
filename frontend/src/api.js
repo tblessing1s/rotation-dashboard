@@ -310,6 +310,11 @@ export const api = {
   // executor.rebuild_short_calls_from_log).
   rebuildShortCalls: (ticker, reason) =>
     request("/api/positions/rebuild-short-calls", { method: "POST", body: JSON.stringify({ ticker, reason }) }),
+  // Retroactively tag an already-booked close_short + sell_short as one
+  // linked roll — for two legs recovered separately through ingestion that
+  // were really one deliberate roll at the broker (see executor.link_as_roll).
+  linkAsRoll: (closeId, openId, reason) =>
+    request("/api/executions/link-roll", { method: "POST", body: JSON.stringify({ close_id: closeId, open_id: openId, reason }) }),
   // Editable transaction table: apply per-transaction edits + derive position.
   saveTransactions: (edits, ticker) =>
     request("/api/transactions/save", { method: "POST", body: JSON.stringify({ edits, ticker }) }),
