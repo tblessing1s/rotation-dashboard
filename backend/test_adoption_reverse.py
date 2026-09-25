@@ -596,6 +596,42 @@ def test_set_position_legs_direct_edit(store):
     assert shorts["2026-07-24"]["entry_premium_total"] == 945
 
 
+def test_set_position_legs_to_empty_leaves_a_closed_position_closed(store):
+    """Clearing legs on an already-closed position (the repair for a stray leg,
+    see below) must not resurrect it — status stays whatever it already was."""
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "IBIT", "status": "closed", "shares": {"count": 0},
+        "leap_legs": [], "short_calls": [{"strike": 43.0, "contracts": 1}]})
+    log.save_state(state)
+
+    res = executor.set_position_legs("IBIT", [])
+    assert res["status"] == "saved"
+    pos = log.find_position(log.load_state(), "IBIT")
+    assert pos["short_calls"] == [] and pos["status"] == "closed"
+
+
+# ---------------------------------------------------------------------------
+# Adopting a historical open onto an already-closed position must reopen it —
+# else the leg lands invisibly (Positions/reconcile both skip status=="closed").
+# ---------------------------------------------------------------------------
+def test_adopting_a_short_open_onto_a_closed_position_reactivates_it(store):
+    state = log.load_state()
+    state["positions"].append({
+        "ticker": "IBIT", "status": "closed", "shares": {"count": 0},
+        "leap_legs": [], "short_calls": []})
+    log.save_state(state)
+
+    feed = [_txn("T1", "TOS1", [_opt_item("IBIT", "2026-09-18", 43.0, -1, 2.02, "OPENING")])]
+    ingest.run_ingestion(feed=feed)
+    pid = log.load_state()["ingestion"]["proposals"][0]["proposal_id"]
+    executor.adopt_broker_trade(pid, stock_price=44.35)
+
+    pos = log.find_position(log.load_state(), "IBIT")
+    assert pos["status"] == "active"
+    assert len(pos["short_calls"]) == 1 and pos["short_calls"][0]["strike"] == 43.0
+
+
 # ---------------------------------------------------------------------------
 # Editable transaction table: edit transactions -> derive open position
 # ---------------------------------------------------------------------------

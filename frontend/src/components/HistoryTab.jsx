@@ -556,6 +556,56 @@ function TransactionEditor() {
   );
 }
 
+// A position marked "closed" (no shares, no LEAP legs — _close_if_empty already
+// fired) can still carry a stray short_calls/leap_legs entry: e.g. adopting a
+// historical trade whose real date predates a later close already books onto
+// the SAME position object (find_position keys purely on ticker), and unlike
+// _buy_shares, an opening short leg never flips status back to "active" — so
+// the leg lands invisibly. Reconcile's expected view and the Positions tab
+// both skip anything status=="closed", so this never surfaces on its own.
+// One-click repair: replace the position's legs with nothing (the state the
+// ticker is actually in) — append-only, audited, derived ledgers recompute.
+function ClosedPositionLegRepair({ positions, onRepaired }) {
+  const [busy, setBusy] = React.useState(null);
+  const stuck = (positions || []).filter(
+    (p) => p.status === "closed" && ((p.short_calls || []).length || (p.leap_legs || []).length));
+  if (stuck.length === 0) return null;
+
+  const clear = async (ticker) => {
+    if (!window.confirm(`${ticker} is marked closed but still carries open leg(s) below — clear them? `
+      + "This only replaces short_calls/leap_legs (append-only, audited); nothing else on the position changes."))
+      return;
+    setBusy(ticker);
+    try { await api.setPositionLegs(ticker, [], `clear stray leg(s) on an already-closed position`); await onRepaired(); }
+    catch (e) { window.alert(String(e.message || e)); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <div className="mb-3 rounded-lg border border-amber-700/60 bg-amber-950/20 p-3">
+      <p className="text-xs font-semibold text-amber-300">
+        {stuck.length} position{stuck.length > 1 ? "s" : ""} marked closed but still carrying leg(s) —
+        invisible to Positions/Reconcile (both skip closed positions).
+      </p>
+      <ul className="mt-2 space-y-1">
+        {stuck.map((p) => (
+          <li key={p.ticker} className="flex items-center gap-2 text-xs">
+            <span className="font-semibold text-slate-200">{p.ticker}</span>
+            <span className="text-slate-500">
+              {(p.short_calls || []).map((sc) => `${sc.strike}C x${sc.contracts} exp ${sc.expiration}`).join(", ")}
+              {(p.leap_legs || []).length ? ` · ${p.leap_legs.length} LEAP leg(s)` : ""}
+            </span>
+            <button onClick={() => clear(p.ticker)} disabled={busy === p.ticker}
+                    className="ml-auto rounded-full border border-amber-700 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 disabled:opacity-50">
+              {busy === p.ticker ? "Clearing…" : "Clear leg(s)"}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 function RawData() {
   const { data, error, reload } = useApi(api.executionsRaw, [], null);
   const [msg, setMsg] = React.useState(null);
@@ -608,6 +658,7 @@ function RawData() {
         </p>
       )}
       {msg && <p className="mb-2 text-xs text-slate-300">{msg}</p>}
+      <ClosedPositionLegRepair positions={data?.positions} onRepaired={reload} />
       <div className="overflow-x-auto">
         <table className="w-full whitespace-nowrap text-xs">
           <thead>
