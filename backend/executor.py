@@ -4308,6 +4308,13 @@ def _sell_short(payload, ticker, strike, contracts, stock_price):
             "entry_premium_total": premium_total, "current_bid": premium_per_share,
             "current_cost": premium_total,
         })
+        # Mirrors _buy_shares: a position marked "closed" that gains a leg is no
+        # longer closed. Without this, adopting a historical short (its real date
+        # predates a close already booked on the SAME position object — find_
+        # position keys only on ticker) leaves a leg stuck on a "closed" position,
+        # invisible to both the Positions tab and reconcile's expected view
+        # (both skip status=="closed" outright).
+        position["status"] = "active"
     return execution, apply
 
 
