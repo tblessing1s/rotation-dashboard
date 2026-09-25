@@ -429,7 +429,7 @@ function _toRow(e) {
 // key with more than one open or close for the same strike+expiration is
 // ambiguous (e.g. reopened after an early exit) and is left unlinked rather
 // than guessed.
-function _linkPairs(rows) {
+export function _linkPairs(rows) {
   const groups = new Map();
   rows.forEach((r, i) => {
     if (r.roll || r.isShare || (r.action !== "sell_short" && r.action !== "close_short")) return;
@@ -442,9 +442,21 @@ function _linkPairs(rows) {
     const opens = idxs.filter((i) => out[i].action === "sell_short");
     const closes = idxs.filter((i) => out[i].action === "close_short");
     if (opens.length === 1 && closes.length === 1) {
-      const label = `${out[opens[0]].ticker} ${out[opens[0]].strike}C`;
-      out[opens[0]] = { ...out[opens[0]], link: label };
-      out[closes[0]] = { ...out[closes[0]], link: label };
+      const openRow = out[opens[0]];
+      const label = `${openRow.ticker} ${openRow.strike}C`;
+      out[opens[0]] = { ...openRow, link: label };
+      // The close's "entry extrinsic" field exists for when NO matching open
+      // is on record at all (see editableExtrinsic) — a manually-typed number
+      // that has to be kept in sync by hand, and can drift from the open's own
+      // (the exact confusion that produced this). Once a match is right here
+      // in the same table, there is nothing left to type: lock the close to
+      // the open's own number so the two can never disagree again.
+      const openExtrinsic = openRow.extrinsic === "" ? null : Number(openRow.extrinsic);
+      out[closes[0]] = {
+        ...out[closes[0]], link: label,
+        extrinsic: openExtrinsic == null ? out[closes[0]].extrinsic : openExtrinsic,
+        extrinsicLocked: openExtrinsic != null,
+      };
     }
   }
   return out;
@@ -517,9 +529,17 @@ function TransactionEditor() {
       // instant this table reloaded, even though it was already applied
       // everywhere else (ledgers, Payouts).
       const byId = data.corrected_by_id || {};
-      const built = _linkPairs(fills.slice().reverse().map((e) => _toRow(byId[e.id] || e)));  // oldest first, like a trade log
-      setRows(built);
-      originalRef.current = Object.fromEntries(built.map((r) => [r.id, r]));
+      const plain = fills.slice().reverse().map((e) => _toRow(byId[e.id] || e));  // oldest first, like a trade log
+      // originalRef snapshots the TRUE stored values (pre-link) — _linkPairs'
+      // auto-matched extrinsic is a display override, not what's necessarily
+      // saved yet. Diffing a save against the linked/displayed values instead
+      // would hide a real mismatch forever: it'd show the correct number
+      // without ever being able to push it, since a locked field can't be
+      // "edited" to trigger a diff. Snapshotting the unlinked values means a
+      // stale stored extrinsic still differs from the display and rides along
+      // on the next save, even an unrelated one — the self-heal this lock needs.
+      originalRef.current = Object.fromEntries(plain.map((r) => [r.id, r]));
+      setRows(_linkPairs(plain));
     }
   }, [data]);
 
@@ -606,10 +626,12 @@ function TransactionEditor() {
                 <td className="py-1 pr-2">
                   <input value={r.extrinsic}
                          placeholder={r.isOpen ? "extrinsic" : r.editableExtrinsic ? "entry extrinsic" : "—"}
-                         disabled={!r.isOpen && !r.editableExtrinsic}
-                         title={r.editableExtrinsic ? "The entry extrinsic this close's original open sold — fill in if it shows $0 because that open was never captured (outside the ingestion window, etc.)" : undefined}
+                         disabled={r.extrinsicLocked || (!r.isOpen && !r.editableExtrinsic)}
+                         title={r.extrinsicLocked
+                           ? `Locked to its matched open's own extrinsic (${r.link}) — nothing to type, they can't disagree`
+                           : r.editableExtrinsic ? "The entry extrinsic this close's original open sold — fill in if it shows $0 because that open was never captured (outside the ingestion window, etc.)" : undefined}
                          onChange={(e) => onExt(i, e.target.value)}
-                         className={`${inp} w-24 ${(r.isOpen || r.editableExtrinsic) ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
+                         className={`${inp} w-24 ${r.extrinsicLocked ? "opacity-60" : (r.isOpen || r.editableExtrinsic) ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
                 </td>
                 <td className="py-1 pr-2 font-sans text-slate-600">
                   {r.roll || (r.link
