@@ -224,6 +224,38 @@ def test_shares_cycle_recorded_on_full_exit_via_sell_shares(store):
     assert view["aggregates"]["win_rate"] == 100.0
 
 
+def test_shares_cycle_closes_regardless_of_which_order_the_log_was_written_in(store):
+    """CONFIRMED LIVE: a buy_shares recovered (adopted) AFTER its own later
+    sell_shares was already appended to the log left "Cycle log" permanently
+    empty for that position — the cycle-builder replayed executions in
+    INSERTION order, hit the sell with nothing open yet (silently skipped),
+    then opened a cycle on the later buy that the already-passed sell could
+    never close. A real, fully-closed position produced no closed-cycle
+    record at all. recompute_derived must replay these in DATE order."""
+    state = log.load_state()
+    # Appended SELL first, BUY second — the exact out-of-order recovery case.
+    state["executions"] += [
+        {"id": "sell1", "action": "sell_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 48.7601, "execution_total": 4876.01, "date": "2026-09-24",
+         "cost_basis_per_share": 44.51, "realized_pnl": 425.01, "mode": "live"},
+        {"id": "buy1", "action": "buy_shares", "ticker": "IBIT", "qty": 100,
+         "price_per_share": 44.51, "execution_total": 4451.0, "date": "2026-09-08", "mode": "live"},
+    ]
+    log.save_state(state)
+    log.recompute_derived(state)
+    log.save_state(state)
+
+    saved = log.load_state()
+    assert len(saved["cycles"]) == 1
+    c = saved["cycles"][0]
+    assert c["ticker"] == "IBIT"
+    assert c["structure"] == position_types.SHARES
+    assert c["entry_date"] == "2026-09-08"
+    assert c["exit_date"] == "2026-09-24"
+    assert c["capital_deployed"] == 4451.0
+    assert c["leap_pnl"] == 425.01
+
+
 def test_shares_cycle_recorded_on_called_away_assignment(store):
     _buy_shares("KO", 200, 60.0)
     _sell_short("KO", 62.0, 2, 1.0, 60.0)
