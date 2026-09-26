@@ -541,7 +541,12 @@ def test_engineered_state_trips_every_position_condition(isolated_state, monkeyp
     state = _state(p, earnings_overrides={"PG": (today + timedelta(days=3)).isoformat()})
     log.save_state(state)
 
-    fired = sorted((a["type"], a["ticker"]) for a in alerts.evaluate(log.load_state()))
+    # The weekly/monthly digests are CALENDAR-gated (Saturday / the 1st) — they
+    # carry no condition and would make this exact-set check fail on those days
+    # only, so they are left out of it. Their own tests pin their schedule.
+    calendar_digests = {"WEEKLY_SUMMARY", "MONTHLY_SUMMARY"}
+    fired = sorted((a["type"], a["ticker"]) for a in alerts.evaluate(log.load_state())
+                   if a["type"] not in calendar_digests)
     assert fired == sorted([
         # The daily digest is not a condition — it fires on EVERY pass, by design,
         # so it belongs in any exhaustive expectation of what one pass produces.
