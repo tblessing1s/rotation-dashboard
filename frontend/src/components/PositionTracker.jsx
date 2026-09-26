@@ -1076,6 +1076,50 @@ function AccrualProgress({ accrual }) {
   );
 }
 
+// Coverage gaps — stretches when owned lots had NO call on them (a legged roll,
+// shares bought before the first call, the last call bought back before the
+// exit). Whatever the stock did in the gap is raw P&L, not juice. Measurement
+// only: NO AUTHORITY — it never gates an order.
+const GAP_KIND_LABEL = { entry: "before first call", roll: "legged roll", exit: "before exit",
+  expiry: "after expiry", other: "other" };
+
+function gapDuration(sec) {
+  if (sec == null) return "?";
+  if (sec < 3600) return `${Math.max(1, Math.round(sec / 60))}m`;
+  if (sec < 86400) return `${(sec / 3600).toFixed(1)}h`;
+  return `${(sec / 86400).toFixed(1)}d`;
+}
+
+function CoverageGaps({ gaps }) {
+  if (!gaps || !gaps.count) return null;
+  const open = gaps.open;
+  const kinds = Object.entries(gaps.by_kind || {});
+  const tone = gaps.gap_pnl < 0 ? "text-rose-300" : gaps.gap_pnl > 0 ? "text-emerald-300" : "text-slate-300";
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="mb-1 flex items-center justify-between text-xs">
+        <span className="uppercase tracking-wide text-slate-500">
+          Uncovered gaps <span className="ml-1 rounded bg-violet-500/15 px-1 text-[10px] text-violet-300">NO AUTHORITY</span>
+        </span>
+        <span className={`tabular-nums ${tone}`}
+          title="Stock move × uncovered shares while no call covered them. Not juice — pure stock exposure.">
+          {money(gaps.gap_pnl)} · {gaps.count} gap{gaps.count === 1 ? "" : "s"}
+          {gaps.unpriced_count ? ` (${gaps.unpriced_count} unpriced)` : ""}
+        </span>
+      </div>
+      <p className="text-[11px] text-slate-500">
+        {kinds.map(([k, v]) => `${GAP_KIND_LABEL[k] || k} ${v.count}× ${money(v.gap_pnl)} / ${gapDuration(v.seconds)}`).join(" · ")}
+      </p>
+      {open && (
+        <p className="mt-1 text-[11px] text-amber-300">
+          Uncovered NOW: {open.uncovered_shares} shares for {gapDuration(open.seconds)}
+          {open.gap_pnl != null && <> ({money(open.gap_pnl)} so far)</>} — sell the replacement call or exit; don't shop strikes while naked-long.
+        </p>
+      )}
+    </div>
+  );
+}
+
 // Open shorts — the weekly income engine: each short's extrinsic capture (the
 // juice we're collecting) with its roll/assignment flags, each rollable in place.
 function ShortCalls({ p, shorts, setRolling, onOpenTicket }) {
@@ -1971,6 +2015,9 @@ function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focus
 
           {/* (3) accrual toward the next lot */}
           <AccrualProgress accrual={p.accrual} />
+
+          {/* (4) uncovered stretches — legging / entry / exit gaps (no authority) */}
+          <CoverageGaps gaps={p.coverage_gaps} />
 
           {p.defend && (
             <DefendPanel ticker={p.ticker} onStage={() => setRolling({ ticker: p.ticker, reason: "defend" })} />

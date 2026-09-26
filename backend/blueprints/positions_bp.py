@@ -56,12 +56,39 @@ def api_positions():
                     view.get("stock_price") or view.get("price"))
         except Exception:  # noqa: BLE001 — a display readout never sinks the panel
             pass
+        # Coverage gaps (NO authority): the uncovered stretches — legged rolls,
+        # entry before the first call, exit after the last buy-back — and the raw
+        # stock P&L they carried, scoped to the current position's entry.
+        try:
+            import coverage_gaps
+            for view in views:
+                view["coverage_gaps"] = coverage_gaps.for_ticker(
+                    state, view.get("ticker", ""),
+                    live_price=view.get("stock_price") or view.get("price"),
+                    since=view.get("entry_date"))["summary"]
+        except Exception:  # noqa: BLE001 — a display readout never sinks the panel
+            pass
         return jsonify({
             "positions": views,
             "capital": position_manager.capital_summary(state),
             "extrinsic_payback": state.get("extrinsic_payback", {}),
             "accrual_ledger": state.get("accrual_ledger", {}),
         })
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@positions_bp.route("/api/positions/coverage-gaps")
+def api_coverage_gaps():
+    """Every uncovered window per ticker (all cycles) with its gap P&L — shadow
+    measurement, no authority. ``?ticker=`` narrows to one name."""
+    try:
+        import coverage_gaps
+        state = log.load_state()
+        ticker = request.args.get("ticker")
+        if ticker:
+            return jsonify(coverage_gaps.for_ticker(state, ticker))
+        return jsonify(coverage_gaps.book(state))
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
