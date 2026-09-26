@@ -1096,6 +1096,38 @@ def build_roll_order(quantity: int, buy_to_close_symbol: str, sell_to_open_symbo
     }
 
 
+def build_covered_order(legs: list[tuple], net_price: float, *,
+                        complex_strategy_type: str | None = None,
+                        duration: str | None = None) -> dict:
+    """ONE net order mixing the share leg and its call leg(s) — a buy-write
+    (BUY shares + SELL_TO_OPEN call, a NET_DEBIT) or an unwind (BUY_TO_CLOSE call
+    + SELL shares, a NET_CREDIT) — so the stock is never held without its call
+    between two separate fills.
+
+    ``legs`` is a list of (instruction, symbol, quantity, asset_type) where
+    asset_type is "EQUITY" (quantity = SHARES, symbol = ticker) or "OPTION"
+    (quantity = contracts, symbol = OCC). ``net_price`` is per share: positive =
+    net credit received, negative = net debit paid.
+
+    LIVE_VERIFY — the equity leg shares build_equity_order's unconfirmed fields;
+    the executor always previewOrders this payload and refuses to place on a
+    rejection (see executor._place_covered_live)."""
+    credit = float(net_price) >= 0
+    return {
+        "orderType": "NET_CREDIT" if credit else "NET_DEBIT",
+        "session": "NORMAL",
+        "price": f"{abs(float(net_price)):.2f}",
+        "duration": duration or config.COVERED_ORDER_DURATION,
+        "orderStrategyType": "SINGLE",
+        "complexOrderStrategyType": complex_strategy_type or config.COVERED_COMPLEX_STRATEGY_TYPE,
+        "orderLegCollection": [
+            {"instruction": instr, "quantity": int(qty),
+             "instrument": {"symbol": sym, "assetType": asset}}
+            for instr, sym, qty, asset in legs
+        ],
+    }
+
+
 def build_equity_order(instruction: str, quantity: int, symbol: str,
                        limit_price: float | None = None) -> dict:
     """A single-leg equity order for the SHARES base leg (schema v20).

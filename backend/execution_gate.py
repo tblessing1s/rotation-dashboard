@@ -110,7 +110,7 @@ def classify_action(action: str | None, payload: dict | None = None) -> str | No
     routine roll can never borrow the emergency unlock (HARD_CFM_RULE)."""
     a = (action or "").strip()
     payload = payload or {}
-    if a in ("open_position_atomic", "buy_leap"):
+    if a in ("open_position_atomic", "buy_leap", "buy_write"):
         return GateAction.ENTRY
     if a == "roll_short":
         reason = (payload.get("roll_reason") or "").strip().lower()
@@ -120,7 +120,7 @@ def classify_action(action: str | None, payload: dict | None = None) -> str | No
         return GateAction.ROLL_SHORT
     if a == "roll_leap":
         return GateAction.ROLL_LEAP
-    if a in ("close_position_atomic", "close_leap", "close_short"):
+    if a in ("close_position_atomic", "close_leap", "close_short", "unwind_covered"):
         return GateAction.EXIT_KILL
     if a in ("cancel", "cancel_order"):
         return GateAction.CANCEL

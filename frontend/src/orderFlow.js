@@ -12,6 +12,8 @@
 const ACTION_VERB = {
   buy_shares: "Buy shares",
   sell_shares: "Sell shares",
+  buy_write: "Buy-write (shares + call)",
+  unwind_covered: "Unwind (call + shares)",
   sell_short: "Sell covered call",
   close_short: "Close covered call",
   roll_short: "Roll covered call",

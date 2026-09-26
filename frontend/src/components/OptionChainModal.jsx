@@ -18,7 +18,10 @@ function bigDollars(n) {
 // COVERED CALL written against them. LEAP entry is retired (see config.
 // LEGACY_LEAP_READONLY), so these are the only actions this ticket offers.
 const ACTION_LABELS = {
-  buy_shares: "Open position — buy 100 shares",
+  // Shares + first call on ONE ticket (both fill together or neither does) —
+  // the default entry, so the shares are never held without their call.
+  buy_write: "Open covered — buy 100 shares + sell call (one ticket)",
+  buy_shares: "Buy shares only (no call yet)",
   sell_short: "Sell covered call (weekly)",
   close_short: "Close / roll covered call",
 };
@@ -78,11 +81,11 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
         const sug = cmp?.strikes?.find((s) => s.suggested) || cmp?.strikes?.[0];
         setWeeklyExp(cmp?.expiration ?? null);
         setWeeklyStrike(sug ? sug.strike : null);
-        // The base is 100 real shares, entered on its own ticket (buy_shares),
-        // and the covered call is a separate step — there is no buy-both-legs
-        // atomic (an equity buy and an option sell can't share one broker order).
+        // An entry defaults to the one-ticket buy-write: shares + first call on a
+        // single net order, so there is no uncovered stretch between two fills.
+        // "Buy shares only" stays available (e.g. scaling toward a lot).
         const sa = c.suggested_action;
-        setAction(ACTION_LABELS[sa] ? sa : "buy_shares");
+        setAction(sa === "buy_shares" || !ACTION_LABELS[sa] ? "buy_write" : sa);
         const defQty =
           sa === "close_short" && c.position?.open_short?.contracts ? c.position.open_short.contracts
           : c.quantity_default ?? 1;
@@ -140,8 +143,9 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
         ...(position?.open_short_count ? { close_short: ACTION_LABELS.close_short } : {}),
       }
     : {
-        // buy_shares always available (establish OR scale the 100-share base);
+        // buy_write / buy_shares always available (establish OR scale the base);
         // covered call once a base is held; roll/close when a short is open.
+        buy_write: ACTION_LABELS.buy_write,
         buy_shares: ACTION_LABELS.buy_shares,
         ...(position?.has_shares ? { sell_short: ACTION_LABELS.sell_short } : {}),
         ...(position?.open_short_count ? { close_short: ACTION_LABELS.close_short } : {}),
@@ -161,6 +165,7 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
   // extrinsic) as a % of share cost. Owning shares outright, there is nothing to
   // pay back — no extrinsic to cover, no burn.
   const sharesEntry = action === "buy_shares";
+  const buyWrite = action === "buy_write";
   const spot = chain?.underlying_price ?? null;
   const sharesCost = spot != null ? spot * sharesPerLot * qtyNum : null;
   const ccPremiumPs = chosenWeekly?.extrinsic ?? null;
@@ -175,6 +180,19 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
       // (a share count); "Quantity" here is 100-share lots, so qty = lots × 100.
       // The covered call is a SEPARATE next step (sell_short) — not on this ticket.
       base.qty = qtyNum * sharesPerLot;
+      if (cbPrice !== "" && !Number.isNaN(Number(cbPrice))) base.circuit_breaker_price = Number(cbPrice);
+      if (overrideReason.trim()) base.override_reason = overrideReason.trim();
+    } else if (action === "buy_write" && chosenWeekly) {
+      // Shares + the chosen call on ONE net order. qty is shares (lots × 100);
+      // one call per lot. The backend re-prices both legs off fresh quotes.
+      base.qty = qtyNum * sharesPerLot;
+      base.contracts = qtyNum;
+      if (chain.underlying_price != null) base.price_per_share = chain.underlying_price;
+      base.strike = chosenWeekly.strike;
+      const exp = chosenWeekly.expiration || chosenGroup?.expiration || weekly?.expiration;
+      if (exp) base.expiration = exp;
+      if (chosenWeekly.symbol) base.option_symbol = chosenWeekly.symbol;
+      if (chosenWeekly.mark != null) base.premium_per_share = chosenWeekly.mark;
       if (cbPrice !== "" && !Number.isNaN(Number(cbPrice))) base.circuit_breaker_price = Number(cbPrice);
       if (overrideReason.trim()) base.override_reason = overrideReason.trim();
     } else if (action === "sell_short" && chosenWeekly) {
@@ -194,13 +212,14 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
     return base;
   }
 
-  const isEntry = action === "buy_shares";
+  const isEntry = action === "buy_shares" || action === "buy_write";
   const gateBlocked = isEntry && accountGate && !accountGate.pass;
   const canExecute =
     qtyNum > 0 &&
     (!gateBlocked || overrideReason.trim().length > 0) &&
     (!needsManualReason || manualReason.trim().length > 0) &&
     ((action === "buy_shares") ||
+      (action === "buy_write" && chosenWeekly) ||
       (action === "sell_short" && chosenWeekly) ||
       (action === "close_short" && openShort));
 
@@ -315,7 +334,7 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
                     {Object.entries(actionOptions).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
                   </select>
                 </label>
-                <label className="text-slate-400">Quantity ({action === "buy_shares" ? "100-share lots" : "contracts"})
+                <label className="text-slate-400">Quantity ({isEntry ? "100-share lots" : "contracts"})
                   <input
                     value={qty}
                     onChange={(e) => setQty(e.target.value.replace(/[^0-9]/g, ""))}
@@ -398,7 +417,8 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
                   </div>
                   <p className="mt-1 text-[11px] text-slate-500">
                     Covered call on {qtyNum} × {sharesPerLot} shares: weekly time premium ÷ share cost.
-                    {sharesEntry ? " You'll sell the covered call as the next step (Sell covered call)." : ""}
+                    {sharesEntry ? " The call is NOT on this ticket — until you sell it, the shares are uncovered." : ""}
+                    {buyWrite ? " Shares and call go as ONE ticket — both fill together or neither does, so the shares are never uncovered." : ""}
                   </p>
                 </>
               )}
@@ -427,7 +447,7 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
                 >
                   {busy
                     ? "Executing…"
-                    : `${action === "open_position_atomic" || action === "buy_shares"
+                    : `${action === "open_position_atomic" || isEntry
                         ? "Open position"
                         : `Execute ${ACTION_LABELS[action]?.split(" ")[0] || ""}`} & log${tradeMode === "paper" ? " (paper)" : ""}`}
                 </button>
@@ -468,11 +488,12 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
                 week (full DTE) is the default so the Level-5 juice gate prices
                 against a real week's premium, not a 1–2 DTE stub. */}
             {!mgmt && (
-            <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" || action === "open_position_atomic" || action === "buy_shares" ? "border-sky-700" : "border-slate-800"}`}>
+            <div className={`rounded-lg border bg-slate-950 p-3 ${action === "sell_short" || action === "open_position_atomic" || isEntry ? "border-sky-700" : "border-slate-800"}`}>
               <div className="mb-2 flex items-center justify-between">
                 <h3 className="text-sm font-semibold text-slate-200">
                   Weekly covered call ({weekly?.posture || "…"}-suggested)
                   {sharesEntry && <span className="ml-1 text-xs font-normal text-slate-500">— sell after the shares fill</span>}
+                  {buyWrite && <span className="ml-1 text-xs font-normal text-emerald-400">— on the same ticket as the shares</span>}
                 </h3>
                 {weekly && (
                   <span className="text-xs text-slate-500">
