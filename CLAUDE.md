@@ -83,6 +83,13 @@ Match the surrounding style; don't introduce a linter unless asked.
   restore; adoption and ingestion recover it by broker order id. Persist anything
   computed across a slow fetch through `logging_handler.mutate_state`, never by
   saving a copy loaded before the fetch.
+- **Never uncovered between fills:** a roll is one two-leg ticket
+  (`_place_live_roll`); the edges are too — `buy_write` (shares + first call) and
+  `unwind_covered` (every call + the shares) go as ONE net order
+  (`executor._covered`, `schwab_api.build_covered_order`), and `exit_position`
+  uses the unwind whenever the shape is 100 shares per call. Their equity leg
+  rides `EQUITY_ORDER_PLACEMENT_ENABLED` + the mandatory previewOrder; logged
+  bookings stamp both legs with one timestamp and a `covered_group_id`.
 - **Period bucketing:** bucket executions by date→expiration via
   `logging_handler.bucket_datetime()` — both the theta ledger and the Payouts view
   key off it so they can't disagree. Never re-derive week/month with a bespoke
@@ -91,7 +98,8 @@ Match the surrounding style; don't introduce a linter unless asked.
   authority pending real-data calibration — the weekly-juice floor
   (`scan_triggers.shadow_floor`), the composite SCORE (`scan_score`), the gate
   ruleset replay, the Level-4 structure metrics (`chart_structure`), and the
-  trailing juice CAPACITY (`juice_capacity`). The
+  trailing juice CAPACITY (`juice_capacity`), and the uncovered-gap P&L
+  (`coverage_gaps` — stock moves while owned lots had no call). The
   load-bearing invariant is that none of them is ever appended to the `blocks`
   list feeding `scan_triggers.compose_row_verdict` — that list is what carries
   verdict authority. There is deliberately no config switch that grants a shadow

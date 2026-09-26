@@ -41,6 +41,7 @@ ALERT_TYPES = {
     "KILL_SWITCH_SPY": ("CRITICAL", "HARD_CFM_RULE: RS3M vs SPY negative on confirmed close -> exit within 1-2 days"),
     "CIRCUIT_BREAKER": ("CRITICAL", "HARD_CFM_RULE: line-in-the-sand exit price stored at entry"),
     "DELTA_UNCOVERED": ("HIGH", "HARD_CFM_RULE: more calls sold than owned 100-share lots (or, on a legacy diagonal, a LEAP that no longer covers the short)"),
+    "SHARES_UNCOVERED": ("MEDIUM", "PROPOSED_DEFAULT: owned 100-share lots carry no call (a legged roll, an entry before the first call, or a last call bought back before the exit) -> every stock move in the gap is raw P&L, not juice; re-cover or exit now"),
     "DEFEND_POSITION": ("HIGH", "HARD_CFM_RULE: underlying closed below the short strike -> defensive roll-down"),
     "SHORT_APPROACHING_ATM": ("MEDIUM", "PROPOSED_DEFAULT: short strike still OTM but within SHORT_ATM_APPROACH_PCT of spot -> assignment risk rising before DEFEND_POSITION would trip"),
     "WHIPSAW_EXIT": ("CRITICAL", "HARD_CFM_RULE: defend whipsaw (too many roll-downs / too much cumulative drag) -> exit, not another defend"),
@@ -113,6 +114,7 @@ _FOCUS_ACTIONS = {
     "WHIPSAW_EXIT", "JUICE_INADEQUATE", "EARNINGS_DATE_STALE", "ROLL_LEG_IMBALANCE",
     "EXTRINSIC_ABOVE_ENTRY", "RECOMMENDATION", "TRUST_COVERAGE_MISS",
     "ORDER_FIDELITY_FAIL", "LOT_ADD_READY", "SHORT_APPROACHING_ATM",
+    "SHARES_UNCOVERED",
 }
 
 
@@ -254,6 +256,44 @@ def check_delta_uncovered(state: dict) -> list[dict]:
                 {"long_delta": cov["long_delta"], "short_delta": cov["short_delta"],
                  "q": round(q, 4), "q_source": q_src},
                 key="inverted"))
+    return out
+
+
+def check_shares_uncovered(state: dict) -> list[dict]:
+    """A SHARES position with full lots and no call on them — the coverage gap a
+    legged roll / entry / exit leaves open. Keyed on when the gap opened, so it
+    fires once per gap (not once per run) and a later gap fires again. The gap's
+    stock move so far is shown, but nothing here blocks or gates anything."""
+    import coverage_gaps
+    import position_manager
+    out = []
+    for p in _open_positions(state):
+        if not position_types.is_shares(p):
+            continue
+        cov = position_manager.delta_coverage(p, None)
+        lots = int(cov.get("coverable_lots") or 0)
+        shorts = int(cov.get("short_contracts") or 0)
+        if lots <= shorts:
+            continue
+        t = p.get("ticker", "")
+        gaps = coverage_gaps.for_ticker(state, t, live_price=_last_close(t))
+        open_w = gaps["summary"]["open"] or {}
+        since = open_w.get("start_time")
+        kind = open_w.get("kind")
+        n = lots - shorts
+        what = {"roll": "since the call was bought back",
+                "entry": "since the shares were bought",
+                "expiry": "since the call expired"}.get(kind, "")
+        summary = f"{t}: {n} lot(s) ({n * config.SHARES_PER_LOT} shares) have NO call on them {what}".rstrip() + "."
+        if open_w.get("gap_pnl") is not None:
+            summary += f" Uncovered stock move so far: {open_w['gap_pnl']:+,.0f}."
+        out.append(_alert(
+            "SHARES_UNCOVERED", t, summary,
+            ("Sell the replacement call now (or sell the shares if you are exiting) — "
+             "don't shop the next strike while uncovered. Roll as one two-leg ticket next time."),
+            {"uncovered_lots": n, "since": since, "kind": kind,
+             "gap_pnl": open_w.get("gap_pnl")},
+            key=str(since or "unknown")))
     return out
 
 
@@ -1484,6 +1524,7 @@ EVALUATORS = [
     check_put_collateral_breach,
     check_whipsaw_exit,
     check_delta_uncovered,
+    check_shares_uncovered,
     check_defend_position,
     check_approaching_atm,
     check_buyback_75,

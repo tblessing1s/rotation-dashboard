@@ -34,6 +34,10 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
                  # real-share base; close_shares_assigned books a called-away exit at the
                  # short strike (a clean delivery of owned shares — see _close_shares_assigned).
                  "buy_shares", "sell_shares", "close_shares_assigned",
+                 # Covered one-ticket orders: shares + call(s) on ONE net order so
+                 # the stock is never held without its call between two fills —
+                 # buy_write (entry) and unwind_covered (exit). See _covered.
+                 "buy_write", "unwind_covered",
                  # Cash-secured put lifecycle (schema v22, Stage 1 — TRACK). Three
                  # append-only typed events, NO order path: a put is opened
                  # manually at the broker and booked here, exactly like an
@@ -58,7 +62,7 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
 # safe in either state of the world. ``adjustment`` is the resolution path, also
 # allowed. See docs/reconciliation.md.
 FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap",
-                          "open_position_atomic", "buy_shares"}
+                          "open_position_atomic", "buy_shares", "buy_write"}
 
 # LEAP-opening actions retired by the shares-primary migration (schema v20). With
 # shares as the active base leg the LEAP diagonal is read-only LEGACY: existing
@@ -185,6 +189,9 @@ PUT_ACTIONS = frozenset({"put_opened", "put_closed", "put_assigned"})
 # The shares base actions. Whether they can reach the broker is now a FLAG, not a
 # permanent property — see `non_transmitting_actions()`.
 EQUITY_ACTIONS = frozenset({"buy_shares", "sell_shares"})
+# Stock + call on one ticket. They carry an equity leg, so they transmit only
+# under the same EQUITY_ORDER_PLACEMENT_ENABLED flag + mandatory preview.
+COVERED_ACTIONS = frozenset({"buy_write", "unwind_covered"})
 
 
 def _transmits(action: str) -> bool:
@@ -206,7 +213,7 @@ def _transmits(action: str) -> bool:
         # is sent, so the price at the assignment (the operator's, or the strike)
         # is the right one, and the no-spot-no-order guard must not refuse it.
         return False
-    if action in EQUITY_ACTIONS:
+    if action in EQUITY_ACTIONS or action in COVERED_ACTIONS:
         return config.EQUITY_ORDER_PLACEMENT_ENABLED
     if action in PUT_ACTIONS:
         # An assignment is an EVENT, not an order — nothing is transmitted, and
@@ -224,7 +231,8 @@ def non_transmitting_actions() -> frozenset:
     The UI reads this (served by /api/live-trading) rather than duplicating the
     rule, so a confirmation dialog can never promise a transmit the dispatch will
     not perform — nor refuse to promise one it will."""
-    return frozenset() if config.EQUITY_ORDER_PLACEMENT_ENABLED else EQUITY_ACTIONS
+    return (frozenset() if config.EQUITY_ORDER_PLACEMENT_ENABLED
+            else EQUITY_ACTIONS | COVERED_ACTIONS)
 
 
 def live_enabled() -> bool:
@@ -866,7 +874,7 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     # gap is the whole gate, so buy_shares runs the same gate on a lot basis.
     if action in ("buy_leap", "open_position_atomic"):
         _enforce_account_gate(payload, ticker, contracts)
-    elif action == "buy_shares":
+    elif action in ("buy_shares", "buy_write"):
         _enforce_shares_account_gate(payload, ticker, stock_price)
 
     state = log.load_state()
@@ -886,7 +894,7 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     # Coded exit reason (+ typed note for OPERATOR_DISCRETION) — validated here,
     # at the operator-facing boundary, so a bad reason is rejected BEFORE any
     # order is placed. Normalizes payload["exit_reason"]/["exit_note"] in place.
-    if action in ("close_leap", "close_position_atomic"):
+    if action in ("close_leap", "close_position_atomic", "unwind_covered"):
         _validate_exit_reason(payload)
 
     # Market-settle execution gate (time-of-day order discipline) — the single
@@ -917,6 +925,9 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
         return _close_position_atomic(payload, ticker, stock_price, mode, price_source)
     if action == "close_shares_assigned":
         return _commit_assignment(payload, ticker, strike, contracts, stock_price, mode, price_source)
+
+    if action in COVERED_ACTIONS:
+        return _covered(payload, ticker, action, stock_price, mode, price_source)
 
     # Shares base actions. Placement is gated on EQUITY_ORDER_PLACEMENT_ENABLED
     # (default false); with the flag off they book as the logged path exactly as
@@ -3570,6 +3581,288 @@ def _place_equity_live(payload, ticker, action, contracts, stock_price, price_so
     }
 
 
+# ---------------------------------------------------------------------------
+# Covered one-ticket orders — the shares are never uncovered between fills.
+#
+# A roll already goes as ONE two-leg ticket (_place_live_roll). The two edges of
+# a position did not: an entry bought the shares, THEN sold the first call; an
+# exit bought the last call back, THEN sold the shares. Every second between
+# those fills is raw, unhedged stock exposure (coverage_gaps measures it).
+#
+#   buy_write       BUY shares + SELL_TO_OPEN the call    one NET_DEBIT ticket
+#   unwind_covered  BUY_TO_CLOSE every call + SELL shares one NET_CREDIT ticket
+#
+# Live, both legs fill together or not at all. On the logged path both legs are
+# booked with ONE timestamp and ONE stock price, linked by covered_group_id.
+# ---------------------------------------------------------------------------
+def _next_covered_id(state) -> str:
+    n = len({e.get("covered_group_id") for e in state.get("executions", [])
+             if e.get("covered_group_id")})
+    return f"covered_{n + 1:03d}"
+
+
+def _covered_plan(payload, ticker, action, stock_price) -> dict:
+    """What the ticket is: its legs (in booking order), their per-share prices,
+    and the per-share net. Pure over the payload + current position; the live
+    path re-prices every leg off fresh quotes before it transmits."""
+    spt = config.SHARES_PER_LOT
+    if action == "buy_write":
+        qty = shares_entry_lots(payload) * spt
+        contracts = qty // spt
+        strike = payload.get("strike")
+        if strike is None:
+            raise ValueError("buy_write needs the call's strike")
+        expiration = _norm_exp(payload.get("expiration"))
+        symbol = payload.get("option_symbol") or (
+            schwab_api.occ_option_symbol(ticker, expiration, strike, call=True)
+            if expiration else None)
+        share_px = float(payload.get("price_per_share")
+                         if payload.get("price_per_share") is not None else (stock_price or 0))
+        premium = float(payload.get("premium_per_share") or 0)
+        return {
+            "action": action, "ticker": ticker, "qty": qty, "contracts": contracts,
+            "legs": [
+                {"action": "buy_shares", "instruction": "BUY", "asset": "EQUITY",
+                 "symbol": ticker, "qty": qty, "price": share_px},
+                {"action": "sell_short", "instruction": "SELL_TO_OPEN", "asset": "OPTION",
+                 "symbol": symbol, "qty": contracts, "strike": strike,
+                 "expiration": expiration, "dte": payload.get("dte", 5), "price": premium},
+            ],
+        }
+
+    # unwind_covered — every open call and every owned share, all on one ticket.
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if not position or position.get("status") == "closed":
+        raise ValueError(f"{ticker} has no open position to unwind")
+    if log.leap_legs(position):
+        raise ValueError(f"{ticker} carries a legacy LEAP leg — unwind it by hand")
+    shares = int((position.get("shares") or {}).get("count") or 0)
+    shorts = [sc for sc in position.get("short_calls") or [] if int(sc.get("contracts") or 0)]
+    contracts = sum(int(sc["contracts"]) for sc in shorts)
+    if not shorts:
+        raise ValueError(f"{ticker} has no open call — sell the shares with sell_shares")
+    if shares != contracts * spt:
+        raise ValueError(
+            f"unwind_covered needs exactly {spt} shares per open call ({ticker} holds "
+            f"{shares} shares against {contracts} call(s)) — sell the extra lot(s) first, "
+            "they carry no call and leave no gap")
+    overrides = {str(k): v for k, v in (payload.get("close_prices") or {}).items()}
+    legs = []
+    for sc in shorts:
+        exp = _norm_exp(sc.get("expiration"))
+        px = overrides.get(str(sc.get("strike")))
+        if px is None:
+            px = sc.get("current_bid")
+        if px is None:
+            raise ValueError(f"no price for the {ticker} {sc.get('strike')}C buy-back")
+        legs.append({"action": "close_short", "instruction": "BUY_TO_CLOSE", "asset": "OPTION",
+                     "symbol": sc.get("option_symbol") or (
+                         schwab_api.occ_option_symbol(ticker, exp, sc.get("strike"), call=True)
+                         if exp else None),
+                     "qty": int(sc["contracts"]), "strike": sc.get("strike"), "expiration": exp,
+                     "extrinsic_sold": sc.get("entry_extrinsic_per_share"), "price": float(px)})
+    share_px = float(payload.get("price_per_share")
+                     if payload.get("price_per_share") is not None else (stock_price or 0))
+    legs.append({"action": "sell_shares", "instruction": "SELL", "asset": "EQUITY",
+                 "symbol": ticker, "qty": shares, "price": share_px})
+    return {"action": action, "ticker": ticker, "qty": shares, "contracts": contracts,
+            "legs": legs}
+
+
+def _covered_net_per_share(plan) -> float:
+    """Signed per-share net across the ticket: + credit received, - debit paid.
+    Quoted per SHARE of stock, the way a buy-write/unwind is priced (stock
+    minus premium), so each option leg weighs its contracts x 100 / shares."""
+    total = 0.0
+    for leg in plan["legs"]:
+        n = leg["qty"] if leg["asset"] == "EQUITY" else leg["qty"] * config.SHARES_PER_LOT
+        sign = 1 if leg["instruction"] in ("SELL", "SELL_TO_OPEN") else -1
+        total += sign * float(leg["price"]) * n
+    return round(total / plan["qty"], 2) if plan["qty"] else 0.0
+
+
+def _covered_order(plan) -> dict:
+    option_legs = [l for l in plan["legs"] if l["asset"] == "OPTION"]
+    for l in option_legs:
+        if not l.get("symbol"):
+            raise ValueError(
+                f"{plan['ticker']} {l.get('strike')}C needs an option symbol or expiration "
+                "to build the ticket")
+    strategy = config.COVERED_COMPLEX_STRATEGY_TYPE if len(option_legs) == 1 else "CUSTOM"
+    return schwab_api.build_covered_order(
+        [(l["instruction"], l["symbol"], l["qty"], l["asset"]) for l in plan["legs"]],
+        _covered_net_per_share(plan), complex_strategy_type=strategy)
+
+
+def _leg_payload(leg, plan, payload, stock_price) -> dict:
+    """The single-leg builder payload for one leg of a covered ticket."""
+    base = {"ticker": plan["ticker"], "stock_price": stock_price}
+    for k in ("source_rec_id", "manual_reason"):
+        if payload.get(k):
+            base[k] = payload[k]
+    a = leg["action"]
+    if a == "buy_shares":
+        keep = ("circuit_breaker_price", "override_reason", "_account_gate",
+                "income_profile", "lot_add", "source", "entry_context")
+        return {**base, **{k: payload[k] for k in keep if k in payload},
+                "qty": leg["qty"], "price_per_share": leg["price"]}
+    if a == "sell_shares":
+        return {**base, "qty": leg["qty"], "price_per_share": leg["price"],
+                "exit_reason": payload.get("exit_reason"), "exit_note": payload.get("exit_note")}
+    if a == "sell_short":
+        return {**base, "strike": leg["strike"], "contracts": leg["qty"],
+                "premium_per_share": leg["price"], "expiration": leg.get("expiration"),
+                "dte": leg.get("dte", 5), "option_symbol": leg.get("symbol")}
+    return {**base, "strike": leg["strike"], "contracts": leg["qty"],
+            "close_price_per_share": leg["price"], "expiration": leg.get("expiration"),
+            "extrinsic_sold": leg.get("extrinsic_sold")}
+
+
+def _commit_covered(plan, payload, ticker, stock_price, price_source, mode, provenance=None):
+    """Book every leg of a covered ticket as its own immutable execution, all
+    stamped with ONE timestamp, ONE stock price and a shared covered_group_id —
+    so the derived views (and coverage_gaps) see the legs as simultaneous."""
+    state = log.load_state()
+    group = _next_covered_id(state)
+    stamp = log.utcnow()
+    stored = []
+    for i, leg in enumerate(plan["legs"]):
+        lp = _leg_payload(leg, plan, payload, stock_price)
+        execution, apply = _build_leg(lp, ticker, leg["action"], lp.get("strike"),
+                                      lp.get("contracts") or 0, stock_price)
+        execution["date"] = stamp
+        execution["covered_group_id"] = group
+        execution["covered_leg"] = leg["action"]
+        execution["covered_action"] = plan["action"]
+        execution["fill_assumption"] = "mid" if mode == "logged" else "broker"
+        for k, v in (provenance or {}).items():
+            if v is not None:
+                execution[k] = v
+        _stamp_source_rec(execution, lp)
+        _stamp_manual_reason(execution, lp)
+        s = _commit_one(execution, apply, ticker, mode, price_source)
+        stored.append(s)
+    state = log.load_state()
+    position = log.find_position(state, ticker)
+    if position:
+        _close_if_empty(position)
+        log.recompute_derived(state)
+        log.save_state(state)
+    return {
+        "success": True, "status": "filled", "mode": mode,
+        "covered_group_id": group, "execution_id": stored[-1]["id"],
+        "execution_ids": [e["id"] for e in stored], "timestamp": stamp,
+        "captured_price": stock_price, "net_per_share": _covered_net_per_share(plan),
+        "executions": stored,
+    }
+
+
+def _covered(payload, ticker, action, stock_price, mode, price_source):
+    """Dispatch a buy_write / unwind_covered. Live + equity placement enabled ->
+    ONE previewed net order (_place_covered_live). Otherwise nothing is sent: a
+    live session previews the ticket for inspection and both legs book as the
+    logged path together (mirrors _commit_shares — mode says what happened)."""
+    plan = _covered_plan(payload, ticker, action, stock_price)
+    if (config.EQUITY_ORDER_PLACEMENT_ENABLED and mode == "live"
+            and schwab_api.configured()):
+        return _place_covered_live(plan, payload, ticker, action, stock_price, price_source)
+    preview = None
+    if mode == "live" and schwab_api.configured():
+        try:
+            order = _covered_order(plan)
+            client = data_handler.broker_client()
+            preview = {"order": order, "transmitted": False,
+                       "preview": client.preview_order(_order_account_hash(client), order)}
+        except Exception as exc:  # noqa: BLE001 — a preview must never block booking
+            preview = {"error": str(exc), "transmitted": False}
+    result = _commit_covered(plan, payload, ticker, stock_price, price_source, "logged")
+    if preview is not None:
+        result["covered_order_preview"] = preview
+    return result
+
+
+def _place_covered_live(plan, payload, ticker, action, stock_price, price_source):
+    """Transmit the covered ticket as ONE net order after re-pricing every leg
+    off fresh quotes and a MANDATORY previewOrder (the equity leg's fields are
+    LIVE_VERIFY — see _place_equity_live). Parked pending; committed on FILLED
+    with the broker's per-leg fills (order_status -> _commit_covered_from_pending)."""
+    _assert_transmit_allowed(action)
+    _guard_resubmit(ticker, action)
+    client = data_handler.broker_client()
+    account_hash = _order_account_hash(client)
+
+    # Fresh prices: the stock off _equity_limit_price, every option leg off a
+    # validated two-sided quote. A bad quote refuses the ticket, never guesses.
+    option_syms = [l["symbol"] for l in plan["legs"] if l["asset"] == "OPTION"]
+    if any(not s for s in option_syms):
+        _covered_order(plan)   # raises the leg-named reason
+    quotes = {}
+    try:
+        quotes = client.get_quotes(option_syms) or {}
+    except Exception as e:  # noqa: BLE001 — a quote-fetch failure is "no quote"
+        log.logger.warning("covered quote fetch failed for %s: %s", option_syms, e)
+    reasons = []
+    for leg in plan["legs"]:
+        if leg["asset"] == "EQUITY":
+            leg["staged_price"] = leg["price"]
+            leg["price"] = _equity_limit_price(client, ticker)
+            continue
+        q = quotes.get(leg["symbol"])
+        problem = order_pricing.validate_leg_quote(
+            q, symbol=leg["symbol"], label=leg["instruction"].lower().replace("_", "-"),
+            now_ms=_now_ms())
+        if problem:
+            reasons.append(problem)
+            continue
+        leg["staged_price"] = leg["price"]
+        leg["price"] = float(order_pricing.quote_mid(q))
+    if reasons:
+        raise ValueError("Refusing to construct the covered ticket — " + "; ".join(reasons))
+
+    order = _covered_order(plan)
+    try:
+        preview = client.preview_order(account_hash, order)
+    except Exception as exc:  # noqa: BLE001 — surface Schwab's own words
+        raise schwab_api.SchwabError(
+            f"Schwab rejected the {action} preview for {ticker} — NOT placing. {exc}") from exc
+
+    placed = client.place_order(account_hash, order)
+    order_id = placed.get("orderId")
+    if not order_id:
+        raise schwab_api.SchwabError(f"Schwab accepted the {action} but returned no order id")
+    net = _covered_net_per_share(plan)
+    log.save_pending_order(order_id, {
+        "kind": "covered", "action": action, "payload": payload, "plan": plan,
+        "ticker": ticker, "contracts": plan["contracts"], "qty": plan["qty"],
+        "stock_price": stock_price, "price_source": price_source,
+        "account_hash": account_hash, "net_limit": net, "placed_at": log.utcnow(),
+        "covered_order_preview": {"order": order, "preview": preview, "transmitted": True},
+    })
+    _record_placement(ticker, action, order_id, net_limit=net,
+                      stock_price=stock_price, price_source=price_source, qty=plan["qty"])
+    return {"success": True, "status": "working", "order_id": str(order_id), "mode": "live",
+            "net_limit": net, "shares": plan["qty"], "contracts": plan["contracts"],
+            "symbols": [l["symbol"] for l in plan["legs"]],
+            "fill_wait_ms": int(config.ORDER_FILL_WAIT_SECONDS * 1000)}
+
+
+def _commit_covered_from_pending(rec: dict, order: dict) -> dict:
+    """Commit a FILLED covered ticket: overlay the broker's per-leg fills onto
+    the plan, then book every leg at the fill's one moment and one spot."""
+    plan = dict(rec.get("plan") or {})
+    plan["legs"] = [dict(l) for l in plan.get("legs") or []]
+    fills = _leg_fills(order, [l.get("symbol") or "" for l in plan["legs"]])
+    for leg in plan["legs"]:
+        f = fills.get((leg.get("symbol") or "").strip())
+        if f is not None:
+            leg["price"] = f
+    provenance = {k: rec.get(k) for k in _SPOT_PROVENANCE_KEYS}
+    return _commit_covered(plan, dict(rec.get("payload") or {}), rec["ticker"],
+                           rec.get("stock_price"), rec.get("price_source", "schwab"),
+                           "live", provenance=provenance)
+
+
 def _fill_price(order: dict):
     """Best-effort average fill price from a Schwab order's activity legs."""
     try:
@@ -3790,6 +4083,8 @@ def order_status(order_id: str) -> dict:
             result = _commit_exit_from_pending(rec, order)
         elif kind == "roll_leap":
             result = _commit_leap_roll_from_pending(rec, order)
+        elif kind == "covered":
+            result = _commit_covered_from_pending(rec, order)
         else:
             result = _commit_from_pending(rec, _fill_price(order))
         log.pop_pending_order(order_id)
@@ -3890,6 +4185,52 @@ def exit_position(ticker: str, exit_reason: str, exit_note: str | None = None,
         return {"ok": False, "ticker": ticker, "steps": steps, "position_closed": False,
                 "error": ("refusing to auto-sequence a position carrying a legacy LEAP "
                           "leg — close it by hand (close_leap / close_position_atomic)")}
+
+    # 0) ONE ticket when it can be: buy back every call AND sell the shares on a
+    #    single net order (unwind_covered), so the shares are never held without
+    #    their call between two fills. Used whenever the ticket would actually
+    #    carry both legs to the broker together (paper, or live with equity
+    #    placement on) and the shape is a clean 100-shares-per-call match. If the
+    #    ticket is refused before anything is placed (a preview rejection, a bad
+    #    quote), getting OUT still wins: fall through to the sequenced legs below.
+    shares_now = int((position.get("shares") or {}).get("count") or 0)
+    calls_now = sum(int(sc.get("contracts") or 0) for sc in position.get("short_calls") or [])
+    one_ticket = (config.EQUITY_ORDER_PLACEMENT_ENABLED
+                  or not (live_transmit() and schwab_api.configured()))
+    if one_ticket and calls_now and shares_now == calls_now * config.SHARES_PER_LOT:
+        close_prices = {}
+        marks = position_manager._live_short_marks(ticker, position.get("short_calls") or [])
+        for sc in position.get("short_calls") or []:
+            px = marks.get((sc.get("strike"), sc.get("expiration")))
+            if px is None:
+                px = sc.get("current_bid")
+            if px is not None:
+                close_prices[str(sc.get("strike"))] = round(float(px), 4)
+        spot = position_manager._stock_price(ticker)
+        if spot is not None and len(close_prices) == len(position.get("short_calls") or []):
+            payload = {"action": "unwind_covered", "ticker": ticker,
+                       "close_prices": close_prices, "price_per_share": round(float(spot), 4),
+                       "stock_price": spot, "source_rec_id": source_rec_id,
+                       "exit_reason": exit_reason, "exit_note": exit_note}
+            result, err = _run_leg_to_fill(payload, now)
+            steps.append({"leg": "unwind_covered", "ok": err is None,
+                          **({"error": err} if err else {}),
+                          **({"result": result} if result else {})})
+            if err is None:
+                state = log.load_state()
+                position = log.find_position(state, ticker)
+                closed = position is None or position.get("status") == "closed"
+                return {"ok": True, "ticker": ticker, "steps": steps, "position_closed": closed,
+                        "error": None, "exit_reason": exit_reason, "exit_note": exit_note}
+            # A ticket that reached the broker and did not fill may still be WORKING —
+            # never leg out on top of it. A refusal before placement, or a broker
+            # rejection/cancel (definitively not live), falls through to the legs.
+            if "did not fill" in err or err.startswith("unexpected order status"):
+                return {"ok": False, "ticker": ticker, "steps": steps, "position_closed": False,
+                        "error": (f"stopped — the {ticker} unwind ticket did not fill ({err}); "
+                                  "shares NOT sold separately, position still covered")}
+            state = log.load_state()
+            position = log.find_position(state, ticker)
 
     # 1) Every open short call, one at a time — a position normally holds one,
     #    but this never assumes it.

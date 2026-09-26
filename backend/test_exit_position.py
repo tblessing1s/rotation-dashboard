@@ -46,7 +46,10 @@ def _sell_short(ticker, strike, contracts, prem, spot, exp="2026-09-11"):
 # ===========================================================================
 # exit_position() — the orchestration.
 # ===========================================================================
-def test_exit_position_closes_short_then_sells_shares_in_order(store, monkeypatch):
+def test_exit_position_closes_short_and_sells_shares_on_one_ticket(store, monkeypatch):
+    """A matched 100-shares-per-call position exits on ONE unwind ticket: both
+    legs share a timestamp and a covered_group_id, so the shares are never held
+    without their call in between. The call is still booked before the shares."""
     _buy_shares("KO", 100, 60.0)
     _sell_short("KO", 62.0, 1, 1.0, 60.0)
     monkeypatch.setattr(position_manager, "_stock_price", lambda t: 58.0)
@@ -55,14 +58,17 @@ def test_exit_position_closes_short_then_sells_shares_in_order(store, monkeypatc
 
     assert res["ok"] is True
     assert res["position_closed"] is True
-    assert [s["leg"] for s in res["steps"]] == ["close_short", "sell_shares"]
+    assert [s["leg"] for s in res["steps"]] == ["unwind_covered"]
     assert all(s["ok"] for s in res["steps"])
 
     st = log.load_state()
-    actions = [e["action"] for e in st["executions"]
-              if e["ticker"] == "KO" and e["action"] in ("close_short", "sell_shares")]
+    legs = [e for e in st["executions"]
+            if e["ticker"] == "KO" and e["action"] in ("close_short", "sell_shares")]
     # close_short must be recorded strictly before sell_shares.
-    assert actions.index("close_short") < actions.index("sell_shares")
+    assert [e["action"] for e in legs] == ["close_short", "sell_shares"]
+    assert len({e["covered_group_id"] for e in legs}) == 1
+    assert len({e["date"] for e in legs}) == 1
+    assert legs[1]["exit_reason"] == exit_reasons.ExitReason.CB_DRAWDOWN_15
     p = log.find_position(st, "KO")
     assert p["shares"]["count"] == 0 and not p["short_calls"] and p["status"] == "closed"
 
@@ -77,7 +83,9 @@ def test_exit_position_closes_every_open_short_before_any_share_sells(store, mon
 
     assert res["ok"] is True
     legs = [s["leg"] for s in res["steps"]]
-    assert legs == ["close_short", "close_short", "sell_shares"]
+    assert legs == ["unwind_covered"]
+    acts = [e["action"] for e in log.load_state()["executions"] if e.get("covered_group_id")]
+    assert acts == ["close_short", "close_short", "sell_shares"]
     st = log.load_state()
     assert log.find_position(st, "KO")["status"] == "closed"
 

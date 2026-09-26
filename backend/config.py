@@ -1366,6 +1366,21 @@ ENTRY_ORDER_DURATION = "DAY"
 # (spread-approval logic may prefer a specific enum) before production reliance.
 ENTRY_COMPLEX_STRATEGY_TYPE = "CUSTOM"
 
+# ---- Covered (stock + call) one-ticket orders ------------------------------
+# HARD_CFM_RULE — the shares are never uncovered between two fills. A buy-write
+# (BUY shares + SELL_TO_OPEN the call) and an unwind (BUY_TO_CLOSE the call +
+# SELL the shares) each go to the broker as ONE net order, so both legs fill
+# together or neither does — the entry/exit sibling of the atomic roll.
+#
+# PROPOSED_DEFAULT / LIVE_VERIFY — complexOrderStrategyType for a stock + one
+# call leg at 100 shares per contract. COVERED is Schwab's documented enum for a
+# buy-write/unwind; anything else (several call legs) goes as CUSTOM. The equity
+# fields are LIVE_VERIFY exactly like build_equity_order, so these tickets ride
+# the same mandatory per-order previewOrder and EQUITY_ORDER_PLACEMENT_ENABLED
+# flag: a payload Schwab will not accept is refused, never placed.
+COVERED_COMPLEX_STRATEGY_TYPE = "COVERED"
+COVERED_ORDER_DURATION = "DAY"
+
 # ---- Order lifecycle: cancel-and-retry state machine -----------------------
 # Provenance tags are load-bearing (see the roll block above): HARD_CFM_RULE
 # encodes an invariant, PROPOSED_DEFAULT is tunable, LIVE_VERIFY must be confirmed
