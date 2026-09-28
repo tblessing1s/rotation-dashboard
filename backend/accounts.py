@@ -320,7 +320,14 @@ def slugify(label: str) -> str:
     return slug.strip("-")
 
 
+# Ids a book may never take. "demo": state.<id>.json for a book called "demo"
+# IS state.demo.json — the primary's demo-mode book (and orders.demo.jsonl its
+# order journal), so the two would silently share one store.
+RESERVED_IDS = frozenset({"demo"})
+
+
 def _unique_id(base: str, taken: set[str]) -> str:
+    taken = set(taken) | RESERVED_IDS
     if base and base not in taken:
         return base
     stem = base or "account"
@@ -329,6 +336,22 @@ def _unique_id(base: str, taken: set[str]) -> str:
         if candidate not in taken:
             return candidate
     raise ValueError("could not derive a unique account id")
+
+
+def _ensure_number_free(registry: dict, number: str | None, account_id: str) -> None:
+    """One Schwab account, one book: refuse a number another active book is
+    already bound to — two books on one account would reconcile, import, trade
+    and read cash against the same brokerage account. An archived book is
+    retired, so its number may be reused by a new one."""
+    if not number:
+        return
+    for other in registry["accounts"]:
+        if (other["id"] != account_id and not other.get("archived")
+                and str(other.get("broker_account_number") or "").strip() == number):
+            raise ValueError(
+                f"Schwab account {_mask(number)} is already bound to '{other['label']}' — "
+                "a brokerage account belongs to exactly one book. Clear it there (or "
+                "archive that book) first.")
 
 
 def create(label: str, broker_account_number: str | None = None,
@@ -345,17 +368,20 @@ def create(label: str, broker_account_number: str | None = None,
         account_id = str(account_id).strip().lower()
         if not _ID_RE.match(account_id):
             raise ValueError("account id must be lowercase letters, digits or dashes")
+        if account_id in RESERVED_IDS:
+            raise ValueError(f"account id '{account_id}' is reserved — pick another")
         if account_id in taken:
             raise ValueError(f"account '{account_id}' already exists")
     else:
         account_id = _unique_id(slugify(label), taken)
         if not _ID_RE.match(account_id):
             raise ValueError("could not derive an account id from that name")
+    number = str(broker_account_number).strip() if broker_account_number else None
+    _ensure_number_free(registry, number, account_id)
     acct = {
         "id": account_id,
         "label": label,
-        "broker_account_number": (str(broker_account_number).strip()
-                                  if broker_account_number else None),
+        "broker_account_number": number,
         "own_connection": False,
         "archived": False,
         "created_at": _utcnow(),
@@ -396,6 +422,7 @@ def update(account_id: str, label: str | None = None,
         target["label"] = (str(label).strip() or target["label"])[:LABEL_MAX]
     if broker_account_number is not None:
         number = str(broker_account_number).strip()
+        _ensure_number_free(registry, number or None, target["id"])
         target["broker_account_number"] = number or None
     if note is not None:
         target["note"] = str(note)[:200]
@@ -547,7 +574,8 @@ class AccountUnbound(ValueError):
     more than one account: "the first linked account" would be a guess."""
 
 
-def ensure_first_linked_ok(count_linked, account_id: str | None = None) -> None:
+def ensure_first_linked_ok(count_linked, account_id: str | None = None,
+                           first_number: str | None = None) -> None:
     """Refuse to let an UNBOUND non-primary book fall back to the first linked
     Schwab account unless that fallback can only mean one account.
 
@@ -557,9 +585,21 @@ def ensure_first_linked_ok(count_linked, account_id: str | None = None) -> None:
     kept only where it is unambiguous: the primary book (the historical single-
     account behaviour), or a book on its OWN login that reaches exactly one
     account. ``count_linked`` is the number of linked accounts, or a zero-arg
-    callable returning it (only called when the answer matters)."""
+    callable returning it (only called when the answer matters).
+
+    The primary keeps its fallback — except onto an account ANOTHER book is
+    bound to (``first_number``, when the caller knows it): then "first linked"
+    is that book's account, and the primary would trade, import and read cash
+    against it."""
     acct = get(account_id or active_id())
     if acct is None or acct["id"] == DEFAULT_ID:
+        owner = _bound_elsewhere(first_number, DEFAULT_ID)
+        if owner is not None:
+            raise AccountUnbound(
+                f"the primary account has no Schwab account number set, and the first "
+                f"account on its login ({_mask(first_number)}) is bound to "
+                f"'{owner['label']}' — refusing to use another book's account. Set the "
+                "primary's own account number in Settings → Accounts.")
         return
     if acct.get("own_connection"):
         n = count_linked() if callable(count_linked) else count_linked
@@ -569,6 +609,16 @@ def ensure_first_linked_ok(count_linked, account_id: str | None = None) -> None:
         f"account '{acct['id']}' has no Schwab account number set, and its Schwab login "
         "may reach more than one account — refusing to guess which one is this book's. "
         "Set its account number in Settings → Accounts.")
+
+
+def _bound_elsewhere(number: str | None, account_id: str) -> dict | None:
+    number = str(number or "").strip()
+    if not number:
+        return None
+    for other in list_accounts():
+        if other["id"] != account_id and str(other.get("broker_account_number") or "").strip() == number:
+            return other
+    return None
 
 
 def broker_hash(client, account_id: str | None = None) -> str:
@@ -583,7 +633,16 @@ def broker_hash(client, account_id: str | None = None) -> str:
     """
     number = broker_account_number(account_id)
     if not number:
-        ensure_first_linked_ok(lambda: len(client.account_numbers() or []), account_id)
+        acct = get(account_id or active_id())
+        if acct is None or acct["id"] == DEFAULT_ID:
+            # Only a book bound elsewhere can make "first linked" someone else's —
+            # a single-book install never pays the extra lookup.
+            if any(o.get("broker_account_number") for o in list_accounts() if o["id"] != DEFAULT_ID):
+                nums = client.account_numbers() or []
+                first = str((nums[0] if nums else {}).get("accountNumber") or "").strip() or None
+                ensure_first_linked_ok(len(nums), account_id, first_number=first)
+        else:
+            ensure_first_linked_ok(lambda: len(client.account_numbers() or []), account_id)
         return client.primary_account_hash()
     for entry in client.account_numbers() or []:
         if str(entry.get("accountNumber") or "").strip() == number:

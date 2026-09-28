@@ -805,3 +805,63 @@ def test_registry_survives_a_json_round_trip(store):
         raw = json.load(fh)
     assert raw["accounts"][1]["broker_account_number"] == "33334444"
     assert accounts.get("ira")["note"] == "spouse"
+
+
+# ---------------------------------------------------------------------------
+# Item 5 hardening — one account, one book
+# ---------------------------------------------------------------------------
+def test_two_active_books_cannot_share_one_account_number(store):
+    accounts.create("Christie", broker_account_number="12902569")
+    with pytest.raises(ValueError, match="already bound to 'Christie'"):
+        accounts.create("Copy", broker_account_number="12902569")
+    other = accounts.create("Other")
+    with pytest.raises(ValueError, match="already bound"):
+        accounts.update(other["id"], broker_account_number=" 12902569 ")
+    # Re-saving a book with its own number is fine; archiving frees the number.
+    accounts.update("christie", broker_account_number="12902569")
+    accounts.update("christie", archived=True)
+    accounts.update(other["id"], broker_account_number="12902569")
+
+
+def test_the_primary_never_falls_back_onto_another_books_account(store):
+    import schwab_api
+    # _Client lists 11112222 first — bind a secondary book to it.
+    accounts.create("IRA", broker_account_number="11112222")
+    with pytest.raises(accounts.AccountUnbound, match="bound to 'IRA'"):
+        accounts.broker_hash(_Client())
+    nodes = [{"securitiesAccount": {"accountNumber": "11112222"}},
+             {"securitiesAccount": {"accountNumber": "33334444"}}]
+    with pytest.raises(accounts.AccountUnbound):
+        schwab_api.select_account_node(nodes, None)
+    # Giving the primary its own number resolves it.
+    accounts.update(accounts.DEFAULT_ID, broker_account_number="33334444")
+    assert accounts.broker_hash(_Client()) == "HASH_IRA"
+
+
+def test_demo_is_a_reserved_account_id(store):
+    with pytest.raises(ValueError, match="reserved"):
+        accounts.create("Anything", account_id="demo")
+    acct = accounts.create("Demo")
+    assert acct["id"] == "demo-2"
+    assert accounts.state_path(acct["id"]) != config.DEMO_STATE_PATH
+
+
+def test_the_accounts_cache_is_kept_per_schwab_login(monkeypatch):
+    import schwab_api
+    monkeypatch.setattr(schwab_api, "_accounts_cache", {})
+    monkeypatch.setattr(schwab_api, "bound_account_number", lambda: None)
+    monkeypatch.setattr(accounts, "ensure_first_linked_ok", lambda *a, **k: None)
+
+    class _C(schwab_api.SchwabClient):
+        def __init__(self, connection, cash):
+            self.connection, self._cash, self.calls = connection, cash, 0
+
+        def get_accounts(self, positions=True):
+            self.calls += 1
+            return [{"securitiesAccount": {"accountNumber": "1",
+                                           "currentBalances": {"cashAvailableForTrading": self._cash}}}]
+
+    shared, own = _C("shared", 1000), _C("account-christie", 29353.79)
+    assert shared.cash_balance() == 1000
+    assert own.cash_balance() == 29353.79     # not served shared's cached response
+    assert shared.cash_balance() == 1000 and shared.calls == 1   # its own cache still hits

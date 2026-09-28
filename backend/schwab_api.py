@@ -80,7 +80,9 @@ SHARED_CONNECTION = "shared"
 # ticket, and this endpoint isn't part of the market-data rate-limit budget
 # but there's no reason to hit it on every keystroke either.
 _ACCOUNTS_TTL = 60  # seconds
-_accounts_cache: tuple[float, list] | None = None
+# Keyed by Schwab connection: one login's /accounts response must never answer
+# for another login's book (a book on its own grant sees different accounts).
+_accounts_cache: dict[str, tuple[float, list]] = {}
 _accounts_lock = threading.Lock()
 
 
@@ -760,14 +762,14 @@ class SchwabClient:
         Raises SchwabError on failure — callers degrade to the stored manual value
         rather than block on this.
         """
-        global _accounts_cache
         with _accounts_lock:
             now = time.time()
-            if not force and _accounts_cache and now - _accounts_cache[0] < _ACCOUNTS_TTL:
-                nodes = _accounts_cache[1]
+            hit = _accounts_cache.get(self.connection)
+            if not force and hit and now - hit[0] < _ACCOUNTS_TTL:
+                nodes = hit[1]
             else:
                 nodes = self.get_accounts(positions=False)
-                _accounts_cache = (now, nodes)
+                _accounts_cache[self.connection] = (now, nodes)
         if not nodes:
             raise SchwabError("schwab: no linked accounts")
         cash = _account_cash(select_account_node(
@@ -955,7 +957,7 @@ def select_account_node(nodes: list[dict], account_number: str | None) -> dict:
     """
     if not account_number:
         import accounts
-        accounts.ensure_first_linked_ok(len(nodes))
+        accounts.ensure_first_linked_ok(len(nodes), first_number=account_node_number(nodes[0]))
         return nodes[0]
     for node in nodes:
         if account_node_number(node) == str(account_number).strip():
