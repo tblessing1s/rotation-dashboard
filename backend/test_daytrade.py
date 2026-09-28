@@ -437,12 +437,11 @@ def test_bars_ingest_ignores_candles_padded_past_now(tmp_store, monkeypatch):
 
     result = bars.ingest(now=now)
 
-    assert result["written"] == 1
+    assert result["written"] == 2                           # 9:30 and 9:35, never the padded slot
     assert result["errors"] == {}
     loaded = store.load_bars("2026-09-14", "ABC")
-    assert len(loaded) == 1
-    assert loaded[0]["close"] == 45.0
-    assert loaded[0]["datetime"].startswith("2026-09-14T09:35")
+    assert [b["datetime"][11:16] for b in loaded] == ["09:30", "09:35"]
+    assert store.latest_bars("2026-09-14")["ABC"]["close"] == 45.0
 
 
 def test_bars_ingest_errors_when_every_candle_is_in_the_future(tmp_store, monkeypatch):
@@ -502,6 +501,41 @@ def test_bars_ingest_picks_todays_candle_over_a_mixed_prior_day_batch(tmp_store,
     loaded = store.load_bars("2026-09-14", "ABC")
     assert loaded[0]["close"] == 46.5
     assert loaded[0]["datetime"].startswith("2026-09-14T09:35")
+
+
+def test_bars_ingest_backfills_candles_missed_while_down(tmp_store, monkeypatch):
+    """Regression (Mon 2026-09-28: deploys at 8:17 and 8:48 CT, Last Bar
+    empty until ~9:00 CT): ingest used to log only the newest candle per
+    tick, so every candle that formed while the app was restarting was lost
+    for good. The first tick back must write all of today's missing ones."""
+    store.save_screen({"schema_version": 1, "date": "2026-09-14", "computed_at": "x",
+                        "picks": [{"symbol": "ABC"}], "screened": []})
+    t = lambda h, m: datetime(2026, 9, 14, h, m, tzinfo=ET)
+    monkeypatch.setattr(bars.data_handler, "client",
+                        lambda: _FakeClient({"ABC": _bars_df([(t(9, 30), 44.0)])}))
+    assert bars.ingest(now=t(9, 31))["written"] == 1
+
+    # App down 9:31-9:52; the provider's response is the whole day so far.
+    day_so_far = _bars_df([(t(9, 30), 44.0), (t(9, 35), 44.5), (t(9, 40), 45.0),
+                           (t(9, 45), 45.5), (t(9, 50), 46.0)])
+    monkeypatch.setattr(bars.data_handler, "client", lambda: _FakeClient({"ABC": day_so_far}))
+    result = bars.ingest(now=t(9, 52))
+
+    assert result["written"] == 4                            # 9:30 already logged
+    loaded = store.load_bars("2026-09-14", "ABC")
+    assert [b["datetime"][11:16] for b in loaded] == ["09:30", "09:35", "09:40", "09:45", "09:50"]
+    assert store.latest_bars("2026-09-14")["ABC"]["close"] == 46.0
+
+
+def test_latest_bars_picks_the_newest_candle_even_if_appended_earlier(tmp_store):
+    # A backfilled older candle can land in the file AFTER a newer one.
+    store.append_bars("2026-09-14", [
+        {"symbol": "ABC", "datetime": "2026-09-14T09:45:00-04:00", "close": 45.5},
+    ])
+    store.append_bars("2026-09-14", [
+        {"symbol": "ABC", "datetime": "2026-09-14T09:40:00-04:00", "close": 45.0},
+    ])
+    assert store.latest_bars("2026-09-14")["ABC"]["close"] == 45.5
 
 
 # ===========================================================================
