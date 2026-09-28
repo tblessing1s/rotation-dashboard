@@ -93,6 +93,38 @@ def api_record_manual_roll():
         return _err(e)
 
 
+@reconcile_bp.route("/api/reconcile/unfilled-rolls")
+def api_unfilled_rolls():
+    """Rolls on ?ticker= that were booked without a broker fill behind them (paper /
+    untransmitted) and are still standing — what the review panel offers to undo
+    when the broker shows the new call missing."""
+    ticker = (request.args.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify({"ticker": ticker, "rolls": executor.find_unfilled_rolls(ticker)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@reconcile_bp.route("/api/reconcile/undo-unfilled-roll", methods=["POST"])
+def api_undo_unfilled_roll():
+    """The roll was booked but never filled at Schwab: void both legs, restore the
+    old short, and (``assigned``) book that old call's assignment — see
+    executor.undo_unfilled_roll."""
+    p = request.get_json(silent=True) or {}
+    try:
+        return jsonify(executor.undo_unfilled_roll(
+            p.get("ticker"), p.get("roll_id"), p.get("reason"),
+            assigned=bool(p.get("assigned")), assigned_on=p.get("assigned_on"),
+            from_expiration=p.get("from_expiration"),
+            stock_price=p.get("stock_price"), diff_ids=p.get("diff_ids")))
+    except (ValueError, TypeError) as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @reconcile_bp.route("/api/reconcile/rebuild-position", methods=["POST"])
 def api_rebuild_position():
     """Rebuild one position's legs from the broker's actual holdings (ground
