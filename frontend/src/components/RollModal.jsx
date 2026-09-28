@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Pill, Loading, fmt } from "./ui.jsx";
+import { Pill, ChartLink, Loading, fmt } from "./ui.jsx";
 import { useTradeMode, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
 import { totalDollars } from "../units.js";
 import { explainRec, ACTION_LABELS } from "../recWhy.js";
@@ -353,7 +353,7 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId,
       >
         <div className="mb-4 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold text-slate-100">Roll short · {ticker}</h2>
+            <h2 className="text-lg font-semibold text-slate-100">Roll short · {ticker}<ChartLink ticker={ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" /></h2>
             <TradeModeBadge mode={tradeMode} />
           </div>
           <button onClick={onClose} className="rounded-lg px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200">✕</button>

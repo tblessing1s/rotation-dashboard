@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Meter, Loading, money, fmt, useApi } from "./ui.jsx";
+import { Card, Meter, ChartLink, Loading, money, fmt, useApi } from "./ui.jsx";
 
 // money() with an explicit sign, for signed exposures.
 function signed(n) {
@@ -231,7 +231,7 @@ export default function PortfolioRisk({ data: dataProp } = {}) {
                 {data.positions.map((r) => (
                   <tr key={r.ticker} className="border-t border-slate-800/60">
                     <td className="py-1.5 pr-3 font-semibold text-slate-100">
-                      {r.ticker}
+                      {r.ticker}<ChartLink ticker={r.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
                       {!r.greeks_complete && (
                         <span className="ml-1 text-xs text-amber-400" title="Some legs lacked a usable mark — greeks partial">*</span>
                       )}

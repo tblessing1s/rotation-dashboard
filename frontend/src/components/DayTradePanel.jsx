@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Meter, Pill, Spinner, ErrorState, Stat, useApi } from "./ui.jsx";
+import { Card, ChartLink, Meter, Pill, Spinner, ErrorState, Stat, useApi } from "./ui.jsx";
 
 // Day-trade sleeve (backend/daytrade/) — a SEPARATE, rules-based intraday
 // strategy for capital too small to fit a CFM position. The rotation regime
@@ -118,7 +118,7 @@ function UniverseTable({ picks, prices, quotes }) {
               : quote.price < p.price ? "text-rose-300" : "text-slate-300";
             return (
               <tr key={p.symbol} className="border-t border-slate-800 text-slate-200">
-                <td className="py-1.5 pr-3 font-mono font-semibold">{p.symbol}</td>
+                <td className="py-1.5 pr-3 font-mono font-semibold">{p.symbol}<ChartLink ticker={p.symbol} size="h-3.5 w-3.5" className="ml-1 align-middle" /></td>
                 <td className="py-1.5 pr-3 text-right font-mono">{p.price}</td>
                 <td className={`py-1.5 pr-3 text-right font-mono ${quoteTone}`}>
                   {quote?.price ?? "—"}
@@ -313,7 +313,7 @@ function ScreenedTable({ rows }) {
           <tbody>
             {filtered.map((r) => (
               <tr key={r.symbol} className="border-t border-slate-800 text-slate-200">
-                <td className="py-1 pr-3 font-mono font-semibold">{r.symbol}</td>
+                <td className="py-1 pr-3 font-mono font-semibold">{r.symbol}<ChartLink ticker={r.symbol} size="h-3.5 w-3.5" className="ml-1 align-middle" /></td>
                 <td className="py-1 pr-3 text-right font-mono">{r.price ?? "—"}</td>
                 <td className="py-1 pr-3 text-right font-mono">{r.avg_volume?.toLocaleString() ?? "—"}</td>
                 <td className="py-1 pr-3 text-right font-mono">{r.atr_pct != null ? `${r.atr_pct}%` : "—"}</td>
@@ -411,7 +411,7 @@ function ScreenCoverage({ universe }) {
                       title={r.reason}
                       className="rounded border border-slate-700 bg-slate-800/60 px-1.5 py-0.5 text-[11px] font-mono text-amber-300"
                     >
-                      {r.symbol}
+                      {r.symbol}<ChartLink ticker={r.symbol} size="h-3.5 w-3.5" className="ml-1 align-middle" />
                     </span>
                   ))}
                 </div>
@@ -552,14 +552,16 @@ function TickerRoster() {
             <div className="max-h-48 overflow-y-auto">
               <div className="flex flex-wrap gap-1.5">
                 {shown.map((t) => (
-                  <button
-                    key={t}
-                    onClick={() => removeTicker(t)}
-                    title={`Remove ${t}`}
-                    className="rounded border border-slate-700 bg-slate-800/60 px-1.5 py-0.5 text-[11px] font-mono text-slate-300 hover:border-rose-800 hover:bg-rose-500/10 hover:text-rose-300"
-                  >
-                    {t} ✕
-                  </button>
+                  <span key={t} className="inline-flex items-center">
+                    <button
+                      onClick={() => removeTicker(t)}
+                      title={`Remove ${t}`}
+                      className="rounded border border-slate-700 bg-slate-800/60 px-1.5 py-0.5 text-[11px] font-mono text-slate-300 hover:border-rose-800 hover:bg-rose-500/10 hover:text-rose-300"
+                    >
+                      {t} ✕
+                    </button>
+                    <ChartLink ticker={t} size="h-3.5 w-3.5" className="ml-1 align-middle" />
+                  </span>
                 ))}
                 {!shown.length && (
                   <p className="text-[11px] text-slate-500">No tickers match.</p>
@@ -628,7 +630,7 @@ function LiveStatusRow({ row }) {
     return (
       <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
         <div className="mb-1 flex items-center justify-between gap-2 text-xs">
-          <span className="font-mono font-semibold text-slate-200">{row.symbol}</span>
+          <span className="font-mono font-semibold text-slate-200">{row.symbol}{" "}<ChartLink ticker={row.symbol} size="h-3.5 w-3.5" className="ml-1 align-middle" /></span>
           <span className={`uppercase ${dirTone}`}>{row.direction} setup</span>
         </div>
         <Meter pct={pct} tone="bg-sky-500" />
@@ -652,7 +654,7 @@ function LiveStatusRow({ row }) {
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900/40 px-3 py-2">
       <div className="mb-1 flex items-center justify-between gap-2 text-xs">
-        <span className="font-mono font-semibold text-slate-200">{row.symbol}</span>
+        <span className="font-mono font-semibold text-slate-200">{row.symbol}{" "}<ChartLink ticker={row.symbol} size="h-3.5 w-3.5" className="ml-1 align-middle" /></span>
         <span className={`uppercase ${dirTone}`}>
           {row.direction} · {row.half_taken ? "half out, riding to target" : "open"}
         </span>
@@ -718,7 +720,7 @@ function SignalFeed({ events }) {
             return (
               <tr key={e.id || `${e.symbol}-${e.event}-${e.at}`} className="border-t border-slate-800 text-slate-200">
                 <td className="py-1.5 pr-3 font-mono text-[11px] text-slate-400">{localTime(e.at)}</td>
-                <td className="py-1.5 pr-3 font-mono font-semibold">{e.symbol}</td>
+                <td className="py-1.5 pr-3 font-mono font-semibold">{e.symbol}<ChartLink ticker={e.symbol} size="h-3.5 w-3.5" className="ml-1 align-middle" /></td>
                 <td className="py-1.5 pr-3"><Pill status={meta.status}>{meta.label}</Pill></td>
                 <td className={`py-1.5 pr-3 font-mono text-[11px] uppercase ${e.direction === "long" ? "text-emerald-300" : e.direction === "short" ? "text-rose-300" : "text-slate-500"}`}>
                   {e.direction || "—"}
@@ -755,7 +757,7 @@ function TradeLog({ trades }) {
         <tbody>
           {rows.map((t) => (
             <tr key={t.trade_id} className="border-t border-slate-800 text-slate-200">
-              <td className="py-1.5 pr-3 font-mono font-semibold">{t.symbol}</td>
+              <td className="py-1.5 pr-3 font-mono font-semibold">{t.symbol}<ChartLink ticker={t.symbol} size="h-3.5 w-3.5" className="ml-1 align-middle" /></td>
               <td className={`py-1.5 pr-3 font-mono text-[11px] uppercase ${t.direction === "long" ? "text-emerald-300" : "text-rose-300"}`}>
                 {t.direction}
               </td>

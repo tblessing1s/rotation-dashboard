@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { fmt } from "./ui.jsx";
+import { ChartLink, fmt } from "./ui.jsx";
 import { useTradeMode, TradeModeBadge } from "../tradeMode.jsx";
 import { explainRec } from "../recWhy.js";
 
@@ -101,7 +101,7 @@ export default function ExitPositionModal({ ticker, position, rec, sourceRecId, 
       >
         <div className="mb-4 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <h2 className="text-lg font-semibold text-slate-100">Exit position · {ticker}</h2>
+            <h2 className="text-lg font-semibold text-slate-100">Exit position · {ticker}<ChartLink ticker={ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" /></h2>
             <TradeModeBadge mode={tradeMode} />
           </div>
           <button onClick={onClose} disabled={busy}

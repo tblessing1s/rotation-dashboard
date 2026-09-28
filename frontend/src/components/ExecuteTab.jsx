@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Light, Loading, GENIUS_LIGHT_ORDER, GENIUS_LIGHT_LABELS, fmt, useApi } from "./ui.jsx";
+import { Card, Pill, Light, ChartLink, Loading, GENIUS_LIGHT_ORDER, GENIUS_LIGHT_LABELS, fmt, useApi } from "./ui.jsx";
 import OptionChainModal from "./OptionChainModal.jsx";
 import PutTicket from "./PutTicket.jsx";
 import { useToast } from "./Toast.jsx";
@@ -334,7 +334,7 @@ export default function ExecuteTab({ initialTicker, sourceRecId, onExecuted, onB
         )}
         {roll && !roll.error && (
           <div className="mt-3 rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-400">
-            Suggested weekly short strike for {ticker}: <span className="font-semibold text-slate-100">{fmt(roll.suggested_strike, 1)}</span>{" "}
+            Suggested weekly short strike for {ticker}<ChartLink ticker={ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />: <span className="font-semibold text-slate-100">{fmt(roll.suggested_strike, 1)}</span>{" "}
             ({roll.regime ? `${roll.regime.toUpperCase()} / ` : ""}{roll.posture}: {roll.atr_mult}×ATR {fmt(roll.atr, 2)}
             {roll.itm_pct != null ? ` / ${(roll.itm_pct * 100).toFixed(0)}% ITM floor` : ""})
           </div>

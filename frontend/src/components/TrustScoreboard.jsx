@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Loading, ErrorState, fmt, useApi } from "./ui.jsx";
+import { Card, ChartLink, Loading, ErrorState, fmt, useApi } from "./ui.jsx";
 import { useToast } from "./Toast.jsx";
 
 // The recommendation-engine trust scoreboard (Settings): coverage / precision /
@@ -301,7 +301,7 @@ export default function TrustScoreboard() {
             const key = mi.miss_key || (mi.execution_ids || []).join(",") || String(i);
             return (
               <li key={key} className={ack ? "text-rose-200/70" : "text-rose-100"}>
-                <span className="font-semibold">{mi.ticker}</span>
+                <span className="font-semibold">{mi.ticker}</span><ChartLink ticker={mi.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
                 {" · "}{(mi.action_type || "").replaceAll("_", " ")}
                 {" · "}{ts(mi.at)}
                 {(mi.execution_ids || []).length > 0 && (
@@ -340,7 +340,7 @@ export default function TrustScoreboard() {
             return (
               <li key={f.order_id || i} className="text-rose-100">
                 <span className="font-mono text-xs">{f.order_id}</span>
-                {" · "}<span className="font-semibold">{f.ticker}</span>
+                {" · "}<span className="font-semibold">{f.ticker}</span><ChartLink ticker={f.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
                 {f.paper ? <span className="text-rose-300/80"> · paper</span> : null}
                 {failed.length > 0 && (
                   <span className="text-rose-300/80">

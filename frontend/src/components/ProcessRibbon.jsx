@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, money, fmt, useApi } from "./ui.jsx";
+import { Card, ChartLink, money, fmt, useApi } from "./ui.jsx";
 
 // "The Cash Flow Machine — today": one illustrated ribbon across the top of the
 // Overview that tells the whole CFM cycle as a story, left→right, in the
@@ -619,17 +619,19 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
           ) : topReady.length ? (
             <div className="flex flex-col items-stretch gap-1">
               {topReady.map((r) => (
-                <button
+                <div role="button" tabIndex={0}
                   key={r.ticker}
                   onClick={(e) => { e.stopPropagation(); nav?.enter?.(r.ticker); }}
-                  className="flex items-center gap-1.5 rounded-md border border-emerald-600/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20"
+                  onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); (() => nav?.enter?.(r.ticker))(e); } }}
+                  className="flex cursor-pointer items-center gap-1.5 rounded-md border border-emerald-600/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-semibold text-emerald-200 hover:bg-emerald-500/20"
                   title={`${r.sector || ""} · ${fmt(r.juice_weekly_pct, 2)}%/wk sap — plant ${r.ticker}`}
                 >
                   <Sprout tone={r.juice_weekly_pct >= (bestJuice ?? 0) ? "#6ee7b7" : "#34d399"}
                           vigor={r.juice_weekly_pct >= (bestJuice ?? 0) ? 1 : 0} />
                   <span className="min-w-0 flex-1 text-left">{r.ticker}</span>
+                  <ChartLink ticker={r.ticker} size="h-3 w-3" className="ml-1 align-middle" />
                   <span className="font-normal text-emerald-400/80">{fmt(r.juice_weekly_pct, 1)}%</span>
-                </button>
+                </div>
               ))}
               {readyList.length > topReady.length && (
                 <span className="text-[10px] text-slate-500">+{readyList.length - topReady.length} more in the beds →</span>
@@ -656,10 +658,11 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
           {grove.length ? (
             <div className="flex max-w-[15rem] flex-wrap items-end justify-center gap-1">
               {grove.map(({ p, pulp, juice, health }) => (
-                <button
+                <div role="button" tabIndex={0}
                   key={p.ticker}
                   onClick={(e) => { e.stopPropagation(); nav?.focus?.(p.ticker); }}
-                  className="flex flex-col items-center rounded-md px-0.5 hover:bg-slate-800/50"
+                  onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); (() => nav?.focus?.(p.ticker))(e); } }}
+                  className="flex cursor-pointer flex-col items-center rounded-md px-0.5 hover:bg-slate-800/50"
                   title={`${p.ticker} — ${HEALTH[health].label}${pulp != null ? ` · ${fmt(pulp, 0)}% of owned lots working` : ""}${juice != null ? ` · ${fmt(juice, 0)}% of juice captured` : " · no call working"}`}
                 >
                   <div className="flex items-end gap-0.5">
@@ -667,7 +670,8 @@ export default function ProcessRibbon({ capital, positions, killByTicker, theta,
                     <GroveCup uid={p.ticker} pct={juice} />
                   </div>
                   <span className="text-[10px] font-semibold text-slate-300">{p.ticker}</span>
-                </button>
+                  <ChartLink ticker={p.ticker} size="h-3 w-3" className="ml-1 align-middle" />
+                </div>
               ))}
             </div>
           ) : (

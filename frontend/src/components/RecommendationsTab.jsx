@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Loading, ErrorState, useApi } from "./ui.jsx";
+import { Card, ChartLink, Pill, Loading, ErrorState, useApi } from "./ui.jsx";
 import { useToast } from "./Toast.jsx";
 import { explainRec, explainResolution, ticketSummary } from "../recWhy.js";
 import TrustScoreboard from "./TrustScoreboard.jsx";
@@ -428,8 +428,9 @@ function RecRow({ rec, now, expanded, onToggle, onGo, onDismiss, onPreapprove })
 
   return (
     <div className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-sm">
-      <button onClick={onToggle} className="flex w-full flex-wrap items-center gap-2 text-left">
+      <div role="button" tabIndex={0} onClick={onToggle} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); (onToggle)(e); } }} className="flex cursor-pointer w-full flex-wrap items-center gap-2 text-left">
         <span className="font-semibold text-slate-100">{rec.ticker}</span>
+        <ChartLink ticker={rec.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
         <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${badge}`}>
           {(rec.action_type || "").replaceAll("_", " ")}
         </span>
@@ -442,7 +443,7 @@ function RecRow({ rec, now, expanded, onToggle, onGo, onDismiss, onPreapprove })
           </span>
         )}
         <span className="shrink-0 text-xs text-slate-500">{expanded ? "▲" : "▼"}</span>
-      </button>
+      </div>
 
       {pending && (
         <div className="mt-1.5 flex flex-wrap items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-200">
@@ -581,7 +582,7 @@ function ResolutionRow({ res }) {
   const at = (res.at || "").slice(0, 16).replace("T", " ");
   return (
     <li className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-xs text-slate-400">
-      <span className="font-semibold text-slate-200">{res.ticker}</span>
+      <span className="font-semibold text-slate-200">{res.ticker}</span><ChartLink ticker={res.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
       <span>engine called <span className="text-slate-300">{x.called}</span></span>
       {x.rule && <span className="text-slate-600">({x.rule.toLowerCase()})</span>}
       <span className={`font-medium ${x.tone}`}>{x.verdict}</span>

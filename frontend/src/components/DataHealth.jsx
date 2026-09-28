@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Light, StaleBadge, Loading, fmt, useApi } from "./ui.jsx";
+import { Card, Light, StaleBadge, Loading, ChartLink, fmt, useApi } from "./ui.jsx";
 
 // Data health: last-successful fetch per source + cache staleness, so a silent
 // provider failure is visible instead of quietly serving stale frames.
@@ -205,11 +205,14 @@ function UniverseCheck() {
                   <span className="text-slate-500">{sector}</span>
                   {ts.map((t) => (
                     manage ? (
-                      <button key={t} onClick={() => removeTicker(t)}
-                              className="rounded border border-rose-800 bg-rose-500/10 px-1.5 py-0.5 text-rose-300 hover:bg-rose-500/20">
-                        {t} ✕
-                      </button>
-                    ) : <span key={t}>{t}</span>
+                      <span key={t} className="inline-flex items-center">
+                        <button onClick={() => removeTicker(t)}
+                                className="rounded border border-rose-800 bg-rose-500/10 px-1.5 py-0.5 text-rose-300 hover:bg-rose-500/20">
+                          {t} ✕
+                        </button>
+                        <ChartLink ticker={t} size="h-3.5 w-3.5" className="ml-1 align-middle" />
+                      </span>
+                    ) : <span key={t}>{t}<ChartLink ticker={t} size="h-3.5 w-3.5" className="ml-1 align-middle" /></span>
                   ))}
                 </div>
               ))}
@@ -282,7 +285,7 @@ function VetCandidates() {
             const done = added[c.ticker];
             return (
               <div key={c.ticker} className="flex flex-wrap items-center gap-2 rounded bg-slate-900/60 px-2 py-1 text-sm">
-                <span className="w-16 font-semibold text-slate-100">{c.ticker}</span>
+                <span className="w-16 font-semibold text-slate-100">{c.ticker}</span><ChartLink ticker={c.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
                 {c.fit ? (
                   <>
                     <span className="rounded-full border border-emerald-600/50 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">FITS CFM</span>
@@ -378,7 +381,7 @@ function PendingOrdersPanel() {
             <div key={o.order_id} className="rounded-md border border-slate-800 bg-slate-900/40 p-2">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-sm font-semibold text-slate-200">
-                  {o.ticker} · {o.action}
+                  {o.ticker}<ChartLink ticker={o.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" /> · {o.action}
                   {o.contracts ? <span className="text-slate-400"> · {o.contracts} × {o.strike ?? "—"}{o.expiration ? ` exp ${o.expiration}` : ""}</span> : null}
                 </span>
                 <span className="font-mono text-[11px] text-slate-500">order {o.order_id}</span>
@@ -411,7 +414,7 @@ function PendingOrdersPanel() {
           </p>
           {(result.results || []).map((r) => (
             <p key={r.order_id} className={`mt-0.5 font-mono text-[11px] ${statusColor(r.status)}`}>
-              {r.ticker} {r.action} order {r.order_id}: {r.status}
+              {r.ticker}<ChartLink ticker={r.ticker} size="h-3 w-3" className="ml-1 align-middle" /> {r.action} order {r.order_id}: {r.status}
               {r.raw_status ? ` (${r.raw_status})` : ""}
               {r.execution_id ? ` → booked ${r.execution_id}` : ""}
               {r.error ? ` — ${r.error}` : ""}
@@ -503,7 +506,7 @@ function IngestionPanel() {
                   <span className="mr-1 rounded bg-amber-900/60 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-amber-300">
                     broker manual
                   </span>
-                  {p.ticker} · {p.action}
+                  {p.ticker}<ChartLink ticker={p.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" /> · {p.action}
                 </span>
                 <button onClick={() => adopt(p)} disabled={adopting === p.proposal_id}
                         className="rounded-full border border-amber-700 bg-amber-900/40 px-2.5 py-1 text-xs font-semibold text-amber-200 hover:bg-amber-900/70 disabled:opacity-50">
@@ -996,7 +999,7 @@ function LiveFillVerify() {
                 <ul className="mt-1 space-y-1">
                   {res.orders.filter((o) => o.ok !== true).map((o) => (
                     <li key={o.order_id} className="rounded bg-slate-900/60 px-2 py-1 text-xs">
-                      <span className="font-semibold text-slate-200">{o.ticker} · {o.kind}</span>
+                      <span className="font-semibold text-slate-200">{o.ticker} · {o.kind}</span><ChartLink ticker={o.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
                       <span className="text-slate-500"> · order {o.order_id}</span>
                       {(o.issues || []).map((i, k) => (
                         <div key={k} className="text-rose-300">— {i}</div>
@@ -1254,7 +1257,7 @@ export default function DataHealth() {
               {Object.entries(ages).map(([sym, age]) => (
                 <li key={sym} className="flex items-center gap-2">
                   <Light status={age == null ? "red" : age <= 30 ? "green" : "yellow"} size="h-2.5 w-2.5" />
-                  <span className="text-slate-300">{sym}</span>
+                  <span className="text-slate-300">{sym}</span><ChartLink ticker={sym} size="h-3.5 w-3.5" className="ml-1 align-middle" />
                   <span className="ml-auto text-xs text-slate-500">{age == null ? "no cache" : `${fmt(age, 1)}h`}</span>
                 </li>
               ))}
