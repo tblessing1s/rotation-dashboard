@@ -70,6 +70,7 @@ ALERT_TYPES = {
     "ORDER_PARTIAL_FILL_CANCELED": ("CRITICAL", "HARD_CFM_RULE: a partial fill remained after a cancel -> possibly unbalanced position; freeze for review and re-check delta coverage; never auto-fix"),
     "ORDER_STATE_UNKNOWN": ("CRITICAL", "HARD_CFM_RULE: an order's broker state is unknown (cancel failed, may still be working) -> hard-lock the position; no resubmit until resolved"),
     "ORDER_RESUBMIT_EXHAUSTED": ("HIGH", "PROPOSED_DEFAULT: a position hit MAX_RESUBMIT_ATTEMPTS this session -> stop resubmitting; reprice or reassess the entry manually"),
+    "HISTORY_DIVERGED": ("HIGH", "HARD_CFM_RULE: the book's fills disagree with Schwab's own transactions (a booked fill Schwab never made, a Schwab fill the book is missing, or a wrong price/size) -> correct the book before trusting its ledgers"),
     "RECONCILE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: reconciliation has not run successfully within the expected window -> the safety check is silent"),
     "SNAPSHOT_DATA_QUALITY": ("LOW", "PROPOSED_DEFAULT: >25% of an entry-context snapshot's tracked fields came back null (stale/unavailable) -> the entry telemetry for calibration is thin, not a trade blocker"),
     "REGIME_CHANGE": ("MEDIUM", "HARD_CFM_RULE: the published (dwell-adjusted) market regime transitioned -> re-check entry posture; raw four-light flaps are suppressed by the yellow dwell"),
@@ -953,6 +954,28 @@ def check_reconcile_dirty(state: dict) -> list[dict]:
     return out
 
 
+def check_history_diverged(state: dict) -> list[dict]:
+    """The daily trade-history audit (history_audit.py) found unexplained
+    differences between this book's fills and Schwab's transactions. One alert
+    per ticker; acknowledged findings don't count."""
+    import history_audit
+    by_ticker: dict[str, list[dict]] = {}
+    for f in history_audit.open_findings(state):
+        by_ticker.setdefault(f.get("ticker") or "", []).append(f)
+    out = []
+    for t, fs in sorted(by_ticker.items()):
+        kinds = sorted({f["kind"] for f in fs})
+        out.append(_alert(
+            "HISTORY_DIVERGED", t or None,
+            f"{t or 'Book'}: {len(fs)} fill(s) disagree with Schwab — " + "; ".join(
+                f["summary"] for f in fs[:3]) + ("…" if len(fs) > 3 else ""),
+            "Open Settings → Trade history vs Schwab: void a fill Schwab never made, adopt a "
+            "missing one, or correct the price — or acknowledge it with a reason.",
+            {"findings": fs, "kinds": kinds},
+            key="|".join(sorted(f["id"] for f in fs))))
+    return out
+
+
 def check_book_correlation(state: dict) -> list[dict]:
     """Two positions can satisfy the 1-per-sector cap while being ~0.9 correlated
     (e.g. a mega-cap in XLK and one in XLC) — the book is really one bet. Warn on
@@ -1543,6 +1566,7 @@ EVALUATORS = [
     check_short_stock_detected,
     check_reconcile_dirty,
     check_reconcile_stale,
+    check_history_diverged,
     check_roll_leg_imbalance,
     check_book_correlation,
     check_regime_change,

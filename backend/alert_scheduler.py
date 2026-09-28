@@ -652,6 +652,16 @@ def _maybe_morning_reconcile(now: datetime, due: list[str]) -> None:
         except Exception as e:  # noqa: BLE001 — a failed reconcile must not kill the thread
             logger.error("pre-market reconciliation failed for account %s: %s",
                          _account_label(account_id), e)
+        # Positions agree says nothing about HOW the book got there — the daily
+        # trade-history audit checks the fills themselves against Schwab.
+        try:
+            import history_audit
+            rep = history_audit.run_history_audit()
+            logger.info("trade-history audit (%s): status=%s open=%s",
+                        _account_label(account_id), rep.get("status"), rep.get("open"))
+        except Exception as e:  # noqa: BLE001 — a failed audit must not kill the thread
+            logger.error("trade-history audit failed for account %s: %s",
+                         _account_label(account_id), e)
 
     # One clock (above), every book reconciled against ITS OWN brokerage account.
     for_each_account("pre-market reconciliation", run)
