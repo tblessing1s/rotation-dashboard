@@ -399,6 +399,13 @@ export const api = {
   // Record an already-executed out-of-band roll from captured fills.
   recordManualRoll: (body) =>
     request("/api/reconcile/record-manual-roll", { method: "POST", body: JSON.stringify(body) }),
+  // Rolls booked without a Schwab fill behind them (paper / untransmitted), and
+  // the undo for one that never filled — optionally booking the old call's
+  // assignment (executor.undo_unfilled_roll).
+  unfilledRolls: (ticker) =>
+    request(`/api/reconcile/unfilled-rolls?ticker=${encodeURIComponent(ticker)}`),
+  undoUnfilledRoll: (body) =>
+    request("/api/reconcile/undo-unfilled-roll", { method: "POST", body: JSON.stringify(body) }),
   // The global reconciliation-freeze verdict + minutes staleness (spec §5).
   freezeStatus: () => request("/api/reconcile/freeze-status"),
   // Pending (placed, not yet settled) orders for this book + an on-demand

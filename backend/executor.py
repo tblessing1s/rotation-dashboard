@@ -2585,6 +2585,184 @@ def restore_executions(ids) -> dict:
     return {"success": True, "status": "restored", "restored": restored}
 
 
+# ---------------------------------------------------------------------------
+# A booked roll that never filled at the broker
+#
+# Every roll that did NOT go through the live two-leg ticket — the paper/logged
+# path, or a live-flagged book whose Schwab connection could not transmit — is
+# committed the instant it is submitted, at the quoted mids
+# (``roll_alloc_method == "mid"``). That is a CLAIM, not a fill: if the order the
+# operator placed at Schwab never filled, the book says "rolled" while the old
+# call is still out there — and on expiration Friday it gets assigned. A live
+# roll that actually filled always carries a broker allocation method instead
+# ("broker_per_leg" / "proportional_to_mid" / "staged_estimate"), so it can never
+# be mistaken for one of these and undone.
+# ---------------------------------------------------------------------------
+_UNCONFIRMED_ROLL_ALLOC = "mid"
+
+
+def _roll_legs(state: dict, roll_id: str) -> list[dict]:
+    return [e for e in state.get("executions") or []
+            if e.get("roll_id") == roll_id and not e.get("excluded")
+            and e.get("action") in ("close_short", "sell_short")]
+
+
+def _roll_leg_unconfirmed(e: dict) -> bool:
+    return (e.get("roll_alloc_method") == _UNCONFIRMED_ROLL_ALLOC
+            and not e.get("order_id") and e.get("source") != "broker_manual")
+
+
+def _original_open_for(state: dict, close_ex: dict) -> dict | None:
+    """The sell_short that opened the leg ``close_ex`` bought back: the latest
+    live (un-voided) sell_short on the same ticker + strike booked before it."""
+    ticker = (close_ex.get("ticker") or "").upper()
+    before = str(close_ex.get("date") or "")
+    best = None
+    for e in state.get("executions") or []:
+        if (e.get("action") == "sell_short" and not e.get("excluded") and not e.get("reversed_by")
+                and (e.get("ticker") or "").upper() == ticker
+                and _strike_eq(e.get("strike"), close_ex.get("strike"))
+                and str(e.get("date") or "") <= before and e.get("id") != close_ex.get("id")):
+            best = e
+    return best
+
+
+def find_unfilled_rolls(ticker: str, state: dict | None = None) -> list[dict]:
+    """The rolls on ``ticker`` that were booked without a broker fill behind them
+    and are still standing (newest first) — the candidates for
+    undo_unfilled_roll. Read-only."""
+    state = state or log.load_state()
+    ticker = (ticker or "").upper()
+    by_roll: dict[str, list[dict]] = {}
+    for e in state.get("executions") or []:
+        if ((e.get("ticker") or "").upper() == ticker and e.get("roll_id")
+                and not e.get("excluded") and e.get("action") in ("close_short", "sell_short")):
+            by_roll.setdefault(e["roll_id"], []).append(e)
+    out = []
+    for roll_id, legs in by_roll.items():
+        close = [e for e in legs if e.get("action") == "close_short"]
+        opened = [e for e in legs if e.get("action") == "sell_short"]
+        if len(close) != 1 or len(opened) != 1 or not all(_roll_leg_unconfirmed(e) for e in legs):
+            continue
+        orig = _original_open_for(state, close[0]) or {}
+        to_exp = opened[0].get("expiration")
+        if not to_exp:
+            # Most booking paths keep the expiry on the position leg, not the
+            # execution — read it back off the leg the roll opened.
+            pos = log.find_position(state, ticker) or {}
+            exps = {sc.get("expiration") for sc in pos.get("short_calls") or []
+                    if _strike_eq(sc.get("strike"), opened[0].get("strike"))}
+            to_exp = exps.pop() if len(exps) == 1 else None
+        out.append({
+            "roll_id": roll_id, "ticker": ticker, "booked_at": close[0].get("date"),
+            "contracts": int(close[0].get("contracts") or 0),
+            "from_strike": close[0].get("strike"), "from_expiration": orig.get("expiration"),
+            "to_strike": opened[0].get("strike"), "to_expiration": to_exp,
+            "close_id": close[0].get("id"), "open_id": opened[0].get("id"),
+            "mode": opened[0].get("mode"),
+        })
+    out.sort(key=lambda r: str(r.get("booked_at") or ""), reverse=True)
+    return out
+
+
+def undo_unfilled_roll(ticker: str, roll_id: str, reason: str, *, assigned: bool = False,
+                       assigned_on: str | None = None, from_expiration: str | None = None,
+                       stock_price=None, diff_ids: list | None = None) -> dict:
+    """The roll was booked but never filled at Schwab — take it back off the book.
+
+    Voids both legs (append-only: ``excluded`` + the typed reason, so they drop
+    out of every derived ledger but stay on the immutable log), removes the new
+    short it opened and puts the old short back exactly as its original
+    sell_short booked it. With ``assigned`` the old call — which is what was
+    really still open — is then booked as assigned: a close_short at intrinsic
+    plus the CALLED_AWAY shares delivery at its strike, dated ``assigned_on``
+    (default: the old call's expiration, else the day the roll was booked — a
+    roll that fails is usually placed on expiration day) so the payout lands in
+    the right week. ``from_expiration`` supplies the old call's expiry when the
+    log never recorded it.
+
+    Refuses a roll with any broker fill evidence behind it: a filled live ticket
+    is the account's truth and is never "undone" here."""
+    ticker = (ticker or "").upper()
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("undoing a roll requires a typed reason (logged on both legs)")
+    state = log.load_state()
+    legs = _roll_legs(state, roll_id)
+    if not legs or any((e.get("ticker") or "").upper() != ticker for e in legs):
+        raise ValueError(f"no standing {ticker} roll {roll_id!r}")
+    close = [e for e in legs if e.get("action") == "close_short"]
+    opened = [e for e in legs if e.get("action") == "sell_short"]
+    if len(close) != 1 or len(opened) != 1:
+        raise ValueError(f"roll {roll_id} is not a single close + open pair — resolve it by hand")
+    if not all(_roll_leg_unconfirmed(e) for e in legs):
+        raise ValueError(
+            f"roll {roll_id} was filled by Schwab (broker-allocated legs) — a real fill is "
+            "never undone; reconcile it against the broker instead")
+    close_ex, open_ex = close[0], opened[0]
+    contracts = int(close_ex.get("contracts") or 0)
+    orig = _original_open_for(state, close_ex)
+    from_expiration = str(from_expiration or (orig or {}).get("expiration") or "")[:10] or None
+
+    void_executions([close_ex["id"], open_ex["id"]], f"roll never filled at broker: {reason}")
+
+    def _restore(s):
+        position = _ensure_position(s, ticker)
+        _remove_short_leg(position, open_ex.get("strike"), open_ex.get("expiration"),
+                          int(open_ex.get("contracts") or 0))
+        if orig is not None:
+            position.setdefault("short_calls", []).append({
+                "strike": close_ex.get("strike"), "contracts": contracts,
+                "open_date": str(orig.get("date") or "")[:10], "expiration": from_expiration,
+                "dte": orig.get("dte", 5),
+                "entry_extrinsic_per_share": orig.get("entry_extrinsic_per_share"),
+                "entry_premium_total": orig.get("premium_total"),
+                "current_bid": orig.get("premium_per_share"),
+                "current_cost": orig.get("premium_total"),
+                "restored": True,
+            })
+        else:
+            _readd_short_leg(position, close_ex)
+        if position.get("status") == "closed":
+            position["status"] = "active"
+        log.recompute_derived(s)
+    log.mutate_state(_restore)
+
+    result = {"success": True, "status": "undone", "ticker": ticker, "roll_id": roll_id,
+              "voided": [close_ex["id"], open_ex["id"]], "restored_strike": close_ex.get("strike"),
+              "restored_expiration": from_expiration}
+
+    if assigned:
+        day = str(assigned_on or from_expiration or close_ex.get("date") or "")[:10]
+        payload = {"reason": reason}
+        if day:
+            # After the close on the day it was assigned — the payout buckets
+            # into that week, not the day the operator noticed.
+            payload["date"] = f"{day}T21:00:00Z"
+        mode = "live" if live_transmit() else "logged"
+        px = float(stock_price) if stock_price not in (None, "") else None
+        booked = _commit_assignment(payload, ticker, close_ex.get("strike"), contracts, px,
+                                    mode, "assignment" if px is None else "operator")
+        result["assignment"] = {k: booked.get(k) for k in ("execution_ids", "realized_pnl")}
+
+    if diff_ids:
+        import reconcile
+
+        def _resolve(s):
+            for diff_id in diff_ids:
+                _r, d = reconcile._find_diff(s, diff_id)
+                if d is not None and d.get("instrument_type") == reconcile.EQUITY and not assigned:
+                    continue  # the share count is untouched unless it was assigned
+                try:
+                    reconcile.mark_diff_resolved(s, diff_id, "unfilled_roll_undone",
+                                                 {"roll_id": roll_id, "assigned": bool(assigned)})
+                except ValueError:
+                    pass  # rolled off the latest report — the correction still stands
+            reconcile.reevaluate_freezes(s)
+        log.mutate_state(_resolve)
+    return result
+
+
 def acknowledge_diff(diff_id: str, ack_reason: str) -> dict:
     """Acknowledge a reconciliation diff as a non-issue (typed reason required),
     logged onto the reconciliation record. Lifts the freeze once the position's
@@ -2933,6 +3111,8 @@ def _commit_assignment(payload, ticker, strike, contracts, stock_price, mode, pr
                                "expiration": match.get("expiration")},
                               ticker, strike_f, sc_contracts, stock_price)
         se["assigned"] = True
+        if payload.get("date"):
+            se["date"] = payload["date"]
         # Booked from the assignment itself: the operator's price at the event,
         # else the strike (a call assigned is at/through its strike by definition).
         se["stock_price_source"] = (f"assignment:{price_source}" if stock_price is not None
@@ -2941,6 +3121,8 @@ def _commit_assignment(payload, ticker, strike, contracts, stock_price, mode, pr
         n = n or sc_contracts
 
     de, da = _shares_assigned_leg(payload, ticker, strike_f, n, stock_price)
+    if payload.get("date"):
+        de["date"] = payload["date"]
     stored = _commit_one(de, da, ticker, mode, price_source)
     committed.append(stored["id"])
 
