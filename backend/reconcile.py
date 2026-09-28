@@ -732,6 +732,11 @@ def run_reconciliation(state: dict | None = None, persist: bool = True) -> dict:
 
     report = reconcile(broker_view, expected_view, as_of)
     report["excluded"] = excluded
+    # What Schwab holds, kept with the report — position_heal only rebuilds a
+    # drifted position from the log when the log's version matches this.
+    report["broker_view"] = [{k: i.get(k) for k in ("underlying", "instrument_type",
+                                                   "put_call", "strike", "expiry", "quantity")}
+                             for i in broker_view]
     _persist(report, apply=True)
     return report
 

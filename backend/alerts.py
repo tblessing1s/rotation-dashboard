@@ -71,6 +71,7 @@ ALERT_TYPES = {
     "ORDER_STATE_UNKNOWN": ("CRITICAL", "HARD_CFM_RULE: an order's broker state is unknown (cancel failed, may still be working) -> hard-lock the position; no resubmit until resolved"),
     "ORDER_RESUBMIT_EXHAUSTED": ("HIGH", "PROPOSED_DEFAULT: a position hit MAX_RESUBMIT_ATTEMPTS this session -> stop resubmitting; reprice or reassess the entry manually"),
     "CROSS_BOOK_DUPLICATE": ("HIGH", "HARD_CFM_RULE: the same Schwab order or transaction is booked in more than one account's book -> a trade belongs to exactly one account; void the copy in the book it does not belong to"),
+    "POSITION_DRIFT": ("HIGH", "HARD_CFM_RULE: a position's shares or short calls differ from what the trade log implies, and Schwab doesn't confirm the log's version -> review before trusting the position; the app never rebuilds it without Schwab agreeing"),
     "HISTORY_DIVERGED": ("HIGH", "HARD_CFM_RULE: the book's fills disagree with Schwab's own transactions (a booked fill Schwab never made, a Schwab fill the book is missing, or a wrong price/size) -> correct the book before trusting its ledgers"),
     "RECONCILE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: reconciliation has not run successfully within the expected window -> the safety check is silent"),
     "SNAPSHOT_DATA_QUALITY": ("LOW", "PROPOSED_DEFAULT: >25% of an entry-context snapshot's tracked fields came back null (stale/unavailable) -> the entry telemetry for calibration is thin, not a trade blocker"),
@@ -972,6 +973,26 @@ def check_cross_book_duplicate(state: dict) -> list[dict]:
     return out
 
 
+def check_position_drift(state: dict) -> list[dict]:
+    """position_heal HELD a drifted position part (the log's version isn't
+    confirmed by Schwab's last holdings) — one alert per ticker."""
+    import position_heal
+    by_ticker: dict[str, list[dict]] = {}
+    for d in position_heal.held(state):
+        by_ticker.setdefault(d["ticker"], []).append(d)
+    out = []
+    for t, ds in sorted(by_ticker.items()):
+        parts = "; ".join(
+            f"{d['part'].replace('_', ' ')}: position {d['mirror']}, trade log {d['log']}, "
+            f"Schwab {d['broker'] if d['broker'] is not None else 'unknown'}" for d in ds)
+        out.append(_alert(
+            "POSITION_DRIFT", t, f"{t}: position differs from the trade log — {parts}",
+            "History → raw log: fix the trade log (void / adopt / correct) until it matches "
+            "Schwab, or use Rebuild from log if the log is right. Run Reconcile now afterwards.",
+            {"drift": ds}, key="|".join(f"{d['part']}:{d['mirror']}:{d['log']}" for d in ds)))
+    return out
+
+
 def check_history_diverged(state: dict) -> list[dict]:
     """The daily trade-history audit (history_audit.py) found unexplained
     differences between this book's fills and Schwab's transactions. One alert
@@ -1585,6 +1606,7 @@ EVALUATORS = [
     check_reconcile_dirty,
     check_reconcile_stale,
     check_history_diverged,
+    check_position_drift,
     check_cross_book_duplicate,
     check_roll_leg_imbalance,
     check_book_correlation,
