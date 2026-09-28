@@ -179,6 +179,17 @@ def _maybe_screen(now: datetime) -> None:
     if not screen_due(now, _last_screen_day):
         return
     _last_screen_day = now.date()
+    # _last_screen_day is in-memory only, so every restart (each deploy)
+    # re-arms it. If today's SCHEDULED screen already succeeded before the
+    # restart, don't redo it: a full force-fetched sweep runs synchronously
+    # in this tick, so doing it inside the signal window stalls bar ingest
+    # (which only ever captures the latest candle — missed ones are never
+    # backfilled) and overwrites the picks the morning's run chose.
+    from daytrade import store
+    if store.load_screen_health().get("scheduled", {}).get("date") == now.strftime("%Y-%m-%d"):
+        logger.info("daytrade screener: today's scheduled screen already ran — "
+                    "skipping the re-run after restart")
+        return
     try:
         from daytrade import settings, trial
         enabled_ids = settings.enabled_account_ids()

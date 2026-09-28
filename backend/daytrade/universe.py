@@ -20,6 +20,8 @@ import logging
 import threading
 from datetime import date, datetime, timezone
 
+import pandas as pd
+
 import config
 import data_handler
 import indicators
@@ -29,7 +31,7 @@ from daytrade import store, tickers as daytrade_tickers
 logger = logging.getLogger("cfm.daytrade")
 
 
-def _evaluate(symbol: str) -> dict:
+def _evaluate(symbol: str, target_date: date) -> dict:
     """One ticker's screener readout. Never raises — a fetch failure is
     recorded as a failed candidate, not a crash of the whole nightly sweep.
 
@@ -40,11 +42,20 @@ def _evaluate(symbol: str) -> dict:
     be under 12h old while still predating today's close. Without this, the
     after-close scheduled run can silently re-serve that stale pre-close
     frame instead of the real closing data, and every screen after it keeps
-    inheriting the same frozen prior-day levels."""
+    inheriting the same frozen prior-day levels.
+
+    Only sessions strictly BEFORE ``target_date`` count: during market hours
+    the provider's daily frame ends in TODAY's still-forming candle, so a
+    screen that runs mid-session (a deploy/restart inside the signal window,
+    or an in-session "Rescan now") would otherwise record today's running
+    high/low as the "prior day" levels — and today's partial volume/range
+    would skew the avg-volume and ATR% filters too."""
     try:
         df = data_handler.get_daily(symbol, force=True)
     except Exception as e:  # noqa: BLE001 — one bad symbol must not sink the sweep
         return {"symbol": symbol, "qualified": False, "reason": f"data unavailable: {e}"}
+    if df is not None and not df.empty:
+        df = df[df.index < pd.Timestamp(target_date)]
     if df is None or df.empty:
         return {"symbol": symbol, "qualified": False, "reason": "no data"}
 
@@ -121,7 +132,7 @@ def screen(tickers: list[str] | None = None, now: datetime | None = None,
     # wasted work instead of where the real fetching happens.
     data_handler.prefetch(tickers, force=True)
 
-    screened = [_evaluate(t) for t in tickers]
+    screened = [_evaluate(t, target_date) for t in tickers]
     qualified = [r for r in screened if r.get("qualified")]
     picks = rank(qualified)[:config.DAYTRADE_UNIVERSE_MAX]
 
