@@ -160,7 +160,10 @@ function ReviewPanel({ ticker, diffs, onDone }) {
 // the money, was assigned. "Schwab is correct" can't tell that story: it would
 // drop the phantom call and leave the shares to a bare adjustment, with the
 // roll's buy-back and new premium still counted in the ledgers and no sale at
-// the strike. This takes the roll back off (both legs voided, old call
+// the strike. A roll booked off a broker "fill" is offered too, but only once
+// Schwab's own record of that order says it never filled (a canceled order
+// whose activity listed $0 execution legs was once booked as filled). This
+// takes the roll back off (both legs voided, old call
 // restored) and, when assigned, books the old call's assignment + the shares
 // delivered at its strike on the day it happened.
 function UnfilledRoll({ ticker, diffs, toast, onDone }) {
@@ -207,9 +210,14 @@ function UnfilledRoll({ ticker, diffs, toast, onDone }) {
     <div className="mb-2 rounded-lg border border-amber-700 bg-amber-500/5 p-3">
       <p className="text-xs text-amber-200">
         The {roll.from_strike}C → {roll.to_strike}C{roll.to_expiration ? ` ${roll.to_expiration}` : ""} roll
-        booked {String(roll.booked_at || "").slice(0, 10)} was <span className="font-semibold">never confirmed by a
-        Schwab fill</span> — it was recorded in the app the moment it was submitted. If that order never filled,
-        the old {roll.from_strike}C stayed open.
+        booked {String(roll.booked_at || "").slice(0, 10)}{" "}
+        {roll.verified === "broker_unfilled" ? (
+          <>was booked as filled, but <span className="font-semibold">Schwab shows order {roll.order_id} never
+          filled</span> (canceled / expired / rejected). The old {roll.from_strike}C stayed open.</>
+        ) : (
+          <>was <span className="font-semibold">never confirmed by a Schwab fill</span> — it was recorded in the
+          app the moment it was submitted. If that order never filled, the old {roll.from_strike}C stayed open.</>
+        )}
       </p>
       <div className="mt-2 flex flex-wrap items-end gap-2">
         <label className="flex flex-col text-[10px] uppercase tracking-wide text-slate-500">

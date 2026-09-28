@@ -126,16 +126,72 @@ def test_equity_diff_stays_open_when_not_assigned(store):
     assert not d.get("resolution")
 
 
-def test_a_broker_filled_roll_is_never_undone(store):
-    res = _covered_then_paper_roll()
+class _Broker:
+    def __init__(self, order):
+        self.order = order
 
-    def _as_filled(s):
+    def get_order(self, account_hash, order_id):
+        return self.order
+
+
+def _booked_off_a_broker_fill(res, monkeypatch, order):
+    """Re-shape the paper roll into what the live poll left behind for SPCX
+    order 1008063520870: broker-allocated legs + a fill receipt."""
+    import data_handler
+    import schwab_api
+    ids = []
+
+    def _as_live(s):
         for e in s["executions"]:
             if e.get("roll_id") == res["roll_group_id"]:
                 e["roll_alloc_method"] = "broker_per_leg"
-    log.mutate_state(_as_filled)
+                e["mode"] = "live"
+                ids.append(e["id"])
+        s.setdefault("order_receipts", []).append(
+            {"order_id": "1008063520870", "account_hash": "acct", "execution_ids": ids})
+    log.mutate_state(_as_live)
+    monkeypatch.setattr(schwab_api, "configured", lambda *a, **k: True)
+    monkeypatch.setattr(data_handler, "broker_client", lambda: _Broker(order))
+
+
+_PHANTOM_CANCEL = {"status": "CANCELED",
+                   "orderLegCollection": [{"legId": 1, "instrument": {"symbol": "OLD"}},
+                                          {"legId": 2, "instrument": {"symbol": "NEW"}}],
+                   "orderActivityCollection": [{"executionLegs": [
+                       {"legId": 1, "quantity": 1, "price": 0.0},
+                       {"legId": 2, "quantity": 1, "price": 0.0}]}]}
+
+
+def test_a_phantom_fill_schwab_canceled_is_offered_and_undone(store, monkeypatch):
+    res = _covered_then_paper_roll()
+    _booked_off_a_broker_fill(res, monkeypatch, _PHANTOM_CANCEL)
+    rolls = executor.find_unfilled_rolls("AAA")
+    assert [(r["roll_id"], r["verified"], r["order_id"]) for r in rolls] == [
+        (res["roll_group_id"], "broker_unfilled", "1008063520870")]
+    executor.undo_unfilled_roll("AAA", res["roll_group_id"], "Schwab canceled it",
+                                assigned=True, from_expiration="2026-09-25")
+    p = log.find_position(log.load_state(), "AAA")
+    assert p["short_calls"] == [] and p["shares"]["count"] == 0
+
+
+def test_a_broker_filled_roll_is_never_undone(store, monkeypatch):
+    res = _covered_then_paper_roll()
+    _booked_off_a_broker_fill(res, monkeypatch, {
+        **_PHANTOM_CANCEL, "status": "FILLED",
+        "orderActivityCollection": [{"executionLegs": [
+            {"legId": 1, "quantity": 1, "price": 3.0}, {"legId": 2, "quantity": 1, "price": 3.5}]}]})
     assert executor.find_unfilled_rolls("AAA") == []
     with pytest.raises(ValueError, match="filled by Schwab"):
+        executor.undo_unfilled_roll("AAA", res["roll_group_id"], "x")
+
+
+def test_a_broker_booked_roll_is_not_undone_unverified(store, monkeypatch):
+    import schwab_api
+    res = _covered_then_paper_roll()
+    _booked_off_a_broker_fill(res, monkeypatch, _PHANTOM_CANCEL)
+    monkeypatch.setattr(schwab_api, "configured", lambda *a, **k: False)
+    assert executor.find_unfilled_rolls("AAA") == []
+    with pytest.raises(ValueError, match="can't be asked"):
         executor.undo_unfilled_roll("AAA", res["roll_group_id"], "x")
 
 
