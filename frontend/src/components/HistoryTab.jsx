@@ -646,6 +646,8 @@ function TransactionEditor() {
         need the <span className="text-amber-300">entry stock price</span> or <span className="text-amber-300">extrinsic</span> —
         edit either and the other is computed. Set the <span className="font-mono">expiration</span> so same-strike weeklies stay separate.
         Prices and extrinsic are <span className="text-slate-400">per share</span>.
+        Shares carry no extrinsic: on a <span className="font-mono">sell_shares</span> row that box is the
+        sale's <span className="text-amber-300">cost basis</span> per share (tagged <span className="font-mono">basis</span>).
         Save derives your open position from these transactions.
         <span className="ml-1"><span className="font-mono">stock source</span> shows where the price behind the
         split came from — hover it for the at-order and at-fill captures.</span>
@@ -654,7 +656,9 @@ function TransactionEditor() {
         <table className="w-full whitespace-nowrap text-xs">
           <thead><tr className="text-left uppercase tracking-wide text-slate-500">
             {["date", "ticker", "action", "strike", "qty", "expiration", "price", "entry stock", "stock source", "extrinsic", "roll"].map((h) =>
-              <th key={h} className="py-1.5 pr-2">{h}</th>)}
+              <th key={h} className="py-1.5 pr-2"
+                  title={h === "extrinsic" ? "Per-share extrinsic on option rows; per-share cost basis on share sales" : undefined}>
+                {h === "extrinsic" ? "extrinsic / basis" : h}</th>)}
           </tr></thead>
           <tbody className="font-mono text-slate-300">
             {rows.map((r, i) => (
@@ -702,6 +706,11 @@ function TransactionEditor() {
                            : undefined}
                          onChange={(e) => onExt(i, e.target.value)}
                          className={`${inp} w-24 ${r.extrinsicLocked ? "opacity-60" : (r.isOpen || r.editableExtrinsic || r.editableCostBasis) ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
+                  {r.editableCostBasis && (
+                    <span className="ml-1 font-sans text-[10px] uppercase tracking-wide text-slate-500"
+                          title="Shares have no extrinsic — this is the per-share cost basis this sale's realized P&L is measured against">
+                      basis</span>
+                  )}
                 </td>
                 <td className="py-1 pr-2 font-sans text-slate-600">
                   {r.roll ? r.roll : (() => {
