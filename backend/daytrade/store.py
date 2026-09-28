@@ -166,20 +166,26 @@ def load_bars(day: str, symbol: str | None = None) -> list[dict]:
                 continue
             if symbol is None or row.get("symbol") == symbol:
                 out.append(row)
+    # By candle time, not append order — a backfilled candle can be appended
+    # after a newer one (see bars.ingest). Stable, so same-time rows keep
+    # their file order.
+    out.sort(key=lambda r: str(r.get("datetime", "")))
     return out
 
 
 def latest_bars(day: str) -> dict[str, dict]:
-    """The most recently ingested bar per symbol for one trading day, keyed
-    by symbol. ``append_bars`` always appends each ingest tick's rows after
-    every earlier tick's (bars.ingest dedupes but never reorders), so the
-    LAST occurrence of a symbol in file order is its most recent bar —
-    no need to compare timestamps. Empty dict if nothing's been ingested
-    yet (e.g. before the window opens, or a date with no screener run)."""
+    """The latest bar per symbol for one trading day, keyed by symbol —
+    latest by the candle's own timestamp, not file position: bars.ingest
+    backfills candles missed while it wasn't running, which can land in the
+    file after a newer one already logged. (One day's ISO strings share a
+    single UTC offset, so they compare correctly as strings.) Empty dict if
+    nothing's been ingested yet (e.g. before the window opens, or a date
+    with no screener run)."""
     out: dict[str, dict] = {}
     for row in load_bars(day):
         symbol = row.get("symbol")
-        if symbol:
+        if symbol and (symbol not in out
+                       or str(row.get("datetime", "")) >= str(out[symbol].get("datetime", ""))):
             out[symbol] = row
     return out
 
@@ -268,4 +274,8 @@ def load_signals(day: str, account_id: str, symbol: str | None = None) -> list[d
                 continue
             if symbol is None or row.get("symbol") == symbol:
                 out.append(row)
+    # By candle time, not append order — a backfilled candle can be appended
+    # after a newer one (see bars.ingest). Stable, so same-time rows keep
+    # their file order.
+    out.sort(key=lambda r: str(r.get("datetime", "")))
     return out

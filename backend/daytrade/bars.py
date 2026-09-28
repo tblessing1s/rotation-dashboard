@@ -1,8 +1,9 @@
 """Day-trade 5-min bar ingestion — strategy rule 2's signal window.
 
 Runs on the ``config.DAYTRADE_BAR_INTERVAL_MINUTES`` cadence during the
-8:30-10:00 AM CT window and appends each of today's screener picks' latest
-completed 5-min candle to that trading day's bar log (``daytrade/store.py``).
+8:30-10:00 AM CT window and appends each of today's screener picks' 5-min
+candles not yet logged (normally just the newest; after a restart, every one
+missed while down) to that trading day's bar log (``daytrade/store.py``).
 The signal engine that reads these bars for the setup/entry/stop rules (2-8)
 is a later phase — this only guarantees the candles exist when that phase
 needs them.
@@ -41,7 +42,7 @@ def _bar_row(symbol: str, day: str, bar) -> dict:
 
 
 def ingest(now: datetime | None = None, symbols: list[str] | None = None) -> dict:
-    """Fetch the latest 5-min bar for each of today's screener picks (or an
+    """Fetch today's 5-min bars for each of today's screener picks (or an
     explicit ``symbols`` list) and append any not already logged to today's
     bar file. A single symbol's fetch failure is logged and skipped rather
     than aborting the rest."""
@@ -75,15 +76,22 @@ def ingest(now: datetime | None = None, symbols: list[str] | None = None) -> dic
             candles = candles[(candles.index <= now) & (candles.index.strftime("%Y-%m-%d") == day)]
             if candles.empty:
                 raise ValueError("no candle for today at or before now")
-            row = _bar_row(symbol, day, candles.iloc[-1])
+            # Every one of today's candles not already logged, oldest first —
+            # not just the latest. A restart (every deploy) or a stalled tick
+            # otherwise loses each candle that formed while ingest wasn't
+            # running, permanently: the first tick back only ever saw the
+            # newest one. The fetch already returns the whole day, so the
+            # backfill costs no extra request.
+            symbol_rows = [_bar_row(symbol, day, c) for _, c in candles.sort_index().iterrows()]
         except Exception as e:  # noqa: BLE001 — one symbol's outage must not skip the rest
             errors[symbol] = str(e)
             continue
-        key = (row["symbol"], row["datetime"])
-        if key in already:
-            continue
-        rows.append(row)
-        already.add(key)
+        for row in symbol_rows:
+            key = (row["symbol"], row["datetime"])
+            if key in already:
+                continue
+            rows.append(row)
+            already.add(key)
 
     written = store.append_bars(day, rows)
     if errors:
