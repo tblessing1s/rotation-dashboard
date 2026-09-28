@@ -139,6 +139,7 @@ function ReviewPanel({ ticker, diffs, onDone }) {
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-rose-300">
         Reconciliation review — state.json diverged from the broker
       </div>
+      <UnfilledRoll ticker={ticker} diffs={diffs} toast={toast} onDone={onDone} />
       <WhichIsCorrect ticker={ticker} diffs={diffs} toast={toast} onDone={onDone} />
       <div className="mt-2 space-y-2">
         {diffs.map((d) => <DiffRow key={d.id} ticker={ticker} diff={d} toast={toast} onDone={onDone} />)}
@@ -148,6 +149,107 @@ function ReviewPanel({ ticker, diffs, onDone }) {
         {advanced ? "Hide" : "Show"} advanced — edit the broker's legs before saving
       </button>
       {advanced && <RebuildFromBroker ticker={ticker} diffIds={diffs.map((d) => d.id)} toast={toast} onDone={onDone} />}
+    </div>
+  );
+}
+
+// The broker is missing a call the book says a roll opened, and that roll was
+// booked WITHOUT a Schwab fill behind it (paper / untransmitted — committed the
+// moment it was submitted, at the quoted mids). The likeliest story: the order
+// at Schwab never filled, so the OLD call stayed open — and, if it finished in
+// the money, was assigned. "Schwab is correct" can't tell that story: it would
+// drop the phantom call and leave the shares to a bare adjustment, with the
+// roll's buy-back and new premium still counted in the ledgers and no sale at
+// the strike. A roll booked off a broker "fill" is offered too, but only once
+// Schwab's own record of that order says it never filled (a canceled order
+// whose activity listed $0 execution legs was once booked as filled). This
+// takes the roll back off (both legs voided, old call
+// restored) and, when assigned, books the old call's assignment + the shares
+// delivered at its strike on the day it happened.
+function UnfilledRoll({ ticker, diffs, toast, onDone }) {
+  const missingCalls = diffs.filter((d) => d.classification === "MISSING_AT_BROKER"
+    && d.instrument_type !== "EQUITY");
+  const { data } = useApi(
+    React.useCallback(() => (missingCalls.length ? api.unfilledRolls(ticker) : Promise.resolve(null)),
+      [ticker, missingCalls.length]),
+    [ticker, missingCalls.length], null);
+  const roll = (data?.rolls || []).find((r) => missingCalls.some((d) => Number(d.strike) === Number(r.to_strike)));
+  const [fromExp, setFromExp] = React.useState("");
+  const [spot, setSpot] = React.useState("");
+  const [reason, setReason] = React.useState("roll order never filled at Schwab");
+  const [busy, setBusy] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+  React.useEffect(() => {
+    if (roll) setFromExp(roll.from_expiration || String(roll.booked_at || "").slice(0, 10));
+  }, [roll?.roll_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  if (!roll) return null;
+
+  const submit = async (assigned) => {
+    if (!reason.trim()) { setErr("a typed reason is required"); return; }
+    const what = assigned
+      ? `void the ${roll.from_strike}C → ${roll.to_strike}C roll and book the ${roll.from_strike}C as ASSIGNED `
+        + `on ${fromExp} (${roll.contracts * 100} shares delivered at ${roll.from_strike})`
+      : `void the ${roll.from_strike}C → ${roll.to_strike}C roll and put the ${roll.from_strike}C back as still open`;
+    if (!window.confirm(`${ticker}: ${what}? Both roll legs stay on the immutable log, voided with your reason.`)) return;
+    setBusy(assigned ? "assigned" : "open"); setErr(null);
+    try {
+      await api.undoUnfilledRoll({
+        ticker, roll_id: roll.roll_id, reason: reason.trim(), assigned,
+        from_expiration: fromExp || null, assigned_on: assigned ? (fromExp || null) : null,
+        stock_price: spot === "" ? null : Number(spot),
+        diff_ids: diffs.map((d) => d.id),
+      });
+      toast.show(assigned ? `${ticker} — roll undone, assignment booked` : `${ticker} — roll undone`,
+        { type: "success" });
+      onDone && onDone();
+    } catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(null); }
+  };
+
+  return (
+    <div className="mb-2 rounded-lg border border-amber-700 bg-amber-500/5 p-3">
+      <p className="text-xs text-amber-200">
+        The {roll.from_strike}C → {roll.to_strike}C{roll.to_expiration ? ` ${roll.to_expiration}` : ""} roll
+        booked {String(roll.booked_at || "").slice(0, 10)}{" "}
+        {roll.verified === "broker_unfilled" ? (
+          <>was booked as filled, but <span className="font-semibold">Schwab shows order {roll.order_id} never
+          filled</span> (canceled / expired / rejected). The old {roll.from_strike}C stayed open.</>
+        ) : (
+          <>was <span className="font-semibold">never confirmed by a Schwab fill</span> — it was recorded in the
+          app the moment it was submitted. If that order never filled, the old {roll.from_strike}C stayed open.</>
+        )}
+      </p>
+      <div className="mt-2 flex flex-wrap items-end gap-2">
+        <label className="flex flex-col text-[10px] uppercase tracking-wide text-slate-500">
+          old {roll.from_strike}C expiry / assigned on
+          <input type="date" value={fromExp} onChange={(e) => setFromExp(e.target.value)}
+                 className="mt-0.5 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-sm text-slate-100" />
+        </label>
+        <label className="flex flex-col text-[10px] uppercase tracking-wide text-slate-500">
+          stock at assignment (opt.)
+          <input value={spot} onChange={(e) => setSpot(e.target.value)} inputMode="decimal"
+                 placeholder="strike"
+                 className="mt-0.5 w-24 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-sm text-slate-100 placeholder:text-slate-600" />
+        </label>
+        <label className="flex min-w-[12rem] flex-1 flex-col text-[10px] uppercase tracking-wide text-slate-500">
+          reason (required)
+          <input value={reason} onChange={(e) => setReason(e.target.value)}
+                 className="mt-0.5 rounded border border-slate-700 bg-slate-900 px-1.5 py-1 text-sm text-slate-100" />
+        </label>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-2">
+        <button onClick={() => submit(true)} disabled={busy !== null}
+                title="Void the roll, then book the old call's assignment and the shares called away at its strike"
+                className="rounded-lg border border-amber-600 bg-amber-500/15 px-3 py-1.5 text-xs font-semibold text-amber-200 hover:bg-amber-500/25 disabled:opacity-50">
+          {busy === "assigned" ? "Booking…" : `Never filled — ${roll.from_strike}C was assigned`}
+        </button>
+        <button onClick={() => submit(false)} disabled={busy !== null}
+                title="Void the roll and restore the old call as still open"
+                className="rounded-lg border border-slate-600 bg-slate-800/60 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          {busy === "open" ? "Undoing…" : `Never filled — ${roll.from_strike}C still open`}
+        </button>
+      </div>
+      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
     </div>
   );
 }

@@ -1873,6 +1873,13 @@ INGESTION_IS_GROUND_TRUTH = True
 # transaction id makes re-pulling an overlapping window always idempotent.
 INGESTION_LOOKBACK_DAYS = 7
 
+# PROPOSED_DEFAULT — how many days of the book's fills the daily trade-history
+# audit (history_audit.py) checks against Schwab's own transactions. Wider than
+# ingestion's window on purpose: the audit exists to catch a fill that went
+# wrong days ago and was never noticed (a phantom booking, a missing fill, a
+# wrong price), and it only reads.
+HISTORY_AUDIT_LOOKBACK_DAYS = 30
+
 # ---- Recommendation trust layer (v2.6, state schema v17) -------------------
 # The engine (recommendation_engine.py) commits to specific recommendations
 # BEFORE the operator acts; recompute_derived() then measures agreement

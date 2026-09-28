@@ -291,6 +291,9 @@ export const api = {
   history: () => request("/api/history"),
   // Daily mark-to-market account-value points for the History tab's value chart.
   accountValueHistory: () => request("/api/account-value-history"),
+  // Drop stored daily points recorded while the book was wrong (typed reason).
+  removeAccountValuePoints: (dates, reason) =>
+    request("/api/account-value-history/remove", { method: "POST", body: JSON.stringify({ dates, reason }) }),
   // Raw executions + live position legs, for the History validation table.
   executionsRaw: () => request("/api/executions/raw"),
   // Durable order journal (outside state.json) — real captured stock prices for
@@ -389,6 +392,19 @@ export const api = {
       body: JSON.stringify({ execution_ids: executionIds, reason, ...(note ? { note } : {}) }),
     }),
   reconcile: () => request("/api/reconcile"),
+  // Trade-history audit: this book's fills vs Schwab's transactions.
+  historyAudit: () => request("/api/reconcile/history-audit"),
+  runHistoryAudit: () => request("/api/reconcile/history-audit", { method: "POST", body: "{}" }),
+  crossBook: () => request("/api/reconcile/cross-book"),
+  runCrossBook: () => request("/api/reconcile/cross-book", { method: "POST", body: "{}" }),
+  ackCrossBook: (duplicateId, reason) =>
+    request("/api/reconcile/cross-book/acknowledge", {
+      method: "POST", body: JSON.stringify({ duplicate_id: duplicateId, reason }),
+    }),
+  ackHistoryFinding: (findingId, reason) =>
+    request("/api/reconcile/history-audit/acknowledge", {
+      method: "POST", body: JSON.stringify({ finding_id: findingId, reason }),
+    }),
   runReconcile: () => request("/api/reconcile", { method: "POST" }),
   verifyFills: (limit) =>
     request("/api/verify-fills", { method: "POST", body: JSON.stringify(limit ? { limit } : {}) }),
@@ -399,6 +415,13 @@ export const api = {
   // Record an already-executed out-of-band roll from captured fills.
   recordManualRoll: (body) =>
     request("/api/reconcile/record-manual-roll", { method: "POST", body: JSON.stringify(body) }),
+  // Rolls booked without a Schwab fill behind them (paper / untransmitted), and
+  // the undo for one that never filled — optionally booking the old call's
+  // assignment (executor.undo_unfilled_roll).
+  unfilledRolls: (ticker) =>
+    request(`/api/reconcile/unfilled-rolls?ticker=${encodeURIComponent(ticker)}`),
+  undoUnfilledRoll: (body) =>
+    request("/api/reconcile/undo-unfilled-roll", { method: "POST", body: JSON.stringify(body) }),
   // The global reconciliation-freeze verdict + minutes staleness (spec §5).
   freezeStatus: () => request("/api/reconcile/freeze-status"),
   // Pending (placed, not yet settled) orders for this book + an on-demand

@@ -866,7 +866,14 @@ def fetch_transactions(lookback_days: int | None = None) -> list:
     # sibling account's fills would propose them for adoption into the wrong book.
     account_hash = accounts.broker_hash(client)
     start, end = _start_end_window(lookback_days)
-    return client.get_transactions(account_hash, start_date=start, end_date=end)
+    txns = client.get_transactions(account_hash, start_date=start, end_date=end) or []
+    # Belt and braces: a row that names a DIFFERENT Schwab account never reaches
+    # this book's proposals, whatever the endpoint returned.
+    number = accounts.broker_account_number()
+    if number:
+        txns = [t for t in txns
+                if str((t or {}).get("accountNumber") or "").strip() in ("", number)]
+    return txns
 
 
 def _enrich_proposals_from_journal(report: dict) -> None:

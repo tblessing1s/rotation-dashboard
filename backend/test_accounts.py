@@ -225,6 +225,53 @@ def test_a_binding_that_is_not_linked_raises_instead_of_routing_elsewhere(store)
         accounts.broker_hash(_Client())
 
 
+def test_an_unbound_secondary_book_never_guesses_the_first_linked_account(store):
+    # CONFIRMED LIVE: an unbound secondary book on a login that also reaches the
+    # primary's account imported the primary's IBIT trades and SPCX roll.
+    import schwab_api
+    accounts.create("Spouse")
+    with accounts.use("spouse"):
+        with pytest.raises(accounts.AccountUnbound, match="account number"):
+            accounts.broker_hash(_Client())
+        with pytest.raises(accounts.AccountUnbound):
+            schwab_api.select_account_node([{"securitiesAccount": {"accountNumber": "1"}},
+                                            {"securitiesAccount": {"accountNumber": "2"}}], None)
+
+
+def test_an_unbound_book_on_its_own_single_account_login_may_use_it(store):
+    import schwab_api
+
+    class _OneAccount(_Client):
+        NUMBERS = [{"accountNumber": "55556666", "hashValue": "HASH_SPOUSE"}]
+
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+    with accounts.use("spouse"):
+        assert accounts.broker_hash(_OneAccount()) == "HASH_SPOUSE"
+        node = {"securitiesAccount": {"accountNumber": "55556666"}}
+        assert schwab_api.select_account_node([node], None) is node
+        # …but not when that login reaches more than one account.
+        with pytest.raises(accounts.AccountUnbound):
+            accounts.broker_hash(_Client())
+
+
+def test_ingestion_drops_rows_from_another_schwab_account(store, monkeypatch):
+    import data_handler
+    import transaction_ingest
+
+    class _Txns(_Client):
+        def get_transactions(self, account_hash, **kw):
+            assert account_hash == "HASH_IRA"
+            return [{"activityId": 1, "accountNumber": "33334444"},
+                    {"activityId": 2, "accountNumber": "11112222"},   # the sibling's
+                    {"activityId": 3}]
+
+    accounts.create("IRA", broker_account_number="33334444")
+    monkeypatch.setattr(data_handler, "broker_client", lambda: _Txns())
+    with accounts.use("ira"):
+        assert [t["activityId"] for t in transaction_ingest.fetch_transactions()] == [1, 3]
+
+
 def test_executor_order_hash_follows_the_active_account(store):
     import executor
     accounts.create("IRA", broker_account_number="33334444")

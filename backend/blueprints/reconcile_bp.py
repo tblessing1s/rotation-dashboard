@@ -93,6 +93,101 @@ def api_record_manual_roll():
         return _err(e)
 
 
+@reconcile_bp.route("/api/reconcile/history-audit", methods=["GET", "POST"])
+def api_history_audit():
+    """The trade-history audit — this book's fills vs Schwab's transactions
+    (history_audit.py). GET returns the last report; POST runs it now
+    (optional ``lookback_days``)."""
+    import history_audit
+    try:
+        if request.method == "POST":
+            p = request.get_json(silent=True) or {}
+            return jsonify(history_audit.run_history_audit(
+                lookback_days=p.get("lookback_days")))
+        state = log.load_state()
+        ha = state.get("history_audit") or {}
+        return jsonify({"last": ha.get("last"), "last_failed": ha.get("last_failed")})
+    except (ValueError, TypeError) as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@reconcile_bp.route("/api/reconcile/cross-book", methods=["GET", "POST"])
+def api_cross_book():
+    """The cross-book duplicate check (cross_book.py): GET this book's last
+    record; POST re-checks every book now and returns this book's record."""
+    import cross_book
+    try:
+        if request.method == "POST":
+            cross_book.run_and_persist()
+        return jsonify(log.load_state().get("cross_book") or {})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@reconcile_bp.route("/api/reconcile/cross-book/acknowledge", methods=["POST"])
+def api_cross_book_ack():
+    """Mark one cross-book duplicate explained for this book (typed reason)."""
+    import cross_book
+    p = request.get_json(silent=True) or {}
+    if not p.get("duplicate_id"):
+        return jsonify({"error": "duplicate_id is required"}), 400
+    try:
+        return jsonify(cross_book.acknowledge(p["duplicate_id"], p.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@reconcile_bp.route("/api/reconcile/history-audit/acknowledge", methods=["POST"])
+def api_history_audit_ack():
+    """Mark one audit finding explained (typed reason, logged)."""
+    import history_audit
+    p = request.get_json(silent=True) or {}
+    if not p.get("finding_id"):
+        return jsonify({"error": "finding_id is required"}), 400
+    try:
+        return jsonify(history_audit.acknowledge(p["finding_id"], p.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@reconcile_bp.route("/api/reconcile/unfilled-rolls")
+def api_unfilled_rolls():
+    """Rolls on ?ticker= that were booked without a broker fill behind them (paper /
+    untransmitted) and are still standing — what the review panel offers to undo
+    when the broker shows the new call missing."""
+    ticker = (request.args.get("ticker") or "").strip().upper()
+    if not ticker:
+        return jsonify({"error": "ticker is required"}), 400
+    try:
+        return jsonify({"ticker": ticker, "rolls": executor.find_unfilled_rolls(ticker)})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@reconcile_bp.route("/api/reconcile/undo-unfilled-roll", methods=["POST"])
+def api_undo_unfilled_roll():
+    """The roll was booked but never filled at Schwab: void both legs, restore the
+    old short, and (``assigned``) book that old call's assignment — see
+    executor.undo_unfilled_roll."""
+    p = request.get_json(silent=True) or {}
+    try:
+        return jsonify(executor.undo_unfilled_roll(
+            p.get("ticker"), p.get("roll_id"), p.get("reason"),
+            assigned=bool(p.get("assigned")), assigned_on=p.get("assigned_on"),
+            from_expiration=p.get("from_expiration"),
+            stock_price=p.get("stock_price"), diff_ids=p.get("diff_ids")))
+    except (ValueError, TypeError) as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @reconcile_bp.route("/api/reconcile/rebuild-position", methods=["POST"])
 def api_rebuild_position():
     """Rebuild one position's legs from the broker's actual holdings (ground
