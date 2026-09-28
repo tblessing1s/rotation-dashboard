@@ -11,12 +11,17 @@ import { api } from "./api.js";
 // We key off schwab.present, NOT status === "ok": an expiring/expired token
 // still routes live (the order is attempted, then errors on refresh — it is not
 // silently logged), so calling that "paper" would be a dangerous mislabel.
+//
+// Live trading ON but no Schwab grant for THIS account is "disconnected", not
+// paper: the backend refuses the order (executor.BrokerNotConnected) rather
+// than booking it as a fill that never reached Schwab.
 export function resolveTradeMode(cfg) {
   if (!cfg) return null;
-  return cfg.live_trading && cfg?.schwab?.present ? "live" : "paper";
+  if (!cfg.live_trading) return "paper";
+  return cfg?.schwab?.present ? "live" : "disconnected";
 }
 
-// Fetch the effective trade mode once. Returns "paper" | "live" | null (still
+// Fetch the effective trade mode once. Returns "paper" | "live" | "disconnected" | null (still
 // resolving). Cheap enough that each order ticket can call it independently.
 export function useTradeMode() {
   const [mode, setMode] = React.useState(null);
@@ -51,6 +56,17 @@ export function useNonTransmittingActions() {
 // order. `mode` is "paper" | "live" | null (renders nothing while resolving).
 export function TradeModeBadge({ mode, className = "" }) {
   if (!mode) return null;
+  if (mode === "disconnected") {
+    return (
+      <span
+        title="Live trading is on, but this account has no Schwab connection — orders are refused, not recorded. Reconnect Schwab for this account in Settings → Accounts."
+        className={`inline-flex items-center gap-1 rounded-full border border-rose-500/40 bg-rose-500/15 px-2.5 py-0.5 text-xs font-semibold uppercase tracking-wide text-rose-300 ${className}`}
+      >
+        <span aria-hidden="true">✕</span>
+        Schwab not connected
+      </span>
+    );
+  }
   const live = mode === "live";
   const cls = live
     ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-300"

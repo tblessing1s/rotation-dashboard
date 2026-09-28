@@ -461,3 +461,42 @@ def test_leg_imbalance_exposure_direction_uncovered():
 
     direction, exposure = executor._leg_imbalance_exposure(close_qty=3, open_qty=3)
     assert direction == "balanced"
+
+
+# ---------------------------------------------------------------------------
+# A CANCELED roll whose activity still lists execution legs is NOT a fill
+# (LIVE: SPCX order 1008063520870 — Schwab canceled it, the app booked it as
+# filled at $0.00 / $0.00 and the old call went on to be assigned).
+# ---------------------------------------------------------------------------
+@pytest.mark.parametrize("order", [
+    _filled_order(close_px=0.0, open_px=0.0, qty=5, status="CANCELED"),
+    {**_filled_order(qty=5, status="CANCELED"), "filledQuantity": 0},
+    {**_filled_order(qty=5, status="CANCELED"),
+     "orderActivityCollection": [{"activityType": "ORDER_ACTION",
+                                  "executionLegs": [{"legId": 1, "quantity": 5, "price": 2.4},
+                                                    {"legId": 2, "quantity": 5, "price": 5.1}]}]},
+])
+def test_canceled_roll_with_phantom_execution_legs_books_nothing(store, monkeypatch, order):
+    _seed_position()
+    fake = _FakeClient([order])
+    _go_live(monkeypatch, fake)
+    before = len(log.load_state()["executions"])
+    placed = executor.execute(_roll_payload())
+    res = executor.order_status(placed["order_id"])
+    assert res["status"] == "canceled"
+    assert len(log.load_state()["executions"]) == before
+    shorts = log.find_position(log.load_state(), "ON")["short_calls"]
+    assert [sc["strike"] for sc in shorts] == [140.5]
+
+
+def test_zero_priced_legs_on_a_filled_roll_are_not_booked_at_zero(store, monkeypatch):
+    # FILLED with real quantities but $0 per-leg prices: the fill stands, the
+    # $0 prices are ignored (staged / proportional prices are used instead).
+    _seed_position()
+    fake = _FakeClient([_filled_order(close_px=0.0, open_px=0.0, qty=5)])
+    _go_live(monkeypatch, fake)
+    placed = executor.execute(_roll_payload())
+    res = executor.order_status(placed["order_id"])
+    assert res["status"] == "filled"
+    legs = [e for e in log.load_state()["executions"] if e.get("roll_group_id")]
+    assert all(e["roll_alloc_method"] != "broker_per_leg" for e in legs)

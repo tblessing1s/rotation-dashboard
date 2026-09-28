@@ -74,6 +74,22 @@ FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap",
 LEGACY_LEAP_OPEN_ACTIONS = {"buy_leap", "roll_leap", "open_position_atomic"}
 
 
+class BrokerNotConnected(ValueError):
+    """Live trading is on, but THIS book has no Schwab grant to send the order
+    with. Refused rather than booked: the old fall-through recorded the order as
+    a live fill the instant it was submitted — a roll that never reached Schwab
+    then read as "rolled" while the old call stayed open and was assigned."""
+
+    def __init__(self, action: str, connection: str | None = None):
+        self.action = action
+        self.connection = connection
+        super().__init__(
+            f"{action} not sent — live trading is on but this account has no Schwab "
+            "connection. Nothing was booked. Reconnect Schwab for this account "
+            "(Settings → Accounts), or turn live trading off to record a trade "
+            "you placed at Schwab yourself.")
+
+
 class LegacyLeapBlocked(ValueError):
     """A NEW LEAP-opening action (buy_leap / roll_leap / open_position_atomic) was
     attempted while the shares-primary migration has the LEAP diagonal in read-only
@@ -208,6 +224,14 @@ def _transmits(action: str) -> bool:
     """
     if not live_transmit() or not schwab_api.configured():
         return False
+    return _is_order(action)
+
+
+def _is_order(action: str) -> bool:
+    """Is ``action`` one the dispatch SENDS to the broker on a connected live
+    book (as opposed to a booking that never leaves the app)? The connection
+    half of `_transmits`, split out so a live book that CAN'T reach Schwab can
+    be told apart from one that simply has nothing to send."""
     if action == "close_shares_assigned":
         # An assignment is an EVENT the operator books after the fact — no order
         # is sent, so the price at the assignment (the operator's, or the strike)
@@ -845,6 +869,11 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     # fully-gated buy_shares the operator confirms (NO auto-execution).
     if action == "lot_add_recommended":
         return _lot_add_recommended(payload, ticker)
+
+    # A live book that can't reach Schwab must not silently book the order as
+    # if it filled — refuse before anything is priced, gated or written.
+    if live_transmit() and _is_order(action) and not schwab_api.configured():
+        raise BrokerNotConnected(action)
 
     contracts = int(payload.get("contracts") or 0)
     strike = payload.get("strike")
@@ -2612,6 +2641,39 @@ def _roll_leg_unconfirmed(e: dict) -> bool:
             and not e.get("order_id") and e.get("source") != "broker_manual")
 
 
+def _roll_receipt(state: dict, exec_ids: list) -> dict | None:
+    """The broker fill receipt (order id + account) that booked these legs."""
+    want = {i for i in exec_ids if i}
+    for r in reversed(state.get("order_receipts") or []):
+        if want & set(r.get("execution_ids") or []):
+            return r
+    return None
+
+
+def _broker_confirms_unfilled(receipt: dict | None) -> bool | None:
+    """Ask Schwab about the order that "filled" these legs. True when the broker
+    says it ended CANCELED / REJECTED / EXPIRED with nothing actually filled;
+    False when it filled (or is still working); None when it can't be asked.
+
+    This is how a roll booked off a phantom fill (execution legs on a canceled
+    order — see _real_execution_legs) is told apart from a real one: the
+    broker's own current record, never the booked prices."""
+    if not receipt or not receipt.get("order_id") or not schwab_api.configured():
+        return None
+    try:
+        order = data_handler.broker_client().get_order(receipt.get("account_hash"),
+                                                        str(receipt["order_id"]))
+    except Exception as e:  # noqa: BLE001 — unverifiable, never assumed unfilled
+        log.logger.warning("unfilled-roll check: order %s unreadable (%s)", receipt.get("order_id"), e)
+        return None
+    raw = (order.get("status") or "").upper()
+    if raw not in ("CANCELED", "REJECTED", "EXPIRED"):
+        return False
+    if order.get("filledQuantity") is not None:
+        return _num(order.get("filledQuantity")) <= 0
+    return not any(True for _ in _real_execution_legs(order))
+
+
 def _original_open_for(state: dict, close_ex: dict) -> dict | None:
     """The sell_short that opened the leg ``close_ex`` bought back: the latest
     live (un-voided) sell_short on the same ticker + strike booked before it."""
@@ -2638,12 +2700,31 @@ def find_unfilled_rolls(ticker: str, state: dict | None = None) -> list[dict]:
         if ((e.get("ticker") or "").upper() == ticker and e.get("roll_id")
                 and not e.get("excluded") and e.get("action") in ("close_short", "sell_short")):
             by_roll.setdefault(e["roll_id"], []).append(e)
+    pos = log.find_position(state, ticker) or {}
+    open_strikes = [sc.get("strike") for sc in pos.get("short_calls") or []]
     out = []
-    for roll_id, legs in by_roll.items():
+    broker_checks = 0
+    for roll_id, legs in sorted(by_roll.items(), key=lambda kv: str(kv[1][0].get("date") or ""),
+                                reverse=True):
         close = [e for e in legs if e.get("action") == "close_short"]
         opened = [e for e in legs if e.get("action") == "sell_short"]
-        if len(close) != 1 or len(opened) != 1 or not all(_roll_leg_unconfirmed(e) for e in legs):
+        if len(close) != 1 or len(opened) != 1:
             continue
+        verified, order_id = "no_order", None
+        if not all(_roll_leg_unconfirmed(e) for e in legs):
+            # Booked off a broker "fill" — offered only when the call it opened is
+            # still on the book AND Schwab now says that order never filled.
+            # Bounded: only the newest few are worth a broker read.
+            if (broker_checks >= 3
+                    or not any(_strike_eq(k, opened[0].get("strike")) for k in open_strikes)):
+                continue
+            receipt = _roll_receipt(state, [close[0].get("id"), opened[0].get("id")])
+            if receipt is None:
+                continue
+            broker_checks += 1
+            if _broker_confirms_unfilled(receipt) is not True:
+                continue
+            verified, order_id = "broker_unfilled", str(receipt.get("order_id"))
         orig = _original_open_for(state, close[0]) or {}
         to_exp = opened[0].get("expiration")
         if not to_exp:
@@ -2659,7 +2740,7 @@ def find_unfilled_rolls(ticker: str, state: dict | None = None) -> list[dict]:
             "from_strike": close[0].get("strike"), "from_expiration": orig.get("expiration"),
             "to_strike": opened[0].get("strike"), "to_expiration": to_exp,
             "close_id": close[0].get("id"), "open_id": opened[0].get("id"),
-            "mode": opened[0].get("mode"),
+            "mode": opened[0].get("mode"), "verified": verified, "order_id": order_id,
         })
     out.sort(key=lambda r: str(r.get("booked_at") or ""), reverse=True)
     return out
@@ -2681,8 +2762,10 @@ def undo_unfilled_roll(ticker: str, roll_id: str, reason: str, *, assigned: bool
     the right week. ``from_expiration`` supplies the old call's expiry when the
     log never recorded it.
 
-    Refuses a roll with any broker fill evidence behind it: a filled live ticket
-    is the account's truth and is never "undone" here."""
+    A roll booked off a broker "fill" is undone only when Schwab's own current
+    record of that order says it ended canceled/rejected/expired with nothing
+    filled (the phantom-fill case — see _real_execution_legs). A filled live
+    ticket is the account's truth and is never "undone" here."""
     ticker = (ticker or "").upper()
     reason = (reason or "").strip()
     if not reason:
@@ -2696,9 +2779,17 @@ def undo_unfilled_roll(ticker: str, roll_id: str, reason: str, *, assigned: bool
     if len(close) != 1 or len(opened) != 1:
         raise ValueError(f"roll {roll_id} is not a single close + open pair — resolve it by hand")
     if not all(_roll_leg_unconfirmed(e) for e in legs):
-        raise ValueError(
-            f"roll {roll_id} was filled by Schwab (broker-allocated legs) — a real fill is "
-            "never undone; reconcile it against the broker instead")
+        receipt = _roll_receipt(state, [e.get("id") for e in legs])
+        confirmed = _broker_confirms_unfilled(receipt)
+        if confirmed is None:
+            raise ValueError(
+                f"roll {roll_id} was booked off a broker fill and Schwab can't be asked about "
+                "its order right now — a real fill is never undone unverified; try again "
+                "once the account is connected")
+        if not confirmed:
+            raise ValueError(
+                f"roll {roll_id} was filled by Schwab — a real fill is never undone; "
+                "reconcile it against the broker instead")
     close_ex, open_ex = close[0], opened[0]
     contracts = int(close_ex.get("contracts") or 0)
     orig = _original_open_for(state, close_ex)
@@ -5733,6 +5824,37 @@ def submission_status(client_order_ref: str) -> dict:
     return {**_submission_response(rec), "poll": poll}
 
 
+def _real_execution_legs(order: dict, *, need_qty: bool = True):
+    """The execution legs in a Schwab order's activity that are actual FILLS.
+
+    CONFIRMED LIVE (SPCX order 1008063520870): Schwab CANCELED a two-leg roll yet
+    its activity still listed execution legs with a quantity and a $0.00 price.
+    Counting those as fills booked a roll that never happened — the old call was
+    then assigned. So a leg counts only when:
+
+      * its activity is an execution (``activityType`` EXECUTION / ``executionType``
+        FILL whenever Schwab says which — a cancel/replace ORDER_ACTION is not);
+      * it has a positive quantity (``need_qty`` — a price read tolerates a leg
+        that reports only its price); and
+      * its price, when reported, is positive — no option trades at $0.00.
+
+    Yields (activity, leg) pairs."""
+    for act in (order or {}).get("orderActivityCollection") or []:
+        a_type = str(act.get("activityType") or "EXECUTION").upper()
+        e_type = str(act.get("executionType") or "FILL").upper()
+        if a_type != "EXECUTION" or e_type != "FILL":
+            continue
+        for leg in act.get("executionLegs") or []:
+            try:
+                if need_qty and float(leg.get("quantity") or 0) <= 0:
+                    continue
+                if leg.get("price") is not None and float(leg["price"]) <= 0:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            yield act, leg
+
+
 def _roll_leg_fills(order: dict, close_symbol: str, open_symbol: str):
     """(close_fill, open_fill) per-share prices from a filled two-leg order's
     activity, matched by legId -> orderLegCollection symbol. None when absent."""
@@ -5742,16 +5864,15 @@ def _roll_leg_fills(order: dict, close_symbol: str, open_symbol: str):
         leg_symbol[leg.get("legId") or i] = sym
     close_px = open_px = None
     try:
-        for act in order.get("orderActivityCollection", []) or []:
-            for leg in act.get("executionLegs", []) or []:
-                price = leg.get("price")
-                if price is None:
-                    continue
-                sym = leg_symbol.get(leg.get("legId"))
-                if sym == close_symbol.strip():
-                    close_px = float(price)
-                elif sym == open_symbol.strip():
-                    open_px = float(price)
+        for _act, leg in _real_execution_legs(order, need_qty=False):
+            price = leg.get("price")
+            if price is None:
+                continue
+            sym = leg_symbol.get(leg.get("legId"))
+            if sym == close_symbol.strip():
+                close_px = float(price)
+            elif sym == open_symbol.strip():
+                open_px = float(price)
     except (TypeError, ValueError):
         pass
     return close_px, open_px
@@ -5771,18 +5892,19 @@ def _roll_leg_filled_qty(order: dict, close_symbol: str, open_symbol: str):
         leg_symbol[leg.get("legId") or i] = sym
     close_qty = open_qty = 0.0
     try:
-        for act in order.get("orderActivityCollection", []) or []:
-            for leg in act.get("executionLegs", []) or []:
-                qty = leg.get("quantity")
-                if qty is None:
-                    continue
-                sym = leg_symbol.get(leg.get("legId"))
-                if sym == close_symbol.strip():
-                    close_qty += float(qty)
-                elif sym == open_symbol.strip():
-                    open_qty += float(qty)
+        for _act, leg in _real_execution_legs(order):
+            sym = leg_symbol.get(leg.get("legId"))
+            if sym == close_symbol.strip():
+                close_qty += float(leg["quantity"])
+            elif sym == open_symbol.strip():
+                open_qty += float(leg["quantity"])
     except (TypeError, ValueError):
         pass
+    # The order-level filled count, when Schwab reports it, is the ceiling: a
+    # spread that says 0 filled has no filled legs, whatever the activity lists.
+    if order.get("filledQuantity") is not None:
+        cap = _num(order.get("filledQuantity"))
+        close_qty, open_qty = min(close_qty, cap), min(open_qty, cap)
     return int(round(close_qty)), int(round(open_qty))
 
 
