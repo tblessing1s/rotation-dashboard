@@ -338,7 +338,7 @@ def test_account_cash_parses_field_priority():
 
 def test_cash_balance_caches_and_raises_on_empty_or_missing_field(monkeypatch):
     import schwab_api
-    monkeypatch.setattr(schwab_api, "_accounts_cache", None)
+    monkeypatch.setattr(schwab_api, "_accounts_cache", {})
     calls = []
 
     class _Client(schwab_api.SchwabClient):
