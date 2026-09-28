@@ -468,14 +468,13 @@ def test_oauth_state_routes_the_grant_to_the_book_that_started_it(client, store,
     """The operator may switch books while Schwab's consent screen is open, so
     the callback must follow the state it issued, not whatever is active now."""
     import schwab_api
-    from blueprints.schwab_auth_bp import _connection_from_state
     accounts.create("Spouse")
     accounts.update("spouse", own_connection=True)
 
     started = client.get("/auth/schwab", headers={"X-CFM-Account": "spouse"}).get_json()
     assert started["connection"] == "account-spouse"
     state = started["authorize_url"].rsplit("state=", 1)[-1]
-    assert _connection_from_state(state) == "account-spouse"
+    assert state.endswith(".account-spouse")
 
     monkeypatch.setattr(schwab_api, "exchange_code",
                         lambda code, uri: {"refresh_token": "SPOUSE-TOKEN"})
@@ -486,11 +485,71 @@ def test_oauth_state_routes_the_grant_to_the_book_that_started_it(client, store,
     assert schwab_api.current_refresh_token() is None  # the shared grant is untouched
 
 
-def test_a_state_naming_an_unknown_connection_falls_back_to_shared(store):
-    from blueprints.schwab_auth_bp import _connection_from_state
-    assert _connection_from_state("rand.account-ghost") == accounts.SHARED_CONNECTION
-    assert _connection_from_state(None) == accounts.SHARED_CONNECTION
-    assert _connection_from_state("rand") == accounts.SHARED_CONNECTION
+# The callback is reachable without a session, so ONLY a state this app issued
+# (signed-in /auth/schwab), unexpired and unused, may store a grant — and never
+# into a slot other than the one it was issued for. Formerly an unknown state
+# fell back to storing into the SHARED grant.
+def _start(client, account=None):
+    headers = {"X-CFM-Account": account} if account else {}
+    url = client.get("/auth/schwab", headers=headers).get_json()["authorize_url"]
+    return url.rsplit("state=", 1)[-1]
+
+
+def _callback(client, state, monkeypatch, token="TOKEN"):
+    import schwab_api
+    monkeypatch.setattr(schwab_api, "exchange_code", lambda code, uri: {"refresh_token": token})
+    return client.get(f"/auth/schwab/callback?code=abc&state={state}")
+
+
+@pytest.mark.parametrize("state", ["forged.shared", "forged.account-spouse", "", "nodot"])
+def test_a_state_this_app_never_issued_is_refused(client, store, app_creds, monkeypatch, state):
+    import schwab_api
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+    resp = _callback(client, state, monkeypatch, token="ATTACKER")
+    assert resp.status_code == 302 and "schwab=error" in resp.headers["Location"]
+    assert schwab_api.current_refresh_token() is None
+    with accounts.use("spouse"):
+        assert schwab_api.current_refresh_token() is None
+
+
+def test_a_state_is_single_use(client, store, app_creds, monkeypatch):
+    import schwab_api
+    state = _start(client)
+    assert "schwab=connected" in _callback(client, state, monkeypatch, "FIRST").headers["Location"]
+    assert "schwab=error" in _callback(client, state, monkeypatch, "REPLAY").headers["Location"]
+    assert schwab_api.current_refresh_token() == "FIRST"
+
+
+def test_a_state_cannot_be_retargeted_to_another_connection(client, store, app_creds, monkeypatch):
+    import schwab_api
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+    nonce = _start(client).split(".", 1)[0]          # issued for the SHARED grant
+    resp = _callback(client, f"{nonce}.account-spouse", monkeypatch, "ATTACKER")
+    assert "schwab=error" in resp.headers["Location"]
+    with accounts.use("spouse"):
+        assert schwab_api.current_refresh_token() is None
+
+
+def test_an_expired_state_is_refused(client, store, app_creds, monkeypatch):
+    import time as _time
+    from blueprints import schwab_auth_bp
+    state = _start(client)
+    real = _time.time
+    monkeypatch.setattr(schwab_auth_bp.time, "time", lambda: real() + schwab_auth_bp.STATE_TTL_SECONDS + 1)
+    assert "schwab=error" in _callback(client, state, monkeypatch).headers["Location"]
+
+
+def test_a_login_for_a_deleted_book_never_lands_in_the_shared_grant(client, store, app_creds,
+                                                                     monkeypatch):
+    import schwab_api
+    accounts.create("Spouse")
+    accounts.update("spouse", own_connection=True)
+    state = _start(client, "spouse")
+    accounts.delete("spouse", purge=True)
+    assert "schwab=error" in _callback(client, state, monkeypatch, "SPOUSE").headers["Location"]
+    assert schwab_api.current_refresh_token() is None
 
 
 def test_connections_endpoint_lists_every_grant(client, store, app_creds):
