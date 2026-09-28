@@ -74,6 +74,22 @@ FROZEN_BLOCKED_ACTIONS = {"buy_leap", "sell_short", "roll_short", "roll_leap",
 LEGACY_LEAP_OPEN_ACTIONS = {"buy_leap", "roll_leap", "open_position_atomic"}
 
 
+class BrokerNotConnected(ValueError):
+    """Live trading is on, but THIS book has no Schwab grant to send the order
+    with. Refused rather than booked: the old fall-through recorded the order as
+    a live fill the instant it was submitted — a roll that never reached Schwab
+    then read as "rolled" while the old call stayed open and was assigned."""
+
+    def __init__(self, action: str, connection: str | None = None):
+        self.action = action
+        self.connection = connection
+        super().__init__(
+            f"{action} not sent — live trading is on but this account has no Schwab "
+            "connection. Nothing was booked. Reconnect Schwab for this account "
+            "(Settings → Accounts), or turn live trading off to record a trade "
+            "you placed at Schwab yourself.")
+
+
 class LegacyLeapBlocked(ValueError):
     """A NEW LEAP-opening action (buy_leap / roll_leap / open_position_atomic) was
     attempted while the shares-primary migration has the LEAP diagonal in read-only
@@ -208,6 +224,14 @@ def _transmits(action: str) -> bool:
     """
     if not live_transmit() or not schwab_api.configured():
         return False
+    return _is_order(action)
+
+
+def _is_order(action: str) -> bool:
+    """Is ``action`` one the dispatch SENDS to the broker on a connected live
+    book (as opposed to a booking that never leaves the app)? The connection
+    half of `_transmits`, split out so a live book that CAN'T reach Schwab can
+    be told apart from one that simply has nothing to send."""
     if action == "close_shares_assigned":
         # An assignment is an EVENT the operator books after the fact — no order
         # is sent, so the price at the assignment (the operator's, or the strike)
@@ -845,6 +869,11 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
     # fully-gated buy_shares the operator confirms (NO auto-execution).
     if action == "lot_add_recommended":
         return _lot_add_recommended(payload, ticker)
+
+    # A live book that can't reach Schwab must not silently book the order as
+    # if it filled — refuse before anything is priced, gated or written.
+    if live_transmit() and _is_order(action) and not schwab_api.configured():
+        raise BrokerNotConnected(action)
 
     contracts = int(payload.get("contracts") or 0)
     strike = payload.get("strike")

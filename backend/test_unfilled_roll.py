@@ -143,3 +143,34 @@ def test_a_reason_is_required(store):
     res = _covered_then_paper_roll()
     with pytest.raises(ValueError, match="typed reason"):
         executor.undo_unfilled_roll("AAA", res["roll_group_id"], "  ")
+
+
+# ---------------------------------------------------------------------------
+# The guard: a live book that can't reach Schwab refuses instead of booking
+# ---------------------------------------------------------------------------
+def test_live_book_without_schwab_refuses_the_roll_and_books_nothing(store, monkeypatch):
+    import schwab_api
+    _covered_then_paper_roll()                       # seeded in paper mode
+    before = list(log.load_state()["executions"])
+    monkeypatch.setattr(executor, "live_enabled", lambda: True)
+    monkeypatch.setattr(schwab_api, "configured", lambda *a, **k: False)
+    with pytest.raises(executor.BrokerNotConnected, match="no Schwab connection"):
+        executor.execute({
+            "action": "roll_short", "ticker": "AAA", "contracts": 1,
+            "from_strike": 141, "close_price_per_share": 3.0, "to_strike": 142,
+            "premium_per_share": 3.5, "to_expiration": "2026-10-09", "stock_price": 140.5})
+    with pytest.raises(executor.BrokerNotConnected):
+        executor.execute({"action": "close_short", "ticker": "AAA", "strike": 141,
+                          "contracts": 1, "close_price_per_share": 3.0, "stock_price": 140.5})
+    assert log.load_state()["executions"] == before
+
+
+def test_bookings_that_never_transmit_still_work_while_disconnected(store, monkeypatch):
+    import schwab_api
+    _covered_then_paper_roll()
+    monkeypatch.setattr(executor, "live_enabled", lambda: True)
+    monkeypatch.setattr(schwab_api, "configured", lambda *a, **k: False)
+    # An assignment is an event, not an order — nothing to send, so it books.
+    res = executor.execute({"action": "close_shares_assigned", "ticker": "AAA",
+                            "strike": 141, "contracts": 1})
+    assert res["status"] == "filled"
