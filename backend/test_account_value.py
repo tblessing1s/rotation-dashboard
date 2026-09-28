@@ -185,3 +185,53 @@ def test_snapshot_account_value_skipped_in_demo_mode_via_nightly_refresh(monkeyp
     monkeypatch.setattr(config, "_demo_mode", True)
     result = maintenance.nightly_refresh()
     assert result["skipped"] == "demo mode"
+
+
+# ---------------------------------------------------------------------------
+# /api/account-value-history — live last point + removing bad points
+# ---------------------------------------------------------------------------
+def _client():
+    import app as app_module
+    return app_module.app.test_client()
+
+
+def test_history_ends_with_todays_live_value(isolated_state, monkeypatch):
+    # LIVE (Christie's Account): the 9/26-9/27 points were recorded while a
+    # phantom 100 SPCX + short call was still on the book; after the book was
+    # corrected the headline kept showing the stale $43,344 until the next night.
+    _mute_quote_warmup(monkeypatch)
+    log.save_state({"metadata": {"operating_cash": 29353.79}, "positions": [],
+                    "account_value_history": [
+                        {"date": "2026-09-27", "total": 43344.0, "operating_cash": 29353.79,
+                         "shares_value": 15014.0, "short_liability": 1023.0}]})
+    monkeypatch.setattr(log, "utcnow", lambda: "2026-09-28T14:00:00Z")
+    pts = _client().get("/api/account-value-history").get_json()["points"]
+    assert [p["date"] for p in pts] == ["2026-09-27", "2026-09-28"]
+    assert pts[-1]["live"] is True and pts[-1]["total"] == 29353.79
+    # The live point is computed on read, never persisted.
+    assert len(log.load_state()["account_value_history"]) == 1
+
+
+def test_live_point_replaces_a_stored_point_for_today(isolated_state, monkeypatch):
+    _mute_quote_warmup(monkeypatch)
+    log.save_state({"metadata": {"operating_cash": 500.0}, "positions": [],
+                    "account_value_history": [{"date": "2026-09-28", "total": 1.0}]})
+    monkeypatch.setattr(log, "utcnow", lambda: "2026-09-28T14:00:00Z")
+    pts = _client().get("/api/account-value-history").get_json()["points"]
+    assert len(pts) == 1 and pts[0]["total"] == 500.0 and pts[0]["live"]
+
+
+def test_remove_points_requires_a_reason_and_keeps_an_audit_copy(isolated_state):
+    log.save_state({"metadata": {}, "positions": [], "account_value_history": [
+        {"date": "2026-09-25", "total": 29000.0},
+        {"date": "2026-09-26", "total": 43344.0},
+        {"date": "2026-09-27", "total": 43344.0}]})
+    c = _client()
+    assert c.post("/api/account-value-history/remove",
+                  json={"dates": ["2026-09-26"]}).status_code == 400
+    r = c.post("/api/account-value-history/remove",
+               json={"dates": ["2026-09-26", "2026-09-27"], "reason": "phantom SPCX"})
+    assert r.get_json()["removed"] == ["2026-09-26", "2026-09-27"]
+    st = log.load_state()
+    assert [p["date"] for p in st["account_value_history"]] == ["2026-09-25"]
+    assert [p["removed_reason"] for p in st["account_value_history_removed"]] == ["phantom SPCX"] * 2
