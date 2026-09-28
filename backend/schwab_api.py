@@ -954,6 +954,8 @@ def select_account_node(nodes: list[dict], account_number: str | None) -> dict:
     is that this book's numbers come from that account and no other.
     """
     if not account_number:
+        import accounts
+        accounts.ensure_first_linked_ok(len(nodes))
         return nodes[0]
     for node in nodes:
         if account_node_number(node) == str(account_number).strip():
