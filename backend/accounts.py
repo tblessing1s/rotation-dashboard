@@ -542,17 +542,48 @@ def broker_account_number(account_id: str | None = None) -> str | None:
     return (acct or {}).get("broker_account_number") or None
 
 
+class AccountUnbound(ValueError):
+    """A non-primary book with no Schwab account number, on a login that reaches
+    more than one account: "the first linked account" would be a guess."""
+
+
+def ensure_first_linked_ok(count_linked, account_id: str | None = None) -> None:
+    """Refuse to let an UNBOUND non-primary book fall back to the first linked
+    Schwab account unless that fallback can only mean one account.
+
+    CONFIRMED LIVE: a secondary book with no account number set, on a login that
+    also reaches the primary's account, imported the primary's IBIT trades and an
+    SPCX roll as its own — "first linked" was the other account. The fallback is
+    kept only where it is unambiguous: the primary book (the historical single-
+    account behaviour), or a book on its OWN login that reaches exactly one
+    account. ``count_linked`` is the number of linked accounts, or a zero-arg
+    callable returning it (only called when the answer matters)."""
+    acct = get(account_id or active_id())
+    if acct is None or acct["id"] == DEFAULT_ID:
+        return
+    if acct.get("own_connection"):
+        n = count_linked() if callable(count_linked) else count_linked
+        if int(n or 0) == 1:
+            return
+    raise AccountUnbound(
+        f"account '{acct['id']}' has no Schwab account number set, and its Schwab login "
+        "may reach more than one account — refusing to guess which one is this book's. "
+        "Set its account number in Settings → Accounts.")
+
+
 def broker_hash(client, account_id: str | None = None) -> str:
     """The Schwab account HASH orders for this book must be placed against.
 
-    Unbound accounts keep the historical behaviour (the first linked account), so
-    a single-account deployment is unchanged. A bound account resolves its number
+    An unbound PRIMARY book keeps the historical behaviour (the first linked
+    account), so a single-account deployment is unchanged; an unbound secondary
+    book gets it only when that can mean one account (ensure_first_linked_ok). A bound account resolves its number
     through /accounts/accountNumbers and FAILS if that number isn't linked —
     routing an order to the wrong account is precisely what the binding exists
     to prevent, so there is no fallback.
     """
     number = broker_account_number(account_id)
     if not number:
+        ensure_first_linked_ok(lambda: len(client.account_numbers() or []), account_id)
         return client.primary_account_hash()
     for entry in client.account_numbers() or []:
         if str(entry.get("accountNumber") or "").strip() == number:
