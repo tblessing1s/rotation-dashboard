@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Spinner, ErrorState, Stat, useApi } from "./ui.jsx";
+import { Card, ChartLink, Spinner, ErrorState, Stat, useApi } from "./ui.jsx";
 
 // Dry-powder cash-secured-put shadow sleeve (csp_dry_powder.py) — a second,
 // distinct income sweep run nightly on idle cash that cannot fund a new full
@@ -17,7 +17,7 @@ function TradeRow({ t, resolved }) {
   const outcome = t.outcome;
   return (
     <tr className="border-t border-slate-800 text-slate-200">
-      <td className="py-1.5 pr-3 font-mono">{t.ticker}</td>
+      <td className="py-1.5 pr-3 font-mono">{t.ticker}<ChartLink ticker={t.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" /></td>
       <td className="py-1.5 pr-3 text-[11px] text-slate-400">{TIER_LABEL[t.tier] ? t.tier : t.tier || "—"}</td>
       <td className="py-1.5 pr-3 font-mono text-[11px] text-slate-400">{t.opened_date}</td>
       <td className="py-1.5 pr-3 font-mono text-[11px] text-slate-400">{t.expiration} ({t.dte}d)</td>

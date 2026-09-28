@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Pill, Stat, Loading, money, fmt, pct, useApi } from "./ui.jsx";
+import { Card, Pill, Stat, ChartLink, Loading, money, fmt, pct, useApi } from "./ui.jsx";
 
 // Closed-cycle history: the learning loop. Every number derives from the
 // immutable execution log (see logging_handler.recompute_derived).
@@ -83,7 +83,7 @@ function ThetaLedgerCards({ theta }) {
                 return (
                   <tr key={i} className="border-t border-slate-800">
                     <td className="py-2 pr-3 text-slate-300">{w.week}</td>
-                    <td className="py-2 pr-3 font-semibold text-slate-100">{w.ticker}</td>
+                    <td className="py-2 pr-3 font-semibold text-slate-100">{w.ticker}<ChartLink ticker={w.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" /></td>
                     <td className="py-2 pr-3">{money(w.extrinsic_sold)}</td>
                     <td className="py-2 pr-3">{money(w.extrinsic_paid_back)}</td>
                     <td className="py-2 pr-3 text-amber-300/80"
@@ -297,7 +297,7 @@ function CycleRow({ c }) {
     <>
       <tr onClick={() => setOpen(!open)} className="cursor-pointer border-t border-slate-800 hover:bg-slate-800/40">
         <td className="py-2 pr-3 font-semibold text-slate-100">
-          <span className="mr-1 text-slate-500">{open ? "▾" : "▸"}</span>{c.ticker}
+          <span className="mr-1 text-slate-500">{open ? "▾" : "▸"}</span>{c.ticker}<ChartLink ticker={c.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
         </td>
         <td className="py-2 pr-3 text-slate-300">{c.entry_date} → {c.exit_date}</td>
         <td className="py-2 pr-3 text-slate-300">{c.days_held ?? "—"}d</td>
@@ -669,7 +669,7 @@ function TransactionEditor() {
                          onChange={(e) => set(i, "date", e.target.value)}
                          className={`${inp} w-24 font-sans`} />
                 </td>
-                <td className="py-1 pr-2 font-sans font-semibold text-slate-300">{r.ticker}</td>
+                <td className="py-1 pr-2 font-sans font-semibold text-slate-300">{r.ticker}<ChartLink ticker={r.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" /></td>
                 <td className="py-1 pr-2 text-amber-300">{r.action}</td>
                 <td className="py-1 pr-2">
                   <input value={r.strike} disabled={r.isShare} placeholder={r.isShare ? "—" : undefined}
@@ -795,7 +795,7 @@ function ClosedPositionLegRepair({ positions, onRepaired }) {
       <ul className="mt-2 space-y-1">
         {stuck.map((p) => (
           <li key={p.ticker} className="flex items-center gap-2 text-xs">
-            <span className="font-semibold text-slate-200">{p.ticker}</span>
+            <span className="font-semibold text-slate-200">{p.ticker}</span><ChartLink ticker={p.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
             <span className="text-slate-500">
               {(p.short_calls || []).map((sc) => `${sc.strike}C x${sc.contracts} exp ${sc.expiration}`).join(", ")}
               {(p.leap_legs || []).length ? ` · ${p.leap_legs.length} LEAP leg(s)` : ""}
@@ -851,7 +851,7 @@ function SharesDriftRepair({ positions, onRepaired }) {
           const expected = Number(p.expected_shares_count ?? current);
           return (
             <li key={p.ticker} className="flex items-center gap-2 text-xs">
-              <span className="font-semibold text-slate-200">{p.ticker}</span>
+              <span className="font-semibold text-slate-200">{p.ticker}</span><ChartLink ticker={p.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
               <span className="text-slate-500">shows {current} shares · log implies {expected}</span>
               <button onClick={() => rebuild(p.ticker, current, expected)} disabled={busy === p.ticker}
                       className="ml-auto rounded-full border border-amber-700 bg-amber-500/10 px-2.5 py-1 text-xs font-semibold text-amber-300 hover:bg-amber-500/20 disabled:opacity-50">
@@ -907,7 +907,7 @@ function ShortCallsDriftRepair({ positions, onRepaired }) {
       <ul className="mt-2 space-y-1">
         {drifted.map((p) => (
           <li key={p.ticker} className="flex items-center gap-2 text-xs">
-            <span className="font-semibold text-slate-200">{p.ticker}</span>
+            <span className="font-semibold text-slate-200">{p.ticker}</span><ChartLink ticker={p.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
             <span className="text-slate-500">
               shows {describe(p.short_calls)} · log implies {describe(p.expected_short_calls)}
             </span>

@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Pill, Loading, fmt } from "./ui.jsx";
+import { Pill, ChartLink, Loading, fmt } from "./ui.jsx";
 import { useTradeMode, useNonTransmittingActions, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
 import { totalDollars } from "../units.js";
 
@@ -259,7 +259,7 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
         onClick={(e) => e.stopPropagation()}
       >
         <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold text-slate-100">Option Chain · {ticker}</h2>
+          <h2 className="text-lg font-semibold text-slate-100">Option Chain · {ticker}<ChartLink ticker={ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" /></h2>
           <button onClick={onClose} className="rounded-lg px-2 py-1 text-slate-400 hover:bg-slate-800 hover:text-slate-200">✕</button>
         </div>
 

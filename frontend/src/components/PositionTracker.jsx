@@ -833,7 +833,10 @@ function RecCard({ rec, now, expanded, onToggleDetail, onExecute, onDismiss, onP
             has no position, so without this the card never says which name it
             is proposing. */}
         {showTicker && (
-          <span className="font-semibold text-slate-100">{rec.ticker}</span>
+          <>
+            <span className="font-semibold text-slate-100">{rec.ticker}</span>
+            <ChartLink ticker={rec.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
+          </>
         )}
         <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${badge}`}>
           {(rec.action_type || "").replaceAll("_", " ")}

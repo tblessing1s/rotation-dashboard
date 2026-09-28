@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { fmt, useApi } from "./ui.jsx";
+import { ChartLink, fmt, useApi } from "./ui.jsx";
 
 // The per-position price strip in the app chrome: on every tab, every open
 // position's live stock price and how far it sits from each short strike.
@@ -50,13 +50,14 @@ function Chip({ p }) {
     // Phone: the chip stacks — name and price on the first line, the legs
     // beneath — and the row snap-scrolls one chip at a time. From `sm` up it is
     // the single inline line the desktop chrome has room for.
-    <button onClick={go}
-            className="flex shrink-0 snap-start flex-col items-start gap-0.5 rounded-md border border-slate-800 bg-slate-900/60 px-2 py-1 text-left text-[11px] hover:border-slate-600 hover:bg-slate-800/80 sm:flex-row sm:items-center sm:gap-2 sm:text-xs"
+    <div role="button" tabIndex={0} onClick={go} onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); (go)(e); } }}
+            className="flex cursor-pointer shrink-0 snap-start flex-col items-start gap-0.5 rounded-md border border-slate-800 bg-slate-900/60 px-2 py-1 text-left text-[11px] hover:border-slate-600 hover:bg-slate-800/80 sm:flex-row sm:items-center sm:gap-2 sm:text-xs"
             title={`${p.ticker} · ${p.shares} shares · open the position card`}>
       <span className="flex items-center gap-2">
         <span className="flex items-center gap-1 font-semibold text-slate-100">
           {p.needs_review && <span className="h-1.5 w-1.5 rounded-full bg-rose-400" title="Needs review — diverged from the broker" />}
           {p.ticker}
+          <ChartLink ticker={p.ticker} size="h-3 w-3" className="ml-1 align-middle" />
         </span>
         <span className="font-mono text-slate-200">{p.stock_price != null ? fmt(p.stock_price, 2) : <span className="text-slate-500">—</span>}</span>
       </span>
@@ -65,7 +66,7 @@ function Chip({ p }) {
           ? <span className="text-slate-500">no short</span>
           : p.legs.map((l, i) => <Leg key={i} leg={l} spot={p.stock_price} />)}
       </span>
-    </button>
+    </div>
   );
 }
 

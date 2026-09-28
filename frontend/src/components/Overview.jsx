@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, Stat, Light, Pill, Meter, Modal, Loading, ErrorState, money, fmt, pct, useApi } from "./ui.jsx";
+import { Card, ChartLink, Stat, Light, Pill, Meter, Modal, Loading, ErrorState, money, fmt, pct, useApi } from "./ui.jsx";
 import AccountsRollup from "./AccountsRollup.jsx";
 import ProcessRibbon from "./ProcessRibbon.jsx";
 import ReadyToEnter from "./ReadyToEnter.jsx";
@@ -413,12 +413,14 @@ function GroveDetail({ positions, killByTicker, onFocus }) {
     >
       <div className="space-y-1.5">
         {rows.map(({ p, count, lots, sold, juicePct, captured, flags }) => (
-          <button
+          <div role="button" tabIndex={0}
             key={p.ticker}
             onClick={() => onFocus?.(p.ticker)}
-            className="flex w-full flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-slate-800/60 bg-slate-900/40 px-3 py-2 text-left transition hover:bg-slate-800/50"
+            onKeyDown={(e) => { if (e.target === e.currentTarget && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); (() => onFocus?.(p.ticker))(e); } }}
+            className="flex cursor-pointer w-full flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-slate-800/60 bg-slate-900/40 px-3 py-2 text-left transition hover:bg-slate-800/50"
           >
             <span className="w-16 shrink-0 text-sm font-semibold text-slate-100">{p.ticker}</span>
+            <ChartLink ticker={p.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />
             <span className="text-xs text-slate-500">
               <span className="font-semibold text-slate-200">{count}</span> sh
               {p.stock_price != null && <span className="ml-1">@ {fmt(p.stock_price, 2)}</span>}
@@ -449,7 +451,7 @@ function GroveDetail({ positions, killByTicker, onFocus }) {
                 ))}
               </span>
             )}
-          </button>
+          </div>
         ))}
       </div>
       <div className="mt-3 border-t border-slate-800 pt-2 text-[11px] text-slate-500">

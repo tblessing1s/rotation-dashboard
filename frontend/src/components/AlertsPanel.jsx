@@ -1,7 +1,7 @@
 import React from "react";
 import { api } from "../api.js";
 import PushSetup from "./PushSetup.jsx";
-import { Card, Loading, Pill, useApi } from "./ui.jsx";
+import { Card, Loading, Pill, ChartLink, useApi } from "./ui.jsx";
 import { useToast } from "./Toast.jsx";
 
 // Alerts, read the way an inbox reads: what's NEW is on top, what you've already
@@ -54,6 +54,7 @@ function AlertRow({ alert, onAck, onAct, compact = false }) {
           {alert.type.replaceAll("_", " ")}
         </span>
         {alert.ticker && <span className="text-sm font-bold text-slate-100">{alert.ticker}</span>}
+        {alert.ticker && <ChartLink ticker={alert.ticker} size="h-3.5 w-3.5" className="ml-1 align-middle" />}
         <span className="ml-auto text-xs text-slate-500" title={`first seen ${alert.first_seen || ""}`}>
           {when(alert.first_seen)}
         </span>
