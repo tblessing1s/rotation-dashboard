@@ -70,6 +70,7 @@ ALERT_TYPES = {
     "ORDER_PARTIAL_FILL_CANCELED": ("CRITICAL", "HARD_CFM_RULE: a partial fill remained after a cancel -> possibly unbalanced position; freeze for review and re-check delta coverage; never auto-fix"),
     "ORDER_STATE_UNKNOWN": ("CRITICAL", "HARD_CFM_RULE: an order's broker state is unknown (cancel failed, may still be working) -> hard-lock the position; no resubmit until resolved"),
     "ORDER_RESUBMIT_EXHAUSTED": ("HIGH", "PROPOSED_DEFAULT: a position hit MAX_RESUBMIT_ATTEMPTS this session -> stop resubmitting; reprice or reassess the entry manually"),
+    "CROSS_BOOK_DUPLICATE": ("HIGH", "HARD_CFM_RULE: the same Schwab order or transaction is booked in more than one account's book -> a trade belongs to exactly one account; void the copy in the book it does not belong to"),
     "HISTORY_DIVERGED": ("HIGH", "HARD_CFM_RULE: the book's fills disagree with Schwab's own transactions (a booked fill Schwab never made, a Schwab fill the book is missing, or a wrong price/size) -> correct the book before trusting its ledgers"),
     "RECONCILE_STALE": ("MEDIUM", "PROPOSED_DEFAULT: reconciliation has not run successfully within the expected window -> the safety check is silent"),
     "SNAPSHOT_DATA_QUALITY": ("LOW", "PROPOSED_DEFAULT: >25% of an entry-context snapshot's tracked fields came back null (stale/unavailable) -> the entry telemetry for calibration is thin, not a trade blocker"),
@@ -954,6 +955,23 @@ def check_reconcile_dirty(state: dict) -> list[dict]:
     return out
 
 
+def check_cross_book_duplicate(state: dict) -> list[dict]:
+    """The daily cross-book check (cross_book.py) found broker ids this book
+    shares with another book. One alert per duplicated broker id."""
+    import cross_book
+    out = []
+    for d in cross_book.open_duplicates(state):
+        labels = d.get("labels") or {}
+        where = "; ".join(f"{labels.get(a, a)}: {', '.join(e)}" for a, e in d["books"].items())
+        out.append(_alert(
+            "CROSS_BOOK_DUPLICATE", None,
+            f"Schwab {d['kind']} {d['broker_id']} is booked in {len(d['books'])} books — {where}.",
+            "A broker trade belongs to exactly one account: void the copy in the book it doesn't "
+            "belong to (History → raw log), and check each book's Schwab account number.",
+            {"duplicate": d}, key=d["id"]))
+    return out
+
+
 def check_history_diverged(state: dict) -> list[dict]:
     """The daily trade-history audit (history_audit.py) found unexplained
     differences between this book's fills and Schwab's transactions. One alert
@@ -1567,6 +1585,7 @@ EVALUATORS = [
     check_reconcile_dirty,
     check_reconcile_stale,
     check_history_diverged,
+    check_cross_book_duplicate,
     check_roll_leg_imbalance,
     check_book_correlation,
     check_regime_change,

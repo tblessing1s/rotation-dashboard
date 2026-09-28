@@ -665,6 +665,15 @@ def _maybe_morning_reconcile(now: datetime, due: list[str]) -> None:
 
     # One clock (above), every book reconciled against ITS OWN brokerage account.
     for_each_account("pre-market reconciliation", run)
+    # …and every book against every OTHER book: one broker fill, one book.
+    try:
+        import cross_book
+        rep = cross_book.run_and_persist()
+        if rep["duplicates"]:
+            logger.warning("cross-book check: %d broker id(s) booked in more than one book",
+                           len(rep["duplicates"]))
+    except Exception as e:  # noqa: BLE001 — must not kill the thread
+        logger.error("cross-book check failed: %s", e)
 
 
 def reconcile_interval_enabled() -> bool:
