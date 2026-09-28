@@ -882,6 +882,73 @@ function HistoryAuditStatus() {
   );
 }
 
+// One broker fill, one book (cross_book.py): the same Schwab order or
+// transaction id held by live entries in more than one account's book. Checked
+// every morning across all books; "Check now" re-runs it.
+function CrossBookStatus() {
+  const { data, reload } = useApi(api.crossBook, [], null);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  const run = async () => {
+    setBusy(true); setErr(null);
+    try { await api.runCrossBook(); await reload(); }
+    catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+  const ack = async (d) => {
+    const reason = window.prompt(`Acknowledge Schwab ${d.kind} ${d.broker_id} in this book?\n\nWhy is it OK here? (required, logged):`);
+    if (!reason || !reason.trim()) return;
+    setErr(null);
+    try { await api.ackCrossBook(d.id, reason.trim()); await reload(); }
+    catch (e) { setErr(String(e.message || e)); }
+  };
+  const dups = data?.duplicates || [];
+  const open = dups.filter((d) => !d.ack);
+  const status = data?.status || "never run";
+  const light = status === "CLEAN" ? "green" : "yellow";
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Other accounts (one fill, one book)</span>
+        <button onClick={run} disabled={busy}
+                className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          {busy ? "Checking…" : "Check now"}
+        </button>
+      </div>
+      <div className="mt-2 flex items-center gap-2 text-sm">
+        <Light status={light} size="h-2.5 w-2.5" />
+        <span className="font-semibold text-slate-200">{status}</span>
+        {data?.as_of && <span className="text-xs text-slate-500">· {data.as_of.replace("T", " ").replace("Z", "")}</span>}
+      </div>
+      {status === "CLEAN" && (
+        <p className="mt-1 text-xs text-slate-500">No Schwab order or transaction in this book is also booked in another account's book.</p>
+      )}
+      {open.length > 0 && (
+        <ul className="mt-2 space-y-1.5">
+          {open.map((d) => (
+            <li key={d.id} className="rounded-lg border border-slate-800 bg-slate-950/60 px-2.5 py-1.5 text-xs">
+              <div className="flex items-start gap-2">
+                <span className="shrink-0 rounded-full border border-rose-600 bg-rose-500/15 px-2 py-0.5 text-[10px] font-semibold uppercase text-rose-200">in {Object.keys(d.books).length} books</span>
+                <span className="text-slate-300">
+                  Schwab {d.kind} {d.broker_id}: {Object.entries(d.books).map(([a, e]) => `${(d.labels || {})[a] || a} (${e.join(", ")})`).join(" · ")}
+                </span>
+                <button onClick={() => ack(d)}
+                        className="ml-auto shrink-0 rounded border border-slate-700 px-1.5 text-[10px] font-semibold text-slate-400 hover:text-slate-200">
+                  acknowledge
+                </button>
+              </div>
+              <p className="mt-0.5 pl-1 text-[11px] text-slate-500">
+                A broker trade belongs to one account: void the copy in the book it doesn't belong to (History → raw log).
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
 // Live-fill verification: re-fetch recent live orders from Schwab and diff the
 // broker's fills against what we logged, plus a reconcile pass. On-demand — this
 // is the "prove the live-order path is correct" check for after a real order.
@@ -1205,6 +1272,7 @@ export default function DataHealth() {
       {!data?.demo && <TieredScheduler data={data} />}
       <ReconcileStatus />
       {!data?.demo && <HistoryAuditStatus />}
+      {!data?.demo && <CrossBookStatus />}
       {!data?.demo && <PendingOrdersPanel />}
       {!data?.demo && <IngestionPanel />}
       {!data?.demo && <LiveFillVerify />}

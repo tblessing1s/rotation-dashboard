@@ -113,6 +113,34 @@ def api_history_audit():
         return _err(e)
 
 
+@reconcile_bp.route("/api/reconcile/cross-book", methods=["GET", "POST"])
+def api_cross_book():
+    """The cross-book duplicate check (cross_book.py): GET this book's last
+    record; POST re-checks every book now and returns this book's record."""
+    import cross_book
+    try:
+        if request.method == "POST":
+            cross_book.run_and_persist()
+        return jsonify(log.load_state().get("cross_book") or {})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@reconcile_bp.route("/api/reconcile/cross-book/acknowledge", methods=["POST"])
+def api_cross_book_ack():
+    """Mark one cross-book duplicate explained for this book (typed reason)."""
+    import cross_book
+    p = request.get_json(silent=True) or {}
+    if not p.get("duplicate_id"):
+        return jsonify({"error": "duplicate_id is required"}), 400
+    try:
+        return jsonify(cross_book.acknowledge(p["duplicate_id"], p.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @reconcile_bp.route("/api/reconcile/history-audit/acknowledge", methods=["POST"])
 def api_history_audit_ack():
     """Mark one audit finding explained (typed reason, logged)."""

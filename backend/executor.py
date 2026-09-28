@@ -1195,6 +1195,19 @@ def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
         raise ValueError(f"proposal {proposal_id} has no resolvable underlying — cannot adopt")
     legs = proposal.get("legs") or []
 
+    # One broker fill, one book: refuse a trade another book already holds
+    # (CONFIRMED LIVE — one account's trades were adopted into another's book).
+    import cross_book
+    elsewhere = cross_book.held_elsewhere(
+        list(proposal.get("transaction_ids") or []) + [l.get("transaction_id") for l in legs],
+        proposal.get("order_id"))
+    if elsewhere:
+        raise ValueError(
+            f"proposal {proposal_id} is already booked in {elsewhere['label']} "
+            f"({elsewhere['broker_id'].replace(':', ' ')}, {', '.join(elsewhere['execution_ids'])}) — "
+            "a broker trade belongs to exactly one account. Check each book's Schwab "
+            "account number in Settings → Accounts.")
+
     # Where the stock price for the extrinsic split comes from, in order: the
     # operator's number; the app's own order journal when this "out-of-band"
     # order was in fact placed from the app (its fill got lost from the store,
