@@ -780,6 +780,108 @@ function ReconcileStatus() {
   );
 }
 
+// Trade-history audit (history_audit.py): this book's FILLS vs Schwab's own
+// transactions over the last ~30 days — reconciliation above only compares what
+// is held now. Runs every morning with reconciliation; "Check now" re-runs it.
+const AUDIT_KIND = {
+  PHANTOM_IN_BOOK: { label: "not at Schwab", cls: "border-rose-600 bg-rose-500/15 text-rose-200",
+    fix: "Schwab has no such fill — void it in History (raw log) if it never happened or belongs to another account." },
+  MISSING_IN_BOOK: { label: "missing in book", cls: "border-amber-600 bg-amber-500/15 text-amber-200",
+    fix: "Schwab filled it — adopt it under Broker execution ingestion (raise \"days back\" if it's older than 7 days)." },
+  PRICE_MISMATCH: { label: "price differs", cls: "border-sky-600 bg-sky-500/15 text-sky-200",
+    fix: "Correct the price in History → Transactions (editable)." },
+  QUANTITY_MISMATCH: { label: "size differs", cls: "border-sky-600 bg-sky-500/15 text-sky-200",
+    fix: "Correct the quantity in History → Transactions (editable)." },
+};
+
+function HistoryAuditStatus() {
+  const { data, reload } = useApi(api.historyAudit, [], null);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+  const [showAcked, setShowAcked] = React.useState(false);
+
+  const run = async () => {
+    setBusy(true); setErr(null);
+    try { await api.runHistoryAudit(); await reload(); }
+    catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+  const ack = async (f) => {
+    const reason = window.prompt(`Acknowledge "${f.summary}"\n\nWhy is this OK? (required, logged):`);
+    if (!reason || !reason.trim()) return;
+    setErr(null);
+    try { await api.ackHistoryFinding(f.id, reason.trim()); await reload(); }
+    catch (e) { setErr(String(e.message || e)); }
+  };
+
+  const last = data?.last;
+  const failed = data?.last_failed;
+  const status = last?.status || (failed ? "FAILED" : "never run");
+  const light = status === "CLEAN" ? "green" : status === "DIRTY" ? "yellow" : status === "never run" ? "yellow" : "red";
+  const findings = last?.findings || [];
+  const open = findings.filter((f) => !f.ack);
+  const acked = findings.filter((f) => f.ack);
+
+  return (
+    <div className="mt-4 border-t border-slate-800 pt-3">
+      <div className="flex items-center justify-between">
+        <span className="text-xs uppercase tracking-wide text-slate-500">Trade history (vs Schwab)</span>
+        <button onClick={run} disabled={busy}
+                className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+          {busy ? "Checking…" : "Check now"}
+        </button>
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2 text-sm">
+        <Light status={light} size="h-2.5 w-2.5" />
+        <span className="font-semibold text-slate-200">{status}</span>
+        {last?.as_of && <span className="text-xs text-slate-500">· {last.as_of.replace("T", " ").replace("Z", "")}</span>}
+        {last && (
+          <span className="text-xs text-slate-400">
+            · fills {last.since} → {last.until} · {last.matched} matched{open.length ? `, ${open.length} to fix` : ""}
+          </span>
+        )}
+      </div>
+      {failed && (!last || failed.as_of > last.as_of) && (
+        <p className="mt-1 text-xs text-rose-400">Last check failed: {failed.error} — the verdict above is from the last successful check.</p>
+      )}
+      {status === "CLEAN" && (
+        <p className="mt-1 text-xs text-slate-500">Every fill in this book matches a Schwab fill, at the same size and price.</p>
+      )}
+      {open.length > 0 && (
+        <ul className="mt-2 space-y-1.5">
+          {open.map((f) => {
+            const k = AUDIT_KIND[f.kind] || { label: f.kind, cls: "border-slate-600 text-slate-300", fix: "" };
+            return (
+              <li key={f.id} className="rounded-lg border border-slate-800 bg-slate-950/60 px-2.5 py-1.5 text-xs">
+                <div className="flex items-start gap-2">
+                  <span className={`shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${k.cls}`}>{k.label}</span>
+                  <span className="text-slate-300">{f.summary}</span>
+                  <button onClick={() => ack(f)}
+                          className="ml-auto shrink-0 rounded border border-slate-700 px-1.5 text-[10px] font-semibold text-slate-400 hover:text-slate-200">
+                    acknowledge
+                  </button>
+                </div>
+                {k.fix && <p className="mt-0.5 pl-1 text-[11px] text-slate-500">{k.fix}</p>}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      {acked.length > 0 && (
+        <button onClick={() => setShowAcked((v) => !v)} className="mt-1 text-[11px] text-slate-500 hover:text-slate-300">
+          {showAcked ? "Hide" : "Show"} {acked.length} acknowledged
+        </button>
+      )}
+      {showAcked && (
+        <ul className="mt-1 space-y-1 text-[11px] text-slate-500">
+          {acked.map((f) => <li key={f.id}>{f.summary} — <span className="italic">{f.ack.reason}</span></li>)}
+        </ul>
+      )}
+      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
 // Live-fill verification: re-fetch recent live orders from Schwab and diff the
 // broker's fills against what we logged, plus a reconcile pass. On-demand — this
 // is the "prove the live-order path is correct" check for after a real order.
@@ -1102,6 +1204,7 @@ export default function DataHealth() {
       )}
       {!data?.demo && <TieredScheduler data={data} />}
       <ReconcileStatus />
+      {!data?.demo && <HistoryAuditStatus />}
       {!data?.demo && <PendingOrdersPanel />}
       {!data?.demo && <IngestionPanel />}
       {!data?.demo && <LiveFillVerify />}

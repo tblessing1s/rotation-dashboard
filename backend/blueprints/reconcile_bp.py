@@ -93,6 +93,41 @@ def api_record_manual_roll():
         return _err(e)
 
 
+@reconcile_bp.route("/api/reconcile/history-audit", methods=["GET", "POST"])
+def api_history_audit():
+    """The trade-history audit — this book's fills vs Schwab's transactions
+    (history_audit.py). GET returns the last report; POST runs it now
+    (optional ``lookback_days``)."""
+    import history_audit
+    try:
+        if request.method == "POST":
+            p = request.get_json(silent=True) or {}
+            return jsonify(history_audit.run_history_audit(
+                lookback_days=p.get("lookback_days")))
+        state = log.load_state()
+        ha = state.get("history_audit") or {}
+        return jsonify({"last": ha.get("last"), "last_failed": ha.get("last_failed")})
+    except (ValueError, TypeError) as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@reconcile_bp.route("/api/reconcile/history-audit/acknowledge", methods=["POST"])
+def api_history_audit_ack():
+    """Mark one audit finding explained (typed reason, logged)."""
+    import history_audit
+    p = request.get_json(silent=True) or {}
+    if not p.get("finding_id"):
+        return jsonify({"error": "finding_id is required"}), 400
+    try:
+        return jsonify(history_audit.acknowledge(p["finding_id"], p.get("reason")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @reconcile_bp.route("/api/reconcile/unfilled-rolls")
 def api_unfilled_rolls():
     """Rolls on ?ticker= that were booked without a broker fill behind them (paper /

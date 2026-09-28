@@ -392,6 +392,13 @@ export const api = {
       body: JSON.stringify({ execution_ids: executionIds, reason, ...(note ? { note } : {}) }),
     }),
   reconcile: () => request("/api/reconcile"),
+  // Trade-history audit: this book's fills vs Schwab's transactions.
+  historyAudit: () => request("/api/reconcile/history-audit"),
+  runHistoryAudit: () => request("/api/reconcile/history-audit", { method: "POST", body: "{}" }),
+  ackHistoryFinding: (findingId, reason) =>
+    request("/api/reconcile/history-audit/acknowledge", {
+      method: "POST", body: JSON.stringify({ finding_id: findingId, reason }),
+    }),
   runReconcile: () => request("/api/reconcile", { method: "POST" }),
   verifyFills: (limit) =>
     request("/api/verify-fills", { method: "POST", body: JSON.stringify(limit ? { limit } : {}) }),
