@@ -41,10 +41,14 @@ def _run_cycle(ticker="NVDA", exec_price=2400, close_price=2600, weeks=2,
     if with_roll:
         executor.execute({"action": "sell_short", "ticker": ticker, "strike": 95,
                           "contracts": 5, "premium_per_share": 0.50, "stock_price": 95})
+        # Stock at 89 so the new 90C's 1.50 premium is all extrinsic — the close
+        # below claims 1.50 sold, and a buy-back's extrinsic sold is now derived
+        # from the short it closes (at 93 the 90C would have been sold for less
+        # than its $3 intrinsic, i.e. $0 extrinsic).
         executor.execute({"action": "roll_short", "ticker": ticker, "contracts": 5,
                           "from_strike": 95, "close_price_per_share": 2.00,
                           "to_strike": 90, "to_dte": 7, "premium_per_share": 1.50,
-                          "stock_price": 93, "roll_reason": "defend"})
+                          "stock_price": 89, "roll_reason": "defend"})
         # close the rolled short flat so the position can fully close
         executor.execute({"action": "close_short", "ticker": ticker, "strike": 90,
                           "contracts": 5, "close_price_per_share": 1.50,

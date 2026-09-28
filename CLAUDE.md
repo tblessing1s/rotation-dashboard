@@ -90,6 +90,11 @@ Match the surrounding style; don't introduce a linter unless asked.
   uses the unwind whenever the shape is 100 shares per call. Their equity leg
   rides `EQUITY_ORDER_PLACEMENT_ENABLED` + the mandatory previewOrder; logged
   bookings stamp both legs with one timestamp and a `covered_group_id`.
+- **Inherited figures are derived, not frozen:** a buy-back's `extrinsic_sold`
+  and a share sale's cost basis / `realized_pnl` come from EARLIER fills, so
+  `logging_handler._derive_from_history` recomputes them from the whole log in
+  date order inside `derived_executions` (an explicit History correction of the
+  field wins). Don't read them off a raw execution for anything derived.
 - **Period bucketing:** bucket executions by date→expiration via
   `logging_handler.bucket_datetime()` — both the theta ledger and the Payouts view
   key off it so they can't disagree. Never re-derive week/month with a bespoke

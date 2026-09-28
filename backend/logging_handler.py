@@ -931,15 +931,131 @@ def derived_executions(state: dict) -> list[dict]:
            if not e.get("reversed_by") and not e.get("reverses_execution_id")
            and not e.get("excluded")]
     overlay = _correction_overlay(raw)
-    if not overlay:
-        return [e for e in raw if e.get("action") != TXN_CORRECTION_ACTION]
     out = []
     for e in raw:
         if e.get("action") == TXN_CORRECTION_ACTION:
             continue
         ch = overlay.get(str(e.get("id")))
         out.append({**e, **ch} if ch else e)
-    return out
+    return _derive_from_history(out, overlay)
+
+
+# ---------------------------------------------------------------------------
+# Figures a fill inherits from EARLIER fills — derived from the whole log in
+# date order, never frozen at booking time
+# ---------------------------------------------------------------------------
+def _history_order_key(e: dict) -> tuple:
+    # Real time order. A History-corrected date carries no time: an OPEN dated
+    # that way sorts to the start of its day and a CLOSE to the end, so a lot
+    # opened and closed on one day still pairs (and a sell-then-rebuy with real
+    # timestamps keeps its real order).
+    # Identical timestamps keep booking order (the exec id sequence, numerically).
+    d = str(e.get("date") or "")
+    closing = e.get("action") in ("close_short", "sell_shares", "close_shares_assigned")
+    time_part = d[10:] if len(d) > 10 else ("~" if closing else "")
+    eid = str(e.get("id") or "")
+    digits = "".join(ch for ch in eid if ch.isdigit())
+    return (d[:10], time_part, int(digits) if digits else 0, eid)
+
+
+def _derive_from_history(execs: list[dict], overlay: dict) -> list[dict]:
+    """Recompute, from the full DATE-ordered log, the two figures a fill takes
+    from an EARLIER fill instead of from its own broker record:
+
+    * a ``close_short``'s ``extrinsic_sold`` — the entry extrinsic of the
+      short it bought back (FIFO by ticker + strike, preferring the same
+      expiry). Net juice then follows through ``close_economics``.
+    * a ``sell_shares`` / ``close_shares_assigned``'s ``cost_basis_per_share``
+      and ``realized_pnl`` — the weighted-average cost of the shares held at
+      that date.
+
+    CONFIRMED LIVE, both ways: a sale adopted before its purchase froze a $0
+    basis ($4,876 "profit" on a $425 trade), a buy-back adopted before its
+    sale froze 0 extrinsic, and a buy-back kept its stale copy after the
+    opening sale's stock price was corrected. Freezing either at booking time
+    makes the result depend on the ORDER fills reached the book.
+
+    An explicit History correction of the field itself always wins. When the
+    earlier fill isn't in the log (history before the book began), the stored
+    value stands. Returns merged copies; the log is never rewritten."""
+    touched: dict[int, dict] = {}
+    lots: dict[tuple, list[dict]] = {}       # (ticker, strike) -> open short lots
+    shares: dict[str, dict] = {}             # ticker -> {count, cost}
+    order = sorted(range(len(execs)), key=lambda i: _history_order_key(execs[i]))
+    for i in order:
+        e = execs[i]
+        a = e.get("action")
+        t = (e.get("ticker") or "").upper()
+        corrected = overlay.get(str(e.get("id"))) or {}
+        if a == "sell_short":
+            lots.setdefault((t, _strike_key(e.get("strike"))), []).append({
+                "exp": str(e.get("expiration") or "")[:10] or None,
+                "left": int(e.get("contracts") or 0),
+                "extrinsic": e.get("entry_extrinsic_per_share"),
+                "id": e.get("id"),
+            })
+        elif a == "close_short":
+            queue = lots.get((t, _strike_key(e.get("strike")))) or []
+            exp = str(e.get("expiration") or "")[:10] or None
+            live = [l for l in queue if l["left"] > 0]
+            lot = next((l for l in live if exp and l["exp"] == exp), None) or (live[0] if live else None)
+            need = int(e.get("contracts") or 0)
+            if lot is not None:
+                if "extrinsic_sold" not in corrected and lot["extrinsic"] is not None:
+                    new = dict(e, extrinsic_sold=round(float(lot["extrinsic"]), 4),
+                               extrinsic_sold_from=lot["id"])
+                    if not e.get("assigned"):
+                        sold, paid, net_total = close_economics(new)
+                        c = int(new.get("contracts") or 0)
+                        new.update(extrinsic_paid_back=paid, net_juice_total=net_total,
+                                   net_juice=round(net_total / (c * 100), 4) if c else new.get("net_juice"))
+                    else:
+                        # Assigned: closed at intrinsic, so all the extrinsic sold is kept.
+                        c = int(new.get("contracts") or 0)
+                        new.update(net_juice=new["extrinsic_sold"],
+                                   net_juice_total=round(new["extrinsic_sold"] * c * 100, 2))
+                    touched[i] = new
+                take = min(need, lot["left"])
+                lot["left"] -= take
+                need -= take
+            for l in live:  # a close bigger than one lot eats the next lots FIFO
+                if need <= 0:
+                    break
+                if l is lot or l["left"] <= 0:
+                    continue
+                take = min(need, l["left"])
+                l["left"] -= take
+                need -= take
+        elif a == "buy_shares":
+            h = shares.setdefault(t, {"count": 0, "cost": 0.0})
+            q = int(e.get("qty") or 0)
+            h["cost"] += float(e.get("price_per_share") or 0) * q
+            h["count"] += q
+        elif a in ("sell_shares", "close_shares_assigned"):
+            h = shares.setdefault(t, {"count": 0, "cost": 0.0})
+            q = int(e.get("qty") or 0)
+            if h["count"] > 0 and q > 0:
+                avg = h["cost"] / h["count"]
+                if "cost_basis_per_share" not in corrected and "realized_pnl" not in corrected:
+                    proceeds = float((e.get("execution_total") if a == "sell_shares"
+                                      else e.get("proceeds")) or 0)
+                    touched[i] = dict(e, cost_basis_per_share=round(avg, 4),
+                                      realized_pnl=round(proceeds - avg * q, 2),
+                                      cost_basis_from="history")
+                taken = min(q, h["count"])
+                h["cost"] -= avg * taken
+                h["count"] -= taken
+        elif a == "adjustment" and (e.get("instrument_type") or "").upper() == "EQUITY":
+            h = shares.setdefault(t, {"count": 0, "cost": 0.0})
+            delta = int(round(float(e.get("quantity_delta") or 0)))
+            if delta < 0 and h["count"] > 0:
+                avg = h["cost"] / h["count"]
+                taken = min(-delta, h["count"])
+                h["cost"] -= avg * taken
+                h["count"] -= taken
+    if not touched:
+        return execs
+    return [touched.get(i, e) for i, e in enumerate(execs)]
 
 
 def recompute_derived(state: dict) -> dict:
