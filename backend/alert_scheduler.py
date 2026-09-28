@@ -652,6 +652,16 @@ def _maybe_morning_reconcile(now: datetime, due: list[str]) -> None:
         except Exception as e:  # noqa: BLE001 — a failed reconcile must not kill the thread
             logger.error("pre-market reconciliation failed for account %s: %s",
                          _account_label(account_id), e)
+        # Rebuild any position that drifted from the trade log where Schwab (just
+        # reconciled above) confirms the log's version; hold the rest.
+        try:
+            import position_heal
+            ph = position_heal.heal()
+            if ph["healed"] or ph["held"]:
+                logger.info("position heal (%s): %d healed, %d held",
+                            _account_label(account_id), len(ph["healed"]), len(ph["held"]))
+        except Exception as e:  # noqa: BLE001 — must not kill the thread
+            logger.error("position heal failed for account %s: %s", _account_label(account_id), e)
         # Positions agree says nothing about HOW the book got there — the daily
         # trade-history audit checks the fills themselves against Schwab.
         try:

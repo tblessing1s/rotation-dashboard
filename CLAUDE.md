@@ -95,6 +95,11 @@ Match the surrounding style; don't introduce a linter unless asked.
   `logging_handler._derive_from_history` recomputes them from the whole log in
   date order inside `derived_executions` (an explicit History correction of the
   field wins). Don't read them off a raw execution for anything derived.
+  The position MIRROR (shares count + short calls) is rebuilt from the log by
+  `position_heal` after any log-changing operation — but only when Schwab's
+  last holdings (`reconciliation.last.broker_view`) confirm the log's version;
+  otherwise it is held and alerted (`POSITION_DRIFT`). Call
+  `executor._heal_positions(tickers)` from any new operation that edits the log.
 - **Period bucketing:** bucket executions by date→expiration via
   `logging_handler.bucket_datetime()` — both the theta ledger and the Payouts view
   key off it so they can't disagree. Never re-derive week/month with a bespoke

@@ -1306,6 +1306,7 @@ def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
     ing["proposals"] = [p for p in (ing.get("proposals") or [])
                         if p.get("proposal_id") != proposal_id]
     log.save_state(state)
+    _heal_positions([ticker])
     return {"success": True, "status": "adopted", "proposal_id": proposal_id,
             "stock_price": stock_price, "stock_price_source": spot_source,
             "execution_ids": stored_ids, "transaction_ids": txn_ids,
@@ -1886,10 +1887,15 @@ def replay_short_calls(ticker: str, state: dict | None = None) -> list[dict]:
     ticker = (ticker or "").upper()
     execs = [e for e in log.derived_executions(state)
              if (e.get("ticker") or "").upper() == ticker and e.get("action") in ("sell_short", "close_short")]
-    execs.sort(key=lambda e: (str(e.get("date") or ""), str(e.get("id") or "")))
-    queues: dict[tuple, list[dict]] = {}   # (strike, expiration) -> FIFO open legs
+    execs.sort(key=log._history_order_key)
+    # Per strike, FIFO. A close takes a lot with ITS expiry first; a leg that
+    # never recorded an expiry (most app-booked legs) pairs with any — the old
+    # strict (strike, expiration) key left such a lot "open" forever whenever
+    # only one side knew its expiry. Two KNOWN, different expiries never pair.
+    queues: dict[object, list[dict]] = {}
     for e in execs:
-        key = (e.get("strike"), e.get("expiration"))
+        key = log._strike_key(e.get("strike"))
+        exp = str(e.get("expiration") or "")[:10] or None
         if e.get("action") == "sell_short":
             queues.setdefault(key, []).append({
                 "strike": e.get("strike"), "contracts": int(e.get("contracts") or 0),
@@ -1901,13 +1907,19 @@ def replay_short_calls(ticker: str, state: dict | None = None) -> list[dict]:
         else:  # close_short
             need = int(e.get("contracts") or 0)
             queue = queues.get(key) or []
-            while need > 0 and queue:
-                leg = queue[0]
+
+            def _exp(leg):
+                return str(leg.get("expiration") or "")[:10] or None
+            order = ([l for l in queue if exp and _exp(l) == exp]
+                     + [l for l in queue if not (exp and _exp(l) == exp)
+                        and (not exp or not _exp(l))])
+            for leg in order:
+                if need <= 0:
+                    break
                 take = min(need, leg["contracts"])
                 leg["contracts"] -= take
                 need -= take
-                if leg["contracts"] <= 0:
-                    queue.pop(0)
+            queues[key] = [l for l in queue if l["contracts"] > 0]
     return [leg for queue in queues.values() for leg in queue if leg["contracts"] > 0]
 
 
@@ -2171,6 +2183,7 @@ def save_transactions(edits: list, ticker: str | None = None) -> dict:
     import reconcile
     reconcile.reevaluate_freezes(state)
     log.save_state(state)
+    _heal_positions(tickers)
     return {"success": True, "status": "saved", "edited": touched,
             "tickers": sorted(filter(None, tickers))}
 
@@ -2464,6 +2477,7 @@ def reverse_adoption(proposal_id: str, reason: str | None = None) -> dict:
     for t in txn_ids:
         ledger.pop(t, None)
     log.save_state(state)
+    _heal_positions([ex.get("ticker") for ex in live])
     return {"success": True, "status": "reversed", "proposal_id": proposal_id,
             "reversed_execution_ids": reversed_ids, "transaction_ids": txn_ids}
 
@@ -2579,7 +2593,14 @@ def _exp_eq(a, b) -> bool:
     return str(a or "")[:10] == str(b or "")[:10]
 
 
-def void_executions(ids, reason: str | None = None) -> dict:
+def _heal_positions(tickers) -> None:
+    """After an operation changed the log, rebuild any position that drifted
+    from it — only where Schwab's last holdings agree (position_heal)."""
+    import position_heal
+    position_heal.after_log_change(tickers)
+
+
+def void_executions(ids, reason: str | None = None, *, heal: bool = True) -> dict:
     """Mark executions EXCLUDED — an append-only 'soft delete'. Voided executions
     drop out of the history views and the derived ledgers (recompute_derived skips
     ``excluded``), while the immutable record is preserved for audit. Use it to
@@ -2592,10 +2613,11 @@ def void_executions(ids, reason: str | None = None) -> dict:
         raise ValueError("no execution ids to void")
     reason = (reason or "voided pre-trading/test entry").strip()
     state = log.load_state()
-    found, voided = set(), []
+    found, voided, tickers = set(), [], set()
     for e in state.get("executions") or []:
         if e.get("id") in ids:
             found.add(e["id"])
+            tickers.add(e.get("ticker"))
             if not e.get("excluded"):
                 e["excluded"] = True
                 e["void_reason"] = reason
@@ -2606,6 +2628,8 @@ def void_executions(ids, reason: str | None = None) -> dict:
         raise ValueError(f"unknown execution id(s): {', '.join(sorted(missing))}")
     log.recompute_derived(state)
     log.save_state(state)
+    if heal:
+        _heal_positions(tickers)
     return {"success": True, "status": "voided", "voided": voided, "count": len(voided)}
 
 
@@ -2615,15 +2639,17 @@ def restore_executions(ids) -> dict:
     if not ids:
         raise ValueError("no execution ids to restore")
     state = log.load_state()
-    restored = []
+    restored, tickers = [], set()
     for e in state.get("executions") or []:
         if e.get("id") in ids and e.get("excluded"):
+            tickers.add(e.get("ticker"))
             e["excluded"] = False
             e.pop("void_reason", None)
             e.pop("voided_at", None)
             restored.append(e["id"])
     log.recompute_derived(state)
     log.save_state(state)
+    _heal_positions(tickers)
     return {"success": True, "status": "restored", "restored": restored}
 
 
@@ -2808,7 +2834,10 @@ def undo_unfilled_roll(ticker: str, roll_id: str, reason: str, *, assigned: bool
     orig = _original_open_for(state, close_ex)
     from_expiration = str(from_expiration or (orig or {}).get("expiration") or "")[:10] or None
 
-    void_executions([close_ex["id"], open_ex["id"]], f"roll never filled at broker: {reason}")
+    # heal=False: the mirror is corrected by hand just below; healing mid-way
+    # (before the old short is restored) could restore it twice.
+    void_executions([close_ex["id"], open_ex["id"]], f"roll never filled at broker: {reason}",
+                    heal=False)
 
     def _restore(s):
         position = _ensure_position(s, ticker)
@@ -2864,6 +2893,7 @@ def undo_unfilled_roll(ticker: str, roll_id: str, reason: str, *, assigned: bool
                     pass  # rolled off the latest report — the correction still stands
             reconcile.reevaluate_freezes(s)
         log.mutate_state(_resolve)
+    _heal_positions([ticker])
     return result
 
 
