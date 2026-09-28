@@ -291,6 +291,9 @@ export const api = {
   history: () => request("/api/history"),
   // Daily mark-to-market account-value points for the History tab's value chart.
   accountValueHistory: () => request("/api/account-value-history"),
+  // Drop stored daily points recorded while the book was wrong (typed reason).
+  removeAccountValuePoints: (dates, reason) =>
+    request("/api/account-value-history/remove", { method: "POST", body: JSON.stringify({ dates, reason }) }),
   // Raw executions + live position legs, for the History validation table.
   executionsRaw: () => request("/api/executions/raw"),
   // Durable order journal (outside state.json) — real captured stock prices for

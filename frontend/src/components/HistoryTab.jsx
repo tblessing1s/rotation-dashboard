@@ -125,7 +125,7 @@ function accountValueMath(p) {
   const cash = p.operating_cash ?? 0;
   const putColl = p.put_collateral ?? 0;
   const shortLiab = p.short_liability ?? 0;
-  const lines = [`${p.date}: ${money(p.total)}`, ""];
+  const lines = [`${p.date}${p.live ? " (live now)" : ""}: ${money(p.total)}`, ""];
   lines.push(`shares at spot        ${money(shares)}`);
   if (leap) lines.push(`legacy LEAP value   +${money(leap)}`);
   lines.push(`operating cash       +${money(cash)}`);
@@ -136,7 +136,50 @@ function accountValueMath(p) {
   return lines.join("\n");
 }
 
-function AccountValueChart({ points }) {
+// The saved daily points (not today's live one), each removable with a typed
+// reason — for a day recorded while the book was wrong (e.g. a phantom
+// position a later correction took off). Past points can't be recomputed: no
+// historical prices are kept, so the honest fix is a gap.
+function RemoveValuePoints({ points, onChanged }) {
+  const [open, setOpen] = React.useState(false);
+  const [busy, setBusy] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+  const saved = (points || []).filter((p) => !p.live);
+  if (saved.length === 0) return null;
+  const remove = async (p) => {
+    const reason = window.prompt(
+      `Remove the ${p.date} point (${money(p.total)}) from the chart? Why was it wrong? (required, logged):`);
+    if (!reason || !reason.trim()) return;
+    setBusy(p.date); setErr(null);
+    try { await api.removeAccountValuePoints([p.date], reason.trim()); onChanged && (await onChanged()); }
+    catch (e) { setErr(String(e.message || e)); }
+    finally { setBusy(null); }
+  };
+  return (
+    <div className="mt-2">
+      <button onClick={() => setOpen((o) => !o)} className="text-[11px] text-slate-500 hover:text-slate-300">
+        {open ? "Hide" : "Fix"} saved points
+      </button>
+      {open && (
+        <ul className="mt-1 max-h-48 space-y-0.5 overflow-y-auto text-xs">
+          {saved.slice().reverse().map((p) => (
+            <li key={p.date} className="flex items-center gap-3">
+              <span className="w-24 text-slate-400">{p.date}</span>
+              <span className="w-24 text-right tabular-nums text-slate-200" title={accountValueMath(p)}>{money(p.total)}</span>
+              <button onClick={() => remove(p)} disabled={busy !== null}
+                      className="rounded border border-rose-800 bg-rose-950/40 px-1.5 text-[10px] font-semibold text-rose-300 hover:opacity-80 disabled:opacity-40">
+                {busy === p.date ? "removing…" : "remove"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {err && <p className="mt-1 text-xs text-rose-400">{err}</p>}
+    </div>
+  );
+}
+
+function AccountValueChart({ points, onChanged }) {
   if (!points || points.length < 2) {
     return (
       <p className="text-sm text-slate-500">
@@ -175,6 +218,7 @@ function AccountValueChart({ points }) {
           {money(change)} ({pct(changePct)})
         </span>
         <span className="text-xs text-slate-500">since {points[0].date}</span>
+        {lastPoint.live && <span className="text-[10px] uppercase tracking-wide text-emerald-400/70">live now</span>}
         <span
           className="cursor-help rounded-full border border-slate-700 bg-slate-800/60 px-1.5 text-[10px] font-semibold text-slate-400"
           title={"total = shares at spot + legacy LEAP value + operating cash + put collateral − short call/put buyback cost\n\nHover any point on the line for that day's numbers."}
@@ -194,6 +238,7 @@ function AccountValueChart({ points }) {
         <span>{points[0].date}</span>
         <span>{points[points.length - 1].date}</span>
       </div>
+      <RemoveValuePoints points={points} onChanged={onChanged} />
     </div>
   );
 }
@@ -977,7 +1022,7 @@ function RawData() {
 export default function HistoryTab() {
   const { data, error, loading } = useApi(api.history, [], null);
   const { data: theta } = useApi(api.thetaLedger, [], null);
-  const { data: valueHistory } = useApi(api.accountValueHistory, [], null);
+  const { data: valueHistory, reload: reloadValue } = useApi(api.accountValueHistory, [], null);
   if (loading && !data) return <Card title="History"><Loading /></Card>;
   if (error) return <Card title="History"><p className="text-sm text-rose-400">{error}</p></Card>;
 
@@ -987,7 +1032,7 @@ export default function HistoryTab() {
   return (
     <div className="grid gap-4">
       <Card title="Account value">
-        <AccountValueChart points={valueHistory?.points} />
+        <AccountValueChart points={valueHistory?.points} onChanged={reloadValue} />
       </Card>
 
       <Card

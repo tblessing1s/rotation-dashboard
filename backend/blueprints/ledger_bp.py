@@ -148,10 +148,55 @@ def api_account_value_history():
     """Daily mark-to-market account-value points (position_manager.account_value)
     for this account's History tab chart. Recorded once/day by the nightly
     maintenance job (maintenance.snapshot_account_value) — there is no way to
-    reconstruct past points on read, so a day the job didn't run has no point."""
+    reconstruct past points on read, so a day the job didn't run has no point.
+
+    The LAST point is today's value computed live (``live: true``), replacing any
+    point already stored for today: the headline must follow the book as it is
+    now, not as it was at the last nightly run — a correction (a voided trade, an
+    undone roll) otherwise kept showing the stale total until the next night."""
     try:
         state = log.load_state()
-        return jsonify({"points": state.get("account_value_history", [])})
+        points = list(state.get("account_value_history", []))
+        today = log.utcnow()[:10]
+        try:
+            import position_manager
+            live = {"date": today, **position_manager.account_value(state), "live": True}
+            if points and points[-1].get("date") == today:
+                points[-1] = live
+            else:
+                points.append(live)
+        except Exception as e:  # noqa: BLE001 — the stored history still renders
+            log.logger.warning("live account value unavailable: %s", e)
+        return jsonify({"points": points})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@ledger_bp.route("/api/account-value-history/remove", methods=["POST"])
+def api_account_value_history_remove():
+    """Drop stored daily points recorded while the book was wrong (e.g. a
+    phantom position a later correction took off). They can't be recomputed —
+    no historical prices are kept — so the honest fix is a gap. A typed reason
+    is required; the removed points are kept under
+    ``account_value_history_removed`` for the audit trail."""
+    payload = request.get_json(silent=True) or {}
+    dates = {str(d)[:10] for d in (payload.get("dates") or []) if d}
+    reason = (payload.get("reason") or "").strip()
+    if not dates:
+        return jsonify({"error": "dates is required"}), 400
+    if not reason:
+        return jsonify({"error": "a typed reason is required"}), 400
+    try:
+        def _drop(state):
+            hist = state.get("account_value_history") or []
+            gone = [p for p in hist if p.get("date") in dates]
+            state["account_value_history"] = [p for p in hist if p.get("date") not in dates]
+            at = log.utcnow()
+            state.setdefault("account_value_history_removed", []).extend(
+                {**p, "removed_at": at, "removed_reason": reason} for p in gone)
+            return [p.get("date") for p in gone]
+        removed = log.mutate_state(_drop)
+        return jsonify({"removed": removed})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
