@@ -691,3 +691,59 @@ def test_digest_due_fires_once_per_day_after_threshold():
     assert scheduler.digest_due(at, None) is True
     assert scheduler.digest_due(at, at.date()) is False
     assert scheduler.digest_due(at, at.date() - timedelta(days=1)) is True
+
+
+def test_screen_ignores_todays_still_forming_daily_candle(tmp_store, monkeypatch):
+    """Regression: a screen that runs mid-session (a restart inside the signal
+    window, or an in-session "Rescan now") gets a daily frame ending in
+    TODAY's partial candle. Its running high/low must not become the "prior
+    day" levels — only sessions strictly before the filing date count."""
+    df = _frame(price=100.0, spread=3.0, volume=2_000_000, days=30)
+    today = df.index[-1]
+    df.loc[today, ["High", "Low", "Close", "Volume"]] = [100.2, 99.9, 100.0, 50_000]
+
+    monkeypatch.setattr(universe.data_handler, "get_daily", lambda t, force=False: df)
+    result = universe.screen(tickers=["GOOD"], now=datetime(today.year, today.month, today.day,
+                                                            10, 15, tzinfo=ET))
+
+    good = result["screened"][0]
+    assert good["prior_day_high"] == pytest.approx(101.5)   # yesterday's, not today's 100.2
+    assert good["prior_day_low"] == pytest.approx(98.5)
+    assert [p["symbol"] for p in result["picks"]] == ["GOOD"]
+
+
+def test_maybe_screen_does_not_rerun_after_a_restart_once_today_is_screened(monkeypatch, tmp_path):
+    """Regression (Friday 2026-09-25: several deploys inside the signal
+    window, zero trades): _last_screen_day is in-memory, so every restart
+    re-armed the screener and it re-ran a full force-fetched sweep mid-
+    window — stalling bar ingest and overwriting the morning's picks. A
+    scheduled screen already recorded for today must survive the restart."""
+    monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
+    monkeypatch.setattr(settings, "enabled_account_ids", lambda: ["primary"])
+    monkeypatch.setattr(trial, "trial_status", lambda aid: {"status": "running"})
+    store.save_screen_health({"trigger": "scheduled", "succeeded_at": "2026-09-25T08:00:05+00:00",
+                              "date": "2026-09-25", "picks": 8, "screened": 200})
+    called = []
+    monkeypatch.setattr(scheduler, "_run_screen", lambda now: called.append(True))
+    monkeypatch.setattr(scheduler, "_last_screen_day", None)   # fresh process after a deploy
+
+    scheduler._maybe_screen(datetime(2026, 9, 25, 10, 20, tzinfo=ET))
+    assert called == []
+
+    # ...but the next trading day still screens normally.
+    scheduler._maybe_screen(datetime(2026, 9, 28, 4, 0, tzinfo=ET))
+    assert called == [True]
+
+
+def test_maybe_screen_still_runs_when_only_a_manual_rescan_covered_today(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
+    monkeypatch.setattr(settings, "enabled_account_ids", lambda: ["primary"])
+    monkeypatch.setattr(trial, "trial_status", lambda aid: {"status": "running"})
+    store.save_screen_health({"trigger": "manual", "succeeded_at": "2026-09-25T07:00:00+00:00",
+                              "date": "2026-09-25", "picks": 8, "screened": 200})
+    called = []
+    monkeypatch.setattr(scheduler, "_run_screen", lambda now: called.append(True))
+    monkeypatch.setattr(scheduler, "_last_screen_day", None)
+
+    scheduler._maybe_screen(datetime(2026, 9, 25, 4, 0, tzinfo=ET))
+    assert called == [True]

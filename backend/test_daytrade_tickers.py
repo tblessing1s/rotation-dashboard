@@ -99,7 +99,7 @@ def test_universe_screen_defaults_to_daytrade_roster(roster, monkeypatch):
     monkeypatch.setattr(daytrade_tickers, "all_tickers", lambda: ["ONLYME"])
 
     seen = []
-    monkeypatch.setattr(universe, "_evaluate", lambda t: seen.append(t) or
+    monkeypatch.setattr(universe, "_evaluate", lambda t, target_date: seen.append(t) or
                         {"symbol": t, "qualified": False, "reason": "no data"})
     universe.screen(now=datetime(2026, 9, 14, tzinfo=ZoneInfo("America/New_York")))
     assert seen == ["ONLYME"]
