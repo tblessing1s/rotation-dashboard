@@ -53,3 +53,23 @@ def test_story_inputs_reconcile_to_total():
     assert t["premium_intrinsic"] == 100.0 and t["buyback_paid"] == 100.0
     assert t["calls_total"] == 200.0 and t["dividends"] == 25.0
     assert t["total"] == round(t["shares_total"] + t["calls_total"] + t["dividends"], 2)
+
+
+def test_buyback_splits_intrinsic_and_extrinsic():
+    # Sold the 55 call for $3.00 ($2.00 extrinsic); bought back at $1.00 with
+    # the stock at 50 (OTM) -> the whole $100 debit is extrinsic.
+    ex = [
+        _e(1, "buy_shares", "14:00", 50.0, qty=100, price_per_share=50.0, execution_total=5000.0),
+        _e(2, "sell_short", "14:00", 50.0, strike=55, contracts=1,
+           premium_total=300.0, entry_extrinsic_per_share=2.0),
+        _e(3, "close_short", "15:00", 50.0, strike=55, contracts=1,
+           close_price_per_share=1.0, close_total=100.0, extrinsic_sold=2.0),
+        # ITM buyback: strike 45, stock 50, closed at $6 -> $5 intrinsic + $1 extrinsic.
+        _e(4, "sell_short", "16:00", 50.0, strike=45, contracts=1,
+           premium_total=500.0, entry_extrinsic_per_share=1.0),
+        _e(5, "close_short", "17:00", 50.0, strike=45, contracts=1,
+           close_price_per_share=6.0, close_total=600.0, extrinsic_sold=1.0),
+    ]
+    t = pnl_breakdown.build({"executions": ex, "positions": []})["tickers"][0]
+    assert t["buyback_paid"] == 700.0
+    assert t["buyback_extrinsic"] == 200.0 and t["buyback_intrinsic"] == 500.0

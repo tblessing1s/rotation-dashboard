@@ -76,7 +76,13 @@ function Story({ r }) {
               hint="Premium that was time value when sold — the true 'juice'" />
         <Line label="Paid to buy back" value={-r.buyback_paid}
               hint="Assignment and expiry cost nothing here; the intrinsic is already in the share sale at the strike" />
+        <Line kind="sub" label="intrinsic" value={-r.buyback_intrinsic}
+              hint="Debit that was in-the-money value at the buy-back — the shares gained this while the call was short" />
+        <Line kind="sub" label="extrinsic" value={-r.buyback_extrinsic}
+              hint="Debit that was time value — premium you had to give back" />
         {r.open && <Line label="Open calls (cost to close now)" value={-r.open_call_mark} />}
+        {r.open && <Line kind="sub" label="intrinsic" value={-r.open_call_intrinsic} />}
+        {r.open && <Line kind="sub" label="extrinsic" value={-r.open_call_extrinsic} />}
         <Line label="Short-call P/L" value={r.calls_total} bold />
       </Section>
       <Section title="3 · Everything else → result">
