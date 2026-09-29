@@ -276,6 +276,8 @@ export const api = {
   killSwitch: () => request("/api/kill-switch"),
   // Monthly payout tracker: current-month estimate + past months + finalize/paid.
   payouts: () => request("/api/payouts"),
+  // Overall + per-ticker P/L split: underlying vs short calls, uncovered gap.
+  pnlBreakdown: () => request("/api/pnl-breakdown"),
   finalizePayout: (month, amount, note) =>
     request("/api/payouts/finalize", {
       method: "POST",

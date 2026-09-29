@@ -93,6 +93,18 @@ def api_coverage_gaps():
         return _err(e)
 
 
+@positions_bp.route("/api/pnl-breakdown")
+def api_pnl_breakdown():
+    """Overall + per-ticker P/L split underlying vs short calls (realized and
+    unrealized), with the uncovered-gap loss called out. Read-only."""
+    try:
+        import pnl_breakdown
+        state = log.load_state()
+        return jsonify(pnl_breakdown.build(state, position_manager.positions_view(state)))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @positions_bp.route("/api/positions/<ticker>/exit", methods=["POST"])
 def api_positions_exit(ticker):
     """Fully exit a position on ONE call: close every open short, then sell
