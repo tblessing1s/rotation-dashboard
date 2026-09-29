@@ -569,6 +569,98 @@ function PayoutGlance({ payouts, onOpen }) {
   );
 }
 
+const dtMoney = (n) => (n == null ? "—" : `${n < 0 ? "-" : n > 0 ? "+" : ""}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+const dtTone = (n) => (n > 0 ? "text-emerald-300" : n < 0 ? "text-rose-300" : "text-slate-100");
+
+// Day Trade at a glance. The sleeve is paper-only and runs on its own clock, so
+// nothing else on the landing shows it: this says whether it is on, what is
+// armed / in a trade right now, today's paper P&L, and trial progress. Every
+// figure is labeled PAPER — no real order is ever placed. Reads the existing
+// per-account /api/daytrade/* endpoints; best-effort, renders nothing on error.
+function DayTradeGlance({ onOpen, refreshKey }) {
+  const dep = [refreshKey];
+  const { data: enabled } = useApi(() => api.daytradeEnabled(), dep, 60000);
+  const { data: cfg } = useApi(() => api.daytradeConfig(), [], null);
+  const { data: trial } = useApi(() => api.daytradeTrial(), dep, 60000);
+  const { data: tradesResp } = useApi(() => api.daytradeTrades(), dep, 60000);
+  const { data: live } = useApi(() => api.daytradeLiveStatus(), dep, 60000);
+  if (!enabled && !trial) return null;
+
+  const on = !!enabled?.enabled;
+  const mode = (cfg?.mode || "paper").toUpperCase();
+  const trades = Object.values(tradesResp?.trades || {});
+  const closed = trades.filter((t) => t.status === "closed");
+  const open = trades.filter((t) => t.status !== "closed");
+  const rows = live?.rows || [];
+  const armed = rows.filter((r) => r.status === "armed");
+  const inTrade = rows.filter((r) => r.status === "in_trade");
+  const priceBySym = {};
+  for (const r of rows) if (r.current_price != null) priceBySym[r.symbol] = r.current_price;
+
+  const realized = trades.reduce((s, t) => s + (t.realized_pnl || 0), 0);
+  let unrealized = 0, unrealizedKnown = open.length === 0;
+  for (const t of open) {
+    const px = priceBySym[t.symbol];
+    if (px == null) continue;
+    unrealizedKnown = true;
+    const remaining = (t.entry?.size || 0) - (t.exits || []).reduce((s, e) => s + (e.size || 0), 0);
+    unrealized += remaining * (px - t.entry.price) * (t.direction === "long" ? 1 : -1);
+  }
+  const wins = closed.filter((t) => (t.realized_pnl || 0) > 0).length;
+  const pct = trial?.target_trades ? (trial.completed_trades / trial.target_trades) * 100 : 0;
+
+  return (
+    <Card
+      title="Day trade"
+      right={
+        <span className="flex items-center gap-2">
+          <Pill status={on ? "go" : "unknown"}>{on ? "ON" : "OFF"}</Pill>
+          <span className="rounded-full border border-violet-500/40 bg-violet-500/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-violet-300"
+                title="Paper mode: signals and fills are simulated — no real order is placed">
+            {mode}
+          </span>
+          <button onClick={onOpen} className="text-xs text-slate-400 hover:text-slate-200">Open Day Trade →</button>
+        </span>
+      }
+    >
+      {!on && (
+        <p className="mb-3 text-xs text-slate-500">Day trading is off for this account — no new paper entries.</p>
+      )}
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
+        <Stat label="Today (paper)" value={dtMoney(realized + (unrealizedKnown ? unrealized : 0))}
+              tone={dtTone(realized + unrealized)}
+              sub={`${dtMoney(realized)} realized${open.length ? ` · ${unrealizedKnown ? dtMoney(unrealized) : "—"} open` : ""}`} />
+        <Stat label="Trades today" value={trades.length}
+              sub={closed.length ? `${wins}/${closed.length} closed green${open.length ? ` · ${open.length} open` : ""}` : open.length ? `${open.length} open` : "none yet"} />
+        <Stat label="Right now" value={`${inTrade.length} in trade`}
+              sub={`${armed.length} armed`} tone={inTrade.length ? "text-emerald-300" : "text-slate-100"} />
+        <Stat label="Paper trial" value={trial ? `${trial.completed_trades}/${trial.target_trades}` : "—"}
+              sub={trial ? (trial.status === "complete" ? `complete · ${trial.verdict}` : `${dtMoney(trial.net_pnl)} · ${fmt(trial.net_r, 2)}R net`) : undefined}
+              tone={trial?.status === "complete" ? dtTone(trial.net_pnl) : "text-slate-100"} />
+      </div>
+      {trial && (
+        <div className="mt-3">
+          <Meter pct={pct} tone={trial.status === "complete" ? (trial.verdict === "loss" ? "bg-rose-500" : "bg-emerald-500") : "bg-sky-500"} />
+        </div>
+      )}
+      {(inTrade.length > 0 || armed.length > 0) && (
+        <div className="mt-3 flex flex-wrap gap-1.5">
+          {inTrade.map((r) => (
+            <span key={`t-${r.symbol}`} className="rounded-full border border-emerald-500/40 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300">
+              {r.symbol} {r.direction || ""} in trade{r.half_taken ? " · ½ off" : ""}
+            </span>
+          ))}
+          {armed.map((r) => (
+            <span key={`a-${r.symbol}`} className="rounded-full border border-amber-500/40 bg-amber-500/10 px-2 py-0.5 text-[11px] text-amber-300">
+              {r.symbol} armed
+            </span>
+          ))}
+        </div>
+      )}
+    </Card>
+  );
+}
+
 export default function Overview({ onNavigate, onSelectStock, onAction, onRegimeStatus,
                                   accountId, accountNonce, onSelectAccount }) {
   // One aggregate call (see /api/overview) instead of stitching regime +
@@ -701,6 +793,9 @@ export default function Overview({ onNavigate, onSelectStock, onAction, onRegime
       {!ov.data?.payouts?.error && (
         <PayoutGlance payouts={ov.data?.payouts} onOpen={() => nav.tab("Payouts")} />
       )}
+
+      {/* Day-trade sleeve (paper) — separate from the CFM book above. */}
+      <DayTradeGlance onOpen={() => nav.tab("Day Trade")} refreshKey={accountNonce} />
 
       {active && (
         <Modal onClose={() => setDetail(null)} maxWidth={detail === "grove" ? "max-w-4xl" : "max-w-2xl"}>
