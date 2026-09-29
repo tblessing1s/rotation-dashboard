@@ -36,3 +36,20 @@ def test_open_position_marks_both_legs():
     assert t["shares_unrealized"] == -200.0
     assert t["calls_realized"] == 0.0 and t["calls_unrealized"] == 60.0
     assert t["total"] == -140.0
+
+
+def test_story_inputs_reconcile_to_total():
+    ex = [
+        _e(1, "buy_shares", "14:00", 50.0, qty=100, price_per_share=50.0,
+           execution_total=5000.0),
+        _e(2, "sell_short", "14:00", 50.0, strike=55, contracts=1,
+           premium_total=300.0, entry_extrinsic_per_share=2.0),
+        _e(3, "close_short", "15:00", 50.0, strike=55, contracts=1, close_total=100.0),
+        _e(4, "dividend_income", "16:00", 50.0, amount=25.0, shares=100),
+    ]
+    t = pnl_breakdown.build({"executions": ex, "positions": []})["tickers"][0]
+    assert t["shares_bought_cost"] == 5000.0
+    assert t["premium_sold"] == 300.0 and t["premium_extrinsic"] == 200.0
+    assert t["premium_intrinsic"] == 100.0 and t["buyback_paid"] == 100.0
+    assert t["calls_total"] == 200.0 and t["dividends"] == 25.0
+    assert t["total"] == round(t["shares_total"] + t["calls_total"] + t["dividends"], 2)

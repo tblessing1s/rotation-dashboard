@@ -9,6 +9,11 @@ Read-only, per ticker and book-wide. Four buckets, all cash P/L in dollars:
                       expiry buys back for nothing here: the intrinsic the call
                       gave away is already inside the shares' sale at the strike.
 * calls unrealized  — open shorts: premium collected minus the current mark.
+* dividends         — held-share cash dividends (their own income event).
+
+Each row also carries the ``story`` inputs behind those buckets (cost in/out of
+the shares, premium split into intrinsic/extrinsic, buybacks, open-call mark) so
+the UI can walk from original cost to position P/L.
 
 ``uncovered_gap`` (from ``coverage_gaps``) is an "of which" line INSIDE the
 shares P/L — the stock move while owned lots had no call — never added on top.
@@ -20,7 +25,11 @@ import coverage_gaps
 import logging_handler as log
 
 _KEYS = ("shares_realized", "shares_unrealized", "calls_realized",
-         "calls_unrealized")
+         "calls_unrealized", "dividends")
+# Story inputs: additive dollar figures that explain the buckets above.
+_STORY = ("shares_bought_cost", "shares_sold_cost", "shares_sale_proceeds",
+          "shares_held_cost", "shares_held_value", "premium_sold",
+          "premium_extrinsic", "buyback_paid", "open_call_mark")
 
 
 def _f(x) -> float:
@@ -32,18 +41,21 @@ def _f(x) -> float:
 
 def _blank(ticker: str) -> dict:
     return {"ticker": ticker, "open": False, "spot": None,
-            **{k: 0.0 for k in _KEYS}, "uncovered_gap": 0.0,
+            **{k: 0.0 for k in _KEYS}, **{k: 0.0 for k in _STORY},
+            "uncovered_gap": 0.0,
             "uncovered_gap_open": False}
 
 
 def _finish(row: dict) -> dict:
-    for k in _KEYS + ("uncovered_gap",):
+    for k in _KEYS + _STORY + ("uncovered_gap",):
         row[k] = round(row[k], 2)
+    row["premium_intrinsic"] = round(row["premium_sold"] - row["premium_extrinsic"], 2)
     row["shares_total"] = round(row["shares_realized"] + row["shares_unrealized"], 2)
     row["calls_total"] = round(row["calls_realized"] + row["calls_unrealized"], 2)
-    row["realized"] = round(row["shares_realized"] + row["calls_realized"], 2)
+    row["realized"] = round(row["shares_realized"] + row["calls_realized"]
+                            + row["dividends"], 2)
     row["unrealized"] = round(row["shares_unrealized"] + row["calls_unrealized"], 2)
-    row["total"] = round(row["shares_total"] + row["calls_total"], 2)
+    row["total"] = round(row["shares_total"] + row["calls_total"] + row["dividends"], 2)
     # Shares P/L with the uncovered stretches taken out: what the stock did
     # while it was actually wearing a call.
     row["shares_while_covered"] = round(row["shares_total"] - row["uncovered_gap"], 2)
@@ -64,14 +76,32 @@ def build(state: dict, position_views: list[dict] | None = None) -> dict:
         if not t:
             continue
         a = e.get("action")
-        if a in ("sell_shares", "close_shares_assigned"):
-            row(t)["shares_realized"] += _f(e.get("realized_pnl"))
+        if a == "buy_shares":
+            row(t)["shares_bought_cost"] += (
+                _f(e.get("execution_total"))
+                or _f(e.get("qty")) * _f(e.get("price_per_share")))
+        elif a in ("sell_shares", "close_shares_assigned"):
+            r = row(t)
+            r["shares_realized"] += _f(e.get("realized_pnl"))
+            r["shares_sold_cost"] += _f(e.get("cost_basis_per_share")) * _f(e.get("qty"))
+            r["shares_sale_proceeds"] += (
+                _f(e.get("execution_total")) or _f(e.get("proceeds")))
         elif a == "sell_short":
-            row(t)["calls_realized"] += _f(e.get("premium_total"))
+            r = row(t)
+            prem = _f(e.get("premium_total"))
+            r["calls_realized"] += prem
+            r["premium_sold"] += prem
+            # Extrinsic captured at the sale; the rest of the premium was intrinsic.
+            r["premium_extrinsic"] += (_f(e.get("entry_extrinsic_per_share"))
+                                       * _f(e.get("contracts")) * 100)
         elif a == "close_short":
             reason = e.get("reason") or e.get("exit_reason")
             free = e.get("assigned") or reason == "expired_worthless"
-            row(t)["calls_realized"] -= 0.0 if free else _f(e.get("close_total"))
+            paid = 0.0 if free else _f(e.get("close_total"))
+            row(t)["calls_realized"] -= paid
+            row(t)["buyback_paid"] += paid
+        elif a == "dividend_income":
+            row(t)["dividends"] += _f(e.get("amount"))
 
     for v in position_views or []:
         if v.get("status") == "closed":
@@ -82,7 +112,9 @@ def build(state: dict, position_views: list[dict] | None = None) -> dict:
         count, basis = _f(sh.get("count")), _f(sh.get("cost_basis_per_share"))
         r["open"] = bool(count or v.get("short_calls"))
         r["spot"] = spot
+        r["shares_held_cost"] += basis * count
         if spot and count:
+            r["shares_held_value"] += float(spot) * count
             r["shares_unrealized"] += (float(spot) - basis) * count
         for sc in v.get("short_calls") or []:
             n = _f(sc.get("contracts"))
@@ -92,6 +124,7 @@ def build(state: dict, position_views: list[dict] | None = None) -> dict:
             # The sell_short above already banked the premium as realized; the
             # open leg's unrealized side is the cost to close it, negative.
             r["calls_unrealized"] -= float(mark) * n * 100
+            r["open_call_mark"] += float(mark) * n * 100
 
     # A short still open has had its premium counted in calls_realized; net it
     # out so the premium sits in unrealized (premium - mark) instead.
@@ -122,6 +155,6 @@ def build(state: dict, position_views: list[dict] | None = None) -> dict:
     tickers = sorted(rows.values(), key=lambda r: r["total"])  # worst first
     tot = _blank("ALL")
     for r in tickers:
-        for k in _KEYS + ("uncovered_gap",):
+        for k in _KEYS + _STORY + ("uncovered_gap",):
             tot[k] += r[k]
     return {"authority": "none", "totals": _finish(tot), "tickers": tickers}
