@@ -97,7 +97,19 @@ def check(state: dict, tickers=None, now: datetime | None = None) -> list[dict]:
             continue
         broker = broker_holdings(state, t, now)
         mirror_shares = int((p.get("shares") or {}).get("count") or 0)
-        log_shares = int(executor.replay_shares_from_log(t, state)["count"])
+        replay = executor.replay_shares_from_log(t, state)
+        log_shares = int(replay["count"])
+        mirror_basis = _f((p.get("shares") or {}).get("cost_basis_per_share"))
+        log_basis = _f(replay.get("cost_basis_per_share"))
+        if (mirror_shares == log_shares and log_shares > 0 and log_basis is not None
+                and (mirror_basis is None or abs(mirror_basis - log_basis) >= 0.005)):
+            # Same share count, different cost basis: a corrected buy price
+            # never reached the mirror (CONFIRMED LIVE: 140.32 kept after the
+            # buy was corrected to 144.09, overstating open share P/L by $377).
+            # Price is the log's alone — Schwab's holdings only confirm the
+            # count, which already agrees — so this always heals.
+            out.append({"ticker": t, "part": "cost_basis", "mirror": mirror_basis, "log": log_basis,
+                        "broker": None, "verdict": "heal"})
         if mirror_shares != log_shares:
             ok = broker is not None and broker["shares"] == log_shares
             out.append({"ticker": t, "part": "shares", "mirror": mirror_shares, "log": log_shares,
@@ -124,7 +136,7 @@ def heal(tickers=None, reason: str = "position drifted from the trade log; Schwa
             held.append(d)
             continue
         try:
-            if d["part"] == "shares":
+            if d["part"] in ("shares", "cost_basis"):
                 executor.rebuild_shares_from_log(d["ticker"], reason)
             else:
                 executor.rebuild_short_calls_from_log(d["ticker"], reason)

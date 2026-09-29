@@ -76,6 +76,15 @@ def fill_time(e: dict) -> datetime | None:
 
 
 def _price(e: dict) -> float | None:
+    # A share fill's own price IS the stock price at that moment — exact, and
+    # corrected with the fill. A captured quote can be stale or, CONFIRMED
+    # LIVE, left over from a record whose price was later corrected (a 140.31
+    # capture on a buy corrected to 144.09 read as a $378 uncovered gain).
+    if e.get("action") in _SHARE_ADD | {"sell_shares"} and e.get("price_per_share") is not None:
+        try:
+            return float(e["price_per_share"])
+        except (TypeError, ValueError):
+            pass
     for k in ("stock_price_at_fill", "stock_price"):
         v = e.get(k)
         if v is not None:
@@ -83,8 +92,6 @@ def _price(e: dict) -> float | None:
                 return float(v)
             except (TypeError, ValueError):
                 pass
-    if e.get("action") in _SHARE_ADD | {"sell_shares"} and e.get("price_per_share") is not None:
-        return float(e["price_per_share"])
     return None
 
 

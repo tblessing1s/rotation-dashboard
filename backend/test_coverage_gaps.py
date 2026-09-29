@@ -34,6 +34,17 @@ def test_ibit_three_gaps_sum_to_minus_39():
     assert s["authority"] == "none"
 
 
+def test_a_share_fill_is_measured_at_its_own_price_not_a_stale_capture():
+    # LIVE (SPCX): a buy corrected to 144.09 still carried a 140.31 captured
+    # quote from before the correction — read as a +$378 uncovered gain.
+    ex = [
+        _e(1, "buy_shares", "14:40", 140.31, qty=100, price_per_share=144.09),
+        _e(2, "sell_short", "14:42", 144.09, strike=137, contracts=1),
+    ]
+    [w] = coverage_gaps.windows_for(ex)
+    assert w["gap_pnl"] == 0.0
+
+
 def test_atomic_roll_leaves_no_window():
     ex = [
         _e(1, "buy_shares", "14:00", 50.0, qty=100),
