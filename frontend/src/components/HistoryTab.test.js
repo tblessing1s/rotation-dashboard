@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { _editsForSave, _legsKey, _linkPairs } from "./HistoryTab.jsx";
+import { _editsForSave, _legsEqual, _legsKey, _linkPairs } from "./HistoryTab.jsx";
 
 // CONFIRMED LIVE: every row was previously resubmitted on every save (price/
 // stock_price/extrinsic are always pre-filled, never blank), and the backend
@@ -167,5 +167,24 @@ describe("_legsKey", () => {
     const a = [{ strike: 43, contracts: 1, expiration: "2026-09-18" }];
     const b = [{ strike: 43, contracts: 2, expiration: "2026-09-18" }];
     expect(_legsKey(a)).not.toBe(_legsKey(b));
+  });
+});
+
+describe("_legsEqual", () => {
+  it("a leg whose log record has no expiry still matches the mirror's (LIVE: TQQQ 75.5C)", () => {
+    const mirror = [{ strike: 75.5, contracts: 2, expiration: "2026-10-02" }];
+    const log = [{ strike: 75.5, contracts: 2, expiration: null }];
+    expect(_legsEqual(mirror, log)).toBe(true);
+  });
+
+  it("known expiries that differ are still drift", () => {
+    expect(_legsEqual([{ strike: 44, contracts: 1, expiration: "2026-09-25" }],
+                      [{ strike: 44, contracts: 1, expiration: "2026-10-02" }])).toBe(false);
+  });
+
+  it("a stray or missing leg is drift", () => {
+    expect(_legsEqual([{ strike: 43, contracts: 1 }], [])).toBe(false);
+    expect(_legsEqual([], [{ strike: 43, contracts: 1 }])).toBe(false);
+    expect(_legsEqual(undefined, [])).toBe(true);
   });
 });

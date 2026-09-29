@@ -22,9 +22,9 @@ def store(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _covered_then_paper_roll():
+def _covered_then_paper_roll(expiration="2026-09-25"):
     executor.execute({"action": "buy_write", "ticker": "AAA", "qty": 100, "stock_price": 140.32,
-                      "price_per_share": 140.32, "strike": 138, "expiration": "2026-09-25",
+                      "price_per_share": 140.32, "strike": 138, "expiration": expiration,
                       "premium_per_share": 4.0, "override_reason": "fixture"})
     return executor.execute({
         "action": "roll_short", "ticker": "AAA", "contracts": 1,
@@ -43,8 +43,8 @@ def test_the_paper_roll_is_offered_as_unfilled(store):
     assert len(rolls) == 1
     r = rolls[0]
     assert r["roll_id"] == res["roll_group_id"]
-    # The log never stamped the old call's expiry on these booking paths.
-    assert (r["from_strike"], r["from_expiration"]) == (138, None)
+    # The old call's expiry is on its own execution (not only the mirror).
+    assert (r["from_strike"], r["from_expiration"]) == (138, "2026-09-25")
     assert (r["to_strike"], r["to_expiration"]) == (141, "2026-10-02")
 
 
@@ -87,7 +87,8 @@ def test_undo_without_assignment_restores_the_old_call(store):
 
 
 def test_assignment_defaults_to_the_day_the_roll_was_booked(store):
-    res = _covered_then_paper_roll()
+    # An old call whose expiry was never recorded anywhere (legacy bookings).
+    res = _covered_then_paper_roll(expiration=None)
     booked = next(e for e in log.load_state()["executions"] if e.get("roll_id"))["date"][:10]
     executor.undo_unfilled_roll("AAA", res["roll_group_id"], "never filled", assigned=True)
     ex = [e for e in log.load_state()["executions"] if e["action"] == "close_shares_assigned"]
