@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { Card, Pill, Loading, fmt } from "./ui.jsx";
 import { useToast } from "./Toast.jsx";
 import { submitOrder } from "../orderFlow.js";
+import { pageStrikes, useStrikePaging } from "../strikePaging.js";
 
 // The cash-secured put ticket (schema v22).
 //
@@ -67,6 +68,7 @@ export default function PutTicket({ ticker, onExecuted }) {
   const [pick, setPick] = React.useState(null);
   const [contracts, setContracts] = React.useState(1);
   const [busy, setBusy] = React.useState(false);
+  const paging = useStrikePaging();
 
   const load = React.useCallback(async (t) => {
     if (!t) return;
@@ -218,7 +220,7 @@ export default function PutTicket({ ticker, onExecuted }) {
                   <span className="w-14">Spread</span>
                 </div>
                 <div className="grid gap-1">
-                  {group.strikes.map((row) => (
+                  {pageStrikes(group.strikes, paging.visible(group.expiration)).map((row) => (
                     <StrikeRow
                       key={row.strike}
                       row={row}
@@ -228,6 +230,15 @@ export default function PutTicket({ ticker, onExecuted }) {
                     />
                   ))}
                 </div>
+                {group.strikes.length > paging.visible(group.expiration) && (
+                  <button
+                    type="button"
+                    onClick={() => paging.more(group.expiration)}
+                    className="mt-1 w-full rounded-lg border border-slate-700 py-1 text-xs text-slate-300 hover:bg-slate-900/60"
+                  >
+                    Show more strikes ({group.strikes.length - paging.visible(group.expiration)} more)
+                  </button>
+                )}
               </div>
 
               <div className="flex items-center gap-3">
