@@ -42,6 +42,12 @@ class RegimeBlocked(RuntimeError):
     """Raised when the market regime is RED — no entries are allowed."""
 
 
+# Strikes returned per expiration for the CC / CSP ladders. The UI shows the 5
+# nearest the suggested strike first and pages the rest in ("Show more") — the
+# chain is already fetched, so widening the ladder costs no extra broker call.
+LADDER_STRIKES = 25
+
+
 def _chain_lock(ticker: str) -> threading.Lock:
     with _locks_guard:
         return _chain_locks.setdefault(ticker, threading.Lock())
@@ -746,7 +752,8 @@ def option_chain(ticker: str, strategy: str = "atr", refresh: bool = False) -> d
                 "expiration": exp,
                 "dte": exp_contracts[0]["dte"] if exp_contracts else None,
                 "strikes": indicators.get_nearby_strikes(
-                    exp_contracts, suggested_strike, underlying, span_to_atm=True),
+                    exp_contracts, suggested_strike, underlying,
+                    count=LADDER_STRIKES, span_to_atm=True),
             })
         # Each week is a full chain with its own ATR-target `suggested` strike.
         # The comparison week (>= a full week of DTE) is the one flagged
@@ -925,7 +932,7 @@ def put_chain(ticker: str, refresh: bool = False) -> dict:
     for exp in _weekly_expirations(weekly_only, count=2):
         exp_contracts = [c for c in weekly_only if c["expiration"] == exp]
         strikes = indicators.get_nearby_strikes(exp_contracts, target, underlying,
-                                                count=5, put=True)
+                                                count=LADDER_STRIKES, put=True)
         strikes, no_tradeable_strike = _apply_put_quality_filter(strikes, target)
         exp_groups.append({
             "expiration": exp,

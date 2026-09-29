@@ -3,6 +3,7 @@ import { api } from "../api.js";
 import { Pill, ChartLink, Loading, fmt } from "./ui.jsx";
 import { useTradeMode, useNonTransmittingActions, TradeModeBadge, LiveOrderConfirm } from "../tradeMode.jsx";
 import { totalDollars } from "../units.js";
+import { pageStrikes, useStrikePaging } from "../strikePaging.js";
 
 // Dollar formatter that tolerates nulls (—) for thin/closed quotes.
 function dollars(n) {
@@ -36,6 +37,7 @@ const ACTION_LABELS = {
 export default function OptionChainModal({ ticker, accountGate, needsManualReason, onExecute, onClose }) {
   const [chain, setChain] = React.useState(null);
   const [error, setError] = React.useState(null);
+  const paging = useStrikePaging();
   const [loading, setLoading] = React.useState(true);
   const [manualReason, setManualReason] = React.useState("");
   const [weeklyStrike, setWeeklyStrike] = React.useState(null);
@@ -521,7 +523,7 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
                         <div className="grid grid-cols-[auto_repeat(5,1fr)] gap-2 text-xs uppercase tracking-wide text-slate-500">
                           <span className="w-6" /><span>Strike</span><span>Delta</span><span>Bid / Ask</span><span>Mark</span><span>Extrinsic</span>
                         </div>
-                        {g.strikes.map((s) => {
+                        {pageStrikes(g.strikes, paging.visible(g.expiration)).map((s) => {
                           const selected = g.expiration === weeklyExp && s.strike === weeklyStrike;
                           return (
                             <label
@@ -547,6 +549,15 @@ export default function OptionChainModal({ ticker, accountGate, needsManualReaso
                             </label>
                           );
                         })}
+                        {g.strikes.length > paging.visible(g.expiration) && (
+                          <button
+                            type="button"
+                            onClick={() => paging.more(g.expiration)}
+                            className="mt-1 w-full rounded-lg border border-slate-700 py-1 text-xs text-slate-300 hover:bg-slate-800/50"
+                          >
+                            Show more strikes ({g.strikes.length - paging.visible(g.expiration)} more)
+                          </button>
+                        )}
                       </>
                     ) : <p className="text-sm text-slate-400">No strikes available.</p>}
                   </div>
