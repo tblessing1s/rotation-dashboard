@@ -77,6 +77,7 @@ def api_daytrade_config():
     account-scoped): these are process-wide constants, not per-account
     state."""
     return jsonify({
+        "mode": config.daytrade_mode(),
         "risk_pct": config.DAYTRADE_RISK_PCT,
         "max_trades_per_day": config.DAYTRADE_MAX_TRADES_PER_DAY,
         "max_losses_per_day": config.DAYTRADE_MAX_LOSSES_PER_DAY,
