@@ -18,6 +18,7 @@ import Overview from "./components/Overview.jsx";
 import RecommendationsTab from "./components/RecommendationsTab.jsx";
 import SettingsTab from "./components/SettingsTab.jsx";
 import PayoutsTab from "./components/PayoutsTab.jsx";
+import PnLTab from "./components/PnLTab.jsx";
 import DayTradePanel from "./components/DayTradePanel.jsx";
 
 // "Calibration" is a DIAGNOSTIC surface, deliberately its own tab and
@@ -29,7 +30,7 @@ import DayTradePanel from "./components/DayTradePanel.jsx";
 // unlike that shadow sleeve, the day-trade engine takes real (paper) trades and
 // has its own daily rhythm (screener, signal feed, trade log) worth a dedicated
 // monitoring surface, not a diagnostic one.
-const TABS = ["Overview", "Recommendations", "Scan", "Positions", "History", "Payouts", "Day Trade", "Calibration", "Settings"];
+const TABS = ["Overview", "Recommendations", "Scan", "Positions", "History", "P/L", "Payouts", "Day Trade", "Calibration", "Settings"];
 
 export default function App() {
   const [tab, setTab] = React.useState("Overview");
@@ -356,6 +357,7 @@ export default function App() {
                                onOpenTicket={openTicket} />
             )}
             {tab === "History" && <HistoryTab key={`${accountNonce}:${execNonce}`} />}
+            {tab === "P/L" && <PnLTab key={`${accountNonce}:${execNonce}`} />}
             {tab === "Payouts" && <PayoutsTab key={`${accountNonce}:${execNonce}`} />}
             {tab === "Day Trade" && <DayTradePanel key={accountNonce} />}
             {tab === "Calibration" && (
