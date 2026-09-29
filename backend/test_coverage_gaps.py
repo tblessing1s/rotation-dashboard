@@ -45,6 +45,31 @@ def test_a_share_fill_is_measured_at_its_own_price_not_a_stale_capture():
     assert w["gap_pnl"] == 0.0
 
 
+def test_a_buy_write_leaves_no_window_whatever_its_leg_prices_say():
+    # LIVE (TQQQ): one buy-write ticket, shares at their fill 78.16, the call's
+    # captured spot 78.01 — read as a -$30 zero-second gap.
+    ex = [
+        _e(1, "buy_shares", "14:33", 78.01, qty=200, price_per_share=78.16, covered_group_id="cov_001"),
+        _e(2, "sell_short", "14:33", 78.01, strike=75.5, contracts=2, covered_group_id="cov_001"),
+    ]
+    assert coverage_gaps.windows_for(ex) == []
+    # Same instant without a group id: still one moment, no exposure.
+    for e in ex:
+        e.pop("covered_group_id")
+    assert coverage_gaps.windows_for(ex) == []
+
+
+def test_date_only_fills_on_one_day_can_still_be_a_gap():
+    ex = [
+        {"id": "a", "ticker": "IBIT", "action": "buy_shares", "date": "2026-09-08",
+         "qty": 100, "price_per_share": 44.51},
+        {"id": "b", "ticker": "IBIT", "action": "sell_short", "date": "2026-09-08",
+         "stock_price": 44.35, "strike": 43, "contracts": 1},
+    ]
+    [w] = coverage_gaps.windows_for(ex)
+    assert w["gap_pnl"] == -16.0
+
+
 def test_atomic_roll_leaves_no_window():
     ex = [
         _e(1, "buy_shares", "14:00", 50.0, qty=100),

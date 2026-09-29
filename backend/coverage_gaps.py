@@ -127,6 +127,21 @@ def _ref(e: dict) -> dict:
             "stock_price": _price(e)}
 
 
+def _one_ticket(a: dict, b: dict) -> bool:
+    """Two fills of ONE ticket (a buy-write / unwind, or an atomic roll) — or two
+    fills stamped at the very same instant — leave no window at all, whatever
+    their prices say. CONFIRMED LIVE: a TQQQ buy-write's shares (78.16, their
+    own fill price) and its call (78.01, the captured quote) read as a -$30
+    zero-second gap."""
+    for k in ("covered_group_id", "roll_group_id", "roll_id"):
+        if a.get(k) and a.get(k) == b.get(k):
+            return True
+    ta, tb = fill_time(a), fill_time(b)
+    # Only a real timestamp: two date-only adoptions can be hours apart.
+    timed = all("T" in str(e.get("fill_time") or e.get("date") or "") for e in (a, b))
+    return timed and ta is not None and ta == tb
+
+
 def _close_window(start_e, end_e, uncovered, end_time=None, end_px=None) -> dict:
     t0 = fill_time(start_e)
     t1 = end_time if end_e is None else fill_time(end_e)
@@ -175,7 +190,7 @@ def windows_for(executions: list[dict], now: datetime | None = None,
         now_uncovered = max(shares // SHARES_PER_LOT - shorts, 0) * SHARES_PER_LOT
         if now_uncovered == uncovered:
             continue
-        if uncovered and start is not None:
+        if uncovered and start is not None and not _one_ticket(start, e):
             w = _close_window(start, e, uncovered)
             if w["seconds"] is None or w["seconds"] > 0 or (w["move_per_share"] or 0) != 0:
                 out.append(w)
