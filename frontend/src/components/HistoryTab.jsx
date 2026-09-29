@@ -433,17 +433,21 @@ function cell(v) {
 // (buy_shares/sell_shares) are included too — they have no strike/expiration/
 // extrinsic, just a price and a qty (shown in the same QTY column as
 // contracts), but their date and price are just as correctable as an
-// option leg's.
-const _FILL = new Set(["sell_short", "close_short", "buy_shares", "sell_shares"]);
-const _SHARE_ACTION = new Set(["buy_shares", "sell_shares"]);
+// option leg's. A called-away assignment (close_shares_assigned) is a share row
+// too: the shares leave at the call's strike, so its price is the strike and
+// not editable — its date, qty and cost basis are.
+const _FILL = new Set(["sell_short", "close_short", "buy_shares", "sell_shares", "close_shares_assigned"]);
+const _SHARE_ACTION = new Set(["buy_shares", "sell_shares", "close_shares_assigned"]);
+const _SHARE_EXIT = new Set(["sell_shares", "close_shares_assigned"]);
 function _price(e) {
+  if (e.action === "close_shares_assigned") return e.strike;
   if (_SHARE_ACTION.has(e.action)) return e.price_per_share;
   return e.action === "sell_short" ? e.premium_per_share : e.close_price_per_share;
 }
 function _extr(e) {
   if (e.action === "sell_short") return e.entry_extrinsic_per_share;
   if (e.action === "close_short") return e.extrinsic_sold;
-  if (e.action === "sell_shares") return e.cost_basis_per_share;
+  if (_SHARE_EXIT.has(e.action)) return e.cost_basis_per_share;
   return null;
 }
 function _toRow(e) {
@@ -461,7 +465,8 @@ function _toRow(e) {
     // Same idea, share-side: a sell adopted before its own buy was recovered
     // had no real cost basis to compute realized_pnl from and booked it off
     // $0 — this lets the operator supply the real cost basis after the fact.
-    editableCostBasis: e.action === "sell_shares",
+    editableCostBasis: _SHARE_EXIT.has(e.action),
+    isAssigned: e.action === "close_shares_assigned",
     source: e.source, roll: e.roll_group_id,
     strike: isShare ? "" : (e.strike ?? ""),
     contracts: isShare ? (e.qty ?? 0) : (e.contracts ?? 1),
@@ -646,7 +651,8 @@ function TransactionEditor() {
         need the <span className="text-amber-300">entry stock price</span> or <span className="text-amber-300">extrinsic</span> —
         edit either and the other is computed. Set the <span className="font-mono">expiration</span> so same-strike weeklies stay separate.
         Prices and extrinsic are <span className="text-slate-400">per share</span>.
-        Shares carry no extrinsic: on a <span className="font-mono">sell_shares</span> row that box is the
+        Shares carry no extrinsic: on a <span className="font-mono">sell_shares</span> or
+        called-away <span className="font-mono">close_shares_assigned</span> row that box is the
         sale's <span className="text-amber-300">cost basis</span> per share (tagged <span className="font-mono">basis</span>).
         Save derives your open position from these transactions.
         <span className="ml-1"><span className="font-mono">stock source</span> shows where the price behind the
@@ -685,7 +691,12 @@ function TransactionEditor() {
                          onChange={(e) => set(i, "expiration", e.target.value)}
                          className={`${inp} w-28 ${r.isShare ? "opacity-40" : ""}`} />
                 </td>
-                <td className="py-1 pr-2"><input value={r.price} onChange={(e) => set(i, "price", e.target.value)} className={`${inp} w-20`} /></td>
+                <td className="py-1 pr-2">
+                  <input value={r.price} disabled={r.isAssigned}
+                         title={r.isAssigned ? "Called away: the shares were delivered at the call's strike" : undefined}
+                         onChange={(e) => set(i, "price", e.target.value)}
+                         className={`${inp} w-20 ${r.isAssigned ? "opacity-60" : ""}`} />
+                </td>
                 <td className="py-1 pr-2">
                   <input value={r.stock_price} placeholder={r.isOpen ? "underlying" : "—"} disabled={!r.isOpen}
                          onChange={(e) => onStock(i, e.target.value)} className={`${inp} w-24 ${r.isOpen ? "border-amber-700 text-amber-200" : "opacity-40"}`} />
@@ -876,10 +887,28 @@ export function _legsKey(legs) {
     .sort()
     .join(",");
 }
+// Same legs by strike + contracts; an expiry must agree only when BOTH sides
+// know it (many booked legs never recorded theirs) — the backend's
+// position_heal._calls_equal rule, so this banner and the heal can't disagree.
+export function _legsEqual(a, b) {
+  const norm = (legs) => (legs || [])
+    .filter((l) => Math.round(Math.abs(Number(l.contracts ?? l.quantity ?? 0))) > 0)
+    .map((l) => ({ strike: Math.round(Number(l.strike) * 100) / 100,
+                   contracts: Math.round(Math.abs(Number(l.contracts ?? l.quantity))),
+                   exp: String(l.expiration || l.expiry || "").slice(0, 10) }));
+  const rest = norm(b);
+  for (const l of norm(a)) {
+    const i = rest.findIndex((x) => x.strike === l.strike && x.contracts === l.contracts
+      && (!l.exp || !x.exp || l.exp === x.exp));
+    if (i < 0) return false;
+    rest.splice(i, 1);
+  }
+  return rest.length === 0;
+}
 function ShortCallsDriftRepair({ positions, onRepaired }) {
   const [busy, setBusy] = React.useState(null);
   const drifted = (positions || []).filter(
-    (p) => p.expected_short_calls !== undefined && _legsKey(p.short_calls) !== _legsKey(p.expected_short_calls));
+    (p) => p.expected_short_calls !== undefined && !_legsEqual(p.short_calls, p.expected_short_calls));
   if (drifted.length === 0) return null;
 
   const rebuild = async (ticker) => {

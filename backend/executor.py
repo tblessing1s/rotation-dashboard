@@ -2236,6 +2236,24 @@ def _compute_txn_changes(e: dict, ed: dict) -> dict:
                 ch["realized_pnl"] = round(proceeds - cps * qty_final, 2)
         return ch
 
+    if a == "close_shares_assigned":
+        # A called-away delivery: the shares go at the call's strike, so the
+        # price is not editable — only the date, the share count and the cost
+        # basis the realized P&L is measured against (same as sell_shares).
+        if ed.get("contracts") not in (None, ""):
+            ch["qty"] = int(round(float(ed["contracts"])))
+        qty_final = ch.get("qty", e.get("qty") or 0)
+        strike = _ff(e.get("strike")) or 0.0
+        if "qty" in ch:
+            ch["proceeds"] = round(strike * qty_final, 2)
+        cost_basis = _ff(ed.get("cost_basis"))
+        if cost_basis is not None:
+            ch["cost_basis_per_share"] = round(cost_basis, 4)
+        cps = ch.get("cost_basis_per_share", _ff(e.get("cost_basis_per_share")))
+        if cps is not None and ("qty" in ch or "cost_basis_per_share" in ch):
+            ch["realized_pnl"] = round((strike - cps) * qty_final, 2)
+        return ch
+
     if ed.get("strike") not in (None, ""):
         ch["strike"] = float(ed["strike"])
     if ed.get("contracts") not in (None, ""):
@@ -5226,6 +5244,12 @@ def _sell_short(payload, ticker, strike, contracts, stock_price):
         "premium_per_share": premium_per_share, "premium_total": premium_total,
         "stock_price": stock_price, "entry_extrinsic_per_share": entry_extrinsic_per_share,
     }
+    # The leg's expiry belongs on the immutable execution too, not only on the
+    # position mirror: CONFIRMED LIVE a buy-write's call booked with none, so
+    # the log could never say which week it was and the drift check could not
+    # match it to the mirror's leg.
+    if _norm_exp(payload.get("expiration")):
+        execution["expiration"] = _norm_exp(payload.get("expiration"))
     # ROLL_STRIKE_CHOICE (TRAVIS_EXTENSION, shadow/telemetry-only) — present only
     # when this open leg came from the Roll dialog's regime-target advisory
     # (roll_advisor / strike_policy.regime_target_strike). A nested, ADDITIVE
@@ -5265,10 +5289,13 @@ def _close_short(payload, ticker, strike, contracts, stock_price):
     state = log.load_state()
     position = log.find_position(state, ticker)
     extrinsic_sold = payload.get("extrinsic_sold")
-    if extrinsic_sold is None and position:
+    expiration = _norm_exp(payload.get("expiration"))
+    if position:
         for sc in position.get("short_calls", []):
             if sc.get("strike") == strike:
-                extrinsic_sold = sc.get("entry_extrinsic_per_share")
+                if extrinsic_sold is None:
+                    extrinsic_sold = sc.get("entry_extrinsic_per_share")
+                expiration = expiration or _norm_exp(sc.get("expiration"))
                 break
     extrinsic_sold = round(float(extrinsic_sold or 0), 4)
     net_juice = round(extrinsic_sold - extrinsic_paid_back, 4)
@@ -5280,6 +5307,8 @@ def _close_short(payload, ticker, strike, contracts, stock_price):
         "extrinsic_paid_back": extrinsic_paid_back, "net_juice": net_juice,
         "net_juice_total": net_juice_total,
     }
+    if expiration:
+        execution["expiration"] = expiration
 
     def apply(position):
         # Contract-aware close: reduce the matching short leg(s) by the closed
