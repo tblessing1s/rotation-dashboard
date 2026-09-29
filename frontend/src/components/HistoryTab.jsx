@@ -471,7 +471,12 @@ function _toRow(e) {
     strike: isShare ? "" : (e.strike ?? ""),
     contracts: isShare ? (e.qty ?? 0) : (e.contracts ?? 1),
     expiration: isShare ? "" : (e.expiration || ""),
-    price: _price(e) ?? "", stock_price: e.stock_price ?? "", extrinsic: _extr(e) ?? "",
+    // A share fill's own price IS the stock price at that moment (read-only
+    // here) — never a separately captured quote that a price correction left
+    // behind (backend coverage_gaps._price reads it the same way).
+    price: _price(e) ?? "",
+    stock_price: (isShare && e.action !== "close_shares_assigned" ? e.price_per_share : e.stock_price) ?? "",
+    extrinsic: _extr(e) ?? "",
     stock_source: e.stock_price_source, stock_at_placement: e.stock_price_at_placement,
     stock_at_fill: e.stock_price_at_fill, fill_time: e.fill_time,
   };

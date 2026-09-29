@@ -110,9 +110,33 @@ def test_short_calls_heal_and_legs_without_an_expiry_pair(store):
     assert [(c["strike"], c["contracts"]) for c in calls] == [(142, 1)]
 
 
+def test_a_corrected_buy_price_heals_the_mirrors_cost_basis(store):
+    # LIVE: the buy was corrected 140.32 -> 144.09; the mirror kept 140.32, so
+    # "current cost of shares held" read $14,032 against $14,409 bought.
+    buy = _ex("exec_001", "buy_shares", "2026-09-01T14:40:48Z", qty=100, price_per_share=140.32)
+    pos = _pos(100, [])
+    pos["shares"]["cost_basis_per_share"] = 140.32
+    _book([buy], pos, holdings=[_shares("SPCX", 100)])
+    executor.save_transactions([{"id": "exec_001", "price": 144.09}])
+    shares = log.find_position(log.load_state(), "SPCX")["shares"]
+    assert shares["count"] == 100 and shares["cost_basis_per_share"] == 144.09
+
+
+def test_cost_basis_drift_heals_even_without_a_schwab_snapshot(store):
+    buy = _ex("b1", "buy_shares", "2026-09-01T14:40:48Z", qty=100, price_per_share=144.09)
+    pos = _pos(100, [])
+    pos["shares"]["cost_basis_per_share"] = 140.32
+    _book([buy], pos)
+    rep = position_heal.heal()
+    assert [d["part"] for d in rep["healed"]] == ["cost_basis"] and rep["held"] == []
+    assert log.find_position(log.load_state(), "SPCX")["shares"]["cost_basis_per_share"] == 144.09
+
+
 def test_in_sync_positions_are_left_alone(store):
+    pos = _pos(100, [])
+    pos["shares"]["cost_basis_per_share"] = 144.09
     _book([_ex("b1", "buy_shares", "2026-09-01T15:40:48Z", qty=100, price_per_share=144.09)],
-          _pos(100, []), holdings=[_shares("SPCX", 100)])
+          pos, holdings=[_shares("SPCX", 100)])
     assert position_heal.heal() == {"healed": [], "held": []}
     assert not any(e["action"] == "position_rebuild" for e in log.load_state()["executions"])
 
