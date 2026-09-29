@@ -29,7 +29,8 @@ _KEYS = ("shares_realized", "shares_unrealized", "calls_realized",
 # Story inputs: additive dollar figures that explain the buckets above.
 _STORY = ("shares_bought_cost", "shares_sold_cost", "shares_sale_proceeds",
           "shares_held_cost", "shares_held_value", "premium_sold",
-          "premium_extrinsic", "buyback_paid", "open_call_mark")
+          "premium_extrinsic", "buyback_paid", "buyback_extrinsic",
+          "open_call_mark", "open_call_extrinsic")
 
 
 def _f(x) -> float:
@@ -49,6 +50,8 @@ def _blank(ticker: str) -> dict:
 def _finish(row: dict) -> dict:
     for k in _KEYS + _STORY + ("uncovered_gap",):
         row[k] = round(row[k], 2)
+    row["buyback_intrinsic"] = round(row["buyback_paid"] - row["buyback_extrinsic"], 2)
+    row["open_call_intrinsic"] = round(row["open_call_mark"] - row["open_call_extrinsic"], 2)
     row["premium_intrinsic"] = round(row["premium_sold"] - row["premium_extrinsic"], 2)
     row["shares_total"] = round(row["shares_realized"] + row["shares_unrealized"], 2)
     row["calls_total"] = round(row["calls_realized"] + row["calls_unrealized"], 2)
@@ -98,8 +101,14 @@ def build(state: dict, position_views: list[dict] | None = None) -> dict:
             reason = e.get("reason") or e.get("exit_reason")
             free = e.get("assigned") or reason == "expired_worthless"
             paid = 0.0 if free else _f(e.get("close_total"))
-            row(t)["calls_realized"] -= paid
-            row(t)["buyback_paid"] += paid
+            r = row(t)
+            r["calls_realized"] -= paid
+            r["buyback_paid"] += paid
+            if paid:
+                # Time value bought back; the remainder of the debit is intrinsic.
+                _, ext_ps, _ = log.close_economics(e)
+                r["buyback_extrinsic"] += min(
+                    max(ext_ps, 0.0) * _f(e.get("contracts")) * 100, paid)
         elif a == "dividend_income":
             row(t)["dividends"] += _f(e.get("amount"))
 
@@ -125,6 +134,12 @@ def build(state: dict, position_views: list[dict] | None = None) -> dict:
             # open leg's unrealized side is the cost to close it, negative.
             r["calls_unrealized"] -= float(mark) * n * 100
             r["open_call_mark"] += float(mark) * n * 100
+            strike = sc.get("strike")
+            if spot and strike is not None:
+                intr = max(float(spot) - float(strike), 0.0) * n * 100
+            else:
+                intr = 0.0
+            r["open_call_extrinsic"] += max(float(mark) * n * 100 - intr, 0.0)
 
     # A short still open has had its premium counted in calls_realized; net it
     # out so the premium sits in unrealized (premium - mark) instead.
