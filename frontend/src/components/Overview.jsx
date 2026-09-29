@@ -572,6 +572,50 @@ function PayoutGlance({ payouts, onOpen }) {
 const dtMoney = (n) => (n == null ? "—" : `${n < 0 ? "-" : n > 0 ? "+" : ""}$${Math.abs(n).toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
 const dtTone = (n) => (n > 0 ? "text-emerald-300" : n < 0 ? "text-rose-300" : "text-slate-100");
 
+const PNL_RANGES = [
+  { key: "1D", days: 1, label: "Today" },
+  { key: "1W", days: 7, label: "7 days" },
+  { key: "1M", days: 30, label: "30 days" },
+  { key: "ALL", days: 0, label: "All" },
+];
+
+// Running realized paper P&L as a step line (one step per exit fill), zero line
+// dashed, green above / red below by the final value. Realized only — open
+// trades are in the "Today" tile above.
+function PnlCurve({ series }) {
+  const pts = series?.points || [];
+  if (pts.length === 0) {
+    return <p className="text-xs text-slate-500">No closed paper fills in this window yet.</p>;
+  }
+  const W = 600, H = 120, PAD = 6;
+  const ts = pts.map((p) => Date.parse(p.at) || 0);
+  const t0 = ts[0], t1 = ts[ts.length - 1];
+  const vals = [0, ...pts.map((p) => p.cum)];
+  const lo = Math.min(...vals), hi = Math.max(...vals);
+  const span = hi - lo || 1;
+  const x = (t) => (t1 === t0 ? W / 2 : PAD + ((t - t0) / (t1 - t0)) * (W - 2 * PAD));
+  const y = (v) => H - PAD - ((v - lo) / span) * (H - 2 * PAD);
+  let d = `M ${x(t0)} ${y(0)}`, prev = 0;
+  pts.forEach((p, i) => { d += ` L ${x(ts[i])} ${y(prev)} L ${x(ts[i])} ${y(p.cum)}`; prev = p.cum; });
+  const total = series.total;
+  const stroke = total > 0 ? "#6ee7b7" : total < 0 ? "#fda4af" : "#94a3b8";
+  const best = Math.max(...pts.map((p) => p.cum)), worst = Math.min(...pts.map((p) => p.cum));
+  return (
+    <div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="h-28 w-full" preserveAspectRatio="none"
+           role="img" aria-label={`Running paper P&L, ${dtMoney(total)} over ${pts.length} fills`}>
+        <line x1={0} x2={W} y1={y(0)} y2={y(0)} stroke="#475569" strokeDasharray="4 4" strokeWidth="1" vectorEffect="non-scaling-stroke" />
+        <path d={d} fill="none" stroke={stroke} strokeWidth="2" vectorEffect="non-scaling-stroke" />
+      </svg>
+      <div className="mt-1 flex flex-wrap justify-between gap-x-4 text-[11px] text-slate-500">
+        <span>{series.fills} fill{series.fills === 1 ? "" : "s"} · realized</span>
+        <span>peak <span className={dtTone(best)}>{dtMoney(best)}</span> · low <span className={dtTone(worst)}>{dtMoney(worst)}</span></span>
+        <span>net <span className={`font-semibold ${dtTone(total)}`}>{dtMoney(total)}</span></span>
+      </div>
+    </div>
+  );
+}
+
 // Day Trade at a glance. The sleeve is paper-only and runs on its own clock, so
 // nothing else on the landing shows it: this says whether it is on, what is
 // armed / in a trade right now, today's paper P&L, and trial progress. Every
@@ -584,6 +628,9 @@ function DayTradeGlance({ onOpen, refreshKey }) {
   const { data: trial } = useApi(() => api.daytradeTrial(), dep, 60000);
   const { data: tradesResp } = useApi(() => api.daytradeTrades(), dep, 60000);
   const { data: live } = useApi(() => api.daytradeLiveStatus(), dep, 60000);
+  const [range, setRange] = React.useState("1W");
+  const days = PNL_RANGES.find((r) => r.key === range)?.days ?? 0;
+  const { data: series } = useApi(() => api.daytradePnlSeries(days), [days, refreshKey], 60000);
   if (!enabled && !trial) return null;
 
   const on = !!enabled?.enabled;
@@ -643,6 +690,22 @@ function DayTradeGlance({ onOpen, refreshKey }) {
           <Meter pct={pct} tone={trial.status === "complete" ? (trial.verdict === "loss" ? "bg-rose-500" : "bg-emerald-500") : "bg-sky-500"} />
         </div>
       )}
+      <div className="mt-4">
+        <div className="mb-1 flex items-center justify-between">
+          <span className="text-xs uppercase tracking-wide text-slate-500">Running P/L (paper)</span>
+          <span className="flex gap-1" role="group" aria-label="P/L time frame">
+            {PNL_RANGES.map((r) => (
+              <button key={r.key} onClick={() => setRange(r.key)} title={r.label} aria-pressed={range === r.key}
+                      className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold ${
+                        range === r.key ? "border-sky-500/50 bg-sky-500/15 text-sky-200"
+                                        : "border-slate-700 text-slate-400 hover:text-slate-200"}`}>
+                {r.key}
+              </button>
+            ))}
+          </span>
+        </div>
+        <PnlCurve series={series} />
+      </div>
       {(inTrade.length > 0 || armed.length > 0) && (
         <div className="mt-3 flex flex-wrap gap-1.5">
           {inTrade.map((r) => (

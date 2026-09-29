@@ -781,3 +781,27 @@ def test_maybe_screen_still_runs_when_only_a_manual_rescan_covered_today(monkeyp
 
     scheduler._maybe_screen(datetime(2026, 9, 25, 4, 0, tzinfo=ET))
     assert called == [True]
+
+
+def test_pnl_series_is_a_running_realized_curve_bounded_by_since_day(monkeypatch, tmp_path):
+    monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
+
+    def trade(tid, sym, exits):
+        return {"symbol": sym, "trade_id": tid, "status": "closed",
+                "exits": [{"kind": "x", "at": at, "pnl": p, "r": 1.0} for at, p in exits]}
+
+    store.save_trades("2026-09-28", "primary", {
+        "a": trade("a", "AAPL", [("2026-09-28T14:00:00Z", 50.0), ("2026-09-28T15:00:00Z", -20.0)])})
+    store.save_trades("2026-09-29", "primary", {
+        "b": trade("b", "MSFT", [("2026-09-29T14:30:00Z", 30.0)])})
+    store.save_trades("2026-09-29", "other", {
+        "c": trade("c", "NVDA", [("2026-09-29T14:45:00Z", 999.0)])})
+
+    full = trial.pnl_series("primary")
+    assert [p["cum"] for p in full["points"]] == [50.0, 30.0, 60.0]
+    assert full["total"] == 60.0 and full["fills"] == 3
+    assert full["days"] == [{"day": "2026-09-28", "pnl": 30.0}, {"day": "2026-09-29", "pnl": 30.0}]
+
+    today = trial.pnl_series("primary", since_day="2026-09-29")
+    assert [p["cum"] for p in today["points"]] == [30.0]
+    assert trial.pnl_series("nobody")["points"] == []

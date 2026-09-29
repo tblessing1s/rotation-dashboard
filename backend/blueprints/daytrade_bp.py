@@ -214,6 +214,27 @@ def api_daytrade_trial():
         return _err(e)
 
 
+@daytrade_bp.route("/api/daytrade/pnl-series")
+def api_daytrade_pnl_series():
+    """Running realized paper P&L over a time frame for the active account
+    (daytrade/trial.py's pnl_series). ``?days=N`` = the last N calendar days
+    ending today ET (1 = today only); omitted or 0 = everything on record."""
+    try:
+        from datetime import datetime, timedelta
+        from daytrade import trial
+        days = int(request.args.get("days") or 0)
+        since = None
+        if days > 0:
+            today = datetime.now(daytrade_scheduler.ET).date()
+            since = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+        return jsonify({"account_id": accounts.active_id(), "days": days,
+                         **trial.pnl_series(accounts.active_id(), since)})
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @daytrade_bp.route("/api/daytrade/enabled", methods=["GET", "POST"])
 def api_daytrade_enabled():
     """Get or set whether the day-trade sleeve is turned on for the active

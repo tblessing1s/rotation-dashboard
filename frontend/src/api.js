@@ -185,6 +185,8 @@ export const api = {
   // (backend/daytrade/trial.py) — aggregated across every day, not scoped
   // to `date`, same as daytradeBudget.
   daytradeTrial: () => request("/api/daytrade/trial"),
+  // Running realized paper P&L over the last `days` days (0 = all) — per account.
+  daytradePnlSeries: (days = 0) => request(`/api/daytrade/pnl-series?days=${days}`),
   // Whether the day-trade sleeve is turned ON for the active account
   // (backend/daytrade/settings.py — default on for the primary book, off
   // for every other). GET reads it, POST {enabled} sets it.
