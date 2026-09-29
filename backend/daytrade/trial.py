@@ -65,3 +65,35 @@ def trial_status(account_id: str) -> dict:
         "net_pnl": round(net_pnl, 2),
         "win_rate": round(wins / completed * 100, 1) if completed else None,
     }
+
+
+def pnl_series(account_id: str, since_day: str | None = None) -> dict:
+    """Running REALIZED paper P&L for one account: one point per exit fill
+    (partial exits included, so a half-target banks on the curve when it
+    happens), oldest first, cumulative from zero at the start of the window.
+    ``since_day`` (``YYYY-MM-DD``, inclusive) bounds the window; None = every
+    day on record. Open trades' unrealized P&L is deliberately not here —
+    this is the banked curve. Pure/read-only, recomputed from the trade logs
+    like ``trial_status``."""
+    fills: list[tuple[str, str, str, float, float | None]] = []
+    for day, day_trades in store.iter_all_trades(account_id):
+        if since_day and day < since_day:
+            continue
+        for t in day_trades.values():
+            for e in t.get("exits") or []:
+                fills.append((e.get("at") or "", day, t.get("symbol"),
+                              float(e.get("pnl") or 0), e.get("r")))
+    fills.sort(key=lambda f: f[0])
+    points, by_day, cum = [], {}, 0.0
+    for at, day, symbol, pnl, r in fills:
+        cum = round(cum + pnl, 2)
+        by_day[day] = round(by_day.get(day, 0.0) + pnl, 2)
+        points.append({"at": at, "day": day, "symbol": symbol,
+                       "pnl": round(pnl, 2), "cum": cum})
+    return {
+        "since": since_day,
+        "points": points,
+        "days": [{"day": d, "pnl": v} for d, v in sorted(by_day.items())],
+        "total": cum,
+        "fills": len(points),
+    }
