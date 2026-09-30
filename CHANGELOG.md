@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Orders tracker on Positions.** Lists orders as Schwab sees them (last 24h,
+  refreshed every 8s) with the broker's status, and a Cancel button that cancels
+  by broker order id — including an order the app never recorded (lost /
+  id-less ack). Broker-confirmed before it says canceled; a filled order is
+  never cancelled or booked. New: `GET /api/orders/broker`,
+  `POST /api/orders/cancel-broker`.
 - **Fix: a roll whose ack carried no order id was never cancelled.** `list_orders`
   sent no time window (Schwab requires `fromEnteredTime`/`toEnteredTime`), so the
   by-legs id recovery always failed, the order stayed UNKNOWN, and nothing could
