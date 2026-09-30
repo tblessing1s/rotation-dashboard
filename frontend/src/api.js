@@ -431,6 +431,10 @@ export const api = {
   // Pending (placed, not yet settled) orders for this book + an on-demand
   // re-poll against Schwab that books a fill the app never got to commit.
   pendingOrders: () => request("/api/orders/pending"),
+  // Orders as Schwab sees them (last 24h) + unconfirmed app submissions, and a
+  // cancel-by-broker-id that works for an order the app never recorded.
+  brokerOrders: () => request("/api/orders/broker"),
+  cancelBrokerOrder: (orderId) => request("/api/orders/cancel-broker", { method: "POST", body: JSON.stringify({ order_id: orderId }) }),
   repollPendingOrders: () => request("/api/orders/repoll", { method: "POST" }),
   // Execution ingestion from Schwab transactions (spec §4).
   ingestion: () => request("/api/ingestion"),

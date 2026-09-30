@@ -4,6 +4,7 @@ import { Card, Meter, Loading, Modal, Light, ChartLink, SleeveBadge, Spinner, mo
 import RollModal from "./RollModal.jsx";
 import ExitPositionModal from "./ExitPositionModal.jsx";
 import PortfolioRisk from "./PortfolioRisk.jsx";
+import OrdersTracker from "./OrdersTracker.jsx";
 import { useToast } from "./Toast.jsx";
 import { explainRec, explainResolution, ticketSummary } from "../recWhy.js";
 import { submitOrder } from "../orderFlow.js";
@@ -2182,6 +2183,7 @@ export default function PositionTracker({ intent, onIntentHandled, onOpenTicket 
 
   return (
     <div className="grid gap-3">
+      <OrdersTracker />
       {positions.length > 0 && (
         <BookSummary positions={positions} diffsByTicker={openDiffsByTicker} risk={risk} />
       )}

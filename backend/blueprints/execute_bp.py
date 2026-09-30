@@ -116,6 +116,30 @@ def api_order_cancel():
         return _err(e)
 
 
+@execute_bp.route("/api/orders/broker")
+def api_orders_broker():
+    """Orders as Schwab sees them (last 24h) + unconfirmed app submissions — the
+    live Orders tracker. Independent of the app's own pending records."""
+    try:
+        return jsonify(executor.list_broker_orders())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@execute_bp.route("/api/orders/cancel-broker", methods=["POST"])
+def api_orders_cancel_broker():
+    """Cancel an order at Schwab by broker order id — works for an order the app
+    never recorded. Broker-confirmed before it reports canceled."""
+    payload = request.get_json(silent=True) or {}
+    order_id = str(payload.get("order_id") or "")
+    if not order_id:
+        return jsonify({"error": "order_id is required"}), 400
+    try:
+        return jsonify(executor.cancel_broker_order(order_id))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @execute_bp.route("/api/order-submission-status")
 def api_order_submission_status():
     """MANUAL status check for a client_order_ref (incident hotfix, D2/D4). Resolves
