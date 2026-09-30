@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Fix: a roll whose ack carried no order id was never cancelled.** `list_orders`
+  sent no time window (Schwab requires `fromEnteredTime`/`toEnteredTime`), so the
+  by-legs id recovery always failed, the order stayed UNKNOWN, and nothing could
+  cancel it. It now sends a 24h window, prefers the live order entered after this
+  attempt, the stale-order sweep retries recovery, and the UI hands a recovered
+  working order to the normal fill-wait/auto-cancel flow.
 - **Removed the accrual ledger / lot builder.** The "Accrual — next lot" meter,
   `accrual.py`, the `accrual_ledger` state key (dropped from state on the next
   recompute), the `LOT_ADD_READY` alert, the `lot_add_recommended` action and

@@ -10,7 +10,7 @@ honest paper path. Position state updates identically either way.
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import config
 import fetch_budget
@@ -4950,6 +4950,27 @@ def cancel_stale_pending_orders(now: datetime | None = None) -> dict:
     checked = 0
     canceled = 0
     errors = []
+    # An order whose ack was lost / carried no id has NO pending record, so the loop
+    # below can't see it — it would rest at the broker until someone cancelled it by
+    # hand. Try to recover its id first (bounded, never re-submits); a recovered order
+    # is registered as pending with its original placed_at and is swept right after.
+    for ref, sub in log.list_order_submissions().items():
+        if sub.get("status") != SUB_UNKNOWN or sub.get("order_id"):
+            continue
+        if int(sub.get("unknown_attempts") or 0) >= int(config.UNKNOWN_STATUS_MAX_ATTEMPTS):
+            continue
+        try:
+            placed = datetime.strptime(str(sub.get("placed_at")), "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc)
+        except (ValueError, TypeError):
+            continue
+        if (now - placed).total_seconds() < 30:
+            continue   # the placing client is still confirming it
+        try:
+            submission_status(ref)
+        except Exception as e:  # noqa: BLE001 — one bad ref never blocks the sweep
+            log.logger.warning("stale-order sweep: recovery of %s failed (%s)", ref, e)
+            errors.append({"client_order_ref": str(ref), "error": str(e)})
     for order_id, rec in log.list_pending_orders().items():
         placed_at = rec.get("placed_at")
         if not placed_at:
@@ -5744,23 +5765,59 @@ def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
     return _submission_response(rec)
 
 
-def _match_recent_order(orders: list, close_symbol: str, open_symbol: str):
+_LIVE_ORDER_STATUSES = frozenset({
+    "WORKING", "QUEUED", "ACCEPTED", "PENDING_ACTIVATION", "AWAITING_PARENT_ORDER",
+    "AWAITING_CONDITION", "AWAITING_MANUAL_REVIEW", "AWAITING_STOP_CONDITION",
+    "AWAITING_UR_OUT", "NEW", "PENDING_ACKNOWLEDGEMENT",
+})
+
+
+def _match_recent_order(orders: list, close_symbol: str, open_symbol: str,
+                        since: str | None = None):
     """Find the orderId of a recently-entered order whose two legs match this roll's
     close/open symbols (D4 recovery when a 2xx ack carried no Location header). Pure:
     given the broker's recent-orders list, return the matching orderId or None. A
-    miss is safe — the caller keeps the record UNKNOWN rather than guessing."""
+    miss is safe — the caller keeps the record UNKNOWN rather than guessing.
+
+    ``since`` (the submission's ``placed_at``) drops orders entered before this
+    attempt, so an earlier cancelled ticket for the same legs is never adopted as
+    this one. Among the matches a still-live order wins, then the newest."""
     want = {(close_symbol or "").strip(), (open_symbol or "").strip()}
+    floor = None
+    if since:
+        try:
+            floor = datetime.strptime(str(since), "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc) - timedelta(seconds=60)
+        except (ValueError, TypeError):
+            floor = None
+    found = []
     for o in orders or []:
         syms = set()
         for leg in o.get("orderLegCollection") or []:
             s = ((leg.get("instrument") or {}).get("symbol") or "").strip()
             if s:
                 syms.add(s)
-        if want and want.issubset(syms):
-            oid = o.get("orderId") or o.get("order_id")
-            if oid is not None:
-                return str(oid)
-    return None
+        if not (want and want.issubset(syms)):
+            continue
+        oid = o.get("orderId") or o.get("order_id")
+        if oid is None:
+            continue
+        entered = None
+        raw = o.get("enteredTime")
+        if raw:
+            try:
+                entered = datetime.strptime(str(raw)[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                    tzinfo=timezone.utc)
+            except ValueError:
+                entered = None
+        if floor is not None and entered is not None and entered < floor:
+            continue
+        live = str(o.get("status") or "").upper() in _LIVE_ORDER_STATUSES
+        found.append((live, entered or datetime.min.replace(tzinfo=timezone.utc), str(oid)))
+    if not found:
+        return None
+    found.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return found[0][2]
 
 
 def submission_status(client_order_ref: str) -> dict:
@@ -5792,7 +5849,8 @@ def submission_status(client_order_ref: str) -> dict:
         try:
             orders = client.list_orders(account_hash)
             recovered = _match_recent_order(
-                orders, rec.get("close_option_symbol"), rec.get("open_option_symbol"))
+                orders, rec.get("close_option_symbol"), rec.get("open_option_symbol"),
+                since=rec.get("placed_at"))
         except Exception as e:  # noqa: BLE001 — a failed lookup just leaves it UNKNOWN
             log.logger.warning("recent-orders recovery failed for %s: %s", client_order_ref, e)
         if recovered:

@@ -245,4 +245,19 @@ describe("submitOrder — unknown/lost-response outcomes", () => {
     expect(res.status).toBe("filled");
     expect(api.submissionStatus).toHaveBeenCalledWith("ref-1");
   });
+
+  it("an order recovered as working by confirm-by-ref is auto-cancelled if it never fills", async () => {
+    const api = {
+      execute: vi.fn().mockResolvedValue({ status: "unknown", client_order_ref: "ref-1" }),
+      submissionStatus: vi.fn().mockResolvedValue({ status: "working", order_id: "O9" }),
+      orderStatus: vi.fn().mockResolvedValue({ status: "working" }),
+      cancelOrder: vi.fn().mockResolvedValue({ status: "canceled" }),
+    };
+    const toast = makeToast();
+    const promise = submitOrder(api, toast, { action: "roll_short", ticker: "SPCX", client_order_ref: "ref-1" });
+    await vi.runAllTimersAsync();
+    const res = await promise;
+    expect(api.cancelOrder).toHaveBeenCalledWith("O9");
+    expect(res.status).toBe("canceled");
+  });
 });
