@@ -648,9 +648,13 @@ function TransactionEditor() {
   const inp = "rounded border border-slate-700 bg-slate-900/60 px-1 text-slate-200";
   return (
     <Card title="Transactions (editable) — the source of truth"
-          right={<button onClick={save} disabled={busy}
-            className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-50">
-            {busy ? "Saving…" : "Save transactions"}</button>}>
+          right={<div className="flex items-center gap-2">
+            <ExportButton label="Export CSV" run={() => api.exportTransactions()} onError={setMsg}
+              title="Every fill in this table as a CSV (corrected view, oldest first)" />
+            <button onClick={save} disabled={busy}
+              className="rounded-full border border-emerald-800 bg-emerald-950/40 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-900/50 disabled:opacity-50">
+              {busy ? "Saving…" : "Save transactions"}</button>
+          </div>}>
       <p className="mb-2 text-xs text-slate-500">
         One row per fill. App-ordered fills come pre-filled; for a trade done in ToS you usually only
         need the <span className="text-amber-300">entry stock price</span> or <span className="text-amber-300">extrinsic</span> —
@@ -956,6 +960,23 @@ function ShortCallsDriftRepair({ positions, onRepaired }) {
   );
 }
 
+// A download button that reports failure through the parent's message line.
+function ExportButton({ label, run, onError, title }) {
+  const [busy, setBusy] = React.useState(false);
+  const click = async () => {
+    setBusy(true);
+    try { await run(); }
+    catch (e) { onError?.(String(e.message || e)); }
+    finally { setBusy(false); }
+  };
+  return (
+    <button onClick={click} disabled={busy} title={title}
+            className="rounded-full border border-slate-700 bg-slate-800/60 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+      {busy ? "Exporting…" : label}
+    </button>
+  );
+}
+
 function RawData() {
   const { data, error, reload } = useApi(api.executionsRaw, [], null);
   const [msg, setMsg] = React.useState(null);
@@ -996,10 +1017,16 @@ function RawData() {
   return (
     <Card title={`Raw execution log — ${execs.length}${fulfilledOnly ? " fulfilled" : ""} of ${data?.execution_count ?? 0}`}
           right={
-            <label className="flex items-center gap-1.5 text-xs text-slate-400">
-              <input type="checkbox" checked={fulfilledOnly} onChange={(e) => setFulfilledOnly(e.target.checked)} />
-              Fulfilled orders only
-            </label>
+            <div className="flex items-center gap-3">
+              <ExportButton label="Export JSON" run={() => api.exportExecutions("json")} onError={setMsg}
+                title="The complete append-only log exactly as stored (every record, not just what's shown)" />
+              <ExportButton label="Export CSV" run={() => api.exportExecutions("csv")} onError={setMsg}
+                title="The complete log as a CSV (nested fields as JSON text)" />
+              <label className="flex items-center gap-1.5 text-xs text-slate-400">
+                <input type="checkbox" checked={fulfilledOnly} onChange={(e) => setFulfilledOnly(e.target.checked)} />
+                Fulfilled orders only
+              </label>
+            </div>
           }>
       {fulfilledOnly && (
         <p className="mb-2 text-[11px] text-slate-500">

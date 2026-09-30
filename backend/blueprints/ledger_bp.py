@@ -234,3 +234,36 @@ def api_export_juice_journal():
     except Exception as e:  # noqa: BLE001
         return _err(e)
 
+
+
+def _download(body: str, mime: str, name: str) -> Response:
+    return Response(body, mimetype=mime,
+                    headers={"Content-Disposition": f"attachment; filename={name}",
+                             "Cache-Control": "no-store"})
+
+
+@ledger_bp.route("/api/export/transactions")
+def api_export_transactions():
+    """The History tab's Transactions table as CSV — one row per fill, from the
+    corrected view the ledgers use (see record_export)."""
+    try:
+        import record_export
+        return _download(record_export.transactions_csv(log.load_state()),
+                         "text/csv", "transactions.csv")
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@ledger_bp.route("/api/export/executions")
+def api_export_executions():
+    """The raw, append-only execution log, complete and uncapped, exactly as stored:
+    ``?format=json`` (default, lossless) or ``csv`` (nested values as JSON text)."""
+    fmt = (request.args.get("format") or "json").lower()
+    try:
+        import record_export
+        state = log.load_state()
+        if fmt == "csv":
+            return _download(record_export.executions_csv(state), "text/csv", "executions.csv")
+        return _download(record_export.executions_json(state), "application/json", "executions.json")
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
