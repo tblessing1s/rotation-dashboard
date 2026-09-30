@@ -814,3 +814,42 @@ def test_daily_deploy_cap_skips_entry_when_nothing_is_left(tmp_store, monkeypatc
 
     assert [e["event"] for e in events if e["event"].startswith("entry")] == ["entry", "entry_skipped"]
     assert next(e for e in events if e["event"] == "entry_skipped")["reason"] == "daily capital limit reached"
+
+
+# ===========================================================================
+# First-bar setups — trading starts once the opening 5-min bar closes
+# ===========================================================================
+def _pick_with_daily_volume(avg_daily):
+    return dict(_pick("ABC", 100, 90), avg_volume=avg_daily)
+
+
+def test_first_bar_can_set_up_against_the_daily_volume_baseline(tmp_store, monkeypatch):
+    monkeypatch.setattr(config, "DAYTRADE_FIRST_BAR_SETUP_ENABLED", True)
+    monkeypatch.setattr(config, "DAYTRADE_FIRST_BAR_VOLUME_SHARE", 0.03)
+    _save_screen([_pick_with_daily_volume(1_000_000)])  # baseline 30k; needs >= 45k
+    store.append_bars(DAY, [
+        _bar("ABC", "09:30", 100.6, 101.5, 100.5, 101, 60_000),   # closes > prior high 100
+        _bar("ABC", "09:35", 101.6, 102, 101.4, 101.8, 50_000),   # breaks setup high 101.5
+    ])
+
+    events = _events(now="09:40")
+
+    assert _event_types(events) == ["setup", "entry"]
+    assert events[0]["at"].endswith("09:30:00-04:00")
+    assert events[1]["at"].endswith("09:35:00-04:00")  # entered on the 2nd bar, not the 3rd
+
+
+def test_first_bar_below_the_baseline_does_not_set_up(tmp_store, monkeypatch):
+    monkeypatch.setattr(config, "DAYTRADE_FIRST_BAR_SETUP_ENABLED", True)
+    _save_screen([_pick_with_daily_volume(1_000_000)])
+    store.append_bars(DAY, [_bar("ABC", "09:30", 100.6, 101.5, 100.5, 101, 40_000)])  # < 45k
+
+    assert _events(now="09:40") == []
+
+
+def test_first_bar_setup_can_be_switched_off(tmp_store, monkeypatch):
+    monkeypatch.setattr(config, "DAYTRADE_FIRST_BAR_SETUP_ENABLED", False)
+    _save_screen([_pick_with_daily_volume(1_000_000)])
+    store.append_bars(DAY, [_bar("ABC", "09:30", 100.6, 101.5, 100.5, 101, 900_000)])
+
+    assert _events(now="09:40") == []

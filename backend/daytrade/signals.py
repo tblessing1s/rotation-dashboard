@@ -65,7 +65,11 @@ see ``_avg_prior_volume`` and the config.py comment above
 ``DAYTRADE_SETUP_VOLUME_MULT``: there is no historical intraday archive yet,
 so it is the running average of the symbol's OWN bars ingested so far that
 day. The first bar of the day therefore never qualifies as a setup (no
-baseline to compare against) — a known, logged limitation, not a silent gap.
+baseline to compare against) — a known, logged limitation, not a silent gap —
+UNLESS ``config.DAYTRADE_FIRST_BAR_SETUP_ENABLED``: then the opening bar is
+measured against a stand-in baseline (the screener's average daily volume x
+``DAYTRADE_FIRST_BAR_VOLUME_SHARE``), so a setup can arm on the very first bar
+and the earliest entry is the second bar, not the third.
 """
 from __future__ import annotations
 
@@ -121,9 +125,12 @@ class _Symbol:
     __slots__ = ("prior_high", "prior_low", "atr14", "risk_per_share", "seen_volumes",
                  "status", "direction", "setup_high", "setup_low", "setup_at",
                  "candles_waited", "entry", "stop", "target1", "target2", "half_taken",
-                 "size", "entry_at", "trade_id", "last_bar", "hwm", "tight", "half_at")
+                 "size", "entry_at", "trade_id", "last_bar", "hwm", "tight", "half_at",
+                 "avg_daily_volume")
 
-    def __init__(self, prior_high: float, prior_low: float, atr14: float | None):
+    def __init__(self, prior_high: float, prior_low: float, atr14: float | None,
+                 avg_daily_volume: float | None = None):
+        self.avg_daily_volume = avg_daily_volume
         self.prior_high = prior_high
         self.prior_low = prior_low
         self.atr14 = atr14
@@ -334,6 +341,9 @@ def _process_bar(sym: _Symbol, day_state: _Day, bar: dict, day: str,
                   adapter: adapters.ExecutionAdapter) -> list[dict]:
     events: list[dict] = []
     avg_volume = _avg_prior_volume(sym.seen_volumes)
+    if (avg_volume is None and config.DAYTRADE_FIRST_BAR_SETUP_ENABLED
+            and sym.avg_daily_volume):
+        avg_volume = sym.avg_daily_volume * config.DAYTRADE_FIRST_BAR_VOLUME_SHARE
 
     if sym.status == "watching":
         direction = _setup_direction(bar, sym.prior_high, sym.prior_low, avg_volume)
@@ -517,7 +527,7 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
     symbols: dict[str, _Symbol] = {}
     for pick in screen.get("picks", []):
         symbols[pick["symbol"]] = _Symbol(pick["prior_day_high"], pick["prior_day_low"],
-                                           pick.get("atr14"))
+                                           pick.get("atr14"), pick.get("avg_volume"))
     if not symbols:
         return {"date": day, "events": []}
 
