@@ -5846,6 +5846,7 @@ def submission_status(client_order_ref: str) -> dict:
     if not order_id and status == SUB_UNKNOWN:
         attempts = int(rec.get("unknown_attempts") or 0) + 1
         recovered = None
+        lookup_error = None
         try:
             orders = client.list_orders(account_hash)
             recovered = _match_recent_order(
@@ -5853,6 +5854,7 @@ def submission_status(client_order_ref: str) -> dict:
                 since=rec.get("placed_at"))
         except Exception as e:  # noqa: BLE001 — a failed lookup just leaves it UNKNOWN
             log.logger.warning("recent-orders recovery failed for %s: %s", client_order_ref, e)
+            lookup_error = str(e)[:300]
         if recovered:
             order_id = recovered
             rec = log.update_order_submission(
@@ -5879,7 +5881,9 @@ def submission_status(client_order_ref: str) -> dict:
             capped = attempts >= int(config.UNKNOWN_STATUS_MAX_ATTEMPTS)
             rec = log.update_order_submission(
                 client_order_ref, unknown_attempts=attempts,
-                detail=("still UNKNOWN — no matching recent order found"
+                detail=("still UNKNOWN — "
+                        + (f"the recent-orders lookup failed: {lookup_error}"
+                           if lookup_error else "no matching recent order found")
                         + (f"; reached max {config.UNKNOWN_STATUS_MAX_ATTEMPTS} check "
                            "attempts, resolve manually at the broker" if capped else "")))
             return {**_submission_response(rec), "attempts": attempts,

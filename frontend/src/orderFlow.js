@@ -53,6 +53,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // truthful by-ref status a few times; resolve on a real outcome, else leave a
 // persistent "confirming — check your broker" message the operator can act on.
 async function confirmByRef(api, toast, id, label, ref) {
+  let lastDetail = null;
   for (let i = 0; i < CONFIRM_ATTEMPTS; i++) {
     await sleep(CONFIRM_MS);
     let st;
@@ -74,6 +75,7 @@ async function confirmByRef(api, toast, id, label, ref) {
       toast.update(id, `${label} canceled.`, { type: "error", duration: 8000 });
       return st;
     }
+    lastDetail = st.detail || lastDetail;
     if (st.status === "working") {
       if (st.order_id) {
         // We have the id now — hand it to the same fill-wait/auto-cancel lifecycle a
@@ -89,7 +91,8 @@ async function confirmByRef(api, toast, id, label, ref) {
   // Still UNKNOWN — do NOT claim failure. Tell the truth and stop.
   toast.update(id,
     `${label} — the broker hasn't confirmed this order yet. It may be working at Schwab; ` +
-      `use "Check status" or confirm in your broker before placing another.`,
+      `use "Check status" or confirm in your broker before placing another.` +
+      (lastDetail ? ` (${lastDetail})` : ""),
     { type: "pending", duration: 0 });
   return { status: "unknown", client_order_ref: ref };
 }
