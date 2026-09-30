@@ -40,6 +40,30 @@ const money = (n) =>
   n == null ? "—" : `${n < 0 ? "-" : ""}$${Math.abs(n).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 const rMult = (n) => (n == null ? "—" : `${n >= 0 ? "+" : ""}${n.toFixed(2)}R`);
 const toneFor = (n) => (n == null ? "text-slate-300" : n > 0 ? "text-emerald-300" : n < 0 ? "text-rose-300" : "text-slate-300");
+// Auto-refresh only runs 8:00-11:00 AM Central on weekdays (the signal window is
+// 8:30-10:00 CT; the extra margin either side covers the pre-open screen and
+// the cutoff fills). Outside it nothing changes, so polling just burns
+// requests; it resumes by itself at 8:00 the next morning — the clock below
+// re-checks every 30s, and the pollers' own effects refetch when it flips.
+const LIVE_START_CT = 8 * 60;
+const LIVE_END_CT = 11 * 60;
+function inLiveWindow(now = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago", weekday: "short", hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(now);
+  const get = (t) => parts.find((p) => p.type === t)?.value;
+  if (get("weekday") === "Sat" || get("weekday") === "Sun") return false;
+  const mins = Number(get("hour")) * 60 + Number(get("minute"));
+  return mins >= LIVE_START_CT && mins < LIVE_END_CT;
+}
+function useLiveWindow() {
+  const [live, setLive] = React.useState(() => inLiveWindow());
+  React.useEffect(() => {
+    const id = setInterval(() => setLive(inLiveWindow()), 30000);
+    return () => clearInterval(id);
+  }, []);
+  return live;
+}
 const clamp01 = (x) => Math.max(0, Math.min(1, x));
 
 // Every event this panel can see is the engine following its own rules
@@ -345,7 +369,8 @@ function ScreenedTable({ rows }) {
 function ScreenCoverage({ universe }) {
   const [open, setOpen] = React.useState(true);
   const [drill, setDrill] = React.useState(null); // null | "all" | "qualified" | bucket key
-  const { data: roster } = useApi(() => api.daytradeTickers(), [], 60000);
+  const live = useLiveWindow();
+  const { data: roster } = useApi(() => api.daytradeTickers(), [], live ? 60000 : null);
 
   if (!universe?.ran) return null;
 
@@ -794,7 +819,8 @@ const REPORT_VIEWS = [["total", "Total"], ["year", "Yearly"], ["month", "Monthly
 // Period rollups of the paper trades + export. "Copy for chat" puts the whole
 // Markdown pack (every rollup and every trade) on the clipboard.
 function PerformanceReport() {
-  const { data: report } = useApi(() => api.daytradeReport(), [], 60000);
+  const live = useLiveWindow();
+  const { data: report } = useApi(() => api.daytradeReport(), [], live ? 60000 : null);
   const [view, setView] = React.useState("week");
   const [msg, setMsg] = React.useState(null);
   const run = async (fn, ok) => {
@@ -919,9 +945,10 @@ export default function DayTradePanel() {
   // Live sizing budget, trial progress, and last-successful-screen health —
   // independent of `date` (all "right now"/"overall"), so they get their own
   // poll rather than riding the per-date fetch below.
-  const { data: budget } = useApi(() => api.daytradeBudget(), [], 60000);
-  const { data: trial } = useApi(() => api.daytradeTrial(), [], 60000);
-  const { data: screenHealth, reload: reloadScreenHealth } = useApi(() => api.daytradeScreenHealth(), [], 60000);
+  const live = useLiveWindow();
+  const { data: budget } = useApi(() => api.daytradeBudget(), [], live ? 60000 : null);
+  const { data: trial } = useApi(() => api.daytradeTrial(), [], live ? 60000 : null);
+  const { data: screenHealth, reload: reloadScreenHealth } = useApi(() => api.daytradeScreenHealth(), [], live ? 60000 : null);
   // A process-wide constant, not per-request state — fetch once, no poll.
   const { data: ruleConfig } = useApi(() => api.daytradeConfig(), [], null);
 
@@ -949,7 +976,7 @@ export default function DayTradePanel() {
       return { universe, signals, trades, prices, quotes, liveStatus };
     },
     [date],
-    pollMs,
+    live ? pollMs : null,
   );
 
   React.useEffect(() => {
@@ -997,9 +1024,11 @@ export default function DayTradePanel() {
           <button onClick={reload} className="text-[11px] text-slate-400 hover:text-slate-200">↻</button>
           <span
             className="text-[10px] text-slate-500"
-            title="Refresh cadence ratchets down automatically: 60s idle, 30s once a setup is armed, 15s once a trade is open"
+            title={live
+              ? "Refresh cadence ratchets down automatically: 60s idle, 30s once a setup is armed, 15s once a trade is open. Auto-refresh runs 8:00-11:00 AM CT on weekdays."
+              : "Auto-refresh is paused outside 8:00-11:00 AM CT on weekdays; it resumes at 8:00 AM CT. Use ↻ to refresh now."}
           >
-            every {pollMs / 1000}s
+            {live ? `every ${pollMs / 1000}s` : "paused · resumes 8:00 AM CT"}
           </span>
         </div>
       }
