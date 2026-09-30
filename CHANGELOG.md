@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- **Autonomous order-status resolution.** The 30s scheduler tick now (1) resolves a
+  send the app never heard back on: recovers its id and hands a live one to the
+  normal auto-cancel, or — once a clean recent-orders lookup ≥90s later still lists
+  nothing — marks it `NOT_PLACED`, so it stops reading "may be working"; (2) polls
+  and books/clears pending orders nobody is watching, so a fill or cancel settles
+  without clicking Re-poll. A `NOT_PLACED` ref no longer blocks a fresh send of the
+  same roll (the modal reuses its idempotency ref), and the unconfirmed toast keeps
+  checking in the background and updates itself with the real answer.
 - **A 429 on the order POST now reads "NOT placed".** It was an ambiguous UNKNOWN
   ("may be working at Schwab"), which sent the operator hunting for an order that
   never existed. It is now a definite rejection that arms the shared rate-limit

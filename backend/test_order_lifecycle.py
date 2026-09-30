@@ -553,7 +553,7 @@ class _BrokerListing(FakeSchwab):
 
 
 def _roll_order(oid, status="WORKING"):
-    return {"orderId": oid, "status": status, "enteredTime": "2026-09-30T15:00:05+0000",
+    return {"orderId": oid, "status": status, "enteredTime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000"),
             "orderType": "NET_DEBIT", "price": 1.2, "quantity": 1,
             "orderLegCollection": [
                 {"instruction": "BUY_TO_CLOSE", "quantity": 1, "instrument": {"symbol": "A"}},
@@ -626,3 +626,66 @@ def test_order_post_5xx_stays_unknown(monkeypatch):
     client = _client_with_post(monkeypatch, 503, text="upstream down")
     res = client.submit_order("HASH", {})
     assert res["outcome"] == "unknown" and res["detail"] == "upstream down"
+
+
+# ---------------------------------------------------------------------------
+# Autonomous order-status resolution
+# ---------------------------------------------------------------------------
+def _unknown_sub(ref, age_s):
+    placed = (datetime.now(timezone.utc) - timedelta(seconds=age_s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    log.save_order_submission(ref, {
+        "client_order_ref": ref, "ticker": "SPCX", "action": "roll_short",
+        "status": executor.SUB_UNKNOWN, "order_id": None, "placed_at": placed,
+        "unknown_attempts": 0, "submit_detail": "no response from broker",
+        "close_option_symbol": "A", "open_option_symbol": "B"})
+
+
+def test_unknown_submission_resolves_not_placed_after_a_clean_empty_lookup(live):
+    live(_BrokerListing([]))
+    _unknown_sub("ref-x", config.NOT_PLACED_AFTER_SECONDS + 10)
+    out = executor.resolve_unconfirmed_submissions()
+    assert out["checked"] == 1
+    sub = log.get_order_submission("ref-x")
+    assert sub["status"] == executor.SUB_NOT_PLACED
+    assert "no response from broker" in sub["detail"]
+    assert executor.submission_status("ref-x")["status"] == "not_placed"
+
+
+def test_unknown_submission_is_not_resolved_too_early_or_on_a_failed_lookup(live):
+    class _Boom(_BrokerListing):
+        def list_orders(self, *a, **k):
+            raise RuntimeError("HTTP 400")
+
+    live(_BrokerListing([]))
+    _unknown_sub("ref-young", config.NOT_PLACED_AFTER_SECONDS - 40)   # past 30s, before the window
+    executor.resolve_unconfirmed_submissions()
+    assert log.get_order_submission("ref-young")["status"] == executor.SUB_UNKNOWN
+
+    live(_Boom([]))
+    _unknown_sub("ref-err", config.NOT_PLACED_AFTER_SECONDS + 10)
+    executor.resolve_unconfirmed_submissions()
+    assert log.get_order_submission("ref-err")["status"] == executor.SUB_UNKNOWN
+
+
+def test_a_matching_live_order_is_adopted_not_declared_not_placed(live):
+    live(_BrokerListing([_roll_order("999")]))
+    _unknown_sub("ref-y", config.NOT_PLACED_AFTER_SECONDS + 10)
+    executor.resolve_unconfirmed_submissions()
+    sub = log.get_order_submission("ref-y")
+    assert sub["status"] == executor.SUB_WORKING and sub["order_id"] == "999"
+
+
+def test_settle_pending_orders_books_a_fill_nobody_is_watching(live):
+    fake = live(FakeSchwab(status="FILLED", fill_price=6.0))
+    executor.execute(_sell_payload())
+    _backdate_only_pending_order(config.ORDER_FILL_WAIT_SECONDS + 60)
+    out = executor.settle_pending_orders()
+    assert out["polled"] == 1 and out["settled"] == 1
+    assert not log.load_state()["pending_orders"]
+
+
+def test_settle_pending_orders_leaves_a_young_order_to_the_live_client(live):
+    live(FakeSchwab(status="FILLED", fill_price=6.0))
+    executor.execute(_sell_payload())
+    out = executor.settle_pending_orders()
+    assert out["polled"] == 0 and log.load_state()["pending_orders"]

@@ -1471,6 +1471,14 @@ QUOTE_MAX_AGE_FOR_ORDER_SECONDS = 60
 # by a MANUAL "check status" action. This hotfix never auto-retries a SUBMISSION;
 # these bound only the read-back that resolves an UNKNOWN into the truth.
 UNKNOWN_STATUS_RETRY_SECONDS = 10
+# An UNKNOWN order (send got no confirmed response) whose id can't be found is
+# resolved as NOT_PLACED once a SUCCESSFUL recent-orders lookup, this long after it
+# was sent, still lists no matching order — Schwab lists an accepted order almost
+# immediately, so a quiet list is a real answer. A late-appearing order is still
+# visible (and cancellable) in the broker-sourced Orders tracker.
+NOT_PLACED_AFTER_SECONDS = float(os.environ.get("NOT_PLACED_AFTER_SECONDS") or 90.0)
+# A still-unresolved UNKNOWN submission older than this is beyond the 24h lookup window.
+UNKNOWN_RESOLVE_MAX_AGE_SECONDS = 24 * 3600
 UNKNOWN_STATUS_MAX_ATTEMPTS = 6
 
 # HARD_CFM_RULE — on ANY submission response the Schwab orderId is extracted and

@@ -5052,6 +5052,55 @@ def repoll_pending_orders() -> dict:
             "remaining": len(log.list_pending_orders())}
 
 
+def resolve_unconfirmed_submissions(now: datetime | None = None) -> dict:
+    """Autonomously resolve sends whose broker outcome the app never learned. An
+    order whose ack was lost / carried no id has NO pending record, so nothing else
+    sees it. Recover its id by recent-orders match (a live one is then registered as
+    pending and cancelled by the normal sweep) or, once a successful lookup still
+    finds nothing, resolve it NOT_PLACED (see ``submission_status``). Bounded, never
+    re-submits. Records < 30s old are still the placing client's to confirm."""
+    now = now or datetime.now(timezone.utc)
+    out = {"checked": 0, "errors": []}
+    for ref, sub in log.list_order_submissions().items():
+        if sub.get("status") != SUB_UNKNOWN or sub.get("order_id"):
+            continue
+        age = _age_seconds(sub.get("placed_at"), now)
+        if age is None or age < 30 or age > config.UNKNOWN_RESOLVE_MAX_AGE_SECONDS:
+            continue
+        out["checked"] += 1
+        try:
+            submission_status(ref)
+        except Exception as e:  # noqa: BLE001 — one bad ref never blocks the sweep
+            log.logger.warning("unconfirmed-order resolve of %s failed (%s)", ref, e)
+            out["errors"].append({"client_order_ref": str(ref), "error": str(e)})
+    return out
+
+
+def settle_pending_orders(now: datetime | None = None) -> dict:
+    """Autonomously settle pending orders nobody is watching any more: poll each
+    against the broker so a fill is booked (and a cancel/reject cleared) without the
+    operator clicking re-poll. Only orders older than the client's own fill-wait
+    window — a live browser owns a young order, and two pollers must not both commit
+    the same fill. A still-working order is left for the stale-order cancel."""
+    now = now or datetime.now(timezone.utc)
+    out = {"polled": 0, "settled": 0, "errors": []}
+    min_age = config.ORDER_FILL_WAIT_SECONDS + 15
+    for order_id, rec in log.list_pending_orders().items():
+        age = _age_seconds(rec.get("placed_at"), now)
+        if age is None or age < min_age:
+            continue
+        out["polled"] += 1
+        try:
+            res = order_status(order_id)
+            if res.get("status") not in ("working", "pending_cancel", "unknown",
+                                         "partially_filled"):
+                out["settled"] += 1
+        except Exception as e:  # noqa: BLE001 — one bad order never blocks the sweep
+            log.logger.warning("auto-settle of order %s failed (%s)", order_id, e)
+            out["errors"].append({"order_id": str(order_id), "error": str(e)})
+    return out
+
+
 def cancel_stale_pending_orders(now: datetime | None = None) -> dict:
     """Server-side backstop for the fill-wait-then-cancel policy: an order that
     hasn't filled quickly is meant to be cancelled and repriced, never left
@@ -5077,27 +5126,8 @@ def cancel_stale_pending_orders(now: datetime | None = None) -> dict:
     checked = 0
     canceled = 0
     errors = []
-    # An order whose ack was lost / carried no id has NO pending record, so the loop
-    # below can't see it — it would rest at the broker until someone cancelled it by
-    # hand. Try to recover its id first (bounded, never re-submits); a recovered order
-    # is registered as pending with its original placed_at and is swept right after.
-    for ref, sub in log.list_order_submissions().items():
-        if sub.get("status") != SUB_UNKNOWN or sub.get("order_id"):
-            continue
-        if int(sub.get("unknown_attempts") or 0) >= int(config.UNKNOWN_STATUS_MAX_ATTEMPTS):
-            continue
-        try:
-            placed = datetime.strptime(str(sub.get("placed_at")), "%Y-%m-%dT%H:%M:%SZ").replace(
-                tzinfo=timezone.utc)
-        except (ValueError, TypeError):
-            continue
-        if (now - placed).total_seconds() < 30:
-            continue   # the placing client is still confirming it
-        try:
-            submission_status(ref)
-        except Exception as e:  # noqa: BLE001 — one bad ref never blocks the sweep
-            log.logger.warning("stale-order sweep: recovery of %s failed (%s)", ref, e)
-            errors.append({"client_order_ref": str(ref), "error": str(e)})
+    resolve_unconfirmed_submissions(now)
+    settle_pending_orders(now)
     for order_id, rec in log.list_pending_orders().items():
         placed_at = rec.get("placed_at")
         if not placed_at:
@@ -5712,6 +5742,7 @@ SUB_UNKNOWN = "UNKNOWN"         # no response / timeout / accepted-but-no-id
 SUB_REJECTED = "REJECTED"       # Schwab explicitly rejected (reason verbatim)
 SUB_FILLED = "FILLED"
 SUB_CANCELED = "CANCELED"
+SUB_NOT_PLACED = "NOT_PLACED"   # broker lists no matching order — it never went out
 SUB_LEG_IMBALANCE = "LEG_IMBALANCE"
 
 
@@ -5748,6 +5779,10 @@ def _submission_response(rec: dict, *, idempotent: bool = False) -> dict:
     if status == SUB_REJECTED:
         return {**base, "success": False, "status": "rejected",
                 "reason": rec.get("broker_reason")}
+    if status == SUB_NOT_PLACED:
+        return {**base, "success": True, "status": "not_placed",
+                "message": rec.get("detail") or "Schwab lists no matching order — "
+                           "it was not placed. Safe to send again."}
     if status == SUB_LEG_IMBALANCE:
         return {**base, "success": False, "status": "leg_imbalance",
                 "order_id": rec.get("order_id"), "frozen": True}
@@ -5786,7 +5821,7 @@ def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
     # F3 idempotency: any existing record for this ref means we already acted on it —
     # return its truthful state, never re-submit (this is the refresh-storm guard).
     existing = log.get_order_submission(ref)
-    if existing is not None:
+    if existing is not None and existing.get("status") != SUB_NOT_PLACED:
         return _submission_response(existing, idempotent=True)
 
     client = data_handler.broker_client()
@@ -5893,6 +5928,15 @@ def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
     return _submission_response(rec)
 
 
+def _age_seconds(stamp, now: datetime | None = None):
+    """Seconds since a ``%Y-%m-%dT%H:%M:%SZ`` stamp, or None if unparseable."""
+    try:
+        t = datetime.strptime(str(stamp), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+    return ((now or datetime.now(timezone.utc)) - t).total_seconds()
+
+
 _LIVE_ORDER_STATUSES = frozenset({
     "WORKING", "QUEUED", "ACCEPTED", "PENDING_ACTIVATION", "AWAITING_PARENT_ORDER",
     "AWAITING_CONDITION", "AWAITING_MANUAL_REVIEW", "AWAITING_STOP_CONDITION",
@@ -5963,7 +6007,7 @@ def submission_status(client_order_ref: str) -> dict:
         return {"client_order_ref": client_order_ref, "status": "unknown",
                 "detail": "no submission record for this ref"}
     status = rec.get("status")
-    if status in (SUB_FILLED, SUB_CANCELED, SUB_REJECTED, SUB_LEG_IMBALANCE):
+    if status in (SUB_FILLED, SUB_CANCELED, SUB_REJECTED, SUB_LEG_IMBALANCE, SUB_NOT_PLACED):
         return _submission_response(rec)
 
     client = data_handler.broker_client()
@@ -6008,6 +6052,20 @@ def submission_status(client_order_ref: str) -> dict:
         else:
             capped = attempts >= int(config.UNKNOWN_STATUS_MAX_ATTEMPTS)
             sent = rec.get("submit_detail")
+            age = _age_seconds(rec.get("placed_at"))
+            if (lookup_error is None and age is not None
+                    and age >= config.NOT_PLACED_AFTER_SECONDS):
+                # A successful lookup, well after the send, lists no such order: it
+                # never reached Schwab. Resolve it so the operator isn't left
+                # chasing an order that doesn't exist, and a re-send starts clean.
+                rec = log.update_order_submission(
+                    client_order_ref, status=SUB_NOT_PLACED, unknown_attempts=attempts,
+                    detail="Schwab lists no matching order "
+                           f"{int(age)}s after it was sent — it was NOT placed"
+                           + (f" (the send itself returned: {sent})" if sent else "")
+                           + ". Safe to send again.")
+                log.logger.info("submission %s resolved NOT_PLACED after %ds", client_order_ref, age)
+                return _submission_response(rec)
             rec = log.update_order_submission(
                 client_order_ref, unknown_attempts=attempts, lookup_ok=lookup_error is None,
                 detail=("still UNKNOWN — "

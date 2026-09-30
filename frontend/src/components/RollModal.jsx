@@ -332,7 +332,7 @@ export default function RollModal({ ticker, reason = "scheduled", sourceRecId,
       // Retire the idempotency ref ONLY on a confirmed terminal outcome — a distinct
       // next roll should mint a fresh ref. On UNKNOWN ("confirming…") keep the ref so
       // a retry reuses it and cannot place a second order for the same intent.
-      const terminal = !res || ["filled", "canceled", "rejected", "logged"].includes(res.status)
+      const terminal = !res || ["filled", "canceled", "rejected", "not_placed", "logged"].includes(res.status)
         || res.mode === "logged";
       if (terminal) clearOrderRef();
       setPendingLive(null);

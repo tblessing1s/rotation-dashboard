@@ -45,56 +45,89 @@ const POLL_ERROR_MAX_MS = 4000;
 // still unconfirmed we leave a persistent, truthful message rather than poll forever.
 const CONFIRM_ATTEMPTS = 5;
 const CONFIRM_MS = 2000;
+// After the quick reads, keep checking on a slower cadence for a few minutes. The
+// backend resolves an order Schwab never received (NOT_PLACED) on its own once a
+// clean lookup still shows nothing (~90s), so waiting here lets the toast end in a
+// real answer instead of "unconfirmed" with the operator left to work it out.
+const CONFIRM_SLOW_ATTEMPTS = 20;
+const CONFIRM_SLOW_MS = 10000;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// One truthful by-ref status read. Returns the outcome (after updating the toast)
+// when the order reached a real answer, else null to keep confirming. `state.detail`
+// carries the last reason the broker side gave, for the final message.
+async function checkOnce(api, toast, id, label, ref, state) {
+  let st;
+  try {
+    st = await api.submissionStatus(ref);
+  } catch {
+    return null; // transient — keep confirming
+  }
+  if (st.status === "filled") {
+    toast.update(id, `${label} filled & logged.`, { type: "success" });
+    return st;
+  }
+  if (st.status === "rejected") {
+    toast.update(id, `${label} rejected by Schwab: ${st.reason || "no reason given"}.`,
+      { type: "error", duration: 10000 });
+    return st;
+  }
+  if (st.status === "canceled") {
+    toast.update(id, `${label} canceled.`, { type: "error", duration: 8000 });
+    return st;
+  }
+  if (st.status === "not_placed") {
+    toast.update(id,
+      `${label} was NOT placed — Schwab has no such order. It's safe to send it again.`,
+      { type: "warning", duration: 0 });
+    return st;
+  }
+  state.detail = st.detail || state.detail;
+  if (st.status === "working") {
+    if (st.order_id) {
+      // We have the id now — hand it to the same fill-wait/auto-cancel lifecycle a
+      // normally-acked order gets, so an unfilled order is not left resting.
+      return trackWorking(api, toast, id, label, { ...st, status: "working" });
+    }
+    toast.update(id,
+      `${label} confirmed working at Schwab. Cancel it in your broker if it doesn't fill.`,
+      { type: "warning", duration: 0 });
+    return st;
+  }
+  return null;
+}
+
 // The order's broker outcome isn't confirmed yet (no response, a timeout, or a 2xx
-// ack with no id). It may be LIVE at Schwab — so we NEVER say "failed". Poll the
-// truthful by-ref status a few times; resolve on a real outcome, else leave a
-// persistent "confirming — check your broker" message the operator can act on.
+// ack with no id). It may be LIVE at Schwab — so we NEVER say "failed". A few quick
+// by-ref reads first; if still unknown we return (so the caller isn't held up) and
+// keep checking in the BACKGROUND, updating the same toast when a real answer
+// arrives — the backend resolves it on its own (found + cancelled, or NOT_PLACED).
 async function confirmByRef(api, toast, id, label, ref) {
-  let lastDetail = null;
+  const state = { detail: null };
   for (let i = 0; i < CONFIRM_ATTEMPTS; i++) {
     await sleep(CONFIRM_MS);
-    let st;
-    try {
-      st = await api.submissionStatus(ref);
-    } catch {
-      continue; // transient — keep confirming
-    }
-    if (st.status === "filled") {
-      toast.update(id, `${label} filled & logged.`, { type: "success" });
-      return st;
-    }
-    if (st.status === "rejected") {
-      toast.update(id, `${label} rejected by Schwab: ${st.reason || "no reason given"}.`,
-        { type: "error", duration: 10000 });
-      return st;
-    }
-    if (st.status === "canceled") {
-      toast.update(id, `${label} canceled.`, { type: "error", duration: 8000 });
-      return st;
-    }
-    lastDetail = st.detail || lastDetail;
-    if (st.status === "working") {
-      if (st.order_id) {
-        // We have the id now — hand it to the same fill-wait/auto-cancel lifecycle a
-        // normally-acked order gets, so an unfilled order is not left resting.
-        return trackWorking(api, toast, id, label, { ...st, status: "working" });
-      }
-      toast.update(id,
-        `${label} confirmed working at Schwab. Cancel it in your broker if it doesn't fill.`,
-        { type: "warning", duration: 0 });
-      return st;
-    }
+    const r = await checkOnce(api, toast, id, label, ref, state);
+    if (r) return r;
+  }
+  toast.update(id,
+    `${label} — still confirming with Schwab (checking automatically)…`,
+    { type: "pending", duration: 0 });
+  void slowConfirm(api, toast, id, label, ref, state);
+  return { status: "unknown", client_order_ref: ref };
+}
+
+async function slowConfirm(api, toast, id, label, ref, state) {
+  for (let i = 0; i < CONFIRM_SLOW_ATTEMPTS; i++) {
+    await sleep(CONFIRM_SLOW_MS);
+    if (await checkOnce(api, toast, id, label, ref, state)) return;
   }
   // Still UNKNOWN — do NOT claim failure. Tell the truth and stop.
   toast.update(id,
     `${label} — the broker hasn't confirmed this order yet. It may be working at Schwab; ` +
-      `use "Check status" or confirm in your broker before placing another.` +
-      (lastDetail ? ` (${lastDetail})` : ""),
+      `check the Orders panel on Positions, or your broker, before placing another.` +
+      (state.detail ? ` (${state.detail})` : ""),
     { type: "pending", duration: 0 });
-  return { status: "unknown", client_order_ref: ref };
 }
 
 export async function submitOrder(api, toast, payload) {
