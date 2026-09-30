@@ -380,6 +380,7 @@ export const api = {
       method: "POST", body: JSON.stringify({ condition, on }),
     }),
   // Master autopilot switch — on/off for every unattended action, grants untouched.
+  getAutopilot: () => request("/api/autopilot"),
   setAutopilot: (on) =>
     request("/api/autopilot", { method: "POST", body: JSON.stringify({ on }) }),
   // Roll/defend auto-execute permission — per trigger rule (ROLL_SCHEDULED_WEEKLY /

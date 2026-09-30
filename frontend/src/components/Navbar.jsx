@@ -1,6 +1,41 @@
 import React from "react";
-import { Light } from "./ui.jsx";
+import { Light, useApi } from "./ui.jsx";
+import { api } from "../api.js";
 import AccountSwitcher from "./AccountSwitcher.jsx";
+
+// Always-visible autopilot state (the navbar is sticky): a steady green dot when it is
+// ON, a hollow grey ring when OFF, and the count of armed triggers. Click -> the
+// Recommendations tab, where the switch and the per-trigger grants live.
+function AutopilotBadge({ onClick, accountId }) {
+  const { data, reload } = useApi(() => api.getAutopilot(), [accountId], 30000);
+  React.useEffect(() => {
+    const h = () => reload();
+    window.addEventListener("cfm:autopilot-changed", h);
+    return () => window.removeEventListener("cfm:autopilot-changed", h);
+  }, [reload]);
+  if (!data) return null;
+  const on = data.enabled !== false;
+  const armed = (data.granted || []).length;
+  const title = on
+    ? `Autopilot ON — ${armed} trigger${armed === 1 ? "" : "s"} armed. Click to manage.`
+    : "Autopilot OFF — nothing acts unattended. Click to manage.";
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      aria-label={title}
+      className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs font-semibold transition ${
+        on && armed
+          ? "border-emerald-600/50 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+          : "border-slate-700 bg-slate-800/60 text-slate-400 hover:bg-slate-800"}`}
+    >
+      <span className={`inline-block h-2 w-2 rounded-full ${
+        on ? (armed ? "bg-emerald-400 shadow-[0_0_6px_1px_rgba(52,211,153,0.7)]" : "bg-slate-400")
+           : "border border-slate-500"}`} />
+      <span>{on ? `Autopilot${armed ? ` · ${armed}` : ""}` : "Autopilot off"}</span>
+    </button>
+  );
+}
 
 function AlertBell({ count, onClick }) {
   const hot = count > 0;
@@ -71,6 +106,7 @@ export default function Navbar({ tabs, active, onChange, regimeStatus, onLogout,
 
           {/* Right-side controls */}
           <div className="ml-auto flex items-center gap-2 sm:gap-3">
+            <AutopilotBadge accountId={accountId} onClick={() => onChange("Recommendations")} />
             <AccountSwitcher accounts={accounts} activeId={accountId} busy={accountBusy}
                              onSelect={onSelectAccount} onManage={onManageAccounts} />
             <div className="flex items-center gap-2 text-xs text-slate-400" title="Market regime">
