@@ -853,25 +853,6 @@ function PerformanceReport() {
   );
 }
 
-// Week / month totals for the period containing the selected date, in the
-// same figures as the day strip above it.
-function PeriodStrip({ label, stats }) {
-  if (!stats) return null;
-  const closedN = stats.closed;
-  return (
-    <div className="mb-4 grid grid-cols-2 gap-4 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3 sm:grid-cols-3 lg:grid-cols-6">
-      <Stat label={label} value={stats.period} sub={`${stats.trades} trade${stats.trades === 1 ? "" : "s"}${stats.open ? ` · ${stats.open} open` : ""}`} />
-      <Stat label="Cumulative R" value={rMult(stats.net_r)} tone={toneFor(stats.net_r)}
-            sub={stats.avg_r == null ? "—" : `avg ${rMult(stats.avg_r)}/trade`} />
-      <Stat label="Realized P&L" value={money(stats.net_pnl)} tone={toneFor(stats.net_pnl)} />
-      <Stat label="Win rate" value={stats.win_rate == null ? "—" : `${Math.round(stats.win_rate)}%`}
-            sub={closedN ? `${stats.wins}/${closedN} closed` : "no closed trades yet"} />
-      <Stat label="Avg win / loss" value={stats.avg_win == null && stats.avg_loss == null ? "—" : `${money(stats.avg_win)} / ${money(stats.avg_loss)}`} />
-      <Stat label="Profit factor" value={stats.profit_factor ?? "—"} />
-    </div>
-  );
-}
-
 const VERDICT_TONE = { win: "go", loss: "avoid", flat: "unknown" };
 
 function TrialBanner({ trial }) {
@@ -940,7 +921,6 @@ export default function DayTradePanel() {
   // poll rather than riding the per-date fetch below.
   const { data: budget } = useApi(() => api.daytradeBudget(), [], 60000);
   const { data: trial } = useApi(() => api.daytradeTrial(), [], 60000);
-  const { data: periods } = useApi(() => api.daytradePeriodStats(date), [date], 60000);
   const { data: screenHealth, reload: reloadScreenHealth } = useApi(() => api.daytradeScreenHealth(), [], 60000);
   // A process-wide constant, not per-request state — fetch once, no poll.
   const { data: ruleConfig } = useApi(() => api.daytradeConfig(), [], null);
@@ -1068,9 +1048,6 @@ export default function DayTradePanel() {
             />
             <Stat label="Rule adherence" value="100%" sub="paper mode enforces the rules exactly" tone="text-emerald-300" />
           </div>
-
-          <PeriodStrip label="Week" stats={periods?.week} />
-          <PeriodStrip label="Month" stats={periods?.month} />
 
           <div className="space-y-6">
             <section>

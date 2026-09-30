@@ -1,4 +1,4 @@
-"""Day-trade sleeve (20 routes) — split out of the former monolithic app.py."""
+"""Day-trade sleeve (19 routes) — split out of the former monolithic app.py."""
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
@@ -259,21 +259,6 @@ def api_daytrade_report():
         from daytrade import report
         since, until = _report_args()
         return jsonify(report.build_report(accounts.active_id(), since, until))
-    except ValueError as e:
-        return _err(e, 400)
-    except Exception as e:  # noqa: BLE001
-        return _err(e)
-
-
-@daytrade_bp.route("/api/daytrade/period-stats")
-def api_daytrade_period_stats():
-    """Week and month totals (daytrade/report.py's period_stats) for the
-    period containing ``?date=`` (default today, ET), active account."""
-    try:
-        from datetime import datetime
-        from daytrade import report
-        day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
-        return jsonify(report.period_stats(accounts.active_id(), day))
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001

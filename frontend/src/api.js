@@ -227,7 +227,6 @@ export const api = {
   // Period rollups (total/year/month/week/day + per-trade rows) and exports
   // (backend/daytrade/report.py). Markdown is the chat-ready pack.
   daytradeReport: () => request("/api/daytrade/report"),
-  daytradePeriodStats: (date) => request(`/api/daytrade/period-stats${date ? `?date=${date}` : ""}`),
   daytradeExport: (format = "md", view = "trades") =>
     downloadFile(`/api/daytrade/export?format=${format}&view=${view}`,
       format === "csv" ? `daytrade_${view}.csv` : `daytrade_report.${format}`),

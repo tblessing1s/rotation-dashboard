@@ -110,22 +110,6 @@ def summaries(rows: list[dict], period: str) -> list[dict]:
     return [_summarize(k, buckets[k]) for k in sorted(buckets)]
 
 
-def period_stats(account_id: str, day: str) -> dict:
-    """The week and the month containing ``day`` (``YYYY-MM-DD``), as summaries
-    — same figures as the day strip (trades, net R, P&L, win rate, ...).
-    Always returns both, zeroed when that period has no trades. Weeks are ISO
-    weeks, so a week that spans a month end shows its trades from both months
-    while the month row shows only its own."""
-    date.fromisoformat(day)  # ValueError -> the route's 400
-    rows = trade_rows(account_id)
-    out = {"date": day, "account_id": account_id}
-    for period in ("week", "month"):
-        key = period_key(day, period)
-        out[period] = _summarize(
-            key, [r for r in rows if period_key(r["date"], period) == key])
-    return out
-
-
 def build_report(account_id: str, since: str | None = None, until: str | None = None) -> dict:
     rows = trade_rows(account_id, since, until)
     return {
