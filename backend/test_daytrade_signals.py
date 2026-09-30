@@ -260,39 +260,102 @@ def test_stop_out_before_half_target_is_a_full_loss(tmp_store):
     assert events[-1]["r"] == -1.0
 
 
-def test_half_target_moves_stop_to_breakeven_then_breakeven_exit(tmp_store):
+def test_half_target_then_pullback_to_breakeven_exits_flat_on_the_remainder(tmp_store):
     _save_screen([_pick("ABC", 100, 90)])
     store.append_bars(DAY, _entered_bars() + [
-        _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),  # high >= target1(102.5)
+        _bar("ABC", "09:45", 102, 102.5, 101.9, 102.4, 30_000),  # high == target1 exactly
         _bar("ABC", "09:50", 101.6, 101.7, 101.4, 101.5, 20_000),  # low <= breakeven(101.5)
     ])
 
     events = _events()
+    # trail = best(102.5) - 1R loose = entry, so the stop is exactly breakeven
     assert _event_types(events) == ["setup", "entry", "half_target", "breakeven_exit"]
     assert events[2]["r"] == pytest.approx(1.0)
+    assert events[2]["stop"] == pytest.approx(101.5)
     assert events[3]["r"] == pytest.approx(0.5)
 
 
-def test_half_target_then_full_target_nets_1_5R(tmp_store):
+def test_loose_trail_ratchets_above_breakeven_and_exits_as_a_trail_stop(tmp_store):
     _save_screen([_pick("ABC", 100, 90)])
     store.append_bars(DAY, _entered_bars() + [
-        _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),   # target1
-        _bar("ABC", "09:50", 103, 103.6, 102.9, 103.5, 20_000),   # target2 (103.5)
+        _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),   # half; best 102.6 -> stop 101.6
+        _bar("ABC", "09:50", 101.6, 101.7, 101.4, 101.5, 20_000),  # low <= 101.6
     ])
 
     events = _events()
-    assert _event_types(events) == ["setup", "entry", "half_target", "final_target"]
-    assert events[-1]["r"] == pytest.approx(1.5)
+    assert _event_types(events) == ["setup", "entry", "half_target", "trail_stop"]
+    assert events[-1]["price"] == pytest.approx(101.6)
+    assert events[-1]["r"] == pytest.approx(0.5 * 1.0 + 0.5 * 0.1)
 
 
-def test_half_target_and_target2_in_the_same_bar_resolves_immediately(tmp_store):
+def test_reaching_2R_tightens_the_trail_and_the_winner_keeps_running(tmp_store):
     _save_screen([_pick("ABC", 100, 90)])
     store.append_bars(DAY, _entered_bars() + [
-        _bar("ABC", "09:45", 102, 103.6, 101.9, 103.5, 30_000),  # spans target1 AND target2
+        _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),   # half target
+        _bar("ABC", "09:50", 103, 103.6, 102.9, 103.5, 20_000),   # +2.1R: tighten, NOT an exit
+        _bar("ABC", "09:55", 103.5, 105.0, 103.4, 104.8, 20_000),  # keeps running, best 105.0
+        _bar("ABC", "10:00", 104.8, 104.9, 104.4, 104.5, 20_000),  # low <= 105.0-0.5 = 104.5
     ])
 
     events = _events()
-    assert _event_types(events) == ["setup", "entry", "half_target", "final_target"]
+    assert _event_types(events) == ["setup", "entry", "half_target", "trail_tighten", "trail_stop"]
+    assert events[3]["stop"] == pytest.approx(103.1)
+    assert events[3]["trail_r"] == pytest.approx(0.5)
+    assert events[-1]["price"] == pytest.approx(104.5)
+    assert events[-1]["r"] == pytest.approx(0.5 * 1.0 + 0.5 * 3.0)
+
+
+def test_half_target_and_2R_in_the_same_bar_tightens_but_stays_open(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars() + [
+        _bar("ABC", "09:45", 102, 103.6, 101.9, 103.5, 30_000),  # spans target1 AND +2R
+    ])
+
+    events = _events(now="09:50")
+    assert _event_types(events) == ["setup", "entry", "half_target", "trail_tighten"]
+
+
+def test_gap_through_the_trail_stop_fills_at_the_open(tmp_store):
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars() + [
+        _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),  # half; stop 101.6
+        _bar("ABC", "09:50", 101.0, 101.2, 100.8, 101.0, 20_000),  # gaps below the stop
+    ])
+
+    events = _events()
+    assert events[-1]["event"] == "trail_stop"
+    assert events[-1]["price"] == pytest.approx(101.0)  # the open, not 101.6
+
+
+def test_trail_state_survives_separate_run_day_calls(tmp_store):
+    """The best price isn't journaled per bar — a later run must rebuild it
+    from the bars, exactly as if the day had been replayed in one call."""
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _entered_bars() + [
+        _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),
+        _bar("ABC", "09:50", 103, 103.6, 102.9, 103.5, 20_000),   # tighten
+        _bar("ABC", "09:55", 103.5, 105.0, 103.4, 104.8, 20_000),  # best 105.0, no event
+    ])
+    _events(now="10:00")  # first run stops here
+    store.append_bars(DAY, [_bar("ABC", "10:00", 104.8, 104.9, 104.4, 104.5, 20_000)])
+
+    events = _events(now="10:05")
+
+    assert events[-1]["event"] == "trail_stop"
+    assert events[-1]["price"] == pytest.approx(104.5)  # 105.0 best, not 103.6, carried over
+
+
+def test_short_trail_mirrors_the_long(tmp_store):
+    sym = signals._Symbol(100, 90, 4.0)
+    sym.direction, sym.entry, sym.stop, sym.half_taken = "short", 100.0, 101.0, True
+    sym.stop = sym.entry
+    bar = lambda lo, hi: {"high": hi, "low": lo}
+    assert signals._advance_trail(sym, bar(98.9, 99.5)) is False   # +1.1R best: loose
+    assert sym.stop == pytest.approx(99.9)                         # 98.9 + 1R: ratchets DOWN, never above entry
+    assert signals._advance_trail(sym, bar(97.9, 99.0)) is True    # +2.1R: tighten
+    assert sym.stop == pytest.approx(98.4)                         # 97.9 + 0.5R
+    signals._advance_trail(sym, bar(98.0, 98.3))
+    assert sym.stop == pytest.approx(98.4)                         # never loosens
 
 
 # ===========================================================================
@@ -352,14 +415,17 @@ def _losing_trade_bars(symbol: str, t_seed: str, t_setup: str, t_entry: str, t_s
 
 
 def _winning_trade_bars(symbol: str, t_seed: str, t_setup: str, t_entry: str,
-                         t_half: str, t_full: str) -> list[dict]:
+                         t_half: str, t_full: str, t_out: str | None = None) -> list[dict]:
+    """Half target, then +2R (trail tightens), then — if ``t_out`` — a pullback
+    that trail-stops the remainder at 103.1 (net +1.3R)."""
+    out = [_bar(symbol, t_out, 103.4, 103.5, 103.0, 103.2, 20_000)] if t_out else []
     return [
         _bar(symbol, t_seed, 95, 96, 94, 95, 100_000),
         _bar(symbol, t_setup, 100.6, 101.5, 100.5, 101, 200_000),
         _bar(symbol, t_entry, 101.6, 102, 101.4, 101.8, 50_000),
         _bar(symbol, t_half, 102, 102.6, 101.9, 102.5, 30_000),
         _bar(symbol, t_full, 103, 103.6, 102.9, 103.5, 20_000),
-    ]
+    ] + out
 
 
 def _setup_only_bars(symbol: str, t_seed: str, t_setup: str) -> list[dict]:
@@ -402,14 +468,14 @@ def test_day_stops_after_plus_2r(tmp_store, monkeypatch):
     monkeypatch.setattr(config, "DAYTRADE_MAX_TRADES_PER_DAY", 5)  # isolate the R cap
     monkeypatch.setattr(config, "DAYTRADE_MAX_LOSSES_PER_DAY", 99)
     _save_screen([_pick("A", 100, 90), _pick("B", 100, 90), _pick("C", 100, 90)])
-    bars = (_winning_trade_bars("A", "09:30", "09:35", "09:40", "09:45", "09:50")
-            + _winning_trade_bars("B", "09:55", "10:00", "10:05", "10:10", "10:15")
+    bars = (_winning_trade_bars("A", "09:30", "09:35", "09:40", "09:45", "09:50", "09:55")
+            + _winning_trade_bars("B", "09:55", "10:00", "10:05", "10:10", "10:15", "10:20")
             + _setup_only_bars("C", "10:20", "10:25"))
     store.append_bars(DAY, bars)
 
     events = _events(now="10:30")
-    a_and_b_r = sum(e["r"] for e in events if e["event"] == "final_target")
-    assert a_and_b_r == pytest.approx(3.0)  # +1.5R each, past the +2R day stop
+    a_and_b_r = sum(e["r"] for e in events if e["event"] == "trail_stop")
+    assert a_and_b_r == pytest.approx(2.6)  # +1.3R each, past the +2R day stop
     c_events = [e for e in events if e["symbol"] == "C"]
     assert c_events[0]["event"] == "setup_skipped"
     assert c_events[0]["reason"] == "+2R reached"
@@ -489,12 +555,13 @@ def test_entries_disabled_between_runs_still_resolves_an_open_trade(tmp_store):
     # documented promise.
     store.append_bars(DAY, [
         _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),   # target1
-        _bar("ABC", "09:50", 103, 103.6, 102.9, 103.5, 20_000),   # target2
+        _bar("ABC", "09:50", 103, 103.6, 102.9, 103.5, 20_000),   # +2R: tighten
+        _bar("ABC", "09:55", 103.4, 103.5, 103.0, 103.2, 20_000),  # trail-stopped at 103.1
     ])
-    second = _events(now="09:55", entries_enabled=False)
+    second = _events(now="10:00", entries_enabled=False)
 
-    assert _event_types(second) == ["setup", "entry", "half_target", "final_target"]
-    assert second[-1]["r"] == pytest.approx(1.5)
+    assert _event_types(second) == ["setup", "entry", "half_target", "trail_tighten", "trail_stop"]
+    assert second[-1]["r"] == pytest.approx(1.3)
 
 
 def test_trades_taken_count_persists_across_separate_calls(tmp_store, monkeypatch):
@@ -543,10 +610,11 @@ def test_run_day_writes_a_matching_trade_log_row(tmp_store):
     _save_screen([_pick("ABC", 100, 90)])
     store.append_bars(DAY, _entered_bars() + [
         _bar("ABC", "09:45", 102, 102.6, 101.9, 102.5, 30_000),   # half target
-        _bar("ABC", "09:50", 103, 103.6, 102.9, 103.5, 20_000),   # final target
+        _bar("ABC", "09:50", 103, 103.6, 102.9, 103.5, 20_000),   # +2R: tighten
+        _bar("ABC", "09:55", 103.4, 103.5, 103.0, 103.2, 20_000),  # trail-stopped at 103.1
     ])
 
-    events = _events()
+    events = _events(now="10:00")
     entry_event = next(e for e in events if e["event"] == "entry")
     trade_id = entry_event["trade_id"]
 
@@ -555,14 +623,14 @@ def test_run_day_writes_a_matching_trade_log_row(tmp_store):
     assert trade["symbol"] == "ABC" and trade["direction"] == "long"
     assert trade["entry"]["price"] == entry_event["entry"]
     assert trade["entry"]["size"] == entry_event["size"]
-    assert [e["kind"] for e in trade["exits"]] == ["half_target", "final_target"]
+    assert [e["kind"] for e in trade["exits"]] == ["half_target", "trail_stop"]
     assert trade["status"] == "closed"
-    assert trade["realized_r"] == pytest.approx(1.5)
+    assert trade["realized_r"] == pytest.approx(1.3)
     # risk-based size would be 50, but DAYTRADE_MAX_POSITION_PCT (20% of the
     # default $5000 equity = $1000) caps notional at entry ~101.5 -> size 9
-    # -> half 4 @ +1, remainder 5 @ +2
+    # -> half 4 @ +1 (102.5), remainder 5 @ +1.6 (trail stop 103.1)
     assert trade["entry"]["size"] == 9
-    assert trade["realized_pnl"] == pytest.approx(4 * 1.0 + 5 * 2.0)
+    assert trade["realized_pnl"] == pytest.approx(4 * 1.0 + 5 * 1.6)
 
 
 def test_run_day_trade_log_is_idempotent_across_repeated_calls(tmp_store):

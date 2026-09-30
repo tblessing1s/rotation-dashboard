@@ -34,7 +34,8 @@ from daytrade import store
 # Exit kinds signals.py can report that CLOSE a trade (the position's
 # remaining size goes to zero). "half_target" is deliberately excluded —
 # the trade stays open with its remainder after a half-target exit.
-TERMINAL_EXIT_KINDS = frozenset({"stop_out", "breakeven_exit", "final_target", "time_cutoff"})
+TERMINAL_EXIT_KINDS = frozenset({"stop_out", "breakeven_exit", "trail_stop", "final_target",
+                            "time_cutoff"})
 
 
 @dataclass(frozen=True)

@@ -54,7 +54,9 @@ const EVENT_META = {
   expired: { label: "expired", status: "unknown" },
   half_target: { label: "half target", status: "go" },
   breakeven_exit: { label: "breakeven exit", status: "caution" },
-  final_target: { label: "final target", status: "go" },
+  final_target: { label: "final target", status: "go" },  // legacy: pre-trailing-stop logs
+  trail_tighten: { label: "trail tightened", status: "go" },
+  trail_stop: { label: "trail stop", status: "go" },
   stop_out: { label: "stop out", status: "avoid" },
   time_cutoff: { label: "time cutoff", status: "caution" },
 };
@@ -69,7 +71,11 @@ function detailFor(e) {
     case "expired":
       return "no break within the entry window";
     case "entry":
-      return `@${e.entry} · ${e.size} sh · stop ${e.stop} · targets ${e.target1}/${e.target2}`;
+      return `@${e.entry} · ${e.size} sh · stop ${e.stop} · ½ off @${e.target1} · tighten trail @${e.target2}`;
+    case "half_target":
+      return `@${e.price} · ${rMult(e.r)} · trailing stop on the rest`;
+    case "trail_tighten":
+      return `stop ${e.stop} · trailing ${e.trail_r}R behind the high`;
     default:
       return e.price != null ? `@${e.price} · ${rMult(e.r)}` : rMult(e.r);
   }
@@ -576,7 +582,7 @@ function TickerRoster() {
 }
 
 // Two-sided range meter for an OPEN trade: -1R (stop) on the left to the
-// active target (+1R before half_taken, +2R after — computed from the
+// active marker (+1R half target before half_taken, +2R trail-tighten point after — computed from the
 // actual target price rather than hardcoded, so it tracks
 // DAYTRADE_HALF_TARGET_R/FULL_TARGET_R if those ever change) on the right,
 // 0R (entry) marked as the red/green boundary, current price as the dot.
@@ -656,7 +662,7 @@ function LiveStatusRow({ row }) {
       <div className="mb-1 flex items-center justify-between gap-2 text-xs">
         <span className="font-mono font-semibold text-slate-200">{row.symbol}{" "}<ChartLink ticker={row.symbol} size="h-3.5 w-3.5" className="ml-1 align-middle" /></span>
         <span className={`uppercase ${dirTone}`}>
-          {row.direction} · {row.half_taken ? "half out, riding to target" : "open"}
+          {row.direction} · {row.half_taken ? "half out, trailing stop" : "open"}
         </span>
       </div>
       {canRender ? (
@@ -847,6 +853,25 @@ function PerformanceReport() {
   );
 }
 
+// Week / month totals for the period containing the selected date, in the
+// same figures as the day strip above it.
+function PeriodStrip({ label, stats }) {
+  if (!stats) return null;
+  const closedN = stats.closed;
+  return (
+    <div className="mb-4 grid grid-cols-2 gap-4 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3 sm:grid-cols-3 lg:grid-cols-6">
+      <Stat label={label} value={stats.period} sub={`${stats.trades} trade${stats.trades === 1 ? "" : "s"}${stats.open ? ` · ${stats.open} open` : ""}`} />
+      <Stat label="Cumulative R" value={rMult(stats.net_r)} tone={toneFor(stats.net_r)}
+            sub={stats.avg_r == null ? "—" : `avg ${rMult(stats.avg_r)}/trade`} />
+      <Stat label="Realized P&L" value={money(stats.net_pnl)} tone={toneFor(stats.net_pnl)} />
+      <Stat label="Win rate" value={stats.win_rate == null ? "—" : `${Math.round(stats.win_rate)}%`}
+            sub={closedN ? `${stats.wins}/${closedN} closed` : "no closed trades yet"} />
+      <Stat label="Avg win / loss" value={stats.avg_win == null && stats.avg_loss == null ? "—" : `${money(stats.avg_win)} / ${money(stats.avg_loss)}`} />
+      <Stat label="Profit factor" value={stats.profit_factor ?? "—"} />
+    </div>
+  );
+}
+
 const VERDICT_TONE = { win: "go", loss: "avoid", flat: "unknown" };
 
 function TrialBanner({ trial }) {
@@ -915,6 +940,7 @@ export default function DayTradePanel() {
   // poll rather than riding the per-date fetch below.
   const { data: budget } = useApi(() => api.daytradeBudget(), [], 60000);
   const { data: trial } = useApi(() => api.daytradeTrial(), [], 60000);
+  const { data: periods } = useApi(() => api.daytradePeriodStats(date), [date], 60000);
   const { data: screenHealth, reload: reloadScreenHealth } = useApi(() => api.daytradeScreenHealth(), [], 60000);
   // A process-wide constant, not per-request state — fetch once, no poll.
   const { data: ruleConfig } = useApi(() => api.daytradeConfig(), [], null);
@@ -1042,6 +1068,9 @@ export default function DayTradePanel() {
             />
             <Stat label="Rule adherence" value="100%" sub="paper mode enforces the rules exactly" tone="text-emerald-300" />
           </div>
+
+          <PeriodStrip label="Week" stats={periods?.week} />
+          <PeriodStrip label="Month" stats={periods?.month} />
 
           <div className="space-y-6">
             <section>

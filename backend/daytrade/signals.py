@@ -121,7 +121,7 @@ class _Symbol:
     __slots__ = ("prior_high", "prior_low", "atr14", "risk_per_share", "seen_volumes",
                  "status", "direction", "setup_high", "setup_low", "setup_at",
                  "candles_waited", "entry", "stop", "target1", "target2", "half_taken",
-                 "size", "entry_at", "trade_id", "last_bar")
+                 "size", "entry_at", "trade_id", "last_bar", "hwm", "tight", "half_at")
 
     def __init__(self, prior_high: float, prior_low: float, atr14: float | None):
         self.prior_high = prior_high
@@ -135,6 +135,9 @@ class _Symbol:
         self.candles_waited = 0
         self.entry = self.stop = self.target1 = self.target2 = None
         self.half_taken = False
+        self.hwm = None       # best price since the half target (trailing stop anchor)
+        self.tight = False    # trail tightened after reaching DAYTRADE_FULL_TARGET_R
+        self.half_at = None
         self.size = 0
         self.entry_at = self.trade_id = None
         self.last_bar: dict | None = None
@@ -227,6 +230,7 @@ def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict,
     sym.status = "in_trade"
     sym.entry, sym.stop, sym.target1, sym.target2 = entry, stop, target1, target2
     sym.half_taken = False
+    sym.hwm, sym.tight, sym.half_at = None, False, None
     sym.size = size
     sym.entry_at = fill.at
     sym.last_bar = bar  # so a trade entered on the day's last bar still has
@@ -243,6 +247,28 @@ def _exit_fill(adapter: adapters.ExecutionAdapter, sym: _Symbol, bar: dict, kind
     fill = adapter.exit(symbol=bar["symbol"], trade_id=sym.trade_id, kind=kind,
                         price=price, size=size, at=bar["datetime"], r=r)
     return fill.price
+
+
+def _advance_trail(sym: _Symbol, bar: dict) -> bool:
+    """Fold one bar into the remainder's trailing stop: track the best price
+    since the half target, tighten the trail once price has reached
+    DAYTRADE_FULL_TARGET_R, and ratchet the stop (never loosen it, never below
+    breakeven). Returns True on the bar that FIRST tightens the trail."""
+    long = sym.direction == "long"
+    extreme = bar["high"] if long else bar["low"]
+    if sym.hwm is None:
+        sym.hwm = extreme
+    else:
+        sym.hwm = max(sym.hwm, extreme) if long else min(sym.hwm, extreme)
+    risk = sym.risk_per_share
+    gain_r = ((sym.hwm - sym.entry) if long else (sym.entry - sym.hwm)) / risk
+    newly = not sym.tight and gain_r >= config.DAYTRADE_FULL_TARGET_R
+    if newly:
+        sym.tight = True
+    dist = (config.DAYTRADE_TRAIL_TIGHT_R if sym.tight else config.DAYTRADE_TRAIL_LOOSE_R) * risk
+    cand = sym.hwm - dist if long else sym.hwm + dist
+    sym.stop = max(sym.stop, cand, sym.entry) if long else min(sym.stop, cand, sym.entry)
+    return newly
 
 
 def _resolve_trade(sym: _Symbol, day_state: _Day, bar: dict,
@@ -268,36 +294,39 @@ def _resolve_trade(sym: _Symbol, day_state: _Day, bar: dict,
             price = _exit_fill(adapter, sym, bar, "half_target", sym.target1, half_size,
                                config.DAYTRADE_HALF_TARGET_R)
             sym.half_taken = True
-            sym.stop = sym.entry  # move to breakeven, rule 6
+            sym.half_at = bar["datetime"]
+            sym.stop = sym.entry  # breakeven floor, rule 6 — the trail only ratchets up from here
             events.append(_event(bar["date"], bar["symbol"], "half_target", bar["datetime"],
                                   direction=sym.direction, price=round(price, 4),
-                                  r=config.DAYTRADE_HALF_TARGET_R, trade_id=sym.trade_id))
+                                  r=config.DAYTRADE_HALF_TARGET_R, stop=round(sym.stop, 4),
+                                  trade_id=sym.trade_id))
             # fall through: the same bar can also resolve the remainder below
         else:
             sym.last_bar = bar
             return events
 
-    # Remainder (half already banked at DAYTRADE_HALF_TARGET_R, stop at breakeven).
-    breakeven_hit = bar["low"] <= sym.stop if long else bar["high"] >= sym.stop
-    target2_hit = bar["high"] >= sym.target2 if long else bar["low"] <= sym.target2
-    if breakeven_hit:
-        net_r = 0.5 * config.DAYTRADE_HALF_TARGET_R
-        price = _exit_fill(adapter, sym, bar, "breakeven_exit", sym.stop, remainder_size, net_r)
+    # Remainder (half banked at DAYTRADE_HALF_TARGET_R): a trailing stop, no
+    # fixed target. The stop tested is the one set by PRIOR bars (a bar's own
+    # new high can't both raise the stop and be stopped out by it).
+    stop_hit = bar["low"] <= sym.stop if long else bar["high"] >= sym.stop
+    if stop_hit:
+        # A gap through the stop fills at the open, not the stop.
+        fill_at = min(sym.stop, bar["open"]) if long else max(sym.stop, bar["open"])
+        remainder_r = ((fill_at - sym.entry) if long else (sym.entry - fill_at)) / sym.risk_per_share
+        net_r = round(0.5 * config.DAYTRADE_HALF_TARGET_R + 0.5 * remainder_r, 4)
+        kind = "trail_stop" if sym.stop != sym.entry else "breakeven_exit"
+        price = _exit_fill(adapter, sym, bar, kind, fill_at, remainder_size, net_r)
         day_state.record_trade_result(net_r)
-        events.append(_event(bar["date"], bar["symbol"], "breakeven_exit", bar["datetime"],
+        events.append(_event(bar["date"], bar["symbol"], kind, bar["datetime"],
                               direction=sym.direction, price=round(price, 4),
                               r=net_r, trade_id=sym.trade_id))
         sym.status = "watching"
-    elif target2_hit:
-        net_r = 0.5 * config.DAYTRADE_HALF_TARGET_R + 0.5 * config.DAYTRADE_FULL_TARGET_R
-        price = _exit_fill(adapter, sym, bar, "final_target", sym.target2, remainder_size, net_r)
-        day_state.record_trade_result(net_r)
-        events.append(_event(bar["date"], bar["symbol"], "final_target", bar["datetime"],
-                              direction=sym.direction, price=round(price, 4),
-                              r=net_r, trade_id=sym.trade_id))
-        sym.status = "watching"
-    else:
-        sym.last_bar = bar
+        return events
+    if _advance_trail(sym, bar):
+        events.append(_event(bar["date"], bar["symbol"], "trail_tighten", bar["datetime"],
+                              direction=sym.direction, stop=round(sym.stop, 4),
+                              trail_r=config.DAYTRADE_TRAIL_TIGHT_R, trade_id=sym.trade_id))
+    sym.last_bar = bar
     return events
 
 
@@ -431,7 +460,9 @@ def _rehydrate(existing: list[dict], symbols: dict[str, _Symbol], day_state: _Da
             day_state.trades_taken += 1
         elif kind == "half_target":
             sym.half_taken = True
-        elif kind in ("breakeven_exit", "final_target", "stop_out", "time_cutoff"):
+            sym.half_at = at
+            sym.stop = sym.entry  # the trail's own state is rebuilt from bars (_restore_trail)
+        elif kind in ("breakeven_exit", "trail_stop", "final_target", "stop_out", "time_cutoff"):
             sym.status = "watching"
             r = e.get("r")
             if r is not None:
@@ -439,6 +470,21 @@ def _rehydrate(existing: list[dict], symbols: dict[str, _Symbol], day_state: _Da
         if at:
             resume_at[symbol] = at
     return resume_at
+
+
+def _restore_trail(symbols: dict[str, _Symbol], bars: list[dict], resume_at: dict[str, str]) -> None:
+    """Rebuild each still-open, half-taken trade's trailing-stop state (best
+    price, tightened flag, current stop) by folding the bars from the half
+    target up to the last journaled event back through ``_advance_trail`` —
+    the trail's high-water mark isn't journaled per bar, but it is a pure
+    function of the bars, so a replay from a later run resumes it exactly."""
+    for bar in bars:
+        sym = symbols.get(bar["symbol"])
+        if sym is None or sym.status != "in_trade" or not sym.half_taken or not sym.half_at:
+            continue
+        if sym.half_at <= bar["datetime"] <= resume_at.get(bar["symbol"], ""):
+            _advance_trail(sym, bar)
+            sym.last_bar = bar
 
 
 def run_day(day: str, account_id: str, now: datetime | None = None,
@@ -482,6 +528,8 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
     bars = [b for b in store.load_bars(day) if b.get("symbol") in symbols]
     bars.sort(key=lambda b: (_parse_at(b["datetime"]), b["symbol"]))
 
+    _restore_trail(symbols, bars, resume_at)
+
     new_events: list[dict] = []
     for bar in bars:
         symbol = bar["symbol"]
@@ -517,7 +565,7 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
 # wrong information but can never contradict or influence an actual trading
 # decision — nothing here is authoritative.
 # ---------------------------------------------------------------------------
-_CLOSED_EVENTS = frozenset({"expired", "entry_skipped", "breakeven_exit",
+_CLOSED_EVENTS = frozenset({"expired", "entry_skipped", "breakeven_exit", "trail_stop",
                             "final_target", "stop_out", "time_cutoff"})
 
 
