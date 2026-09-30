@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **A 429 on the order POST now reads "NOT placed".** It was an ambiguous UNKNOWN
+  ("may be working at Schwab"), which sent the operator hunting for an order that
+  never existed. It is now a definite rejection that arms the shared rate-limit
+  pause. The original send failure is kept on the record (`submit_detail`) and the
+  unconfirmed toast says when Schwab lists no matching order.
 - **Orders tracker on Positions.** Lists orders as Schwab sees them (last 24h,
   refreshed every 8s) with the broker's status, and a Cancel button that cancels
   by broker order id — including an order the app never recorded (lost /

@@ -593,3 +593,36 @@ def test_cancel_broker_order_refuses_an_order_not_on_this_account(live):
     live(_BrokerListing([_roll_order("999")]))
     with pytest.raises(ValueError):
         executor.cancel_broker_order("12345")
+
+
+# ---------------------------------------------------------------------------
+# A 429 on the order POST is a definite "not placed", never an ambiguous UNKNOWN.
+# ---------------------------------------------------------------------------
+def _client_with_post(monkeypatch, status, headers=None, text=""):
+    class Resp:
+        status_code = status
+        def __init__(self):
+            self.headers = headers or {}
+            self.text = text
+
+    monkeypatch.setattr(schwab_api.requests, "post", lambda *a, **k: Resp())
+    monkeypatch.setattr(schwab_api._limiter, "before_order", lambda *a, **k: 0.0)
+    client = schwab_api.SchwabClient.__new__(schwab_api.SchwabClient)
+    monkeypatch.setattr(client, "_auth_headers", lambda *a, **k: {}, raising=False)
+    return client
+
+
+def test_order_post_429_is_rejected_not_unknown_and_arms_the_pause(monkeypatch):
+    schwab_api.reset_rate_limiter()
+    client = _client_with_post(monkeypatch, 429, headers={"Retry-After": "7"})
+    res = client.submit_order("HASH", {})
+    assert res["outcome"] == "rejected" and res["rate_limited"] is True
+    assert "NOT placed" in res["reason"]
+    assert schwab_api.rate_limit_status()["paused_for"] > 0
+    schwab_api.reset_rate_limiter()
+
+
+def test_order_post_5xx_stays_unknown(monkeypatch):
+    client = _client_with_post(monkeypatch, 503, text="upstream down")
+    res = client.submit_order("HASH", {})
+    assert res["outcome"] == "unknown" and res["detail"] == "upstream down"
