@@ -54,7 +54,9 @@ const EVENT_META = {
   expired: { label: "expired", status: "unknown" },
   half_target: { label: "half target", status: "go" },
   breakeven_exit: { label: "breakeven exit", status: "caution" },
-  final_target: { label: "final target", status: "go" },
+  final_target: { label: "final target", status: "go" },  // legacy: pre-trailing-stop logs
+  trail_tighten: { label: "trail tightened", status: "go" },
+  trail_stop: { label: "trail stop", status: "go" },
   stop_out: { label: "stop out", status: "avoid" },
   time_cutoff: { label: "time cutoff", status: "caution" },
 };
@@ -69,7 +71,11 @@ function detailFor(e) {
     case "expired":
       return "no break within the entry window";
     case "entry":
-      return `@${e.entry} · ${e.size} sh · stop ${e.stop} · targets ${e.target1}/${e.target2}`;
+      return `@${e.entry} · ${e.size} sh · stop ${e.stop} · ½ off @${e.target1} · tighten trail @${e.target2}`;
+    case "half_target":
+      return `@${e.price} · ${rMult(e.r)} · trailing stop on the rest`;
+    case "trail_tighten":
+      return `stop ${e.stop} · trailing ${e.trail_r}R behind the high`;
     default:
       return e.price != null ? `@${e.price} · ${rMult(e.r)}` : rMult(e.r);
   }
@@ -576,7 +582,7 @@ function TickerRoster() {
 }
 
 // Two-sided range meter for an OPEN trade: -1R (stop) on the left to the
-// active target (+1R before half_taken, +2R after — computed from the
+// active marker (+1R half target before half_taken, +2R trail-tighten point after — computed from the
 // actual target price rather than hardcoded, so it tracks
 // DAYTRADE_HALF_TARGET_R/FULL_TARGET_R if those ever change) on the right,
 // 0R (entry) marked as the red/green boundary, current price as the dot.
@@ -656,7 +662,7 @@ function LiveStatusRow({ row }) {
       <div className="mb-1 flex items-center justify-between gap-2 text-xs">
         <span className="font-mono font-semibold text-slate-200">{row.symbol}{" "}<ChartLink ticker={row.symbol} size="h-3.5 w-3.5" className="ml-1 align-middle" /></span>
         <span className={`uppercase ${dirTone}`}>
-          {row.direction} · {row.half_taken ? "half out, riding to target" : "open"}
+          {row.direction} · {row.half_taken ? "half out, trailing stop" : "open"}
         </span>
       </div>
       {canRender ? (

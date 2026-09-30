@@ -160,8 +160,8 @@ def to_markdown(report: dict) -> str:
         f"# Day-trade paper-trading report — account `{report['account_id']}` ({span})",
         "",
         "Paper-mode trades from a rules-based intraday strategy (5-min bars, entry on a "
-        "volume-confirmed breakout, stop = ATR-based, half off at +1R, remainder to +2R, "
-        "time cutoff). R = multiple of the initial per-share risk; P&L is realized "
+        "volume-confirmed breakout, stop = ATR-based, half off at +1R, then a loose trailing stop on the "
+        "rest that tightens at +2R, time cutoff). R = multiple of the initial per-share risk; P&L is realized "
         "dollars. Win rate / wins / losses count closed trades only. Please review the "
         "results and the individual trades for patterns, rule-following, and what to improve.",
         "",

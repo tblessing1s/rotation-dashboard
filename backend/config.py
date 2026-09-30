@@ -804,6 +804,15 @@ DAYTRADE_STOP_ATR_DIVISOR = 4.0
 # end, not a separate constant).
 DAYTRADE_HALF_TARGET_R = 1.0
 DAYTRADE_FULL_TARGET_R = 2.0
+# The remainder after the half target no longer exits at a fixed +2R: it rides
+# a TRAILING stop (signals._advance_trail). Loose while below DAYTRADE_FULL_
+# TARGET_R — the stop starts at breakeven and trails the best price by
+# DAYTRADE_TRAIL_LOOSE_R of initial risk, so the trade can't lose money — then,
+# once price reaches DAYTRADE_FULL_TARGET_R, it tightens to DAYTRADE_TRAIL_
+# TIGHT_R so the winner keeps running but banks most of the gain. The stop
+# never loosens; the 10:00-window-end time cutoff still closes whatever's open.
+DAYTRADE_TRAIL_LOOSE_R = 1.0
+DAYTRADE_TRAIL_TIGHT_R = 0.5
 
 # Rule 7 — risk: % of account risked per trade (sized off the stop distance),
 # max trades/day, and the day-stop trigger (two losing trades OR cumulative

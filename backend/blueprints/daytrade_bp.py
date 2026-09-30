@@ -84,6 +84,8 @@ def api_daytrade_config():
         "daily_stop_r": config.DAYTRADE_DAILY_STOP_R,
         "max_position_pct": config.DAYTRADE_MAX_POSITION_PCT,
         "max_daily_deploy_pct": config.DAYTRADE_MAX_DAILY_DEPLOY_PCT,
+        "trail_loose_r": config.DAYTRADE_TRAIL_LOOSE_R,
+        "trail_tight_r": config.DAYTRADE_TRAIL_TIGHT_R,
     })
 
 
