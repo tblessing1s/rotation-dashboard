@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- **Removed the accrual ledger / lot builder.** The "Accrual — next lot" meter,
+  `accrual.py`, the `accrual_ledger` state key (dropped from state on the next
+  recompute), the `LOT_ADD_READY` alert, the `lot_add_recommended` action and
+  `LOT_ADD_BUFFER_PCT` are gone. Executions are untouched; a historical
+  `lot_add` stamp on a `buy_shares` is still read by `trust_derive`.
+
 ## v2.16.0 — Coverage-miss acknowledgements + the extrinsic-captured roll (state schema v23)
 
 Two trust-layer additions, both born from the first live coverage misses.

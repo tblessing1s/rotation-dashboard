@@ -960,11 +960,6 @@ CAPACITY_RETENTION_DAYS = 280   # PROPOSED_DEFAULT
 # retained inputs rather than a lost history.
 CAPACITY_STRIKE_ATR_MULT = SHORT_ATR_MULT
 
-# Position builder: accrued cash must cover a fresh 100-share lot plus this buffer
-# before LOT_ADD_RECOMMENDED is emitted, so a recommendation isn't invalidated by
-# a tick between the alert and the fill.
-LOT_ADD_BUFFER_PCT = 0.02
-
 # Shares-only enforcement (schema v20). Shares are the active base leg and the
 # LEAP diagonal is read-only LEGACY: existing history stays queryable and priced,
 # but no NEW LEAP may be opened, added to, or rolled — executor.execute rejects

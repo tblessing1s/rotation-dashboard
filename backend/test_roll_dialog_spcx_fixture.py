@@ -173,7 +173,7 @@ def test_realized_extrinsic_on_close_and_ledger_isolation(store, monkeypatch):
     extrinsic_paid_back = 18.55 - 18.34 = 0.21 — matching the live dialog's own
     displayed $0.21. realized_extrinsic = initial_extrinsic_sold (1.53, the
     "$153 sold / 82% captured" origin figure) - 0.21. The roll's net debit
-    (-1023, matching the real screenshot) must not reach the accrual ledger."""
+    (-1023, matching the real screenshot) must not reach the ledgers."""
     entry_extrinsic = 1.53
     _mock_common(monkeypatch, SPOT, entry_extrinsic=entry_extrinsic)
     # Seed the position for a real executor roll (find_position is monkeypatched

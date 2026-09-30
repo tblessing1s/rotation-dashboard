@@ -46,14 +46,7 @@ VALID_ACTIONS = {"buy_leap", "sell_short", "close_short", "close_leap", "roll_sh
                  "put_opened", "put_closed", "put_assigned",
                  # Held-share cash dividend, booked as its OWN income event (kept out of
                  # the juice/theta ledger — derived into state['dividend_ledger']).
-                 "dividend_income",
-                 # Position builder (schema v21). LOT_ADD_RECOMMENDED is telemetry —
-                 # the record that the builder told the operator a lot was fundable,
-                 # and whether the Level 5 gate blocked it. There is deliberately no
-                 # lot_add_executed action: an EXECUTED add is a plain buy_shares
-                 # carrying a `lot_add` stamp, so it traverses the same freeze /
-                 # Level-5 / execution-window / spread path as any other new risk.
-                 "lot_add_recommended"}
+                 "dividend_income"}
 
 # Actions REJECTED on a frozen (needs_review) position — new risk cannot be added
 # to a position whose state is unverified. Closing actions (close_short,
@@ -863,12 +856,6 @@ def _execute(payload: dict, now: datetime | None = None) -> dict:
         if action == "put_opened":
             return _put_opened(payload, ticker, strike, contracts, stock_price)
         return _put_closed(payload, ticker, strike, contracts, stock_price)
-
-    # Builder telemetry — a recommendation, not a trade: no gate, no price capture,
-    # no order, no position mutation. The ADD it recommends is a separate,
-    # fully-gated buy_shares the operator confirms (NO auto-execution).
-    if action == "lot_add_recommended":
-        return _lot_add_recommended(payload, ticker)
 
     # A live book that can't reach Schwab must not silently book the order as
     # if it filled — refuse before anything is priced, gated or written.
@@ -3160,40 +3147,6 @@ def _dividend_income(payload, ticker):
             "amount": amount, "execution": stored}
 
 
-def _lot_add_recommended(payload, ticker):
-    """Record that the position builder recommended a 100-share lot add (schema
-    v21). Telemetry ONLY — this books no trade, mutates no position, and moves no
-    cash: accrued cash changes covered-call math at exactly one moment, when a real
-    lot is bought [HARD_CFM_RULE].
-
-    The Level 5 verdict is evaluated and STAMPED here so the record says whether
-    the recommendation was actionable or blocked-with-reason at the moment it was
-    made — a later gate change must not be able to rewrite that history. There is
-    NO auto-execution: acting on this is a separate, operator-confirmed
-    ``buy_shares`` carrying a ``lot_add`` stamp."""
-    import accrual
-    state = log.load_state()
-    price = payload.get("price_per_share")
-    if price is None:
-        price, _src = _capture_price(ticker, payload.get("stock_price"))
-    status = accrual.lot_add_status(state, ticker, float(price) if price is not None else None)
-    execution = {
-        "ticker": ticker, "action": "lot_add_recommended",
-        "accrued_cash": status.get("accrued_cash"),
-        "lot_cost": status.get("lot_cost"),
-        "threshold": status.get("threshold"),
-        "price_per_share": round(float(price), 4) if price is not None else None,
-        "actionable": bool(status.get("actionable")),
-        "blocked": bool(status.get("blocked")),
-        "blocked_reason": status.get("blocked_reason"),
-        "blocking_failures": status.get("blocking_failures") or [],
-    }
-    _stamp_source_rec(execution, payload)
-    stored = log.append_execution(execution)
-    return {"success": True, "status": "recorded", "execution_id": stored["id"],
-            "lot_add": status, "execution": stored}
-
-
 def _commit_shares(payload, ticker, action, contracts, strike, stock_price, price_source, mode):
     """Commit a shares base action (buy_shares / sell_shares). Live equity
     submission is NOT enabled by this migration: in a live session the equity
@@ -4038,7 +3991,7 @@ def _leg_payload(leg, plan, payload, stock_price) -> dict:
     a = leg["action"]
     if a == "buy_shares":
         keep = ("circuit_breaker_price", "override_reason", "_account_gate",
-                "income_profile", "lot_add", "source", "entry_context")
+                "income_profile", "source", "entry_context")
         return {**base, **{k: payload[k] for k in keep if k in payload},
                 "qty": leg["qty"], "price_per_share": leg["price"]}
     if a == "sell_shares":
@@ -5253,7 +5206,7 @@ def _sell_short(payload, ticker, strike, contracts, stock_price):
     # ROLL_STRIKE_CHOICE (TRAVIS_EXTENSION, shadow/telemetry-only) — present only
     # when this open leg came from the Roll dialog's regime-target advisory
     # (roll_advisor / strike_policy.regime_target_strike). A nested, ADDITIVE
-    # field: recompute_derived's theta/accrual ledgers read only named scalar
+    # field: recompute_derived's theta ledger reads only named scalar
     # fields (net_juice/net_juice_total etc, see logging_handler.py) and never
     # this key, so it carries no accounting weight — it exists purely so a later
     # analysis can see what was recommended vs. what was actually chosen.
@@ -5415,11 +5368,6 @@ def _buy_shares(payload, ticker, stock_price):
     # bought under is a matter of record, not of current state.
     profile = income_profile.normalize(payload.get("income_profile"))
     execution["income_profile"] = profile
-    # Provenance for a builder-driven add (see accrual.py). A lot add is a plain
-    # buy_shares carrying this stamp — NOT its own action — so it traverses the same
-    # freeze / Level-5 / execution-window / spread path as any other new risk.
-    if payload.get("lot_add"):
-        execution["lot_add"] = True
 
     def apply(position):
         shares = position.setdefault("shares", {"count": 0, "cost_basis_per_share": None,
