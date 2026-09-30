@@ -782,6 +782,71 @@ function TradeLog({ trades }) {
   );
 }
 
+const REPORT_VIEWS = [["total", "Total"], ["year", "Yearly"], ["month", "Monthly"],
+  ["week", "Weekly"], ["day", "Daily"]];
+
+// Period rollups of the paper trades + export. "Copy for chat" puts the whole
+// Markdown pack (every rollup and every trade) on the clipboard.
+function PerformanceReport() {
+  const { data: report } = useApi(() => api.daytradeReport(), [], 60000);
+  const [view, setView] = React.useState("week");
+  const [msg, setMsg] = React.useState(null);
+  const run = async (fn, ok) => {
+    try { await fn(); setMsg(ok); } catch (e) { setMsg(e.message || "Export failed"); }
+    setTimeout(() => setMsg(null), 4000);
+  };
+  const rows = !report ? [] : view === "total" ? (report.total ? [report.total] : []) : [...(report[view] || [])].reverse();
+  const btn = "rounded border border-slate-700 px-2 py-1 text-[11px] text-slate-300 hover:bg-slate-800";
+  return (
+    <section>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h4 className="text-xs font-semibold text-slate-300">Performance</h4>
+        <div className="flex flex-wrap items-center gap-2">
+          {msg && <span className="text-[11px] text-slate-400">{msg}</span>}
+          <button className={btn} onClick={() => run(async () => navigator.clipboard.writeText(await api.daytradeExportText()), "Copied — paste into your chat")}>Copy for chat</button>
+          <button className={btn} onClick={() => run(() => api.daytradeExport("md"), "Saved .md")}>Markdown</button>
+          <button className={btn} onClick={() => run(() => api.daytradeExport("csv", view === "total" ? "total" : view), `Saved ${view} CSV`)}>{REPORT_VIEWS.find(([k]) => k === view)[1]} CSV</button>
+          <button className={btn} onClick={() => run(() => api.daytradeExport("csv", "trades"), "Saved trades CSV")}>Trades CSV</button>
+          <button className={btn} onClick={() => run(() => api.daytradeExport("json"), "Saved .json")}>JSON</button>
+        </div>
+      </div>
+      <div className="mb-2 flex gap-1">
+        {REPORT_VIEWS.map(([k, label]) => (
+          <button key={k} onClick={() => setView(k)}
+            className={`rounded px-2 py-1 text-[11px] ${view === k ? "bg-slate-700 text-slate-100" : "text-slate-400 hover:bg-slate-800"}`}>{label}</button>
+        ))}
+      </div>
+      {!rows.length ? (
+        <p className="text-xs text-slate-500">No paper trades recorded yet.</p>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-xs">
+            <thead className="text-slate-500">
+              <tr>{["Period", "Trades", "Win %", "W/L", "Net P&L", "Net R", "Avg R", "Avg win", "Avg loss", "PF"].map((h) => <th key={h} className="px-2 py-1 font-medium">{h}</th>)}</tr>
+            </thead>
+            <tbody className="font-mono text-slate-300">
+              {rows.map((r) => (
+                <tr key={r.period} className="border-t border-slate-800">
+                  <td className="px-2 py-1">{r.period}</td>
+                  <td className="px-2 py-1">{r.trades}{r.open ? ` (${r.open} open)` : ""}</td>
+                  <td className="px-2 py-1">{r.win_rate == null ? "—" : `${r.win_rate}%`}</td>
+                  <td className="px-2 py-1">{r.wins}/{r.losses}</td>
+                  <td className={`px-2 py-1 ${toneFor(r.net_pnl)}`}>{money(r.net_pnl)}</td>
+                  <td className={`px-2 py-1 ${toneFor(r.net_r)}`}>{rMult(r.net_r)}</td>
+                  <td className="px-2 py-1">{rMult(r.avg_r)}</td>
+                  <td className="px-2 py-1">{money(r.avg_win)}</td>
+                  <td className="px-2 py-1">{money(r.avg_loss)}</td>
+                  <td className="px-2 py-1">{r.profit_factor ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 const VERDICT_TONE = { win: "go", loss: "avoid", flat: "unknown" };
 
 function TrialBanner({ trial }) {
@@ -1007,6 +1072,8 @@ export default function DayTradePanel() {
               <h4 className="mb-2 text-xs font-semibold text-slate-300">Signal feed</h4>
               <SignalFeed events={data.signals.events} />
             </section>
+
+            <PerformanceReport />
 
             <section>
               <h4 className="mb-2 text-xs font-semibold text-slate-300">Trade log</h4>

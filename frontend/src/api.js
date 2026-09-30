@@ -74,7 +74,7 @@ async function request(path, opts = {}) {
 // Save a server-generated file (CSV / JSON export). A plain <a download> can't send
 // the X-CFM-Account header, so it would export whichever book the server last
 // persisted; fetching with the header keeps the export to the book on screen.
-export async function downloadFile(path, filename) {
+async function fetchBlob(path) {
   let res;
   try {
     res = await fetch(BASE + path, {
@@ -90,7 +90,11 @@ export async function downloadFile(path, filename) {
     if (res.status === 401) window.dispatchEvent(new CustomEvent("auth-required"));
     throw new Error(msg);
   }
-  const url = URL.createObjectURL(await res.blob());
+  return res.blob();
+}
+
+export async function downloadFile(path, filename) {
+  const url = URL.createObjectURL(await fetchBlob(path));
   const a = document.createElement("a");
   a.href = url;
   a.download = filename;
@@ -98,6 +102,11 @@ export async function downloadFile(path, filename) {
   a.click();
   a.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+// Same account-scoped fetch as downloadFile, but returns the text (for clipboard copy).
+export async function fetchText(path) {
+  return (await fetchBlob(path)).text();
 }
 
 export const api = {
@@ -215,6 +224,13 @@ export const api = {
   // to `date`, same as daytradeBudget.
   daytradeTrial: () => request("/api/daytrade/trial"),
   // Running realized paper P&L over the last `days` days (0 = all) — per account.
+  // Period rollups (total/year/month/week/day + per-trade rows) and exports
+  // (backend/daytrade/report.py). Markdown is the chat-ready pack.
+  daytradeReport: () => request("/api/daytrade/report"),
+  daytradeExport: (format = "md", view = "trades") =>
+    downloadFile(`/api/daytrade/export?format=${format}&view=${view}`,
+      format === "csv" ? `daytrade_${view}.csv` : `daytrade_report.${format}`),
+  daytradeExportText: () => fetchText("/api/daytrade/export?format=md"),
   daytradePnlSeries: (days = 0) => request(`/api/daytrade/pnl-series?days=${days}`),
   // Whether the day-trade sleeve is turned ON for the active account
   // (backend/daytrade/settings.py — default on for the primary book, off

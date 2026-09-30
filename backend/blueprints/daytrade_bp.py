@@ -1,4 +1,4 @@
-"""Day-trade sleeve (17 routes) — split out of the former monolithic app.py."""
+"""Day-trade sleeve (19 routes) — split out of the former monolithic app.py."""
 from __future__ import annotations
 
 from flask import Blueprint, jsonify, request
@@ -229,6 +229,64 @@ def api_daytrade_pnl_series():
             since = (today - timedelta(days=days - 1)).strftime("%Y-%m-%d")
         return jsonify({"account_id": accounts.active_id(), "days": days,
                          **trial.pnl_series(accounts.active_id(), since)})
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+def _report_args():
+    """since/until (YYYY-MM-DD, inclusive) from the query string, validated."""
+    from datetime import date
+    out = []
+    for k in ("since", "until"):
+        v = request.args.get(k) or None
+        if v:
+            date.fromisoformat(v)
+        out.append(v)
+    return out
+
+
+@daytrade_bp.route("/api/daytrade/report")
+def api_daytrade_report():
+    """The active account's paper trades rolled up by total / year / month /
+    week / day, plus the flat per-trade list (daytrade/report.py).
+    Optional ``?since=`` / ``?until=`` (YYYY-MM-DD, inclusive)."""
+    try:
+        from daytrade import report
+        since, until = _report_args()
+        return jsonify(report.build_report(accounts.active_id(), since, until))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@daytrade_bp.route("/api/daytrade/export")
+def api_daytrade_export():
+    """Download the report. ``?format=md`` (default; one chat-ready pack with
+    every rollup + every trade), ``json`` (everything), or ``csv`` with
+    ``?view=trades|total|year|month|week|day`` (default ``trades``)."""
+    try:
+        from flask import Response
+        from daytrade import report
+        fmt = (request.args.get("format") or "md").lower()
+        view = (request.args.get("view") or "trades").lower()
+        if fmt not in ("md", "markdown", "json", "csv"):
+            raise ValueError(f"unknown format {fmt!r}")
+        if fmt == "csv" and view != "trades" and view not in report.PERIODS:
+            raise ValueError(f"unknown view {view!r}")
+        since, until = _report_args()
+        rep = report.build_report(accounts.active_id(), since, until)
+        if fmt == "csv":
+            body, mime, name = report.to_csv(rep, view), "text/csv", f"daytrade_{view}.csv"
+        elif fmt == "json":
+            body, mime, name = report.to_json(rep), "application/json", "daytrade_report.json"
+        else:
+            body, mime, name = report.to_markdown(rep), "text/markdown", "daytrade_report.md"
+        return Response(body, mimetype=mime,
+                        headers={"Content-Disposition": f"attachment; filename={name}",
+                                 "Cache-Control": "no-store"})
     except ValueError as e:
         return _err(e, 400)
     except Exception as e:  # noqa: BLE001
