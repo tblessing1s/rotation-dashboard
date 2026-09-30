@@ -1027,7 +1027,7 @@ export default function DayTradePanel() {
               value={budget ? money(budget.amount) : "—"}
               sub={budget
                 ? `${budget.source === "dry_powder" ? budget.detail : `fallback — ${budget.detail}`}` +
-                  (ruleConfig ? ` · max ${ruleConfig.max_position_pct}%/trade` : "")
+                  (ruleConfig ? ` · max ${ruleConfig.max_position_pct}%/trade, ${ruleConfig.max_daily_deploy_pct}%/day` : "")
                 : "loading…"}
               tone={budget?.source === "fallback" ? "text-amber-300" : "text-slate-100"}
             />

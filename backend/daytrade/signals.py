@@ -148,6 +148,7 @@ class _Day:
         self.account_equity = account_equity
         self.entries_enabled = entries_enabled
         self.trades_taken = 0
+        self.deployed = 0.0  # cumulative entry notional today (daily deploy cap)
         self.losses = 0
         self.cumulative_r = 0.0
         self.stopped_reason: str | None = None
@@ -196,28 +197,28 @@ def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict,
     risk_per_share = sym.risk_per_share
     risk_amount = day_state.account_equity * (config.DAYTRADE_RISK_PCT / 100.0)
     risk_based_size = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
-    # Cap notional too, not just risk (config.DAYTRADE_MAX_POSITION_PCT): a
-    # tight stop (small risk_per_share relative to price) can request a
-    # share count whose dollar size dwarfs a wide-stop setup's, even though
-    # both risk the same 1% — this only ever pulls the size DOWN from the
-    # risk-based figure, it never raises risk above DAYTRADE_RISK_PCT.
+    # Cap capital too, not just risk (config.DAYTRADE_MAX_POSITION_PCT per
+    # trade, DAYTRADE_MAX_DAILY_DEPLOY_PCT across the day's entries) — this
+    # only ever pulls the size DOWN from the risk-based figure.
     notional_cap = day_state.account_equity * (config.DAYTRADE_MAX_POSITION_PCT / 100.0)
     notional_based_size = int(notional_cap // requested_entry) if requested_entry > 0 else 0
-    requested_size = min(risk_based_size, notional_based_size)
+    daily_room = day_state.account_equity * (config.DAYTRADE_MAX_DAILY_DEPLOY_PCT / 100.0) - day_state.deployed
+    daily_based_size = int(daily_room // requested_entry) if requested_entry > 0 and daily_room > 0 else 0
+    requested_size = min(risk_based_size, notional_based_size, daily_based_size)
     if requested_size <= 0:
-        # Either 1% of the current budget doesn't buy even one share at this
-        # risk distance, or the per-trade notional cap doesn't — e.g. the
-        # funding book's dry powder is at or near zero (daytrade/budget.py).
-        # A real trade here would be a size-0 no-op that still consumed one
-        # of the day's trade slots; skip it outright instead, the same as
-        # any other guardrail block.
+        # No room: the budget is ~0, or 1.5% of it doesn't buy one share at
+        # this price, or the day's deploy cap is used up. A size-0 "trade"
+        # would still burn one of the day's slots; skip it like any guardrail.
         sym.status = "watching"
+        reason = ("daily capital limit reached" if daily_based_size <= 0 and notional_based_size > 0
+                  and risk_based_size > 0 else "no budget available")
         return _event(bar["date"], bar["symbol"], "entry_skipped", bar["datetime"],
-                      direction=sym.direction, reason="no budget available", trade_id=sym.trade_id)
+                      direction=sym.direction, reason=reason, trade_id=sym.trade_id)
 
     fill = adapter.enter(symbol=bar["symbol"], trade_id=sym.trade_id, direction=sym.direction,
                          price=requested_entry, size=requested_size, at=bar["datetime"])
     entry, size = fill.price, fill.size
+    day_state.deployed += entry * size
     stop = entry - risk_per_share if sym.direction == "long" else entry + risk_per_share
     target1 = entry + risk_per_share if sym.direction == "long" else entry - risk_per_share
     target2 = (entry + 2 * risk_per_share if sym.direction == "long"

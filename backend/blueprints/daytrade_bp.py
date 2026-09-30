@@ -83,6 +83,7 @@ def api_daytrade_config():
         "max_losses_per_day": config.DAYTRADE_MAX_LOSSES_PER_DAY,
         "daily_stop_r": config.DAYTRADE_DAILY_STOP_R,
         "max_position_pct": config.DAYTRADE_MAX_POSITION_PCT,
+        "max_daily_deploy_pct": config.DAYTRADE_MAX_DAILY_DEPLOY_PCT,
     })
 
 
