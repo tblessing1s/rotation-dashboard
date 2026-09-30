@@ -4750,8 +4750,18 @@ def list_broker_orders(limit: int = 25) -> dict:
          "open_option_symbol": v.get("open_option_symbol")}
         for ref, v in subs.items()
         if v.get("status") in (SUB_UNKNOWN, SUB_SUBMITTING) and not v.get("order_id")]
+    live_ids = {r["order_id"] for r in rows if r["live"]}
+    status_by_id = {r["order_id"]: r["status"] for r in rows}
+    # App-side pending records that are NOT working at the broker — the leftovers the
+    # operator may want to clear (the broker shows them terminal, or not at all).
+    stale = [
+        {"order_id": str(oid), "ticker": rec.get("ticker"),
+         "action": rec.get("action") or rec.get("kind"),
+         "placed_at": rec.get("placed_at"),
+         "broker_status": status_by_id.get(str(oid))}
+        for oid, rec in log.list_pending_orders().items() if str(oid) not in live_ids]
     return {"orders": rows[:max(1, int(limit))], "unconfirmed": unconfirmed,
-            "as_of": log.utcnow()}
+            "stale_pending": stale, "as_of": log.utcnow()}
 
 
 def cancel_broker_order(order_id: str) -> dict:
@@ -4825,6 +4835,92 @@ def cancel_broker_order(order_id: str) -> dict:
     log.append_order_journal({"event": "canceled_by_operator", "order_id": order_id,
                               "raw_status": raw})
     return {"order_id": order_id, "status": "canceled", "raw_status": raw}
+
+
+def clear_unfilled_order(order_id: str | None = None, client_order_ref: str | None = None,
+                         force: bool = False) -> dict:
+    """Operator "clear it out": drop an order the app sent that never filled at the
+    broker, so it stops showing and stops blocking a fresh send. Nothing is sent to
+    Schwab — this only tidies the app's own records after checking the broker:
+
+      * FILLED / partly filled -> refused (a fill must be booked, not cleared — re-poll).
+      * still WORKING          -> refused (cancel it; clearing would forget a live order).
+      * terminal (canceled / rejected / expired, nothing filled) -> cleared.
+      * an id-less send that a clean recent-orders lookup can't find -> cleared (Schwab
+        has no such order).
+      * an order id Schwab can't return / an unreachable lookup -> needs ``force`` (the
+        operator confirming Schwab has nothing, e.g. by checking TOS) — an unverifiable
+        clear is never silent.
+
+    An order with an id clears its pending record and releases its resubmission
+    lock; an id-less send (UNKNOWN) is closed out as NOT_PLACED."""
+    if not order_id and not client_order_ref:
+        raise ValueError("order_id or client_order_ref is required")
+    client = data_handler.broker_client()
+    account_hash = _order_account_hash(client)
+    order_id = str(order_id) if order_id else None
+    sub = log.get_order_submission(client_order_ref) if client_order_ref else None
+    if sub is None and order_id:
+        sub = next((v for v in log.list_order_submissions().values()
+                    if str(v.get("order_id") or "") == order_id), None)
+    if sub is not None and not order_id and sub.get("order_id"):
+        order_id = str(sub["order_id"])
+    if order_id and not log.get_pending_order(order_id) and sub is None:
+        return {"cleared": False, "status": "not_found",
+                "message": f"The app has no record of order {order_id}."}
+
+    def refuse(status, message, **extra):
+        return {"cleared": False, "status": status, "message": message, **extra}
+
+    # --- what does the broker say? -------------------------------------------------
+    order, verified = None, False
+    if order_id:
+        try:
+            order = client.get_order(account_hash, order_id) or None
+            verified = order is not None
+        except Exception as e:  # noqa: BLE001 — unreadable is "unverified", not "gone"
+            log.logger.warning("clear: could not read order %s (%s)", order_id, e)
+    else:
+        try:
+            recent = client.list_orders(account_hash)
+            verified = True
+            sid = _match_recent_order(recent, sub.get("close_option_symbol"),
+                                      sub.get("open_option_symbol"), since=sub.get("placed_at"))
+            if sid:
+                order_id = sid
+                order = next((o for o in recent if str(o.get("orderId")) == sid), None)
+        except Exception as e:  # noqa: BLE001
+            log.logger.warning("clear: recent-orders lookup failed (%s)", e)
+    raw = str((order or {}).get("status") or "").upper()
+    if order is not None:
+        if raw == "FILLED" or _num(order.get("filledQuantity")) > 0:
+            return refuse("filled", "It filled (or partly filled) at Schwab — it can't be cleared. "
+                                    "Re-poll / reconcile so the fill is booked.", order_id=order_id)
+        if raw not in _TERMINAL_STATUSES:
+            return refuse("working", "It is still working at Schwab — cancel it first; "
+                                     "clearing would make the app forget a live order.",
+                          order_id=order_id, raw_status=raw)
+    elif not force and not (verified and not order_id):
+        why = ("Schwab has no record of it" if verified
+               else "Schwab couldn't be reached to check it")
+        return refuse("unverified", f"{why}. If you've confirmed in TOS that it never went out, "
+                                    "clear it anyway.", needs_force=True)
+
+    # --- clear ---------------------------------------------------------------------
+    note = "cleared by the operator" + (" (forced, not verified at the broker)" if order is None else "")
+    rec = log.get_pending_order(order_id) if order_id else None
+    if rec:
+        _settle_order(order_id, rec, olc.CANCELED, raw or "CLEARED_BY_OPERATOR", note=note)
+        log.pop_pending_order(order_id)
+    if sub is not None:
+        log.update_order_submission(
+            sub.get("client_order_ref"), status=SUB_NOT_PLACED,
+            **({"order_id": order_id} if order_id else {}),
+            detail=f"{note}: it never filled at Schwab. Safe to send again.")
+    log.append_order_journal({"event": "cleared_by_operator", "order_id": order_id,
+                              "client_order_ref": (sub or {}).get("client_order_ref"),
+                              "raw_status": raw or None, "forced": order is None})
+    return {"cleared": True, "status": "cleared", "order_id": order_id, "message": note}
 
 
 def _confirm_cancel(client, rec: dict, order_id: str) -> dict:

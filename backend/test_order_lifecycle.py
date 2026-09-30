@@ -689,3 +689,54 @@ def test_settle_pending_orders_leaves_a_young_order_to_the_live_client(live):
     executor.execute(_sell_payload())
     out = executor.settle_pending_orders()
     assert out["polled"] == 0 and log.load_state()["pending_orders"]
+
+
+# ---------------------------------------------------------------------------
+# Operator "clear": drop an order the app sent that never filled
+# ---------------------------------------------------------------------------
+def test_clear_drops_a_pending_order_the_broker_shows_canceled(live):
+    live(FakeSchwab(status="CANCELED"))
+    executor.execute(_sell_payload())
+    order_id = next(iter(log.load_state()["pending_orders"]))
+    res = executor.clear_unfilled_order(order_id)
+    assert res["cleared"] is True
+    assert order_id not in log.load_state()["pending_orders"]
+
+
+def test_clear_refuses_a_working_or_filled_order(live):
+    fake = live(FakeSchwab(status="WORKING"))
+    executor.execute(_sell_payload())
+    order_id = next(iter(log.load_state()["pending_orders"]))
+    assert executor.clear_unfilled_order(order_id)["status"] == "working"
+    fake._status = "FILLED"
+    assert executor.clear_unfilled_order(order_id)["status"] == "filled"
+    assert order_id in log.load_state()["pending_orders"]        # nothing was dropped
+
+
+def test_clear_of_an_unverifiable_order_needs_force(live):
+    class _Unreadable(FakeSchwab):
+        def get_order(self, *a, **k):
+            raise RuntimeError("HTTP 404")
+
+    live(_Unreadable(status="WORKING"))
+    executor.execute(_sell_payload())
+    order_id = next(iter(log.load_state()["pending_orders"]))
+    res = executor.clear_unfilled_order(order_id)
+    assert res["cleared"] is False and res["needs_force"] is True
+    assert order_id in log.load_state()["pending_orders"]
+    assert executor.clear_unfilled_order(order_id, force=True)["cleared"] is True
+    assert order_id not in log.load_state()["pending_orders"]
+
+
+def test_clear_closes_out_an_idless_unknown_send_but_not_a_live_match(live):
+    live(_BrokerListing([]))
+    _unknown_sub("ref-c", 300)
+    res = executor.clear_unfilled_order(client_order_ref="ref-c")
+    assert res["cleared"] is True
+    assert log.get_order_submission("ref-c")["status"] == executor.SUB_NOT_PLACED
+
+    live(_BrokerListing([_roll_order("999")], status="WORKING"))
+    _unknown_sub("ref-d", 300)
+    res = executor.clear_unfilled_order(client_order_ref="ref-d")
+    assert res["cleared"] is False and res["status"] == "working"
+    assert log.get_order_submission("ref-d")["status"] == executor.SUB_UNKNOWN

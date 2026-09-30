@@ -140,6 +140,23 @@ def api_orders_cancel_broker():
         return _err(e)
 
 
+@execute_bp.route("/api/orders/clear", methods=["POST"])
+def api_orders_clear():
+    """Clear an order the app sent that never filled at the broker (tidies the app's
+    own records only — nothing is sent to Schwab). Refused if it filled or is still
+    working; ``force`` clears one the broker can't confirm."""
+    payload = request.get_json(silent=True) or {}
+    order_id = str(payload.get("order_id") or "")
+    ref = str(payload.get("client_order_ref") or "")
+    if not order_id and not ref:
+        return jsonify({"error": "order_id or client_order_ref is required"}), 400
+    try:
+        return jsonify(executor.clear_unfilled_order(
+            order_id or None, ref or None, force=bool(payload.get("force"))))
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @execute_bp.route("/api/order-submission-status")
 def api_order_submission_status():
     """MANUAL status check for a client_order_ref (incident hotfix, D2/D4). Resolves

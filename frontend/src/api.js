@@ -434,6 +434,8 @@ export const api = {
   // Orders as Schwab sees them (last 24h) + unconfirmed app submissions, and a
   // cancel-by-broker-id that works for an order the app never recorded.
   brokerOrders: () => request("/api/orders/broker"),
+  // Clear an order the app sent that never filled (records only — nothing goes to Schwab).
+  clearOrder: (body) => request("/api/orders/clear", { method: "POST", body: JSON.stringify(body) }),
   cancelBrokerOrder: (orderId) => request("/api/orders/cancel-broker", { method: "POST", body: JSON.stringify({ order_id: orderId }) }),
   repollPendingOrders: () => request("/api/orders/repoll", { method: "POST" }),
   // Execution ingestion from Schwab transactions (spec §4).

@@ -60,12 +60,34 @@ export default function OrdersTracker() {
     }
   };
 
+  // Clear an order the app sent that never filled. Verified against Schwab first: a
+  // fill or a still-working order is refused; one Schwab can't confirm needs an
+  // explicit OK (the operator has checked TOS).
+  const clear = async (body, key) => {
+    setBusyId(key);
+    setNote(null);
+    try {
+      let res = await api.clearOrder(body);
+      if (res.needs_force && window.confirm(`${res.message}\n\nClear it from the app?`)) {
+        res = await api.clearOrder({ ...body, force: true });
+      }
+      if (res.cleared) setNote({ ok: true, text: "Cleared — it's no longer tracked, and you can send it again." });
+      else setNote({ ok: false, text: res.message || "Not cleared." });
+    } catch (e) {
+      setNote({ ok: false, text: `Could not clear: ${e.message || e}` });
+    } finally {
+      setBusyId(null);
+      load();
+    }
+  };
+
   if (data?.skipped) return null;   // no live broker on this book — nothing to track
   const orders = data?.orders || [];
   const live = orders.filter((o) => o.live);
   const recent = orders.filter((o) => !o.live).slice(0, 3);
   const unconfirmed = data?.unconfirmed || [];
-  if (!err && data && !live.length && !unconfirmed.length && !recent.length) return null;
+  const stale = data?.stale_pending || [];
+  if (!err && data && !live.length && !unconfirmed.length && !recent.length && !stale.length) return null;
 
   return (
     <Card title="Orders">
@@ -90,6 +112,31 @@ export default function OrdersTracker() {
             If it's working, it appears above once Schwab lists it (this refreshes every few seconds) — you can cancel it there.
             {u.detail ? ` (${u.detail})` : ""}
           </p>
+          <div className="mt-1.5 flex justify-end">
+            <button onClick={() => clear({ client_order_ref: u.client_order_ref }, u.client_order_ref)}
+                    disabled={busyId === u.client_order_ref}
+                    title="It never filled at Schwab — clear it from the app (nothing is sent to Schwab)"
+                    className="rounded-md border border-slate-600 px-2 py-0.5 text-[11px] font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+              {busyId === u.client_order_ref ? "Clearing…" : "Clear"}
+            </button>
+          </div>
+        </div>
+      ))}
+
+      {stale.map((o) => (
+        <div key={`stale-${o.order_id}`} className="mt-2 rounded-md border border-slate-700 bg-slate-900/40 p-2">
+          <p className="text-xs font-semibold text-slate-300">
+            {o.ticker} {o.action} · order {o.order_id} — tracked by the app, not working at Schwab
+            {o.broker_status ? ` (${o.broker_status.replace(/_/g, " ").toLowerCase()})` : ""}
+          </p>
+          <div className="mt-1.5 flex justify-end">
+            <button onClick={() => clear({ order_id: o.order_id }, `stale-${o.order_id}`)}
+                    disabled={busyId === `stale-${o.order_id}`}
+                    title="Clear this leftover from the app (nothing is sent to Schwab)"
+                    className="rounded-md border border-slate-600 px-2 py-0.5 text-[11px] font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+              {busyId === `stale-${o.order_id}` ? "Clearing…" : "Clear"}
+            </button>
+          </div>
         </div>
       ))}
 

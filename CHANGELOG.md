@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Clear an order that never filled.** A Clear button on the Positions Orders card
+  (unconfirmed sends, and app-tracked orders Schwab no longer has working) drops
+  the app's record and releases its resubmission lock so the roll can be sent
+  again. Checked against Schwab first: a filled/partly-filled order is refused
+  (re-poll instead), a still-working one is refused (cancel it), and one Schwab
+  can't confirm asks for an explicit OK. Sends nothing to Schwab.
+  `POST /api/orders/clear`.
 - **Autonomous order-status resolution.** The 30s scheduler tick now (1) resolves a
   send the app never heard back on: recovers its id and hands a live one to the
   normal auto-cancel, or — once a clean recent-orders lookup ≥90s later still lists
