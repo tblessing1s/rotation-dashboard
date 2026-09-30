@@ -740,3 +740,71 @@ def test_clear_closes_out_an_idless_unknown_send_but_not_a_live_match(live):
     res = executor.clear_unfilled_order(client_order_ref="ref-d")
     assert res["cleared"] is False and res["status"] == "working"
     assert log.get_order_submission("ref-d")["status"] == executor.SUB_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# A rate-limited (429) cancel must not hard-lock an order that is really gone.
+# ---------------------------------------------------------------------------
+class _RateLimitedCancel(FakeSchwab):
+    """Every DELETE 429s and the status reads 429 too until the pause has been sat
+    out; the order itself is CANCELED at the broker (the operator did it in TOS)."""
+
+    def __init__(self, unreadable_reads):
+        super().__init__(status="WORKING")
+        self._reads = 0
+        self._unreadable = unreadable_reads
+
+    def get_order(self, account_hash, order_id):
+        self._reads += 1
+        if self._reads <= self._unreadable:
+            raise RuntimeError("schwab account: HTTP 429 Too many requests")
+        return {"status": "CANCELED"}
+
+    def cancel_order(self, account_hash, order_id):
+        self.canceled.append((account_hash, order_id))
+        raise RuntimeError("schwab cancel order: HTTP 429 Too many requests")
+
+
+def test_rate_limited_cancel_rechecks_the_order_before_hard_locking(live):
+    live(_RateLimitedCancel(unreadable_reads=1 + config.CANCEL_POLL_MAX_ATTEMPTS))
+    executor.execute(_sell_payload())
+    order_id = next(iter(log.load_state()["pending_orders"]))
+    res = executor.cancel_order(order_id)
+    assert res["status"] == "canceled"                       # not a hard lock
+    assert order_id not in log.load_state()["pending_orders"]
+    states = [e["new_state"] for e in log.load_state()["order_events"] if e["order_id"] == order_id]
+    assert olc.LOCKED_UNKNOWN not in states
+
+
+def test_cancel_delete_429_arms_the_shared_pause(monkeypatch):
+    schwab_api.reset_rate_limiter()
+
+    class Resp:
+        status_code = 429
+        text = "Too many requests"
+        headers = {"Retry-After": "6"}
+
+    monkeypatch.setattr(schwab_api.requests, "delete", lambda *a, **k: Resp())
+    monkeypatch.setattr(schwab_api._limiter, "before_order", lambda *a, **k: 0.0)
+    client = schwab_api.SchwabClient.__new__(schwab_api.SchwabClient)
+    monkeypatch.setattr(client, "_auth_headers", lambda *a, **k: {}, raising=False)
+    with pytest.raises(schwab_api.SchwabError):
+        client.cancel_order("HASH", "1")
+    assert schwab_api.rate_limit_status()["paused_for"] > 0
+    schwab_api.reset_rate_limiter()
+
+
+def test_a_roll_found_canceled_by_a_poll_leaves_locked_unknown(live):
+    live(FakeSchwab(status="WORKING"))
+    executor.execute(_sell_payload())
+    order_id = next(iter(log.load_state()["pending_orders"]))
+    rec = log.get_pending_order(order_id)
+    rec["kind"] = "roll_short"
+    rec.update(close_option_symbol="A", open_option_symbol="B")
+    log.save_pending_order(order_id, rec)
+    executor._hard_lock_unknown(order_id, rec, "HTTP 429")
+    data_handler.broker_client()._status = "CANCELED"
+    res = executor.order_status(order_id)
+    assert res["status"] == "canceled"
+    last = [e for e in log.load_state()["order_events"] if e["order_id"] == order_id][-1]
+    assert last["new_state"] == olc.CANCELED

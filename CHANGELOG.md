@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Fix: a rate-limited cancel no longer hard-locks an order that is really gone.**
+  A Schwab 429 on the cancel DELETE now arms the shared pause (it used to fire
+  six instant retries into the same limit), the app re-reads the order after
+  sitting the pause out before declaring the broker state unknown, and a roll
+  later found cancelled/rejected/filled by a poll leaves `LOCKED_UNKNOWN` in the
+  order lifecycle log.
 - **Clear an order that never filled.** A Clear button on the Positions Orders card
   (unconfirmed sends, and app-tracked orders Schwab no longer has working) drops
   the app's record and releases its resubmission lock so the roll can be sent

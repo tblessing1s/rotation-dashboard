@@ -4360,6 +4360,13 @@ def order_status(order_id: str) -> dict:
     if rec.get("kind") == "roll_short":
         res = _roll_order_status(rec, order, order_id, raw)
         _sync_roll_submission(rec, res)
+        # A roll that turns out terminal at the broker must leave the lifecycle log
+        # too — otherwise an order hard-locked as UNKNOWN (e.g. its cancel was
+        # rate-limited) stays LOCKED_UNKNOWN forever though Schwab shows it done.
+        coded = {"canceled": olc.CANCELED, "rejected": olc.REJECTED,
+                 "filled": olc.FILLED}.get(res.get("status"))
+        if coded and olc.is_terminal(coded):
+            _settle_order(order_id, rec, coded, raw)
         return res
     if raw == "FILLED":
         _stamp_fill_spot(rec, order)
@@ -4644,6 +4651,17 @@ def _safe_status(client, rec: dict, order_id: str) -> str:
         return ""
 
 
+def _wait_out_rate_limit(max_seconds: float = 8.0) -> None:
+    """Sleep out an armed Schwab 429 pause (bounded) so the next read isn't fired
+    straight back into the same rate limit."""
+    try:
+        wait = min(float(schwab_api.rate_limit_status().get("paused_for") or 0), max_seconds)
+    except Exception:  # noqa: BLE001 — pacing is best-effort
+        return
+    if wait > 0:
+        time.sleep(wait)
+
+
 def cancel_order(order_id: str) -> dict:
     """Cancel a working order at the broker and drop the pending entry — BROKER
     FIRST (rule 1). The local pending record is cleared ONLY once the order is
@@ -4692,6 +4710,16 @@ def cancel_order(order_id: str) -> dict:
                 return _finalize_cancel_terminal(client, rec, order_id, cancel_requested=True)
             if config.CANCEL_POLL_INTERVAL_SEC:
                 time.sleep(config.CANCEL_POLL_INTERVAL_SEC)
+    # Every DELETE failed — but that says nothing about the ORDER: a rate-limited
+    # (429) DELETE never reached it, and the operator may well have cancelled it in
+    # TOS meanwhile. Sit out any rate-limit pause and look at the order once more
+    # before declaring the broker state unknown.
+    _wait_out_rate_limit()
+    chk = _safe_status(client, rec, order_id)
+    if chk == "FILLED":
+        return order_status(order_id)
+    if chk in _TERMINAL_STATUSES:
+        return _finalize_cancel_terminal(client, rec, order_id, cancel_requested=True)
     # Rule 5: every cancel failed and the order is still working — broker state is
     # unknown. Hard-lock (no resubmit ever while unknown) and surface the error.
     _hard_lock_unknown(order_id, rec, str(last_err))
@@ -4804,6 +4832,15 @@ def cancel_broker_order(order_id: str) -> dict:
                     break
                 if config.CANCEL_POLL_INTERVAL_SEC:
                     time.sleep(config.CANCEL_POLL_INTERVAL_SEC)
+        if last_err is not None:
+            _wait_out_rate_limit()
+            chk = _safe_status(client, rec, order_id)
+            if chk == "FILLED":
+                return {"order_id": order_id, "status": "filled", "raw_status": chk,
+                        "message": "It filled before the cancel reached Schwab. "
+                                   "Run reconciliation to bring the app in line."}
+            if chk in _TERMINAL_STATUSES:
+                raw, last_err = chk, None
         if last_err is not None:
             raise schwab_api.SchwabError(
                 f"cancel of order {order_id} failed and it may still be working at "

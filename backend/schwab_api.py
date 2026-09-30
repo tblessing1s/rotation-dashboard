@@ -942,6 +942,12 @@ class SchwabClient:
         )
         if resp.status_code in (200, 201, 204):
             return {"orderId": order_id, "canceled": True}
+        if resp.status_code == 429:
+            # Rate-limited: the cancel was NOT processed. Arm the shared pause so the
+            # caller's next attempt (before_order sits it out) isn't fired straight
+            # back into the same wall — six instant retries all 429ing is what used
+            # to leave a cancelled-at-TOS order looking "still WORKING".
+            _limiter.note_rate_limited(resp.headers.get("Retry-After"))
         hint = self._ACCT_HINT if resp.status_code in (401, 403) else ""
         raise SchwabError(f"schwab cancel order: HTTP {resp.status_code} {resp.text[:200]}{hint}")
 
