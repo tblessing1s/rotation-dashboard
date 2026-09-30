@@ -260,4 +260,20 @@ describe("submitOrder — unknown/lost-response outcomes", () => {
     expect(api.cancelOrder).toHaveBeenCalledWith("O9");
     expect(res.status).toBe("canceled");
   });
+
+  it("an unknown order that the backend later resolves as not placed ends in a real answer", async () => {
+    let calls = 0;
+    const api = {
+      execute: vi.fn().mockResolvedValue({ status: "unknown", client_order_ref: "ref-1" }),
+      submissionStatus: vi.fn().mockImplementation(async () =>
+        (++calls > 7 ? { status: "not_placed" } : { status: "unknown" })),
+    };
+    const toast = makeToast();
+    const promise = submitOrder(api, toast, { action: "roll_short", ticker: "SPCX", client_order_ref: "ref-1" });
+    await vi.runAllTimersAsync();
+    const res = await promise;
+    expect(res.status).toBe("unknown");                 // the caller isn't held up
+    expect(toast.last().message).toContain("was NOT placed");
+    expect(toast.last().message).not.toContain("failed");
+  });
 });

@@ -2,6 +2,26 @@
 
 ## Unreleased
 
+- **Clear an order that never filled.** A Clear button on the Positions Orders card
+  (unconfirmed sends, and app-tracked orders Schwab no longer has working) drops
+  the app's record and releases its resubmission lock so the roll can be sent
+  again. Checked against Schwab first: a filled/partly-filled order is refused
+  (re-poll instead), a still-working one is refused (cancel it), and one Schwab
+  can't confirm asks for an explicit OK. Sends nothing to Schwab.
+  `POST /api/orders/clear`.
+- **Autonomous order-status resolution.** The 30s scheduler tick now (1) resolves a
+  send the app never heard back on: recovers its id and hands a live one to the
+  normal auto-cancel, or — once a clean recent-orders lookup ≥90s later still lists
+  nothing — marks it `NOT_PLACED`, so it stops reading "may be working"; (2) polls
+  and books/clears pending orders nobody is watching, so a fill or cancel settles
+  without clicking Re-poll. A `NOT_PLACED` ref no longer blocks a fresh send of the
+  same roll (the modal reuses its idempotency ref), and the unconfirmed toast keeps
+  checking in the background and updates itself with the real answer.
+- **A 429 on the order POST now reads "NOT placed".** It was an ambiguous UNKNOWN
+  ("may be working at Schwab"), which sent the operator hunting for an order that
+  never existed. It is now a definite rejection that arms the shared rate-limit
+  pause. The original send failure is kept on the record (`submit_detail`) and the
+  unconfirmed toast says when Schwab lists no matching order.
 - **Orders tracker on Positions.** Lists orders as Schwab sees them (last 24h,
   refreshed every 8s) with the broker's status, and a Cancel button that cancels
   by broker order id — including an order the app never recorded (lost /

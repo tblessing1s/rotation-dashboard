@@ -553,7 +553,7 @@ class _BrokerListing(FakeSchwab):
 
 
 def _roll_order(oid, status="WORKING"):
-    return {"orderId": oid, "status": status, "enteredTime": "2026-09-30T15:00:05+0000",
+    return {"orderId": oid, "status": status, "enteredTime": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+0000"),
             "orderType": "NET_DEBIT", "price": 1.2, "quantity": 1,
             "orderLegCollection": [
                 {"instruction": "BUY_TO_CLOSE", "quantity": 1, "instrument": {"symbol": "A"}},
@@ -593,3 +593,150 @@ def test_cancel_broker_order_refuses_an_order_not_on_this_account(live):
     live(_BrokerListing([_roll_order("999")]))
     with pytest.raises(ValueError):
         executor.cancel_broker_order("12345")
+
+
+# ---------------------------------------------------------------------------
+# A 429 on the order POST is a definite "not placed", never an ambiguous UNKNOWN.
+# ---------------------------------------------------------------------------
+def _client_with_post(monkeypatch, status, headers=None, text=""):
+    class Resp:
+        status_code = status
+        def __init__(self):
+            self.headers = headers or {}
+            self.text = text
+
+    monkeypatch.setattr(schwab_api.requests, "post", lambda *a, **k: Resp())
+    monkeypatch.setattr(schwab_api._limiter, "before_order", lambda *a, **k: 0.0)
+    client = schwab_api.SchwabClient.__new__(schwab_api.SchwabClient)
+    monkeypatch.setattr(client, "_auth_headers", lambda *a, **k: {}, raising=False)
+    return client
+
+
+def test_order_post_429_is_rejected_not_unknown_and_arms_the_pause(monkeypatch):
+    schwab_api.reset_rate_limiter()
+    client = _client_with_post(monkeypatch, 429, headers={"Retry-After": "7"})
+    res = client.submit_order("HASH", {})
+    assert res["outcome"] == "rejected" and res["rate_limited"] is True
+    assert "NOT placed" in res["reason"]
+    assert schwab_api.rate_limit_status()["paused_for"] > 0
+    schwab_api.reset_rate_limiter()
+
+
+def test_order_post_5xx_stays_unknown(monkeypatch):
+    client = _client_with_post(monkeypatch, 503, text="upstream down")
+    res = client.submit_order("HASH", {})
+    assert res["outcome"] == "unknown" and res["detail"] == "upstream down"
+
+
+# ---------------------------------------------------------------------------
+# Autonomous order-status resolution
+# ---------------------------------------------------------------------------
+def _unknown_sub(ref, age_s):
+    placed = (datetime.now(timezone.utc) - timedelta(seconds=age_s)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    log.save_order_submission(ref, {
+        "client_order_ref": ref, "ticker": "SPCX", "action": "roll_short",
+        "status": executor.SUB_UNKNOWN, "order_id": None, "placed_at": placed,
+        "unknown_attempts": 0, "submit_detail": "no response from broker",
+        "close_option_symbol": "A", "open_option_symbol": "B"})
+
+
+def test_unknown_submission_resolves_not_placed_after_a_clean_empty_lookup(live):
+    live(_BrokerListing([]))
+    _unknown_sub("ref-x", config.NOT_PLACED_AFTER_SECONDS + 10)
+    out = executor.resolve_unconfirmed_submissions()
+    assert out["checked"] == 1
+    sub = log.get_order_submission("ref-x")
+    assert sub["status"] == executor.SUB_NOT_PLACED
+    assert "no response from broker" in sub["detail"]
+    assert executor.submission_status("ref-x")["status"] == "not_placed"
+
+
+def test_unknown_submission_is_not_resolved_too_early_or_on_a_failed_lookup(live):
+    class _Boom(_BrokerListing):
+        def list_orders(self, *a, **k):
+            raise RuntimeError("HTTP 400")
+
+    live(_BrokerListing([]))
+    _unknown_sub("ref-young", config.NOT_PLACED_AFTER_SECONDS - 40)   # past 30s, before the window
+    executor.resolve_unconfirmed_submissions()
+    assert log.get_order_submission("ref-young")["status"] == executor.SUB_UNKNOWN
+
+    live(_Boom([]))
+    _unknown_sub("ref-err", config.NOT_PLACED_AFTER_SECONDS + 10)
+    executor.resolve_unconfirmed_submissions()
+    assert log.get_order_submission("ref-err")["status"] == executor.SUB_UNKNOWN
+
+
+def test_a_matching_live_order_is_adopted_not_declared_not_placed(live):
+    live(_BrokerListing([_roll_order("999")]))
+    _unknown_sub("ref-y", config.NOT_PLACED_AFTER_SECONDS + 10)
+    executor.resolve_unconfirmed_submissions()
+    sub = log.get_order_submission("ref-y")
+    assert sub["status"] == executor.SUB_WORKING and sub["order_id"] == "999"
+
+
+def test_settle_pending_orders_books_a_fill_nobody_is_watching(live):
+    fake = live(FakeSchwab(status="FILLED", fill_price=6.0))
+    executor.execute(_sell_payload())
+    _backdate_only_pending_order(config.ORDER_FILL_WAIT_SECONDS + 60)
+    out = executor.settle_pending_orders()
+    assert out["polled"] == 1 and out["settled"] == 1
+    assert not log.load_state()["pending_orders"]
+
+
+def test_settle_pending_orders_leaves_a_young_order_to_the_live_client(live):
+    live(FakeSchwab(status="FILLED", fill_price=6.0))
+    executor.execute(_sell_payload())
+    out = executor.settle_pending_orders()
+    assert out["polled"] == 0 and log.load_state()["pending_orders"]
+
+
+# ---------------------------------------------------------------------------
+# Operator "clear": drop an order the app sent that never filled
+# ---------------------------------------------------------------------------
+def test_clear_drops_a_pending_order_the_broker_shows_canceled(live):
+    live(FakeSchwab(status="CANCELED"))
+    executor.execute(_sell_payload())
+    order_id = next(iter(log.load_state()["pending_orders"]))
+    res = executor.clear_unfilled_order(order_id)
+    assert res["cleared"] is True
+    assert order_id not in log.load_state()["pending_orders"]
+
+
+def test_clear_refuses_a_working_or_filled_order(live):
+    fake = live(FakeSchwab(status="WORKING"))
+    executor.execute(_sell_payload())
+    order_id = next(iter(log.load_state()["pending_orders"]))
+    assert executor.clear_unfilled_order(order_id)["status"] == "working"
+    fake._status = "FILLED"
+    assert executor.clear_unfilled_order(order_id)["status"] == "filled"
+    assert order_id in log.load_state()["pending_orders"]        # nothing was dropped
+
+
+def test_clear_of_an_unverifiable_order_needs_force(live):
+    class _Unreadable(FakeSchwab):
+        def get_order(self, *a, **k):
+            raise RuntimeError("HTTP 404")
+
+    live(_Unreadable(status="WORKING"))
+    executor.execute(_sell_payload())
+    order_id = next(iter(log.load_state()["pending_orders"]))
+    res = executor.clear_unfilled_order(order_id)
+    assert res["cleared"] is False and res["needs_force"] is True
+    assert order_id in log.load_state()["pending_orders"]
+    assert executor.clear_unfilled_order(order_id, force=True)["cleared"] is True
+    assert order_id not in log.load_state()["pending_orders"]
+
+
+def test_clear_closes_out_an_idless_unknown_send_but_not_a_live_match(live):
+    live(_BrokerListing([]))
+    _unknown_sub("ref-c", 300)
+    res = executor.clear_unfilled_order(client_order_ref="ref-c")
+    assert res["cleared"] is True
+    assert log.get_order_submission("ref-c")["status"] == executor.SUB_NOT_PLACED
+
+    live(_BrokerListing([_roll_order("999")], status="WORKING"))
+    _unknown_sub("ref-d", 300)
+    res = executor.clear_unfilled_order(client_order_ref="ref-d")
+    assert res["cleared"] is False and res["status"] == "working"
+    assert log.get_order_submission("ref-d")["status"] == executor.SUB_UNKNOWN

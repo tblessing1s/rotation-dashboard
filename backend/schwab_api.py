@@ -845,7 +845,7 @@ class SchwabClient:
               An EXPLICIT broker rejection (see _EXPLICIT_REJECT_CODES) with the
               body preserved verbatim as the reason.
           {"outcome": "unknown", "status_code": int|None, "detail": str}
-              No response / timeout / auth / rate-limit / 5xx — ambiguous. The order
+              No response / timeout / auth / 5xx — ambiguous. The order
               may be live; the caller confirms with the broker before claiming
               anything. status_code is None when the request never got a response.
         """
@@ -866,6 +866,15 @@ class SchwabClient:
             order_id = location.rstrip("/").rsplit("/", 1)[-1] if location else None
             return {"outcome": "accepted", "order_id": order_id, "location": location}
         body = (resp.text or "").strip()
+        if resp.status_code == 429:
+            # Rate-limited BEFORE the order was processed — Schwab did not place it,
+            # so this is a definite "not placed", not an ambiguous UNKNOWN that
+            # leaves the operator hunting for an order that doesn't exist. Arm the
+            # shared pause so the very next attempt doesn't hit the same wall.
+            pause = _limiter.note_rate_limited(resp.headers.get("Retry-After"))
+            return {"outcome": "rejected", "status_code": 429, "rate_limited": True,
+                    "reason": f"Schwab rate-limited the request (HTTP 429), so the order "
+                              f"was NOT placed. Wait ~{int(pause)}s and send it again."}
         if resp.status_code in self._EXPLICIT_REJECT_CODES:
             return {"outcome": "rejected", "status_code": resp.status_code,
                     "reason": body or f"Schwab rejected the order (HTTP {resp.status_code})"}
