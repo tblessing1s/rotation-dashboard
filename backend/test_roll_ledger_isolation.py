@@ -1,5 +1,5 @@
 """Phase-1 roll-dialog audit, §1.6 — ROLL_STRIKE_CHOICE (TRAVIS_EXTENSION,
-telemetry-only) must never reach the theta/accrual ledgers. Those ledgers are
+telemetry-only) must never reach the theta ledger. Those ledgers are
 derived purely from each close_short execution's net_juice/net_juice_total
 (extrinsic sold − extrinsic paid back, see executor._close_short and
 logging_handler.recompute_derived) — never from roll_strike_choice's own
@@ -81,7 +81,6 @@ def test_roll_strike_choice_never_reaches_the_ledger(store):
     ytd = state["theta_ledger"]["totals"]["ytd"]
     assert ytd == pytest.approx(expected_net_juice_total)
     assert "99999" not in repr(state["theta_ledger"])
-    assert "99999" not in repr(state["accrual_ledger"])
 
     # And explicitly: nothing in recompute_derived's inputs is keyed off
     # roll_strike_choice — mutating/removing it must not change the ledger at all.

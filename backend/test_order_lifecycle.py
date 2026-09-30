@@ -474,3 +474,59 @@ def test_stale_order_sweep_is_a_noop_without_a_broker(live, monkeypatch):
     res = executor.cancel_stale_pending_orders(now=datetime.now(timezone.utc))
     assert res == {"checked": 0, "canceled": 0, "errors": []}
     assert log.load_state()["pending_orders"]  # untouched
+
+
+# ---------------------------------------------------------------------------
+# Header-less ack recovery: a lost order id must not leave a resting order that
+# nothing can cancel.
+# ---------------------------------------------------------------------------
+def test_list_orders_sends_the_time_window_schwab_requires(monkeypatch):
+    import schwab_api
+    seen = {}
+
+    class Resp:
+        status_code = 200
+        text = "[]"
+        def json(self):
+            return []
+
+    def fake_request(method, url, **kw):
+        seen.update(kw.get("params") or {})
+        return Resp()
+
+    monkeypatch.setattr(schwab_api, "_request", fake_request)
+    client = schwab_api.SchwabClient.__new__(schwab_api.SchwabClient)
+    monkeypatch.setattr(client, "_auth_headers", lambda *a, **k: {}, raising=False)
+    client.list_orders("HASH")
+    assert seen.get("fromEnteredTime") and seen.get("toEnteredTime")
+    assert seen["fromEnteredTime"] < seen["toEnteredTime"]
+
+
+def _ord(oid, status, entered):
+    return {"orderId": oid, "status": status, "enteredTime": entered,
+            "orderLegCollection": [{"instrument": {"symbol": "A"}}, {"instrument": {"symbol": "B"}}]}
+
+
+def test_match_recent_order_prefers_the_live_new_order_over_an_old_cancelled_one():
+    orders = [_ord("OLD", "CANCELED", "2026-09-30T14:00:00+0000"),
+              _ord("NEW", "WORKING", "2026-09-30T15:00:05+0000")]
+    assert executor._match_recent_order(orders, "A", "B", since="2026-09-30T15:00:00Z") == "NEW"
+    # An order entered before this attempt is never adopted.
+    assert executor._match_recent_order(
+        [_ord("OLD", "WORKING", "2026-09-30T14:00:00+0000")], "A", "B",
+        since="2026-09-30T15:00:00Z") is None
+
+
+def test_stale_sweep_tries_to_recover_an_unknown_submission_with_no_id(live, monkeypatch):
+    live(FakeSchwab(status="WORKING"))
+    placed = (datetime.now(timezone.utc) - timedelta(seconds=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    log.save_order_submission("ref-lost", {
+        "client_order_ref": "ref-lost", "status": executor.SUB_UNKNOWN, "order_id": None,
+        "placed_at": placed, "unknown_attempts": 0})
+    log.save_order_submission("ref-fresh", {
+        "client_order_ref": "ref-fresh", "status": executor.SUB_UNKNOWN, "order_id": None,
+        "placed_at": log.utcnow(), "unknown_attempts": 0})
+    asked = []
+    monkeypatch.setattr(executor, "submission_status", lambda ref: asked.append(ref) or {})
+    executor.cancel_stale_pending_orders(now=datetime.now(timezone.utc))
+    assert asked == ["ref-lost"]     # the fresh one is still the placing client's to confirm

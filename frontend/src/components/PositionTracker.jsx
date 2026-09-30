@@ -1135,52 +1135,6 @@ function RecSection({ p, recs, resolved, onRecsChanged, focusCard, setExiting })
   );
 }
 
-// Accrual toward the next 100-share lot (schema v21, TRAVIS_EXTENSION).
-//
-// The balance is REALIZED extrinsic at cycle close plus received dividends —
-// nothing else. Roll-down credits are excluded by construction (they are a
-// deferred intrinsic obligation, and compounding them is the Martingale trap),
-// as are unrealized juice and every intrinsic component.
-//
-// Accrued cash is CASH, never exposure: it changes no covered-call math until a
-// whole lot is actually bought, and the app never auto-executes the add.
-function AccrualProgress({ accrual }) {
-  if (!accrual || accrual.threshold == null) return null;
-  const src = accrual.by_source || {};
-  const ready = accrual.ready;
-  return (
-    <div className="mt-4 border-t border-slate-800 pt-3">
-      <div className="mb-1.5 flex items-center justify-between text-xs">
-        <span className="uppercase tracking-wide text-slate-500">Accrual — next lot</span>
-        <span
-          className="cursor-help tabular-nums text-slate-400"
-          title={[
-            `realized extrinsic ${money(src.REALIZED_EXTRINSIC || 0)}`,
-            `dividends ${money(src.DIVIDEND || 0)}`,
-            "Excluded by construction: roll-down credits (deferred intrinsic obligation),",
-            "unrealized juice, and any intrinsic component.",
-          ].join("\n")}
-        >
-          {money(accrual.accrued_cash)} / {money(accrual.threshold)}
-        </span>
-      </div>
-      <Meter pct={accrual.pct_to_next_lot} tone={ready ? "bg-emerald-400" : "bg-sky-500/70"} />
-      <p className="mt-1 text-[11px] text-slate-500">
-        {ready ? (
-          <span className="text-emerald-300">
-            Enough for another {accrual.shares_per_lot}-share lot. Whether the add clears
-            the Level 5 gate is checked when you act — and never auto-executed.
-          </span>
-        ) : (
-          <>{money(accrual.remaining)} more toward another {accrual.shares_per_lot}-share lot
-            {accrual.lot_cost != null && <> (lot {money(accrual.lot_cost)} + {fmt((accrual.buffer_pct || 0) * 100, 0)}% buffer)</>}.
-          </>
-        )}
-      </p>
-    </div>
-  );
-}
-
 // Coverage gaps — stretches when owned lots had NO call on them (a legged roll,
 // shares bought before the first call, the last call bought back before the
 // exit). Whatever the stock did in the gap is raw P&L, not juice. Measurement
@@ -1986,7 +1940,7 @@ function BookSummary({ positions, diffsByTicker, risk }) {
 
 // One ticker, collapsible. Collapsed: a summary of the three things that matter —
 // the share base, covered-lot capacity, short-call capture. Expanded: those in
-// full (share block, short list, accrual), plus any active safety alert
+// full (share block, short list), plus any active safety alert
 // (reconciliation, defend, whipsaw) which also auto-opens the row.
 function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focused, setRolling, setExiting, onOpenTicket, afterResolve }) {
   const shorts = p.short_calls || [];
@@ -2118,10 +2072,7 @@ function PositionRow({ p, diffs, recs, resolved, onRecsChanged, focusCard, focus
           {/* (2) weekly covered-call capture */}
           <ShortCalls p={p} shorts={shorts} setRolling={setRolling} onOpenTicket={onOpenTicket} />
 
-          {/* (3) accrual toward the next lot */}
-          <AccrualProgress accrual={p.accrual} />
-
-          {/* (4) uncovered stretches — legging / entry / exit gaps (no authority) */}
+          {/* (3) uncovered stretches — legging / entry / exit gaps (no authority) */}
           <CoverageGaps gaps={p.coverage_gaps} />
 
           {p.defend && (

@@ -75,9 +75,14 @@ async function confirmByRef(api, toast, id, label, ref) {
       return st;
     }
     if (st.status === "working") {
+      if (st.order_id) {
+        // We have the id now — hand it to the same fill-wait/auto-cancel lifecycle a
+        // normally-acked order gets, so an unfilled order is not left resting.
+        return trackWorking(api, toast, id, label, { ...st, status: "working" });
+      }
       toast.update(id,
-        `${label} confirmed working at Schwab${st.order_id ? ` (order ${st.order_id})` : ""}.`,
-        { type: "success" });
+        `${label} confirmed working at Schwab. Cancel it in your broker if it doesn't fill.`,
+        { type: "warning", duration: 0 });
       return st;
     }
   }
@@ -148,8 +153,16 @@ export async function submitOrder(api, toast, payload) {
     toast.update(id, `${label} filled & logged.`, { type: "success" });
     return res;
   }
+  return trackWorking(api, toast, id, label, res);
+}
 
-  // Live working order — confirm the fill within the window, or cancel it: on
+// A live order is resting at Schwab: confirm the fill within the window, or cancel it.
+// Shared by the normal placement path AND by confirm-by-ref, so an order whose
+// ack was lost / carried no id is cancelled on timeout exactly like any other —
+// it used to stop at "confirmed working" and rest at the broker until cancelled
+// by hand.
+async function trackWorking(api, toast, id, label, res) {
+  // Confirm the fill within the window, or cancel it: on
   // timeout automatically, or the instant the operator clicks the toast's own
   // Cancel button (below) — no need to leave this screen or find the Pending
   // Orders panel while the order is still in flight. Both paths report the

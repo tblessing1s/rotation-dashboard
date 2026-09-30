@@ -306,7 +306,7 @@ def _v18_to_v19(state: dict) -> dict:
 def _v19_to_v20(state: dict) -> dict:
     """v20 (shares-primary migration): the active base leg becomes real shares.
 
-    Two additive changes, no historical rewrite:
+    One additive change, no historical rewrite:
 
     - Every existing position is tagged ``position_type = "LEAP_PMCC_LEGACY"``.
       All current positions are the legacy diagonal (deep-ITM LEAP + short call),
@@ -336,28 +336,18 @@ def _v20_to_v21(state: dict) -> dict:
     volatile names for their juice); it is an extension made viable by the
     shares-primary model. This migration only makes room for it.
 
-    Two additive changes, no historical rewrite:
+    One additive change, no historical rewrite:
 
     - Every existing position is tagged ``income_profile = "JUICE_ENGINE"``. All
       current positions are CFM juice-engine positions, so the discriminator is a
       pure backfill — the DIVIDEND_COMPOUNDER path is opt-in by an explicit tag,
       never by omission (see income_profile.normalize, which resolves anything
       else to JUICE_ENGINE).
-    - ``accrual_ledger`` is seeded empty. It is fully DERIVED from executions by
-      recompute_derived (like the theta / payback / dividend / roll ledgers); the
-      migration only seeds the key so a reader on an un-recomputed load never
-      key-errors. Nothing here credits anything — the accrual writer accepts only
-      realized extrinsic at cycle close and DIVIDEND_RECEIPT.
 
-    Immutability holds: executions are never rewritten. The new typed events
-    (ACCRUAL_CREDIT / LOT_ADD_RECOMMENDED / LOT_ADD_EXECUTED) are APPENDED by the
-    executor going forward, never synthesized from history here — back-filling
-    them would fabricate a compounding record that never happened."""
+    Immutability holds: executions are never rewritten."""
     import income_profile
     for p in state.get("positions", []):
         p.setdefault("income_profile", income_profile.JUICE_ENGINE)
-    state.setdefault("accrual_ledger", {"by_ticker": {}, "records": [],
-                                        "recommendations": []})
     return state
 
 

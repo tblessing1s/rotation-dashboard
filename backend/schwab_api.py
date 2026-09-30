@@ -196,6 +196,11 @@ def rate_limit_status() -> dict:
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
+def _schwab_ts(dt: datetime) -> str:
+    """Schwab's ISO-8601 query-time format: ``yyyy-MM-dd'T'HH:mm:ss.SSSZ`` (UTC)."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 def _request(method: str, url: str, *, sleep=time.sleep, **kwargs):
     """Issue an HTTP request with bounded exponential backoff on TRANSIENT
     failures — connection resets / read timeouts (which ``requests`` raises) and
@@ -878,11 +883,16 @@ class SchwabClient:
         the response array shape are unconfirmed against a live account; the caller
         matches on leg symbols + time and treats a miss as still-UNKNOWN, so a wrong
         assumption here degrades safely (never a false match)."""
-        params: dict = {"maxResults": max_results}
-        if from_entered_time:
-            params["fromEnteredTime"] = from_entered_time
-        if to_entered_time:
-            params["toEnteredTime"] = to_entered_time
+        # Schwab REQUIRES both fromEnteredTime and toEnteredTime on this endpoint
+        # (a bare call is a 400). Without a default window the id-recovery below
+        # could never succeed, so a header-less ack stayed UNKNOWN forever and the
+        # resting order was never registered as pending — nothing could cancel it.
+        now = datetime.now(timezone.utc)
+        params: dict = {
+            "maxResults": max_results,
+            "fromEnteredTime": from_entered_time or _schwab_ts(now - timedelta(days=1)),
+            "toEnteredTime": to_entered_time or _schwab_ts(now + timedelta(minutes=5)),
+        }
         out = self._get_json(f"{ACCOUNTS_BASE}/accounts/{account_hash}/orders", params=params)
         return out if isinstance(out, list) else []
 

@@ -93,11 +93,6 @@ def _default_state() -> dict:
         # removes one (see rec_types.MissAckReason).
         "coverage_miss_acks": [],
         "order_fidelity": {},
-        # Per-position accrual ledger (schema v21) — realized extrinsic at cycle
-        # close plus received dividends, compounding toward the next 100-share lot.
-        # DERIVED from executions by recompute_derived; seeded here so a reader on
-        # a fresh book never key-errors.
-        "accrual_ledger": {"by_ticker": {}, "records": [], "recommendations": []},
         # Cash-secured put roll-up (schema v22) — open collateral and realized put
         # premium per ticker. DERIVED from the put_opened / put_closed /
         # put_assigned executions by recompute_derived; seeded here so a reader on
@@ -1286,12 +1281,9 @@ def recompute_derived(state: dict) -> dict:
         "total": round(sum(div_by_ticker.values()), 2),
     }
 
-    # Accrual ledger (schema v21) — realized extrinsic at cycle close + received
-    # dividends, compounding toward the next 100-share lot. The whitelist that
-    # keeps roll-down credits, unrealized juice and intrinsic OUT of it lives in
-    # accrual.credit_for; derived here so it can never be bypassed by a writer.
-    import accrual
-    state["accrual_ledger"] = accrual.derive(state, execs)
+    # The accrual / lot-builder ledger was removed; drop the stale key from books
+    # written before then so it can't linger in state.json.
+    state.pop("accrual_ledger", None)
 
     # Put ledger (schema v22) — open collateral and realized put premium, per
     # ticker, derived from the three put events. Realized premium is the net of

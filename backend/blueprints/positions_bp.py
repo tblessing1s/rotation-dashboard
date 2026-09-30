@@ -33,27 +33,14 @@ def api_positions():
     try:
         state = log.load_state()
         views = position_manager.positions_view(state)
-        # Income profile + accrual progress per position (schema v21). Attached
-        # here rather than inside positions_view so the accrual read stays a
-        # display concern: nothing below feeds coverage, sizing or capital math —
-        # accrued cash is CASH, never exposure, until a real lot is bought.
-        #
-        # Uses the CHEAP pure `progress`, not `lot_add_status`. This is a polled
-        # read-only endpoint; running the Level 5 gate here would fire a live Schwab
-        # cash_balance() call (and potentially a state.json WRITE, via
-        # resolve_operating_cash) once per accrual-ready position on every poll. The
-        # gate verdict belongs to the paths that act on it — the alert sweep and the
-        # executor — which is where it is evaluated.
+        # Income profile per position (schema v21). Attached here rather than
+        # inside positions_view so it stays a display concern.
         try:
-            import accrual
             import income_profile
             for view in views:
                 profile = income_profile.of(view)   # the view IS the position dict
                 view["income_profile"] = profile
                 view["income_profile_badge"] = income_profile.badge(profile)
-                view["accrual"] = accrual.progress(
-                    state, view.get("ticker", ""),
-                    view.get("stock_price") or view.get("price"))
         except Exception:  # noqa: BLE001 — a display readout never sinks the panel
             pass
         # Coverage gaps (NO authority): the uncovered stretches — legged rolls,
@@ -72,7 +59,6 @@ def api_positions():
             "positions": views,
             "capital": position_manager.capital_summary(state),
             "extrinsic_payback": state.get("extrinsic_payback", {}),
-            "accrual_ledger": state.get("accrual_ledger", {}),
         })
     except Exception as e:  # noqa: BLE001
         return _err(e)

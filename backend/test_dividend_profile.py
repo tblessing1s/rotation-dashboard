@@ -18,7 +18,6 @@ os.environ.setdefault("DATA_DIR", tempfile.mkdtemp(prefix="cfm-divprof-"))
 os.environ.setdefault("CFM_ALERTS_SCHEDULER", "0")
 os.environ.setdefault("CFM_SKIP_STARTUP_CHECK", "1")
 
-import accrual  # noqa: E402
 import account_gate  # noqa: E402
 import alerts  # noqa: E402
 import config  # noqa: E402
@@ -213,8 +212,8 @@ def test_3_dividend_fixture_fails_juice_floor_but_clears_combined(store, monkeyp
     # HONEST MAGNITUDE, pinned so it can't be misread later. A 3%/yr payer
     # contributes ~0.06%/wk — roughly a FIFTH of the 0.25%/wk gap between the two
     # floors (0.75 vs 0.50). So it is the LOWER FLOOR, not the dividend, that does
-    # most of the work of admitting this name. The dividend is real income and it
-    # compounds through the accrual ledger; it is not a large weekly yield term.
+    # most of the work of admitting this name. The dividend is real income, but it
+    # is not a large weekly yield term.
     floor_gap = config.SHARES_JUICE_FLOOR_PCT - config.COMBINED_YIELD_FLOOR_WK
     assert as_div["dividend_weekly_pct"] < floor_gap / 3
     # The name would clear the combined floor on juice alone, dividend or not:
@@ -298,158 +297,12 @@ def test_4c_kill_switch_spy_leg_is_untouched():
 
 
 # ===========================================================================
-# 5. Accrual accumulates; crossing the threshold recommends; L5 blocks with reason.
+# 7. Atomicity — no fractional lot ever counts as coverage.
 # ===========================================================================
-def test_5_accrual_accumulates_and_recommends_a_lot_add(store):
+def test_7_a_fragment_never_rounds_up_into_coverage(store):
     _buy_shares("KO", 100, 60.0)
-    _sell_short("KO", 58.0, 1, 3.0, 60.0)
-    # Cycle close: sold 3.00/sh with 2.00 intrinsic (1.00 extrinsic), bought back
-    # at 2.20 with 2.00 intrinsic (0.20 extrinsic) -> 0.80/sh x 100 = $80 realized.
-    _close_short("KO", 58.0, 1, 2.20, 60.0)
-    executor.execute({"action": "dividend_income", "ticker": "KO",
-                      "per_share": 0.48, "pay_date": "2026-07-15"})
-
-    ledger = log.load_state()["accrual_ledger"]
-    ko = ledger["by_ticker"]["KO"]
-    assert ko["by_source"][accrual.SOURCE_REALIZED_EXTRINSIC] == 80.0
-    assert ko["by_source"][accrual.SOURCE_DIVIDEND] == 48.0
-    assert ko["accrued_cash"] == 128.0
-    # The whitelist is a module constant, not persisted state — the per-ticker
-    # by_source keys are derived from it, so they are what pins it.
-    assert sorted(ko["by_source"]) == sorted(accrual.ACCEPTED_SOURCES)
-
-    # Not yet a lot: 128 < 60 * 100 * 1.02.
-    state = log.load_state()
-    prog = accrual.progress(state, "KO", 60.0)
-    assert prog["ready"] is False
-    assert prog["threshold"] == pytest.approx(6120.0)
-    assert prog["remaining"] == pytest.approx(5992.0)
-
-    # With enough accrued, and a funded account, the add is actionable.
-    state["accrual_ledger"]["by_ticker"]["KO"]["accrued_cash"] = 7000.0
-    status = accrual.lot_add_status(state, "KO", 60.0)
-    assert status["ready"] is True and status["actionable"] is True
-    assert status["blocked"] is False
-
-
-def test_5b_lot_add_blocked_by_level5_shows_the_reason(store):
-    _buy_shares("KO", 100, 60.0)
-    state = log.load_state()
-    state["accrual_ledger"] = {"by_ticker": {"KO": {
-        "ticker": "KO", "credited": 7000.0, "spent_on_lots": 0.0,
-        "accrued_cash": 7000.0, "credits": 2,
-        "by_source": {accrual.SOURCE_DIVIDEND: 1000.0,
-                      accrual.SOURCE_REALIZED_EXTRINSIC: 6000.0}}}, "records": []}
-    # Starve the account: the cash-reserve check must block the add.
-    state["metadata"]["operating_cash"] = 100.0
-    log.save_state(state)
-
-    status = accrual.lot_add_status(log.load_state(), "KO", 60.0)
-    assert status["ready"] is True          # the accrual IS there...
-    assert status["actionable"] is False    # ...but the add is not actionable
-    assert status["blocked"] is True
-    assert "cash_reserve" in status["blocking_failures"]
-    assert "Level 5 gate" in status["blocked_reason"]
-
-
-def test_5c_lot_add_recommendation_is_telemetry_not_a_trade(store):
-    _buy_shares("KO", 100, 60.0)
-    before = log.find_position(log.load_state(), "KO")["shares"]["count"]
-    executor.execute({"action": "lot_add_recommended", "ticker": "KO",
-                      "price_per_share": 60.0})
-    state = log.load_state()
-    # No position change, no cash movement — a recommendation books nothing.
-    assert log.find_position(state, "KO")["shares"]["count"] == before
-    rec = [e for e in state["executions"] if e["action"] == "lot_add_recommended"][-1]
-    assert rec["actionable"] is False       # not enough accrued yet
-    assert state["accrual_ledger"]["recommendations"][-1]["ticker"] == "KO"
-
-
-def test_5d_an_executed_lot_add_spends_the_accrued_balance(store):
-    _buy_shares("KO", 100, 60.0)
-    _sell_short("KO", 58.0, 1, 3.0, 60.0)
-    _close_short("KO", 58.0, 1, 2.20, 60.0)
-    assert log.load_state()["accrual_ledger"]["by_ticker"]["KO"]["accrued_cash"] == 80.0
-    # A lot add consumes the balance it was funded by, so the same dollars can't
-    # fund an unbounded series of adds.
-    _buy_shares("KO", 100, 60.0, lot_add=True)
-    ko = log.load_state()["accrual_ledger"]["by_ticker"]["KO"]
-    assert ko["spent_on_lots"] == 6000.0
-    assert ko["accrued_cash"] == 0.0        # floored at zero, never a debt
-
-
-# ===========================================================================
-# 6. Martingale guard — a roll-down credit produces NO accrual credit.
-# ===========================================================================
-def test_6_roll_down_credit_never_produces_an_accrual_credit(store):
-    """Structural. A defensive roll's credit is the near side of a DEFERRED
-    INTRINSIC OBLIGATION; compounding it would scale the book up precisely as the
-    thesis deteriorates. The rejection is by construction in credit_for, not by a
-    downstream filter."""
-    _buy_shares("KO", 100, 60.0)
-    _sell_short("KO", 62.0, 1, 2.0, 60.0)
-    # A defensive roll: close_short + sell_short sharing a roll_id.
-    executor.execute({"action": "roll_short", "ticker": "KO", "contracts": 1,
-                      "from_strike": 62.0, "close_price_per_share": 3.5,
-                      "to_strike": 58.0, "premium_per_share": 6.0,
-                      "to_expiration": "2026-08-28", "to_dte": 7,
-                      "stock_price": 58.5, "roll_reason": "defend"})
-    state = log.load_state()
-    rolled = [e for e in state["executions"] if e.get("roll_id")]
-    assert rolled, "the roll must have produced roll_id-stamped legs"
-
-    # The unit-level guarantee: credit_for REJECTS every roll leg.
-    for e in rolled:
-        assert accrual.credit_for(e) is None, e.get("action")
-
-    # And the ledger reflects it — no realized-extrinsic credit from the roll.
-    ko = state["accrual_ledger"]["by_ticker"].get("KO", {})
-    assert ko.get("by_source", {}).get(accrual.SOURCE_REALIZED_EXTRINSIC, 0.0) == 0.0
-
-    # The roll IS in the roll ledger — it happened, it's just not income.
-    assert state["roll_ledger"]["by_ticker"]["KO"]["count"] == 1
-
-
-def test_6b_credit_for_is_a_whitelist(store):
-    """Anything not explicitly recognized accrues nothing — including actions that
-    do not exist yet."""
-    for action in ("buy_shares", "sell_shares", "buy_leap", "close_leap",
-                   "sell_short", "adjustment", "txn_correction",
-                   "lot_add_recommended", "some_future_action"):
-        assert accrual.credit_for({"action": action, "ticker": "KO",
-                                   "amount": 500, "id": "x"}) is None, action
-    assert accrual.credit_for(None) is None
-    assert accrual.credit_for({}) is None
-
-
-# ===========================================================================
-# 7. Atomicity — 99 shares' worth of accrued cash changes nothing.
-# ===========================================================================
-def test_7_sub_lot_accrual_changes_no_coverage_or_per_contract_math(store):
-    _buy_shares("KO", 100, 60.0)
-    state = log.load_state()
-    p = log.find_position(state, "KO")
-    before_lots = pm.covered_lots(p["shares"]["count"])
-    before_capital = pm.position_capital(p)
-
-    # 99 shares' worth of cash — one share short of a lot.
-    state["accrual_ledger"] = {"by_ticker": {"KO": {
-        "ticker": "KO", "credited": 5940.0, "spent_on_lots": 0.0,
-        "accrued_cash": 5940.0, "credits": 9,
-        "by_source": {accrual.SOURCE_DIVIDEND: 940.0,
-                      accrual.SOURCE_REALIZED_EXTRINSIC: 5000.0}}}, "records": []}
-    log.save_state(state)
-
-    state = log.load_state()
-    p = log.find_position(state, "KO")
-    # Nothing moved: not the share count, not coverable lots, not deployed capital.
+    p = log.find_position(log.load_state(), "KO")
     assert p["shares"]["count"] == 100
-    assert pm.covered_lots(p["shares"]["count"]) == before_lots
-    assert pm.position_capital(p) == before_capital
-    prog = accrual.progress(state, "KO", 60.0)
-    assert prog["ready"] is False
-
-    # And a fragment can never round up into coverage.
     assert pm.covered_lots(199)["coverable_lots"] == 1
     assert pm.covered_lots(199)["fragment_shares"] == 99
 
@@ -595,7 +448,7 @@ def test_10_combined_metric_day_count_is_pinned():
 # ===========================================================================
 # Schema v21
 # ===========================================================================
-def test_v20_to_v21_backfills_juice_engine_and_seeds_the_ledger():
+def test_v20_to_v21_backfills_juice_engine():
     v20 = {
         "schema_version": 20,
         "positions": [{"ticker": "AAPL", "position_type": position_types.SHARES,
@@ -608,9 +461,6 @@ def test_v20_to_v21_backfills_juice_engine_and_seeds_the_ledger():
     # Every pre-existing position is a JUICE_ENGINE position — the sleeve is opt-in.
     assert out["positions"][0]["income_profile"] == ip.JUICE_ENGINE
     assert ip.of(out["positions"][0]) == ip.JUICE_ENGINE
-    # The ledger is seeded empty — a migration never fabricates a compounding record.
-    assert out["accrual_ledger"]["by_ticker"] == {}
-    assert out["accrual_ledger"]["records"] == []
     # Executions untouched: ADD only, no rewrite.
     assert out["executions"] == before
 
