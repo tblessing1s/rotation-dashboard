@@ -71,6 +71,35 @@ async function request(path, opts = {}) {
   return data;
 }
 
+// Save a server-generated file (CSV / JSON export). A plain <a download> can't send
+// the X-CFM-Account header, so it would export whichever book the server last
+// persisted; fetching with the header keeps the export to the book on screen.
+export async function downloadFile(path, filename) {
+  let res;
+  try {
+    res = await fetch(BASE + path, {
+      credentials: "same-origin",
+      headers: activeAccount ? { "X-CFM-Account": activeAccount } : {},
+    });
+  } catch {
+    throw new Error("Network error — couldn't reach the server.");
+  }
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { msg = (await res.json()).error || msg; } catch { /* not JSON */ }
+    if (res.status === 401) window.dispatchEvent(new CustomEvent("auth-required"));
+    throw new Error(msg);
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 export const api = {
   // One-call landing payload: regime + positions/capital + theta + kill-switch.
   overview: () => request("/api/overview"),
@@ -300,6 +329,10 @@ export const api = {
     request("/api/account-value-history/remove", { method: "POST", body: JSON.stringify({ dates, reason }) }),
   // Raw executions + live position legs, for the History validation table.
   executionsRaw: () => request("/api/executions/raw"),
+  // Exports: the Transactions table (CSV) and the full raw execution log (JSON / CSV).
+  exportTransactions: () => downloadFile("/api/export/transactions", "transactions.csv"),
+  exportExecutions: (format = "json") =>
+    downloadFile(`/api/export/executions?format=${format}`, `executions.${format}`),
   // Durable order journal (outside state.json) — real captured stock prices for
   // broker orders the app itself placed, filterable by ticker.
   orderJournal: (ticker) =>
