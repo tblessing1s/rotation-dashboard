@@ -790,15 +790,6 @@ DAYTRADE_SCREEN_ET = "04:00"
 # (daytrade/signals.py's _avg_prior_volume), not a multi-day same-time-of-day
 # average. Revisit once historical intraday bars exist to compare against.
 DAYTRADE_SETUP_VOLUME_MULT = 1.5
-# Start trading as soon as the FIRST 5-min bar closes instead of waiting a
-# second bar. With no earlier bar to average, the opening bar's volume
-# baseline is the screener's 20-day average DAILY volume x this share — the
-# fraction of a day's volume a typical opening 5-min bar trades (an even
-# split would be ~1.3%; the open is heavier, ~3%). It then faces the usual
-# DAYTRADE_SETUP_VOLUME_MULT, i.e. ~4.5% of daily volume. UNCALIBRATED: tune
-# from the signal log. Off (False) restores "first bar is baseline only".
-DAYTRADE_FIRST_BAR_SETUP_ENABLED = True
-DAYTRADE_FIRST_BAR_VOLUME_SHARE = 0.03
 
 # Rule 4 — entry: cancel the setup if the break doesn't trigger within this
 # many candles after the setup candle.
