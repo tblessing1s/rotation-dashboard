@@ -5884,7 +5884,8 @@ def _place_live_roll(payload, ticker, contracts, stock_price, price_source):
 
     # UNKNOWN — no response / timeout / auth / 5xx. The order MAY be live. Never
     # "failed": UNKNOWN, and the operator confirms with the broker.
-    rec = log.update_order_submission(ref, status=SUB_UNKNOWN, detail=result.get("detail"))
+    rec = log.update_order_submission(ref, status=SUB_UNKNOWN, detail=result.get("detail"),
+                                      submit_detail=result.get("detail"))
     _alert_order("ORDER_STATUS_UNKNOWN", ticker,
                  f"{ticker} roll submission got no confirmed response — status UNKNOWN. "
                  "The order may be working at Schwab; confirm before resubmitting.",
@@ -6006,11 +6007,15 @@ def submission_status(client_order_ref: str) -> dict:
                 "client_order_ref": client_order_ref, "recovered": True})
         else:
             capped = attempts >= int(config.UNKNOWN_STATUS_MAX_ATTEMPTS)
+            sent = rec.get("submit_detail")
             rec = log.update_order_submission(
-                client_order_ref, unknown_attempts=attempts,
+                client_order_ref, unknown_attempts=attempts, lookup_ok=lookup_error is None,
                 detail=("still UNKNOWN — "
                         + (f"the recent-orders lookup failed: {lookup_error}"
-                           if lookup_error else "no matching recent order found")
+                           if lookup_error else
+                           "Schwab lists no matching order in the last 24h, so it most "
+                           "likely was NOT placed")
+                        + (f"; the send itself returned: {sent}" if sent else "")
                         + (f"; reached max {config.UNKNOWN_STATUS_MAX_ATTEMPTS} check "
                            "attempts, resolve manually at the broker" if capped else "")))
             return {**_submission_response(rec), "attempts": attempts,
