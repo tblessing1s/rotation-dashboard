@@ -29,12 +29,11 @@ persistence rule exists to avoid. Want the position to actually CLOSE on the
 first close below the 50-day MA instead of merely a warning? That is a
 different, stricter rule than this one and is not what this warning does.
 
-LIVE FIRST-LEVEL RULE (config.CIRCUIT_BREAKER_FIRST_LEVEL_LIVE, on by default): the
-one exception. When the caller supplies a live price, the FIRST breaker — the
-highest defined level, ``nearest_trigger`` — is tripped the moment the live price is
-at/through it (a gap included), without the close or the 3-close persistence. That is
-deliberately the stricter rule the paragraph above describes, applied to that one
-level only; the other levels keep their own rules.
+LIVE FIRST-LEVEL RULE (config.CIRCUIT_BREAKER_FIRST_LEVEL_LIVE, on by default): when
+the caller supplies a live price, the highest of the drawdown / slow-MA / manual
+levels is tripped the moment the live price is at/through it (a gap included),
+without waiting for the close. The fast (50-day) MA is deliberately NOT part of it:
+it keeps its 3-consecutive-closes rule, on closes only.
 
 AUTO-EXIT PERMISSIONS (opt-in, per-condition, default OFF): the operator may
 grant drawdown / ma_fast / ma_slow individually the authority to close the
@@ -85,11 +84,11 @@ def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
 
     ``live_price`` (optional, the engine passes its snapshot's live quote): with
     config.CIRCUIT_BREAKER_FIRST_LEVEL_LIVE on, the FIRST breaker — the highest
-    defined level, i.e. ``nearest_trigger``, the one a falling price crosses
-    first — counts as tripped the moment the live price is at/through it, gap
-    included, without waiting for the close (or, for the fast MA, the 3-close
-    persistence). Only that one level is promoted; the others keep their own
-    rules. Callers that pass no live price get the close-confirmed verdict.
+    defined level, i.e. the one a falling price crosses first among
+    drawdown / slow MA / manual line — counts as tripped the moment the live price
+    is at/through it, gap included, without waiting for the close. The fast (50-day)
+    MA is never promoted: it always needs its consecutive closes. Only that one
+    level is promoted; the others keep their own rules. Callers that pass no live price get the close-confirmed verdict.
     """
     ticker = position.get("ticker", "")
     if df is None:
@@ -173,10 +172,14 @@ def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
     by_id = {c["id"]: c for c in conditions}
 
     # First breaker on the LIVE price (see docstring): a gap through the highest
-    # level is an exit now, not at the next close.
+    # non-fast-MA level is an exit now, not at the next close. The fast (50-day) MA
+    # is excluded on purpose — it only trips on CIRCUIT_BREAKER_MA_FAST_CLOSES
+    # consecutive CLOSES below it, never on a live print.
+    live_ids = [i for i in levels if i != fast["id"]]
+    live_id = max(live_ids, key=levels.get) if live_ids else None
     if (config.CIRCUIT_BREAKER_FIRST_LEVEL_LIVE and live_price is not None
-            and nearest_id is not None and float(live_price) <= levels[nearest_id]):
-        first = by_id[nearest_id]
+            and live_id is not None and float(live_price) <= levels[live_id]):
+        first = by_id[live_id]
         first["tripped"] = True
         first["detail"] = {**first["detail"], "live_price": _round(live_price),
                            "live_first_level": True}
@@ -219,6 +222,13 @@ def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
         headline = "circuit breaker intact"
         action = "Hold — no circuit-breaker condition tripped."
 
+    # When something IS tripped, attribute the exit to the highest level that is
+    # actually tripped (a live gap through the 200MA / drawdown line can trip while
+    # the 50-day MA, still awaiting its closes, sits higher and untripped).
+    if tripped:
+        tripped_levels = [c["id"] for c in breached if c["id"] in levels]
+        if tripped_levels:
+            nearest_id = max(tripped_levels, key=levels.get)
     nearest_trigger = ({"condition": nearest_id, "price": levels[nearest_id],
                         "label": by_id[nearest_id]["label"]}
                        if nearest_id else None)

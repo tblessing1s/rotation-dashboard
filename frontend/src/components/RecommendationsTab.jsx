@@ -164,6 +164,7 @@ function AutopilotSwitch({ enabled, onChanged }) {
     setBusy(true);
     try {
       await api.setAutopilot(!on);
+      window.dispatchEvent(new Event("cfm:autopilot-changed"));
       toast.show(`Autopilot ${!on ? "ON" : "OFF"}`, { type: !on ? "success" : "info" });
       onChanged();
     } catch (e) {

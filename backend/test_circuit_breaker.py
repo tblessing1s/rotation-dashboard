@@ -212,25 +212,33 @@ def test_high_close_since_none_without_any_price_data():
 
 
 # ---- first breaker on the LIVE price ----------------------------------------
-def test_live_price_through_the_first_level_trips_without_waiting_for_closes():
-    # Closes sit at 100 (above the 50-day MA and the 100 line) — no close-based
-    # condition trips. A live gap to 90 is through the highest level (ma_fast,
-    # 100) and counts as the first breaker immediately.
+def test_live_price_never_trips_the_50_day_ma():
+    # Flat closes: the 50-day MA line is 100. A live print at 90 is below it, but
+    # the fast MA only trips on 3 consecutive CLOSES — never on a live price.
     closes = [100.0] * 100
-    v = circuit_breaker.evaluate(_pos(), df=_frame(closes))
-    assert not v["tripped"]
     v = circuit_breaker.evaluate(_pos(), df=_frame(closes), live_price=90.0)
-    assert v["tripped"] and "ma_fast" in _tripped(v)
-    assert v["nearest_trigger"]["condition"] == "ma_fast"
-    assert circuit_breaker.exit_reason_code(v) == "CB_MA50_3CLOSE"
+    assert not v["tripped"]
 
 
-def test_live_price_above_the_first_level_does_not_trip():
-    v = circuit_breaker.evaluate(_pos(), df=_frame([100.0] * 100), live_price=101.0)
+def test_live_gap_through_the_drawdown_line_trips_and_is_attributed_to_it():
+    # High since entry 100 -> drawdown line 85; closes are still 100, live gaps to 80.
+    pos = _pos(entry_price=100.0)
+    df = _frame([100.0] * 100)
+    assert not circuit_breaker.evaluate(pos, df=df)["tripped"]
+    v = circuit_breaker.evaluate(pos, df=df, live_price=80.0)
+    assert v["tripped"] and _tripped(v) == {"drawdown"}
+    # The 50-day MA level (100) sits higher but is untripped: the exit is attributed
+    # to the level that actually tripped.
+    assert v["nearest_trigger"]["condition"] == "drawdown"
+    assert circuit_breaker.exit_reason_code(v) == "CB_DRAWDOWN_15"
+
+
+def test_live_price_above_the_level_does_not_trip():
+    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([100.0] * 100), live_price=90.0)
     assert not v["tripped"]
 
 
 def test_live_first_level_can_be_switched_off(monkeypatch):
     monkeypatch.setattr(config, "CIRCUIT_BREAKER_FIRST_LEVEL_LIVE", False)
-    v = circuit_breaker.evaluate(_pos(), df=_frame([100.0] * 100), live_price=90.0)
+    v = circuit_breaker.evaluate(_pos(entry_price=100.0), df=_frame([100.0] * 100), live_price=80.0)
     assert not v["tripped"]
