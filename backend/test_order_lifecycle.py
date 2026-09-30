@@ -308,6 +308,42 @@ def test_cancel_delete_error_still_working_exhausts_to_hard_lock(live, monkeypat
         executor._guard_resubmit("ON", "sell_short")
 
 
+# --- an in-flight cancel is waited on, never re-DELETEd into a hard lock ------
+def test_cancel_of_a_pending_cancel_order_waits_instead_of_hard_locking(live):
+    fake = live(FakeSchwab(status="WORKING"))
+    executor.execute(_sell_payload())
+    fake._status = "PENDING_CANCEL"
+
+    def refuse(account_hash, order_id):
+        raise schwab_api.SchwabError("HTTP 400 order already pending cancel")
+    fake.cancel_hook = refuse
+
+    out = executor.cancel_order("ORD1")
+    assert out["status"] == "pending_cancel"
+    assert fake.canceled == []                                  # no second DELETE
+    assert _lock("ON", "sell_short")["state"] != olc.LOCKED_UNKNOWN
+    fake._status = "CANCELED"                                   # Schwab finishes
+    assert executor.cancel_order("ORD1")["status"] == "canceled"
+    executor._guard_resubmit("ON", "sell_short")
+
+
+def test_error_confirming_an_accepted_cancel_does_not_redelete(live, monkeypatch):
+    fake = live(FakeSchwab(status="WORKING"))
+    executor.execute(_sell_payload())
+    real = executor._finalize_cancel_terminal
+
+    def boom(*a, **k):
+        raise schwab_api.SchwabError("HTTP 503 reading order")
+    monkeypatch.setattr(executor, "_finalize_cancel_terminal", boom)
+
+    out = executor.cancel_order("ORD1")                         # DELETE ok -> CANCELED
+    assert out["status"] == "pending_cancel"                    # kept, not hard-locked
+    assert len(fake.canceled) == 1
+    assert _lock("ON", "sell_short")["state"] != olc.LOCKED_UNKNOWN
+    monkeypatch.setattr(executor, "_finalize_cancel_terminal", real)
+    assert executor.order_status("ORD1")["status"] == "canceled"   # sweep settles it
+
+
 # --- Case 6: REJECTED on submit -> terminal, resubmit allowed ----------------
 def test_rejected_is_terminal_and_allows_resubmit(live):
     fake = live(FakeSchwab(status="REJECTED"))

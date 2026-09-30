@@ -13,6 +13,14 @@ T0 = datetime(2026, 7, 8, 11, 0, tzinfo=ET)
 
 
 @pytest.fixture(autouse=True)
+def _no_near_strike_band(monkeypatch):
+    """These fixtures park the stock ~1% above the short strike, inside the
+    near-strike band; they pin the OTHER signals, so the band is off here. The
+    near-strike trigger has its own tests in test_autopilot.py."""
+    monkeypatch.setattr(config, "SHORT_ATM_APPROACH_PCT", 0.0)
+
+
+@pytest.fixture(autouse=True)
 def _fresh(monkeypatch):
     er.reset()
     monkeypatch.setattr(config, "demo_enabled", lambda: False)

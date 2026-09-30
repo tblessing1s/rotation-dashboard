@@ -4401,6 +4401,21 @@ def order_status(order_id: str) -> dict:
 _EXIT_LEG_POLL_INTERVAL_S = 1.0
 
 
+def _cancel_unfilled_leg(order_id) -> str:
+    """A leg outran its fill window: cancel it rather than leave a limit resting at
+    the broker (the stale sweep is only a backstop, minutes later). Returns the
+    error text for the caller; a fill that raced the cancel is reported as such."""
+    try:
+        res = cancel_order(order_id)
+    except Exception as e:  # noqa: BLE001 — surface it; the order may still be live
+        return f"order did not fill within the wait window and could not be cancelled ({e})"
+    if res.get("status") == "filled":
+        return "order did not fill within the wait window and then filled during cancel"
+    if res.get("status") == "pending_cancel":
+        return "order did not fill within the wait window (cancel pending at the broker)"
+    return "order did not fill within the wait window (cancelled)"
+
+
 def _run_leg_to_fill(payload: dict, now: datetime | None = None) -> tuple[dict | None, str | None]:
     """Execute one leg and, for a live order, block until it is confirmed
     filled (or definitively not going to be). Returns (result, None) on a
@@ -4427,7 +4442,7 @@ def _run_leg_to_fill(payload: dict, now: datetime | None = None) -> tuple[dict |
         if poll_status in ("rejected", "canceled"):
             return None, f"order {poll_status}"
         if time.monotonic() >= deadline:
-            return None, "order did not fill within the wait window"
+            return None, _cancel_unfilled_leg(order_id)
 
 
 def exit_position(ticker: str, exit_reason: str, exit_note: str | None = None,
@@ -4633,7 +4648,7 @@ _TERMINAL_STATUSES = ("CANCELED", "REJECTED", "EXPIRED")
 # window stays monkeypatchable (tests set interval ~0 for an effectively mocked
 # clock). TIMEOUT = interval x max attempts.
 CANCEL_CONFIRM_POLL_S = config.CANCEL_POLL_INTERVAL_SEC
-CANCEL_CONFIRM_TIMEOUT_S = config.CANCEL_POLL_INTERVAL_SEC * config.CANCEL_POLL_MAX_ATTEMPTS
+CANCEL_CONFIRM_TIMEOUT_S = config.CANCEL_CONFIRM_TIMEOUT_SEC
 
 
 def _safe_status(client, rec: dict, order_id: str) -> str:
@@ -4676,11 +4691,17 @@ def cancel_order(order_id: str) -> dict:
 
     # Still working — record the cancel request, then DELETE with bounded retries.
     _settle_order(order_id, rec, olc.CANCEL_REQUESTED, raw or "WORKING")
+    if raw == "PENDING_CANCEL":
+        # A cancel is already in flight at Schwab (ours from an earlier pass, or the
+        # operator's). A second DELETE is refused by the broker and, retried to
+        # exhaustion, used to hard-lock an order that was in fact being cancelled —
+        # so just wait for it to land.
+        return _confirm_cancel(client, rec, order_id)
     last_err: Exception | None = None
-    for _ in range(max(1, int(config.CANCEL_POLL_MAX_ATTEMPTS))):
+    attempts = max(1, int(config.CANCEL_POLL_MAX_ATTEMPTS))
+    for i in range(attempts):
         try:
             client.cancel_order(rec["account_hash"], order_id)
-            return _confirm_cancel(client, rec, order_id)
         except Exception as e:  # noqa: BLE001 — broker refused the DELETE
             last_err = e
             # Rule 4: the order may have raced to a FILL (a filled order can't be
@@ -4690,10 +4711,21 @@ def cancel_order(order_id: str) -> dict:
                 return order_status(order_id)
             if chk in _TERMINAL_STATUSES:
                 return _finalize_cancel_terminal(client, rec, order_id, cancel_requested=True)
-            if config.CANCEL_POLL_INTERVAL_SEC:
-                time.sleep(config.CANCEL_POLL_INTERVAL_SEC)
+            if chk == "PENDING_CANCEL":
+                return _confirm_cancel(client, rec, order_id)
+            if i < attempts - 1 and config.CANCEL_POLL_INTERVAL_SEC:
+                # Back off (0.4s, 0.8s, 1.6s, ...) — a 429 / brief 5xx needs more
+                # than a tight retry loop to clear.
+                time.sleep(config.CANCEL_POLL_INTERVAL_SEC * min(2 ** i, 8))
+            continue
+        # The DELETE was accepted. Confirming is a separate step: an error there (a
+        # status read, a fill commit) must NOT be mistaken for a refused DELETE — that
+        # re-sent the DELETE at an already-cancelled order and hard-locked it.
+        return _confirm_cancel(client, rec, order_id)
     # Rule 5: every cancel failed and the order is still working — broker state is
-    # unknown. Hard-lock (no resubmit ever while unknown) and surface the error.
+    # unknown. Hard-lock (no resubmit ever while unknown) and surface the error. The
+    # stale-order sweep re-attempts the cancel every tick, which releases the lock
+    # as soon as the broker cooperates.
     _hard_lock_unknown(order_id, rec, str(last_err))
     raise schwab_api.SchwabError(
         f"cancel of order {order_id} failed and it is still WORKING at the broker — "
@@ -4942,7 +4974,14 @@ def _confirm_cancel(client, rec: dict, order_id: str) -> dict:
             # Terminal after we requested the cancel — resolve it with fill/partial
             # awareness (a FILLED here is a fill-DURING-cancel; a partial is a
             # defensive-review state). cancel_requested=True drives that mapping.
-            return _finalize_cancel_terminal(client, rec, order_id, cancel_requested=True)
+            try:
+                return _finalize_cancel_terminal(client, rec, order_id, cancel_requested=True)
+            except Exception as e:  # noqa: BLE001 — a read blip must not lose the cancel
+                # Terminal at the broker but resolving it failed (e.g. a get_order
+                # error). The pending record is kept, so the next sweep settles it.
+                log.logger.warning("cancel of %s confirmed terminal but settling failed (%s)",
+                                   order_id, e)
+                return {"order_id": order_id, "status": "pending_cancel", "raw_status": raw}
 
     # Accepted but not yet terminal — the order may still be working at Schwab.
     # Keep the pending record (never popped above) and say so plainly.

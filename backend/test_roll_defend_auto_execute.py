@@ -86,6 +86,7 @@ def test_permissions_default_all_off(store):
     assert auto_exec.get_permissions() == {
         TriggerRule.ROLL_SCHEDULED_WEEKLY: False, TriggerRule.ROLL_75PCT: False,
         TriggerRule.ROLL_EXTRINSIC_CAPTURED: False, TriggerRule.DEFEND_BELOW_STRIKE: False,
+        TriggerRule.DEFEND_APPROACHING_STRIKE: False,
     }
 
 

@@ -209,3 +209,28 @@ def test_high_close_since_falls_back_when_the_date_matches_nothing():
 
 def test_high_close_since_none_without_any_price_data():
     assert indicators.high_close_since(None, "2020-01-01") is None
+
+
+# ---- first breaker on the LIVE price ----------------------------------------
+def test_live_price_through_the_first_level_trips_without_waiting_for_closes():
+    # Closes sit at 100 (above the 50-day MA and the 100 line) — no close-based
+    # condition trips. A live gap to 90 is through the highest level (ma_fast,
+    # 100) and counts as the first breaker immediately.
+    closes = [100.0] * 100
+    v = circuit_breaker.evaluate(_pos(), df=_frame(closes))
+    assert not v["tripped"]
+    v = circuit_breaker.evaluate(_pos(), df=_frame(closes), live_price=90.0)
+    assert v["tripped"] and "ma_fast" in _tripped(v)
+    assert v["nearest_trigger"]["condition"] == "ma_fast"
+    assert circuit_breaker.exit_reason_code(v) == "CB_MA50_3CLOSE"
+
+
+def test_live_price_above_the_first_level_does_not_trip():
+    v = circuit_breaker.evaluate(_pos(), df=_frame([100.0] * 100), live_price=101.0)
+    assert not v["tripped"]
+
+
+def test_live_first_level_can_be_switched_off(monkeypatch):
+    monkeypatch.setattr(config, "CIRCUIT_BREAKER_FIRST_LEVEL_LIVE", False)
+    v = circuit_breaker.evaluate(_pos(), df=_frame([100.0] * 100), live_price=90.0)
+    assert not v["tripped"]

@@ -1396,6 +1396,11 @@ ORDER_FILL_TIMEOUT_SEC = 45
 # in tests for an effectively mocked clock.
 CANCEL_POLL_INTERVAL_SEC = 0.4
 CANCEL_POLL_MAX_ATTEMPTS = 6
+# How long, after the DELETE is accepted, to wait for Schwab (asynchronous) to move
+# the order to a terminal state before reporting pending_cancel. Was interval x
+# attempts = 2.4s, which routinely expired before Schwab finished. A pending_cancel
+# is safe (record kept, lock blocks resubmit, sweep settles it) — just slow.
+CANCEL_CONFIRM_TIMEOUT_SEC = 10.0
 
 # PROPOSED_DEFAULT — how many times a NEW order may be submitted for the SAME
 # position intent within one app session (a place, cancel, and re-place counts as
@@ -1775,6 +1780,15 @@ CIRCUIT_BREAKER_ATR_MULT = 2.0
 CIRCUIT_BREAKER_DROP_PCT = 0.15        # 15% drop from the entry price
 CIRCUIT_BREAKER_MA_FAST = 50           # fast MA window (days)
 CIRCUIT_BREAKER_MA_FAST_CLOSES = 3     # consecutive closes below the fast MA (the "2-3" rule)
+# TRAVIS_EXTENSION / PROPOSED_DEFAULT — the FIRST breaker (the highest defined level:
+# circuit_breaker.evaluate's nearest_trigger) trips on the LIVE price the moment it is
+# at/through that level, gap included, without waiting for the close or the fast MA's
+# 3-close persistence. Only that one level is promoted; the rest keep their own rules.
+# Applies wherever the engine supplies a live quote (recommendation passes, so the
+# unattended circuit-breaker auto-exit sees a gap immediately). Set
+# CIRCUIT_BREAKER_FIRST_LEVEL_LIVE=0 to go back to close-confirmed verdicts only.
+CIRCUIT_BREAKER_FIRST_LEVEL_LIVE = (os.environ.get("CIRCUIT_BREAKER_FIRST_LEVEL_LIVE", "1")
+                                    .strip().lower() not in ("0", "false", "no"))
 CIRCUIT_BREAKER_MA_SLOW = 200          # slow MA window; a single close below is a breach
 
 # HARD_CFM_RULE (candidate — OFF by default, pending confirmation): block

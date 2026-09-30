@@ -656,9 +656,12 @@ def _check_circuit_breaker_auto_exit(now: datetime, dry_run: bool | None) -> lis
     rejected order, a timeout — see executor.exit_position) is recorded and
     notified, never raised — it must never sink the recommendation pass or
     stop the next position in the loop from being checked."""
+    import autopilot
     import circuit_breaker
     import executor
     state = log.load_state()
+    if not autopilot.enabled(state):
+        return []
     perms = circuit_breaker.get_auto_exit_permissions(state)
     if not any(perms.values()):
         return []
@@ -744,9 +747,12 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
     rejected order, a bad quote — see executor.execute) is recorded and
     notified, never raised — it must never sink the recommendation pass or
     stop the next position in the loop from being checked."""
+    import autopilot
     import executor
     import recommendation_auto_execute as auto_exec
     state = log.load_state()
+    if not autopilot.enabled(state):
+        return []
     perms = auto_exec.get_permissions(state)
     if not any(perms.values()):
         return []

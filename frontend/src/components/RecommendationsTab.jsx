@@ -154,6 +154,48 @@ function AutoExitPermissions({ perms, onChanged }) {
   );
 }
 
+// Master autopilot switch — turns EVERY unattended action (both grant lists below)
+// on or off without touching the individual grants. See backend/autopilot.py.
+function AutopilotSwitch({ enabled, onChanged }) {
+  const toast = useToast();
+  const [busy, setBusy] = React.useState(false);
+  const on = enabled !== false; // never set == on (pre-existing grants keep working)
+  async function flip() {
+    setBusy(true);
+    try {
+      await api.setAutopilot(!on);
+      toast.show(`Autopilot ${!on ? "ON" : "OFF"}`, { type: !on ? "success" : "info" });
+      onChanged();
+    } catch (e) {
+      toast.show(String(e.message || e), { type: "error" });
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <Card
+      title="Autopilot"
+      right={
+        <button
+          onClick={flip}
+          disabled={busy}
+          className={`rounded-lg border px-3 py-1.5 text-xs font-semibold disabled:opacity-50 ${
+            on ? "border-emerald-600/50 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
+               : "border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800"}`}
+        >
+          {busy ? "Saving…" : on ? "● ON — turn off" : "○ OFF — turn on"}
+        </button>
+      }
+    >
+      <p className="text-xs text-slate-400">
+        Master switch over the two lists below. OFF: nothing acts unattended — recommendations
+        still appear and can be executed by hand. ON: whichever triggers you've granted act on
+        their own. Your individual grants are kept either way.
+      </p>
+    </Card>
+  );
+}
+
 // Roll/defend auto-execute — the same "opt-in, per-trigger, default off,
 // confirm-to-enable" pattern as AutoExitPermissions above, extended to the
 // routine roll/defend triggers instead of EXIT. See
@@ -167,6 +209,8 @@ const AUTO_EXECUTE_TRIGGERS = [
     detail: "≥80% of the extrinsic sold at entry is captured — rolls up in place or up-and-out, whichever the current week's runway supports." },
   { id: "DEFEND_BELOW_STRIKE", label: "Stock closed below the strike",
     detail: "The underlying closed under the short strike — the defensive roll-down." },
+  { id: "DEFEND_APPROACHING_STRIKE", label: "Stock getting close to the strike",
+    detail: "Live price is within a few percent of the short strike (still above it) — rolls down in place with runway left this week, down-and-out to the next weekly when it's nearly over. New strike follows the regime/posture." },
 ];
 
 function RollDefendAutoExecutePermissions({ perms, onChanged }) {
@@ -671,6 +715,7 @@ export default function RecommendationsTab({ onNavigate, onSelectStock, onAction
         </p>
       </Card>
 
+      <AutopilotSwitch enabled={data?.autopilot_enabled} onChanged={reload} />
       <AutoExitPermissions perms={data?.circuit_breaker_auto_exit} onChanged={reload} />
 
       <RollDefendAutoExecutePermissions perms={data?.roll_defend_auto_execute} onChanged={reload} />
