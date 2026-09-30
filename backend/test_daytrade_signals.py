@@ -48,6 +48,11 @@ def _save_screen(picks: list[dict]) -> None:
 @pytest.fixture
 def tmp_store(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
+    # The engine tests below were written against generous capital caps (size
+    # then comes from risk / the 20% notional cap); the real 1.5%/15% defaults
+    # are covered by the "capital budgeting" tests at the end of this file.
+    monkeypatch.setattr(config, "DAYTRADE_MAX_POSITION_PCT", 20.0)
+    monkeypatch.setattr(config, "DAYTRADE_MAX_DAILY_DEPLOY_PCT", 1000.0)
     return tmp_path
 
 
@@ -687,3 +692,57 @@ def test_current_status_only_lists_symbols_still_armed_or_in_trade(tmp_store):
     rows = signals.current_status(DAY, ACCOUNT)
     assert [r["symbol"] for r in rows] == ["XYZ"]
     assert rows[0]["status"] == "armed"
+
+
+# ===========================================================================
+# Capital budgeting — 1.5% per trade, 15% per day (config defaults)
+# ===========================================================================
+def _two_setup_day():
+    _save_screen([_pick("AAA", 100, 90), _pick("BBB", 100, 90)])
+    bars = []
+    for sym in ("AAA", "BBB"):
+        bars += _setup_bars_for(sym)
+    store.append_bars(DAY, bars)
+
+
+def _setup_bars_for(symbol):
+    return [dict(b, symbol=symbol) for b in _setup_bars()] + [
+        _bar(symbol, "09:40", 101.6, 102, 101.4, 101.8, 50_000)]
+
+
+def test_default_caps_size_each_trade_to_1_5_pct_of_budget(tmp_store, monkeypatch):
+    monkeypatch.setattr(config, "DAYTRADE_MAX_POSITION_PCT", 1.5)
+    monkeypatch.setattr(config, "DAYTRADE_MAX_DAILY_DEPLOY_PCT", 15.0)
+    _save_screen([_pick("ABC", 100, 90)])
+    store.append_bars(DAY, _setup_bars() + [
+        _bar("ABC", "09:40", 101.6, 102, 101.4, 101.8, 50_000),
+    ])
+
+    entry = _events(account_equity=20_000.0)[1]
+
+    assert entry["event"] == "entry"
+    assert entry["size"] == 2  # floor(1.5% of 20k = $300 / 101.5)
+
+
+def test_daily_deploy_cap_stops_further_entries(tmp_store, monkeypatch):
+    monkeypatch.setattr(config, "DAYTRADE_MAX_POSITION_PCT", 1.5)
+    monkeypatch.setattr(config, "DAYTRADE_MAX_DAILY_DEPLOY_PCT", 2.0)  # room for ~1.3 trades
+    _two_setup_day()
+
+    events = _events(account_equity=20_000.0)
+    entries = [e for e in events if e["event"] == "entry"]
+
+    # per trade: floor($300 / 101.5) = 2; day cap $400 leaves $197 -> 1 share
+    assert [e["size"] for e in entries] == [2, 1]
+    assert sum(e["entry"] * e["size"] for e in entries) <= 20_000 * 0.02
+
+
+def test_daily_deploy_cap_skips_entry_when_nothing_is_left(tmp_store, monkeypatch):
+    monkeypatch.setattr(config, "DAYTRADE_MAX_POSITION_PCT", 1.5)
+    monkeypatch.setattr(config, "DAYTRADE_MAX_DAILY_DEPLOY_PCT", 1.5)  # exactly one trade
+    _two_setup_day()
+
+    events = _events(account_equity=20_000.0)
+
+    assert [e["event"] for e in events if e["event"].startswith("entry")] == ["entry", "entry_skipped"]
+    assert next(e for e in events if e["event"] == "entry_skipped")["reason"] == "daily capital limit reached"
