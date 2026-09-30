@@ -60,6 +60,7 @@ _EXIT_PRIORITY = (
 )
 _ROLL_PRIORITY = (
     TriggerRule.DEFEND_BELOW_STRIKE,      # -> DEFEND
+    TriggerRule.DEFEND_APPROACHING_STRIKE,  # -> DEFEND (roll down BEFORE the strike breaks)
     TriggerRule.EARNINGS_WINDOW,          # -> ROLL_OUT (deep-ITM earnings strike)
     TriggerRule.DIVIDEND_ASSIGNMENT_RISK, # -> DEFEND (roll out to re-establish time value)
     TriggerRule.ROLL_75PCT,               # -> ROLL_OUT (early juice capture)
@@ -79,12 +80,23 @@ _ROLL_PRIORITY = (
 # execution side rather than inventing a reason no other path emits.
 _TRIGGER_ACTION = {
     TriggerRule.DEFEND_BELOW_STRIKE: ActionType.DEFEND,
+    TriggerRule.DEFEND_APPROACHING_STRIKE: ActionType.DEFEND,
     TriggerRule.EARNINGS_WINDOW: ActionType.ROLL_OUT,
     TriggerRule.DIVIDEND_ASSIGNMENT_RISK: ActionType.DEFEND,
     TriggerRule.ROLL_75PCT: ActionType.ROLL_OUT,
     TriggerRule.ROLL_SCHEDULED_WEEKLY: ActionType.ROLL_OUT,
     TriggerRule.ROLL_EXTRINSIC_CAPTURED: ActionType.ROLL_OUT,
 }
+
+
+def _policy_strike(market: dict, tk: dict, price) -> float | None:
+    """The regime/posture strike strike_policy would sell now (None when it can't
+    be priced) — the SAME suggestion _build_action_rec puts on a roll ticket."""
+    if price is None or tk.get("atr") is None:
+        return None
+    regime = (market.get("regime") or {}).get("status")
+    posture = market.get("posture") or config.DEFAULT_STRIKE_POSTURE
+    return (strike_policy.suggest_strike(price, tk["atr"], regime, posture) or {}).get("strike")
 
 
 def _iso(dt: datetime) -> str:
@@ -467,7 +479,7 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
     # `nearest_trigger` rides along in the snapshot (not just status/headline)
     # because it is what recommendation_runner's auto-exit path acts on —
     # whichever level is closest to price, not a fixed priority order.
-    cb = circuit_breaker.evaluate(position, df=tk.get("bars")) if tk.get("bars") is not None else None
+    cb = circuit_breaker.evaluate(position, df=tk.get("bars"), live_price=price) if tk.get("bars") is not None else None
     if cb and cb.get("tripped"):
         triggers[TriggerRule.CIRCUIT_BREAKER] = {
             "circuit_breaker": {k: cb.get(k) for k in
@@ -514,6 +526,22 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
                 "short": key, "last_close": last_close, "price": price,
                 "condition_first_true_at": _first_close_below(tk.get("bars"), sc.get("strike")),
             }
+        # Getting close to the strike (still above it): the ITM cushion is thin, so
+        # roll DOWN now instead of waiting for the close below it. Reads the live
+        # price via enrich_short.approaching_atm (hands off to DEFEND_BELOW_STRIKE
+        # at the strike, never both). A roll that would not actually land BELOW the
+        # current strike (the policy strike is not lower) is no defense — skipped.
+        if (es.get("approaching_atm") and TriggerRule.DEFEND_BELOW_STRIKE not in triggers
+                and TriggerRule.DEFEND_APPROACHING_STRIKE not in triggers):
+            new_strike = _policy_strike(market, tk, price if price is not None else last_close)
+            if (new_strike is not None and sc.get("strike") is not None
+                    and float(new_strike) < float(sc["strike"])):
+                triggers[TriggerRule.DEFEND_APPROACHING_STRIKE] = {
+                    "short": key, "price": price, "dte": sc.get("dte"),
+                    "distance_pct": es.get("strike_distance_pct"),
+                    "threshold_pct": config.SHORT_ATM_APPROACH_PCT,
+                    "new_strike": new_strike,
+                }
         earn = tk.get("earnings") or {}
         if earn.get("warning") and TriggerRule.EARNINGS_WINDOW not in triggers:
             triggers[TriggerRule.EARNINGS_WINDOW] = {"short": key, "earnings": earn}
@@ -597,6 +625,7 @@ _KILL_EXIT_CODE = {
 # (pinned by test_roll_trigger_action_types_agree_with_their_graded_roll_reason).
 _ROLL_REASON = {
     TriggerRule.DEFEND_BELOW_STRIKE: "defend",
+    TriggerRule.DEFEND_APPROACHING_STRIKE: "defend",
     TriggerRule.EARNINGS_WINDOW: "earnings",
     TriggerRule.DIVIDEND_ASSIGNMENT_RISK: "defend",   # graded DEFEND, like the alert's deep link
     TriggerRule.ROLL_75PCT: "75%-rule",
@@ -649,6 +678,13 @@ def _build_action_rec(position: dict, market: dict, now: datetime,
                 roll_dte = (int(dte) if dte else 0) + 7
             elif roll_direction == "ROLL_UP":
                 roll_dte = int(dte)
+        elif rule == TriggerRule.DEFEND_APPROACHING_STRIKE:
+            # Same runway rule as the extrinsic-captured roll, mirrored downward:
+            # enough of this week left -> roll DOWN in place; otherwise roll DOWN
+            # AND OUT to the next weekly (config.ROLL_UP_SAME_WEEK_MIN_DTE).
+            out_ = roll_advisor.roll_direction(dte)["direction"] == "ROLL_UP_AND_OUT"
+            roll_direction = "ROLL_DOWN_AND_OUT" if out_ else "ROLL_DOWN"
+            roll_dte = (int(dte) if dte else 0) + 7 if out_ else (int(dte) if dte else 5)
         elif rule in (TriggerRule.ROLL_75PCT, TriggerRule.ROLL_SCHEDULED_WEEKLY,
                     TriggerRule.EARNINGS_WINDOW, TriggerRule.DIVIDEND_ASSIGNMENT_RISK):
             roll_dte = (int(dte) if dte else 0) + 7  # roll OUT to the next weekly

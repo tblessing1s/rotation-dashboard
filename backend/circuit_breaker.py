@@ -29,6 +29,13 @@ persistence rule exists to avoid. Want the position to actually CLOSE on the
 first close below the 50-day MA instead of merely a warning? That is a
 different, stricter rule than this one and is not what this warning does.
 
+LIVE FIRST-LEVEL RULE (config.CIRCUIT_BREAKER_FIRST_LEVEL_LIVE, on by default): the
+one exception. When the caller supplies a live price, the FIRST breaker — the
+highest defined level, ``nearest_trigger`` — is tripped the moment the live price is
+at/through it (a gap included), without the close or the 3-close persistence. That is
+deliberately the stricter rule the paragraph above describes, applied to that one
+level only; the other levels keep their own rules.
+
 AUTO-EXIT PERMISSIONS (opt-in, per-condition, default OFF): the operator may
 grant drawdown / ma_fast / ma_slow individually the authority to close the
 position UNATTENDED — see get_auto_exit_permissions / set_auto_exit_permission
@@ -69,12 +76,20 @@ def entry_price(position: dict) -> float | None:
     return float(ep) if ep is not None else None
 
 
-def evaluate(position: dict, df=None) -> dict:
+def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
     """Evaluate every circuit-breaker condition for one position.
 
     ``df`` (daily OHLCV) is loaded from the cache when not supplied, so this
     works offline / in demo mode like the rest of the app. Best-effort: missing
     price data leaves the affected condition untripped rather than raising.
+
+    ``live_price`` (optional, the engine passes its snapshot's live quote): with
+    config.CIRCUIT_BREAKER_FIRST_LEVEL_LIVE on, the FIRST breaker — the highest
+    defined level, i.e. ``nearest_trigger``, the one a falling price crosses
+    first — counts as tripped the moment the live price is at/through it, gap
+    included, without waiting for the close (or, for the fast MA, the 3-close
+    persistence). Only that one level is promoted; the others keep their own
+    rules. Callers that pass no live price get the close-confirmed verdict.
     """
     ticker = position.get("ticker", "")
     if df is None:
@@ -135,6 +150,37 @@ def evaluate(position: dict, df=None) -> dict:
     }
 
     conditions = [drawdown, fast, slow, manual]
+
+    # Every condition's PRICE LEVEL, for the Positions card's "the spot where
+    # this trips" readout — not just the pass/fail booleans above. Each is a
+    # floor price recomputed fresh from today's data (the MAs move day to
+    # day; the drawdown/manual lines are fixed once set). `nearest_trigger` is
+    # whichever defined level sits HIGHEST — the level a falling price would
+    # cross FIRST, by construction, since every level here is a floor below
+    # the current price. It names the level, not a promise: ma_fast's line
+    # only STARTS the 3-close clock, it does not trip alone on one touch —
+    # unless the live-price first-level rule below promotes it.
+    levels = {}
+    if drop_line is not None:
+        levels["drawdown"] = drop_line
+    if ma_fast_value is not None:
+        levels["ma_fast"] = _round(ma_fast_value)
+    if ma_slow is not None:
+        levels["ma_slow"] = _round(ma_slow)
+    if line is not None:
+        levels["manual_line"] = _round(float(line))
+    nearest_id = max(levels, key=levels.get) if levels else None
+    by_id = {c["id"]: c for c in conditions}
+
+    # First breaker on the LIVE price (see docstring): a gap through the highest
+    # level is an exit now, not at the next close.
+    if (config.CIRCUIT_BREAKER_FIRST_LEVEL_LIVE and live_price is not None
+            and nearest_id is not None and float(live_price) <= levels[nearest_id]):
+        first = by_id[nearest_id]
+        first["tripped"] = True
+        first["detail"] = {**first["detail"], "live_price": _round(live_price),
+                           "live_first_level": True}
+
     breached = [c for c in conditions if c["tripped"]]
     tripped = bool(breached)
 
@@ -173,25 +219,6 @@ def evaluate(position: dict, df=None) -> dict:
         headline = "circuit breaker intact"
         action = "Hold — no circuit-breaker condition tripped."
 
-    # Every condition's PRICE LEVEL, for the Positions card's "the spot where
-    # this trips" readout — not just the pass/fail booleans above. Each is a
-    # floor price recomputed fresh from today's data (the MAs move day to
-    # day; the drawdown/manual lines are fixed once set). `nearest_trigger` is
-    # whichever defined level sits HIGHEST — the level a falling price would
-    # cross FIRST, by construction, since every level here is a floor below
-    # the current price. It names the level, not a promise: ma_fast's line
-    # only STARTS the 3-close clock, it does not trip alone on one touch.
-    levels = {}
-    if drop_line is not None:
-        levels["drawdown"] = drop_line
-    if ma_fast_value is not None:
-        levels["ma_fast"] = _round(ma_fast_value)
-    if ma_slow is not None:
-        levels["ma_slow"] = _round(ma_slow)
-    if line is not None:
-        levels["manual_line"] = _round(float(line))
-    nearest_id = max(levels, key=levels.get) if levels else None
-    by_id = {c["id"]: c for c in conditions}
     nearest_trigger = ({"condition": nearest_id, "price": levels[nearest_id],
                         "label": by_id[nearest_id]["label"]}
                        if nearest_id else None)

@@ -3,7 +3,7 @@
 Generalizes the precedent in circuit_breaker.py's AUTO-EXIT PERMISSIONS
 section (EXIT-only, circuit-breaker conditions) to the roll/defend trigger
 family: the operator may grant ONE specific TriggerRule the authority to act
-UNATTENDED. Only the four triggers in AUTO_EXECUTE_TRIGGERS are eligible —
+UNATTENDED. Only the triggers in AUTO_EXECUTE_TRIGGERS are eligible —
 every other trigger (every EXIT trigger included, which keeps its own
 separate circuit-breaker permission set) has no automation path here at all.
 Granting a trigger does not change what recommendation_engine.evaluate()
@@ -32,6 +32,7 @@ AUTO_EXECUTE_TRIGGERS = (
     TriggerRule.ROLL_75PCT,
     TriggerRule.ROLL_EXTRINSIC_CAPTURED,
     TriggerRule.DEFEND_BELOW_STRIKE,
+    TriggerRule.DEFEND_APPROACHING_STRIKE,
 )
 _AUTO_EXECUTE_KEY = "roll_defend_auto_execute"
 

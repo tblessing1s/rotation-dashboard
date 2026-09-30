@@ -45,6 +45,7 @@ logger = logging.getLogger("cfm.eventrun")
 # Signal keys, per ticker. Named for the engine rule they lead to.
 ROLL_75 = "roll_75"                         # -> ROLL_75PCT
 EXTRINSIC_CAPTURED = "extrinsic_captured"   # -> ROLL_EXTRINSIC_CAPTURED
+APPROACH_STRIKE = "approach_strike"         # -> DEFEND_APPROACHING_STRIKE (live price within the cushion band)
 DIVIDEND_RISK = "dividend_risk"             # -> DIVIDEND_ASSIGNMENT_RISK (extrinsic below the coming dividend)
 ASSIGNMENT_RISK = "assignment_risk"         # -> DIVIDEND_ASSIGNMENT_RISK (extrinsic collapsed while deep ITM)
 EARNINGS = "earnings"                       # -> EARNINGS_WINDOW (report inside the warn window)
@@ -106,6 +107,8 @@ def detect_signals(state: dict, quotes: dict, today=None) -> dict[str, set[str]]
                 continue
             if es.get("roll_now"):
                 sig.add(ROLL_75)
+            if es.get("approaching_atm"):
+                sig.add(APPROACH_STRIKE)
             captured = es.get("extrinsic_captured_pct")
             dte = sc.get("dte")
             if (captured is not None and dte is not None and int(dte) >= 1

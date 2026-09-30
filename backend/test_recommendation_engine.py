@@ -20,6 +20,14 @@ from rec_types import ActionType, TriggerRule  # noqa: E402
 NOW = datetime(2026, 7, 10, 14, 0, tzinfo=timezone.utc)
 
 
+
+@pytest.fixture(autouse=True)
+def _no_near_strike_band(monkeypatch):
+    """These fixtures park the stock ~1% above the short strike, which is INSIDE the
+    near-strike band; they pin the OTHER triggers, so the band is off here. The
+    near-strike defend trigger has its own tests in test_autopilot.py."""
+    monkeypatch.setattr(config, "SHORT_ATM_APPROACH_PCT", 0.0)
+
 def _frame(values, start="2026-03-01", vol=1e6):
     idx = pd.bdate_range(start, periods=len(values))
     c = pd.Series(values, index=idx, dtype=float)
@@ -59,7 +67,10 @@ def _healthy_tk(price=182.0):
     # every existing test's hand-built snapshot happened to cancel the bug
     # rather than exercise it, so 24 passing tests coexisted with every live
     # roll/entry ticket pricing its new leg at roughly spot price.
-    bars = _frame([170 + i * 0.25 for i in range(90)])
+    # Bars END at the live price (a gentle uptrend into it), so the price sits above
+    # its own 50-day MA — otherwise the live first-level circuit-breaker rule reads
+    # the fixture as a breach.
+    bars = _frame([price - (89 - i) * 0.25 for i in range(90)])
     return {
         "price": price, "last_close": price - 0.3, "atr": 3.0, "hist_vol": 30.0,
         "rs3m_vs_spy": 8.0, "rs3m_vs_sector": 4.0, "q": 0.0,
@@ -95,7 +106,7 @@ def test_aapl_laggard_emits_exit_kill_rs_spy_on_first_pass():
     # faster. That keeps the circuit breaker (drawdown / MA breaches) out of the
     # picture, so the SPY kill-switch rule is unambiguously the dominant trigger
     # — _EXIT_PRIORITY puts CIRCUIT_BREAKER above it.
-    tk["bars"] = _frame([200 + i * 0.05 for i in range(90)])
+    tk["bars"] = _frame([177.5 + i * 0.05 for i in range(90)])   # ends at the live price
     tk["spy_bars"] = _frame([100 + i * 0.9 for i in range(90)])
     recs = engine.evaluate(_market({"AAPL": tk}), _state([_position("AAPL")]), NOW, [])
     exits = [r for r in recs if r["action_type"] == ActionType.EXIT]
@@ -152,7 +163,7 @@ def test_no_duplicate_within_validity_window():
 # Defend / roll triggers
 # ---------------------------------------------------------------------------
 def test_defend_below_strike_uses_strike_policy_and_records_first_true():
-    tk = _healthy_tk(price=170.0)
+    tk = _healthy_tk(price=175.0)
     tk["last_close"] = 175.5   # below the 180 short strike, live price confirms
     # A gentle uptrend that never reaches the 180 strike: below-strike fires,
     # while the closes stay ABOVE the 50-day MA so the circuit breaker's
@@ -168,7 +179,7 @@ def test_defend_below_strike_uses_strike_policy_and_records_first_true():
     assert ticket["action"] == "roll_short"
     assert ticket["roll_reason"] == "defend"
     import strike_policy
-    pol = strike_policy.suggest_strike(170.0, 3.0, "green", "conservative")
+    pol = strike_policy.suggest_strike(175.0, 3.0, "green", "conservative")
     sto = [l for l in ticket["legs"] if l["instruction"] == "SELL_TO_OPEN"][0]
     assert sto["strike"] == pol["strike"]   # single source of proposed strikes
     assert rec["input_snapshot"]["condition_first_true_at"] is not None

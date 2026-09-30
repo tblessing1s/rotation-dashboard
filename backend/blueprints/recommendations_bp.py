@@ -19,6 +19,7 @@ def api_recommendations():
     import trust_derive
     import position_manager
     import circuit_breaker
+    import autopilot
     import recommendation_auto_execute
     from datetime import datetime, timezone
     try:
@@ -73,6 +74,8 @@ def api_recommendations():
             # Per-trigger roll/defend auto-execute permissions (default OFF).
             # See recommendation_auto_execute.py.
             "roll_defend_auto_execute": recommendation_auto_execute.get_permissions(state),
+            # Master autopilot switch (autopilot.py) over both grants above.
+            "autopilot_enabled": autopilot.enabled(state),
         })
     except Exception as e:  # noqa: BLE001
         return _err(e)
@@ -108,6 +111,23 @@ def api_set_roll_defend_auto_execute():
             payload.get("trigger_rule"), bool(payload.get("on"))))
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@recommendations_bp.route("/api/autopilot", methods=["GET", "POST"])
+def api_autopilot():
+    """The master autopilot switch (see autopilot.py). GET -> {enabled, granted,
+    ...}; POST {on} turns every unattended action on/off without touching the
+    per-trigger grants."""
+    import autopilot
+    try:
+        if request.method == "POST":
+            payload = request.get_json(silent=True) or {}
+            if "on" not in payload:
+                return jsonify({"error": "on is required"}), 400
+            return jsonify(autopilot.set_enabled(bool(payload["on"])))
+        return jsonify(autopilot.status())
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

@@ -23,6 +23,7 @@ export const RULE_LABELS = {
   WHIPSAW_GUARD: "Defend whipsaw",
   DELTA_COVERAGE_FLOOR: "Coverage floor breached",
   DEFEND_BELOW_STRIKE: "Stock closed below the strike",
+  DEFEND_APPROACHING_STRIKE: "Stock getting close to the strike",
   ROLL_75PCT: "75% of the premium captured",
   ROLL_SCHEDULED_WEEKLY: "Weekly roll due",
   ROLL_EXTRINSIC_CAPTURED: "Juice mostly banked",
@@ -95,6 +96,15 @@ export function explainRec(rec) {
         { k: "close", v: dollars(d.last_close) },
         { k: "strike", v: num(d.short?.strike, 2) },
         ...(gap != null ? [{ k: "below strike", v: `${num(Math.abs(gap), 1)}%` }] : []),
+      );
+      break;
+    }
+    case "DEFEND_APPROACHING_STRIKE": {
+      why = `The stock is ${dollars(d.price)}, only ${num(d.distance_pct, 1)}% above the ${num(d.short?.strike, 2)} strike (band ${num(d.threshold_pct, 1)}%). The cushion is thin — roll the call down now${d.new_strike != null ? ` to ${num(d.new_strike, 2)}` : ""} rather than wait for a close below it.`;
+      numbers.push(
+        { k: "price", v: dollars(d.price) },
+        { k: "strike", v: num(d.short?.strike, 2) },
+        { k: "above strike", v: `${num(d.distance_pct, 1)}%` },
       );
       break;
     }

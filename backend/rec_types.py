@@ -53,6 +53,7 @@ class TriggerRule:
     WHIPSAW_GUARD = "WHIPSAW_GUARD"                    # defend whipsaw -> EXIT, not another defend
     DELTA_COVERAGE_FLOOR = "DELTA_COVERAGE_FLOOR"      # LEAP no longer covers -> EXIT
     DEFEND_BELOW_STRIKE = "DEFEND_BELOW_STRIKE"        # closed below short strike -> DEFEND roll-down
+    DEFEND_APPROACHING_STRIKE = "DEFEND_APPROACHING_STRIKE"  # live price within SHORT_ATM_APPROACH_PCT of the strike -> DEFEND roll-down (before the breach)
     ROLL_75PCT = "ROLL_75PCT"                          # >=75% decayed, >2 DTE -> ROLL_OUT early
     ROLL_SCHEDULED_WEEKLY = "ROLL_SCHEDULED_WEEKLY"    # expiry imminent -> ROLL_OUT (weekly cadence)
     ROLL_EXTRINSIC_CAPTURED = "ROLL_EXTRINSIC_CAPTURED"  # sold extrinsic mostly banked -> ROLL_OUT early (juice capture)
@@ -72,6 +73,7 @@ TRIGGER_RULES = frozenset({
     TriggerRule.KILL_RS_SECTOR, TriggerRule.KILL_RS_SPY_CONFIRMED,
     TriggerRule.CIRCUIT_BREAKER, TriggerRule.WHIPSAW_GUARD,
     TriggerRule.DELTA_COVERAGE_FLOOR, TriggerRule.DEFEND_BELOW_STRIKE,
+    TriggerRule.DEFEND_APPROACHING_STRIKE,
     TriggerRule.ROLL_75PCT, TriggerRule.ROLL_SCHEDULED_WEEKLY,
     TriggerRule.ROLL_EXTRINSIC_CAPTURED,
     TriggerRule.JUICE_HURDLE_FAIL, TriggerRule.DTE_PLANNED_EXIT,

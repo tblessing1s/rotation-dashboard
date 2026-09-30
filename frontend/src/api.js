@@ -379,6 +379,9 @@ export const api = {
     request("/api/recommendations/circuit-breaker-auto-exit", {
       method: "POST", body: JSON.stringify({ condition, on }),
     }),
+  // Master autopilot switch — on/off for every unattended action, grants untouched.
+  setAutopilot: (on) =>
+    request("/api/autopilot", { method: "POST", body: JSON.stringify({ on }) }),
   // Roll/defend auto-execute permission — per trigger rule (ROLL_SCHEDULED_WEEKLY /
   // ROLL_75PCT / ROLL_EXTRINSIC_CAPTURED / DEFEND_BELOW_STRIKE), default OFF.
   // Granting one lets the engine roll the short UNATTENDED the moment that
