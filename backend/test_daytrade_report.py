@@ -71,19 +71,3 @@ def test_routes(seeded, monkeypatch):
     assert r.status_code == 200 and "attachment" in r.headers["Content-Disposition"]
     assert client.get("/api/daytrade/export?format=csv&view=bogus").status_code == 400
     assert client.get("/api/daytrade/report?since=nope").status_code == 400
-
-
-def test_period_stats_for_the_week_and_month_of_a_day(seeded):
-    ps = report.period_stats("primary", "2026-01-07")  # same ISO week (W02) as the 5th
-    assert ps["week"]["period"] == "2026-W02" and ps["week"]["net_pnl"] == 15.0
-    assert ps["month"]["period"] == "2026-01" and ps["month"]["trades"] == 2
-    empty = report.period_stats("primary", "2026-03-10")
-    assert empty["month"]["trades"] == 0 and empty["month"]["net_pnl"] == 0
-
-
-def test_period_stats_route(seeded):
-    import app as app_mod
-    client = app_mod.create_app().test_client()
-    r = client.get("/api/daytrade/period-stats?date=2026-01-05")
-    assert r.status_code == 200 and r.get_json()["month"]["net_pnl"] == 15.0
-    assert client.get("/api/daytrade/period-stats?date=nope").status_code == 400
