@@ -530,3 +530,66 @@ def test_stale_sweep_tries_to_recover_an_unknown_submission_with_no_id(live, mon
     monkeypatch.setattr(executor, "submission_status", lambda ref: asked.append(ref) or {})
     executor.cancel_stale_pending_orders(now=datetime.now(timezone.utc))
     assert asked == ["ref-lost"]     # the fresh one is still the placing client's to confirm
+
+
+# ---------------------------------------------------------------------------
+# Orders tracker: list what Schwab has working and cancel it by broker id, even
+# when the app never recorded the order.
+# ---------------------------------------------------------------------------
+class _BrokerListing(FakeSchwab):
+    def __init__(self, orders, **kw):
+        super().__init__(**kw)
+        self._orders = orders
+
+    def list_orders(self, account_hash, from_entered_time=None, to_entered_time=None,
+                    max_results=50):
+        return list(self._orders)
+
+    def get_order(self, account_hash, order_id):
+        for o in self._orders:
+            if str(o["orderId"]) == str(order_id):
+                return {**o, "status": self._status}
+        return {}
+
+
+def _roll_order(oid, status="WORKING"):
+    return {"orderId": oid, "status": status, "enteredTime": "2026-09-30T15:00:05+0000",
+            "orderType": "NET_DEBIT", "price": 1.2, "quantity": 1,
+            "orderLegCollection": [
+                {"instruction": "BUY_TO_CLOSE", "quantity": 1, "instrument": {"symbol": "A"}},
+                {"instruction": "SELL_TO_OPEN", "quantity": 1, "instrument": {"symbol": "B"}}]}
+
+
+def test_orders_tracker_lists_an_untracked_working_order(live):
+    live(_BrokerListing([_roll_order("999", "WORKING"), _roll_order("998", "CANCELED")]))
+    out = executor.list_broker_orders()
+    rows = {r["order_id"]: r for r in out["orders"]}
+    assert rows["999"]["live"] is True and rows["999"]["tracked"] is False
+    assert rows["998"]["live"] is False
+    assert out["orders"][0]["order_id"] == "999"      # working orders sort first
+
+
+def test_cancel_broker_order_cancels_an_untracked_order_and_clears_its_submission(live):
+    fake = live(_BrokerListing([_roll_order("999")], status="WORKING"))
+    log.save_order_submission("ref-lost", {
+        "client_order_ref": "ref-lost", "ticker": "SPCX", "status": executor.SUB_UNKNOWN,
+        "order_id": None, "placed_at": log.utcnow(), "unknown_attempts": 0,
+        "close_option_symbol": "A", "open_option_symbol": "B"})
+    res = executor.cancel_broker_order("999")
+    assert res["status"] == "canceled"
+    assert fake.canceled == [("HASH", "999")]
+    sub = log.get_order_submission("ref-lost")
+    assert sub["status"] == executor.SUB_CANCELED and sub["order_id"] == "999"
+    assert executor.list_broker_orders()["unconfirmed"] == []
+
+
+def test_cancel_broker_order_never_cancels_a_filled_order(live):
+    fake = live(_BrokerListing([_roll_order("999")], status="FILLED"))
+    res = executor.cancel_broker_order("999")
+    assert res["status"] == "filled" and fake.canceled == []
+
+
+def test_cancel_broker_order_refuses_an_order_not_on_this_account(live):
+    live(_BrokerListing([_roll_order("999")]))
+    with pytest.raises(ValueError):
+        executor.cancel_broker_order("12345")

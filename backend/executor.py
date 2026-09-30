@@ -4700,6 +4700,133 @@ def cancel_order(order_id: str) -> dict:
         f"position hard-locked pending manual reconciliation: {last_err}")
 
 
+def _order_row(o: dict, *, tracked: set, sub_by_id: dict) -> dict:
+    """One broker order flattened for the Orders tracker."""
+    status = str(o.get("status") or "").upper()
+    legs = []
+    for leg in o.get("orderLegCollection") or []:
+        inst = leg.get("instrument") or {}
+        legs.append({"instruction": leg.get("instruction"),
+                     "quantity": leg.get("quantity"),
+                     "symbol": (inst.get("symbol") or "").strip()})
+    oid = str(o.get("orderId") or o.get("order_id") or "")
+    sub = sub_by_id.get(oid) or {}
+    return {
+        "order_id": oid,
+        "status": status,
+        "live": status in _LIVE_ORDER_STATUSES,
+        "entered_time": o.get("enteredTime"),
+        "order_type": o.get("orderType"),
+        "price": o.get("price"),
+        "quantity": o.get("quantity"),
+        "filled_quantity": o.get("filledQuantity"),
+        "legs": legs,
+        "tracked": oid in tracked,
+        "ticker": sub.get("ticker"),
+        "action": sub.get("action"),
+    }
+
+
+def list_broker_orders(limit: int = 25) -> dict:
+    """Orders as SCHWAB sees them (last 24h) for this book's account, plus any app
+    submissions still awaiting a broker id. The source of truth for "what is
+    actually working", independent of whether the app kept a pending record — an
+    order whose ack was lost has none, yet is live at the broker and cancellable."""
+    if not schwab_api.configured():
+        return {"orders": [], "unconfirmed": [], "skipped": "broker-not-configured"}
+    client = data_handler.broker_client()
+    account_hash = _order_account_hash(client)
+    orders = client.list_orders(account_hash)
+    tracked = {str(k) for k in log.list_pending_orders()}
+    subs = log.list_order_submissions()
+    sub_by_id = {str(v.get("order_id")): v for v in subs.values() if v.get("order_id")}
+    rows = [_order_row(o, tracked=tracked, sub_by_id=sub_by_id) for o in orders or []]
+    rows.sort(key=lambda r: str(r.get("entered_time") or ""), reverse=True)
+    rows.sort(key=lambda r: not r["live"])   # live orders first (stable)
+    unconfirmed = [
+        {"client_order_ref": ref, "ticker": v.get("ticker"), "action": v.get("action"),
+         "placed_at": v.get("placed_at"), "detail": v.get("detail"),
+         "close_option_symbol": v.get("close_option_symbol"),
+         "open_option_symbol": v.get("open_option_symbol")}
+        for ref, v in subs.items()
+        if v.get("status") in (SUB_UNKNOWN, SUB_SUBMITTING) and not v.get("order_id")]
+    return {"orders": rows[:max(1, int(limit))], "unconfirmed": unconfirmed,
+            "as_of": log.utcnow()}
+
+
+def cancel_broker_order(order_id: str) -> dict:
+    """Cancel an order at Schwab by its BROKER id — including one the app never
+    recorded (a lost / id-less ack). An order the app tracks goes through the
+    normal ``cancel_order`` lifecycle. Otherwise: read it from THIS book's account
+    (so another account's order can't be touched), refuse if it already filled, DELETE
+    it, and CONFIRM a terminal state before saying canceled. Never books anything —
+    a fill that raced the cancel is left to ingestion/reconciliation."""
+    order_id = str(order_id)
+    if log.get_pending_order(order_id):
+        return cancel_order(order_id)
+    client = data_handler.broker_client()
+    account_hash = _order_account_hash(client)
+    order = client.get_order(account_hash, order_id)
+    if not order:
+        raise ValueError(f"order {order_id} was not found on this book's Schwab account")
+    raw = str(order.get("status") or "").upper()
+    if raw == "FILLED":
+        return {"order_id": order_id, "status": "filled", "raw_status": raw,
+                "message": "It already filled at Schwab — nothing to cancel. "
+                           "Run reconciliation to bring the app in line."}
+    rec = {"account_hash": account_hash}
+    if raw not in _TERMINAL_STATUSES:
+        last_err = None
+        for _ in range(max(1, int(config.CANCEL_POLL_MAX_ATTEMPTS))):
+            try:
+                client.cancel_order(account_hash, order_id)
+                last_err = None
+                break
+            except Exception as e:  # noqa: BLE001 — refused DELETE; re-check the order
+                last_err = e
+                chk = _safe_status(client, rec, order_id)
+                if chk == "FILLED":
+                    return {"order_id": order_id, "status": "filled", "raw_status": chk,
+                            "message": "It filled before the cancel reached Schwab. "
+                                       "Run reconciliation to bring the app in line."}
+                if chk in _TERMINAL_STATUSES:
+                    last_err = None
+                    break
+                if config.CANCEL_POLL_INTERVAL_SEC:
+                    time.sleep(config.CANCEL_POLL_INTERVAL_SEC)
+        if last_err is not None:
+            raise schwab_api.SchwabError(
+                f"cancel of order {order_id} failed and it may still be working at "
+                f"Schwab — cancel it in your broker: {last_err}")
+        deadline = time.monotonic() + CANCEL_CONFIRM_TIMEOUT_S
+        while time.monotonic() < deadline:
+            time.sleep(CANCEL_CONFIRM_POLL_S)
+            raw = _safe_status(client, rec, order_id) or raw
+            if raw == "FILLED" or raw in _TERMINAL_STATUSES:
+                break
+        if raw == "FILLED":
+            return {"order_id": order_id, "status": "filled", "raw_status": raw,
+                    "message": "It filled before the cancel took. "
+                               "Run reconciliation to bring the app in line."}
+        if raw not in _TERMINAL_STATUSES:
+            return {"order_id": order_id, "status": "pending_cancel", "raw_status": raw}
+    # Terminal — close out any app submission this order was (or matches, if it never
+    # got an id), so the "unconfirmed" row clears instead of lingering.
+    syms = {(((leg.get("instrument") or {}).get("symbol")) or "").strip()
+            for leg in order.get("orderLegCollection") or []}
+    for ref, sub in log.list_order_submissions().items():
+        same = str(sub.get("order_id") or "") == order_id
+        orphan = (sub.get("status") == SUB_UNKNOWN and not sub.get("order_id") and
+                  {(sub.get("close_option_symbol") or "").strip(),
+                   (sub.get("open_option_symbol") or "").strip()} <= syms)
+        if same or orphan:
+            log.update_order_submission(ref, status=SUB_CANCELED, order_id=order_id,
+                                        detail="canceled at the broker by the operator")
+    log.append_order_journal({"event": "canceled_by_operator", "order_id": order_id,
+                              "raw_status": raw})
+    return {"order_id": order_id, "status": "canceled", "raw_status": raw}
+
+
 def _confirm_cancel(client, rec: dict, order_id: str) -> dict:
     """Confirm a just-issued cancel actually took before dropping the pending
     record. Schwab cancels asynchronously, so poll (bounded) until the order is
