@@ -1396,6 +1396,11 @@ ORDER_FILL_TIMEOUT_SEC = 45
 # in tests for an effectively mocked clock.
 CANCEL_POLL_INTERVAL_SEC = 0.4
 CANCEL_POLL_MAX_ATTEMPTS = 6
+# How long, after the DELETE is accepted, to wait for Schwab (asynchronous) to move
+# the order to a terminal state before reporting pending_cancel. Was interval x
+# attempts = 2.4s, which routinely expired before Schwab finished. A pending_cancel
+# is safe (record kept, lock blocks resubmit, sweep settles it) — just slow.
+CANCEL_CONFIRM_TIMEOUT_SEC = 10.0
 
 # PROPOSED_DEFAULT — how many times a NEW order may be submitted for the SAME
 # position intent within one app session (a place, cancel, and re-place counts as
