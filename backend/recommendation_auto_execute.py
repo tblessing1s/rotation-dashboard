@@ -21,7 +21,9 @@ that gate; this module does not assume it.
 """
 from __future__ import annotations
 
+import config
 import logging_handler as log
+import roll_advisor
 from rec_types import TriggerRule
 
 # Persisted like strike_policy's posture / circuit_breaker's auto-exit perms:
@@ -127,3 +129,67 @@ def resolve_live_expiration(ticker: str, from_expiration: str | None,
         return None
     weeklies = option_chain._weekly_expirations(contracts, count=3)
     return next((e for e in weeklies if e != from_expiration), None)
+
+
+def _mark(c: dict) -> float | None:
+    bid, ask = c.get("bid"), c.get("ask")
+    if bid is not None and ask is not None and bid > 0 and ask >= bid:
+        return (float(bid) + float(ask)) / 2.0
+    return None   # a one-sided / unquoted strike is never picked
+
+
+def pick_strike_in_juice_band(contracts: list[dict], expiration: str, spot: float | None,
+                              floor_strike: float, *, below_strike: float | None = None,
+                              low: float | None = None, high: float | None = None) -> dict | None:
+    """The strike an auto-roll sells: among this expiration's strikes AT OR BELOW
+    ``floor_strike`` (the regime/posture strike — never shallower than the policy
+    would sell) and, for a roll-down, strictly BELOW ``below_strike`` (the strike
+    being closed), the one whose weekly extrinsic (roll_advisor.juice_per_week, %
+    of spot per 7 days, mid-priced) is closest to [low, high]: inside the band wins
+    outright, else the nearest edge. Ties go to the deeper strike (more protective).
+    PURE. None when no priced candidate exists — the caller must then skip the roll
+    rather than fall back to an unchecked strike."""
+    low = config.AUTOPILOT_JUICE_LOW_PCT if low is None else low
+    high = config.AUTOPILOT_JUICE_HIGH_PCT if high is None else high
+    best = None
+    considered = 0
+    for c in contracts:
+        if c.get("expiration") != expiration or c.get("strike") is None:
+            continue
+        strike = float(c["strike"])
+        if strike > float(floor_strike) + 1e-9:
+            continue
+        if below_strike is not None and strike >= float(below_strike) - 1e-9:
+            continue
+        mark = _mark(c)
+        j = roll_advisor.juice_per_week(mark, strike, spot, c.get("dte"))
+        if j is None:
+            continue
+        considered += 1
+        dist = 0.0 if low <= j <= high else min(abs(j - low), abs(j - high))
+        key = (dist, strike)                      # nearer the band, then deeper
+        if best is None or key < best[0]:
+            best = (key, {"strike": strike, "juice_per_week_pct": round(j, 3),
+                          "in_band": dist == 0.0, "distance_from_band": round(dist, 3),
+                          "mark": round(mark, 2), "dte": c.get("dte")})
+    if best is None:
+        return None
+    return {**best[1], "band": [low, high], "considered": considered,
+            "regime_floor_strike": float(floor_strike)}
+
+
+def select_band_strike(ticker: str, payload: dict, rec: dict) -> dict | None:
+    """Live: read the chain for ``payload['to_expiration']`` and pick the new strike
+    by pick_strike_in_juice_band. A defend (DEFEND_*) roll must land BELOW the strike
+    it closes. None -> no usable strike (skip this pass)."""
+    import option_chain
+    import schwab_api
+    chain = option_chain._fetch_chain(ticker)
+    spot, contracts = schwab_api.parse_call_chain(chain)
+    if not spot or not contracts or payload.get("to_strike") is None:
+        return None
+    defend = rec.get("trigger_rule") in (TriggerRule.DEFEND_BELOW_STRIKE,
+                                         TriggerRule.DEFEND_APPROACHING_STRIKE)
+    return pick_strike_in_juice_band(
+        contracts, payload["to_expiration"], spot, float(payload["to_strike"]),
+        below_strike=payload.get("from_strike") if defend else None)

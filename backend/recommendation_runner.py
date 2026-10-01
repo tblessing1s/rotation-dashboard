@@ -765,6 +765,7 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
         if payload is None:
             continue
         ticker = rec.get("ticker")
+        band = None
         if executor.live_transmit():
             edte = auto_exec.emission_dte(rec, payload["from_strike"], payload["from_expiration"])
             if edte is None:
@@ -778,6 +779,18 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
             if not to_expiration:
                 continue
             payload["to_expiration"] = to_expiration
+            if config.AUTOPILOT_JUICE_BAND_ENABLED:
+                try:
+                    band = auto_exec.select_band_strike(ticker, payload, rec)
+                except Exception as e:  # noqa: BLE001 — no chain, no roll; retry next pass
+                    logger.warning("auto-roll strike selection failed for %s: %s", ticker, e)
+                    continue
+                if band is None:
+                    logger.warning("auto-roll for %s skipped: no priced strike at/below the "
+                                   "regime strike %s in %s", ticker, payload.get("to_strike"),
+                                   to_expiration)
+                    continue
+                payload["to_strike"] = band["strike"]
         try:
             outcome = executor.execute(payload, now=now)
         except Exception as e:  # noqa: BLE001 — one failed auto-roll must never sink the pass
@@ -785,6 +798,8 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
             outcome = {"success": False, "ticker": ticker, "error": str(e)}
         result = {"rec_id": rec.get("rec_id"), "ticker": ticker,
                   "trigger_rule": rule, **outcome}
+        if band:
+            result["strike_selection"] = band
         results.append(result)
         logger.info("roll/defend auto-execute: %s", result)
         if not outcome.get("success"):

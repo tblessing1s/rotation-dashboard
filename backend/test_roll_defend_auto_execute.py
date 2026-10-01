@@ -36,6 +36,8 @@ def store(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DEMO_STATE_PATH", str(tmp_path / "state.demo.json"))
     monkeypatch.setattr(config, "_demo_mode", False)
     monkeypatch.setattr(executor, "live_transmit", lambda: False)
+    # The weekly-extrinsic strike pick reads a live chain; it has its own tests below.
+    monkeypatch.setattr(config, "AUTOPILOT_JUICE_BAND_ENABLED", False)
     return tmp_path
 
 
@@ -392,3 +394,34 @@ def test_live_mode_skips_when_the_chain_has_no_matching_expiration(store, monkey
     results = runner._check_roll_defend_auto_execute(NOW, dry_run=True)
 
     assert results == [] and called == []
+
+
+# ===========================================================================
+# Live: the new strike comes from the 0.8-1%/wk extrinsic band.
+# ===========================================================================
+def _live_roll(monkeypatch, band):
+    monkeypatch.setattr(executor, "live_transmit", lambda: True)
+    monkeypatch.setattr(config, "AUTOPILOT_JUICE_BAND_ENABLED", True)
+    auto_exec.set_permission(TriggerRule.ROLL_SCHEDULED_WEEKLY, True)
+    _seed([_roll_rec("rec_1", "KO", TriggerRule.ROLL_SCHEDULED_WEEKLY,
+                     from_expiration="2026-09-11", to_dte=11, emission_dte=4)])
+    monkeypatch.setattr(auto_exec, "resolve_live_expiration", lambda *a: "2026-09-18")
+    monkeypatch.setattr(auto_exec, "select_band_strike", lambda *a: band)
+    calls = []
+    monkeypatch.setattr(executor, "execute",
+                        lambda payload, now=None: calls.append(payload) or {"success": True})
+    return calls
+
+
+def test_live_roll_uses_the_band_strike_and_records_the_selection(store, monkeypatch):
+    sel = {"strike": 61.5, "juice_per_week_pct": 0.92, "in_band": True}
+    calls = _live_roll(monkeypatch, sel)
+    results = runner._check_roll_defend_auto_execute(NOW, dry_run=True)
+    assert calls[0]["to_strike"] == 61.5
+    assert results[0]["strike_selection"] == sel
+
+
+def test_live_roll_is_skipped_when_no_priced_strike_is_available(store, monkeypatch):
+    calls = _live_roll(monkeypatch, None)
+    assert runner._check_roll_defend_auto_execute(NOW, dry_run=True) == []
+    assert calls == []

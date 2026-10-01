@@ -1138,6 +1138,18 @@ ROLL_EXTRINSIC_CAPTURED_PCT = ROLL_READY_DECAY_PCT
 # next weekly instead, for a full fresh week of extrinsic rather than a few
 # days' worth. See roll_advisor.roll_direction.
 ROLL_UP_SAME_WEEK_MIN_DTE = 3
+
+# TRAVIS_EXTENSION / PROPOSED_DEFAULT — the weekly-extrinsic target autopilot rolls toward:
+# the NEW short's extrinsic as a % of the stock price, normalised to a 7-day week (the
+# same number roll_advisor.juice_per_week shows in the Roll dialog). A live auto-roll
+# picks, among strikes at or BELOW the regime/posture strike (never shallower than the
+# policy would sell), the one whose weekly extrinsic is closest to this band — inside
+# it if any strike is; otherwise the nearest one. CFM_AUTOPILOT_JUICE_LOW/HIGH tune it;
+# CFM_AUTOPILOT_JUICE_BAND=0 disables the selection (the regime strike is used as-is).
+AUTOPILOT_JUICE_BAND_ENABLED = (os.environ.get("CFM_AUTOPILOT_JUICE_BAND", "1")
+                                .strip().lower() not in ("0", "false", "no"))
+AUTOPILOT_JUICE_LOW_PCT = float(os.environ.get("CFM_AUTOPILOT_JUICE_LOW") or 0.8)
+AUTOPILOT_JUICE_HIGH_PCT = float(os.environ.get("CFM_AUTOPILOT_JUICE_HIGH") or 1.0)
 # TRAVIS_EXTENSION / PROPOSED_DEFAULT — a brief intraday spike through
 # ROLL_EXTRINSIC_CAPTURED_PCT can revert before the next scheduled quote poll
 # ever samples it (POLL_T0_SECONDS), so nothing is ever observed to be >= the
