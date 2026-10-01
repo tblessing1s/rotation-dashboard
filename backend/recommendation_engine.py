@@ -531,7 +531,14 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
         # price via enrich_short.approaching_atm (hands off to DEFEND_BELOW_STRIKE
         # at the strike, never both). A roll that would not actually land BELOW the
         # current strike (the policy strike is not lower) is no defense — skipped.
-        if (es.get("approaching_atm") and TriggerRule.DEFEND_BELOW_STRIKE not in triggers
+        # A live drop THROUGH the strike while the last close is still above it is the
+        # same defense, one step further: DEFEND_BELOW_STRIKE waits for the close, so
+        # without this a gap down would sit unanswered until the close confirms.
+        crossed_live = (price is not None and last_close is not None
+                        and sc.get("strike") is not None
+                        and float(price) < float(sc["strike"]) <= float(last_close))
+        if ((es.get("approaching_atm") or crossed_live)
+                and TriggerRule.DEFEND_BELOW_STRIKE not in triggers
                 and TriggerRule.DEFEND_APPROACHING_STRIKE not in triggers):
             new_strike = _policy_strike(market, tk, price if price is not None else last_close)
             if (new_strike is not None and sc.get("strike") is not None
