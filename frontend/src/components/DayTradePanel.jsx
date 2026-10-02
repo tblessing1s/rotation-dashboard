@@ -813,6 +813,132 @@ function TradeLog({ trades }) {
   );
 }
 
+// Every DAYTRADE_* parameter in one place (backend/daytrade/params.py). The
+// replayable ones (the signal engine's rules, sizing and guardrails) are
+// editable: "Run what-if" replays the selected date's saved picks + bars with
+// your values next to the live ones. Nothing is saved or applied — it is a
+// zero-authority simulation; the live strategy keeps its configured values.
+function ParamInput({ p, value, onChange }) {
+  const changed = value !== "" && Number(value) !== Number(p.value);
+  return (
+    <label className="flex items-center justify-between gap-2 py-1" title={p.help}>
+      <span className="text-[11px] text-slate-300">{p.label}</span>
+      {p.replayable ? (
+        <input
+          type="number" step="any" value={value} placeholder={String(p.value)}
+          onChange={(e) => onChange(p.key, e.target.value)}
+          className={`w-24 rounded border bg-slate-900 px-1.5 py-0.5 text-right font-mono text-[11px] text-slate-200 ${
+            changed ? "border-sky-500" : "border-slate-700"}`}
+        />
+      ) : (
+        <span className="font-mono text-[11px] text-slate-500">{String(p.value)}</span>
+      )}
+    </label>
+  );
+}
+
+function WhatIfColumn({ title, res }) {
+  const s = res.summary;
+  return (
+    <div className="rounded border border-slate-800 bg-slate-950/40 p-2">
+      <div className="mb-1 text-[10px] uppercase tracking-wide text-slate-500">{title}</div>
+      <div className="grid grid-cols-2 gap-x-3 text-[11px] text-slate-300">
+        <span>Trades</span><span className="text-right font-mono">{s.trades}</span>
+        <span>Win/Loss</span><span className="text-right font-mono">{s.wins}/{s.losses}</span>
+        <span>Net R</span><span className={`text-right font-mono ${toneFor(s.net_r)}`}>{rMult(s.net_r)}</span>
+        <span>Net P&amp;L</span><span className={`text-right font-mono ${toneFor(s.net_pnl)}`}>{money(s.net_pnl)}</span>
+        <span>Skipped</span><span className="text-right font-mono">{s.skipped}</span>
+      </div>
+      {res.trades.length > 0 && (
+        <div className="mt-2 border-t border-slate-800 pt-1">
+          {res.trades.map((t) => (
+            <div key={t.trade_id} className="flex justify-between font-mono text-[10px] text-slate-400">
+              <span>{t.symbol} {t.direction} {t.entry.size}sh @{t.entry.price}</span>
+              <span className={toneFor(t.realized_r)}>{t.realized_r == null ? "open" : rMult(t.realized_r)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function StrategyParameters({ date }) {
+  const [open, setOpen] = React.useState(false);
+  const { data, error, reload } = useApi(() => api.daytradeParams(), [], null);
+  const [vals, setVals] = React.useState({});
+  const [busy, setBusy] = React.useState(false);
+  const [result, setResult] = React.useState(null);
+  const [err, setErr] = React.useState(null);
+
+  const params = data?.params || [];
+  const groups = [...new Set(params.map((p) => p.group))];
+  const overrides = Object.fromEntries(
+    params.filter((p) => p.replayable && vals[p.key] !== undefined && vals[p.key] !== "" && Number(vals[p.key]) !== Number(p.value))
+      .map((p) => [p.key, Number(vals[p.key])]));
+  const nChanged = Object.keys(overrides).length;
+
+  const run = async () => {
+    setBusy(true); setErr(null);
+    try { setResult(await api.daytradeWhatIf(date, overrides)); }
+    catch (e) { setErr(String(e.message || e)); setResult(null); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <section>
+      <button onClick={() => setOpen((o) => !o)}
+              className="mb-2 flex items-center gap-1.5 text-xs font-semibold text-slate-300 hover:text-slate-100">
+        <span className="text-slate-500">{open ? "▾" : "▸"}</span>
+        Strategy parameters &amp; what-if
+      </button>
+      {open && (
+        <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/40 p-3">
+          <p className="text-[11px] text-slate-500">
+            Edit any value and replay <span className="text-slate-300">{date}</span> to see what the
+            strategy would have done. This is a simulation only — nothing is saved and the live
+            settings don't change. Screener and schedule values are shown for reference (they decide
+            which names were picked and when, which a replay of a saved day can't redo).
+          </p>
+          {error && <ErrorState error={error} onRetry={reload} />}
+          <div className="grid gap-x-6 gap-y-3 sm:grid-cols-2 lg:grid-cols-3">
+            {groups.map((g) => (
+              <div key={g}>
+                <div className="mb-0.5 text-[10px] uppercase tracking-wide text-slate-500">{g}</div>
+                {params.filter((p) => p.group === g).map((p) => (
+                  <ParamInput key={p.key} p={p} value={vals[p.key] ?? ""}
+                              onChange={(k, v) => setVals((x) => ({ ...x, [k]: v }))} />
+                ))}
+              </div>
+            ))}
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={run} disabled={busy || !data}
+                    className="rounded border border-sky-700 bg-sky-500/10 px-2.5 py-1 text-xs font-semibold text-sky-300 hover:bg-sky-500/20 disabled:opacity-50">
+              {busy ? <Spinner size="h-3 w-3" /> : `Run what-if on ${date}`}
+            </button>
+            <button onClick={() => { setVals({}); setResult(null); }} disabled={!nChanged && !result}
+                    className="rounded border border-slate-700 px-2.5 py-1 text-xs text-slate-400 hover:text-slate-200 disabled:opacity-40">
+              Reset
+            </button>
+            <span className="text-[11px] text-slate-500">{nChanged} changed</span>
+            {err && <span className="text-[11px] text-rose-300">{err}</span>}
+          </div>
+          {result && !result.ran && (
+            <p className="text-[11px] text-amber-300">The screener hasn't run for {result.date}, so there's nothing to replay.</p>
+          )}
+          {result?.ran && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <WhatIfColumn title="Live settings" res={result.baseline} />
+              <WhatIfColumn title={`Your values (${Object.keys(result.overrides).length} changed)`} res={result.modified} />
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
 const REPORT_VIEWS = [["total", "Total"], ["year", "Yearly"], ["month", "Monthly"],
   ["week", "Weekly"], ["day", "Daily"]];
 
@@ -1095,6 +1221,8 @@ export default function DayTradePanel() {
             <ScreenCoverage universe={data.universe} />
 
             <TickerRoster />
+
+            <StrategyParameters date={date} />
 
             <section>
               <h4 className="mb-2 text-xs font-semibold text-slate-300">

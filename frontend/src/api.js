@@ -187,6 +187,11 @@ export const api = {
   // N/day") — reads the live value instead of a hardcoded string that a
   // config change could silently leave lying. SHARED, like the above.
   daytradeConfig: () => request("/api/daytrade/config"),
+  // Every DAYTRADE_* parameter + a write-nothing what-if replay of a saved
+  // day with some overridden (backend/daytrade/params.py, whatif.py).
+  daytradeParams: () => request("/api/daytrade/params"),
+  daytradeWhatIf: (date, overrides) =>
+    request("/api/daytrade/whatif", { method: "POST", body: JSON.stringify({ date, overrides }) }),
   daytradeSignals: (date, symbol) => {
     const q = new URLSearchParams();
     if (date) q.set("date", date);

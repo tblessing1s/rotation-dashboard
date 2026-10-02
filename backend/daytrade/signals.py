@@ -76,6 +76,7 @@ from zoneinfo import ZoneInfo
 import config
 
 from daytrade import adapters, store
+from daytrade.params import P
 
 logger = logging.getLogger("cfm.daytrade")
 
@@ -101,7 +102,7 @@ def _setup_direction(bar: dict, prior_high: float, prior_low: float,
                       avg_volume: float | None) -> str | None:
     if avg_volume is None or avg_volume <= 0:
         return None
-    if bar["volume"] < avg_volume * config.DAYTRADE_SETUP_VOLUME_MULT:
+    if bar["volume"] < avg_volume * P.DAYTRADE_SETUP_VOLUME_MULT:
         return None
     if bar["close"] > prior_high:
         return "long"
@@ -127,7 +128,7 @@ class _Symbol:
         self.prior_high = prior_high
         self.prior_low = prior_low
         self.atr14 = atr14
-        self.risk_per_share = (atr14 / config.DAYTRADE_STOP_ATR_DIVISOR) if atr14 else None
+        self.risk_per_share = (atr14 / P.DAYTRADE_STOP_ATR_DIVISOR) if atr14 else None
         self.seen_volumes: list[float] = []
         self.status = "watching"
         self.direction = None
@@ -164,7 +165,7 @@ class _Day:
             return "paper trial complete — no new entries"
         if self.stopped_reason:
             return self.stopped_reason
-        if self.trades_taken >= config.DAYTRADE_MAX_TRADES_PER_DAY:
+        if self.trades_taken >= P.DAYTRADE_MAX_TRADES_PER_DAY:
             return "max trades/day reached"
         return None
 
@@ -172,10 +173,10 @@ class _Day:
         self.cumulative_r += net_r
         if net_r < 0:
             self.losses += 1
-        if self.losses >= config.DAYTRADE_MAX_LOSSES_PER_DAY:
+        if self.losses >= P.DAYTRADE_MAX_LOSSES_PER_DAY:
             self.stopped_reason = "two losing trades"
-        elif self.cumulative_r >= config.DAYTRADE_DAILY_STOP_R:
-            self.stopped_reason = f"+{config.DAYTRADE_DAILY_STOP_R:g}R reached"
+        elif self.cumulative_r >= P.DAYTRADE_DAILY_STOP_R:
+            self.stopped_reason = f"+{P.DAYTRADE_DAILY_STOP_R:g}R reached"
 
 
 def _event(day: str, symbol: str, event: str, at: str, **extra) -> dict:
@@ -198,14 +199,14 @@ def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict,
                       direction=sym.direction, reason=reason, trade_id=sym.trade_id)
     requested_entry = sym.setup_high if sym.direction == "long" else sym.setup_low
     risk_per_share = sym.risk_per_share
-    risk_amount = day_state.account_equity * (config.DAYTRADE_RISK_PCT / 100.0)
+    risk_amount = day_state.account_equity * (P.DAYTRADE_RISK_PCT / 100.0)
     risk_based_size = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
-    # Cap capital too, not just risk (config.DAYTRADE_MAX_POSITION_PCT per
+    # Cap capital too, not just risk (P.DAYTRADE_MAX_POSITION_PCT per
     # trade, DAYTRADE_MAX_DAILY_DEPLOY_PCT across the day's entries) — this
     # only ever pulls the size DOWN from the risk-based figure.
-    notional_cap = day_state.account_equity * (config.DAYTRADE_MAX_POSITION_PCT / 100.0)
+    notional_cap = day_state.account_equity * (P.DAYTRADE_MAX_POSITION_PCT / 100.0)
     notional_based_size = int(notional_cap // requested_entry) if requested_entry > 0 else 0
-    daily_room = day_state.account_equity * (config.DAYTRADE_MAX_DAILY_DEPLOY_PCT / 100.0) - day_state.deployed
+    daily_room = day_state.account_equity * (P.DAYTRADE_MAX_DAILY_DEPLOY_PCT / 100.0) - day_state.deployed
     daily_based_size = int(daily_room // requested_entry) if requested_entry > 0 and daily_room > 0 else 0
     requested_size = min(risk_based_size, notional_based_size, daily_based_size)
     if requested_size <= 0:
@@ -223,9 +224,9 @@ def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict,
     entry, size = fill.price, fill.size
     day_state.deployed += entry * size
     stop = entry - risk_per_share if sym.direction == "long" else entry + risk_per_share
-    target1 = entry + risk_per_share if sym.direction == "long" else entry - risk_per_share
-    target2 = (entry + 2 * risk_per_share if sym.direction == "long"
-               else entry - 2 * risk_per_share)
+    t1, t2 = P.DAYTRADE_HALF_TARGET_R * risk_per_share, P.DAYTRADE_FULL_TARGET_R * risk_per_share
+    target1 = entry + t1 if sym.direction == "long" else entry - t1
+    target2 = entry + t2 if sym.direction == "long" else entry - t2
 
     sym.status = "in_trade"
     sym.entry, sym.stop, sym.target1, sym.target2 = entry, stop, target1, target2
@@ -262,10 +263,10 @@ def _advance_trail(sym: _Symbol, bar: dict) -> bool:
         sym.hwm = max(sym.hwm, extreme) if long else min(sym.hwm, extreme)
     risk = sym.risk_per_share
     gain_r = ((sym.hwm - sym.entry) if long else (sym.entry - sym.hwm)) / risk
-    newly = not sym.tight and gain_r >= config.DAYTRADE_FULL_TARGET_R
+    newly = not sym.tight and gain_r >= P.DAYTRADE_FULL_TARGET_R
     if newly:
         sym.tight = True
-    dist = (config.DAYTRADE_TRAIL_TIGHT_R if sym.tight else config.DAYTRADE_TRAIL_LOOSE_R) * risk
+    dist = (P.DAYTRADE_TRAIL_TIGHT_R if sym.tight else P.DAYTRADE_TRAIL_LOOSE_R) * risk
     cand = sym.hwm - dist if long else sym.hwm + dist
     sym.stop = max(sym.stop, cand, sym.entry) if long else min(sym.stop, cand, sym.entry)
     return newly
@@ -292,13 +293,13 @@ def _resolve_trade(sym: _Symbol, day_state: _Day, bar: dict,
         target1_hit = bar["high"] >= sym.target1 if long else bar["low"] <= sym.target1
         if target1_hit:
             price = _exit_fill(adapter, sym, bar, "half_target", sym.target1, half_size,
-                               config.DAYTRADE_HALF_TARGET_R)
+                               P.DAYTRADE_HALF_TARGET_R)
             sym.half_taken = True
             sym.half_at = bar["datetime"]
             sym.stop = sym.entry  # breakeven floor, rule 6 — the trail only ratchets up from here
             events.append(_event(bar["date"], bar["symbol"], "half_target", bar["datetime"],
                                   direction=sym.direction, price=round(price, 4),
-                                  r=config.DAYTRADE_HALF_TARGET_R, stop=round(sym.stop, 4),
+                                  r=P.DAYTRADE_HALF_TARGET_R, stop=round(sym.stop, 4),
                                   trade_id=sym.trade_id))
             # fall through: the same bar can also resolve the remainder below
         else:
@@ -313,7 +314,7 @@ def _resolve_trade(sym: _Symbol, day_state: _Day, bar: dict,
         # A gap through the stop fills at the open, not the stop.
         fill_at = min(sym.stop, bar["open"]) if long else max(sym.stop, bar["open"])
         remainder_r = ((fill_at - sym.entry) if long else (sym.entry - fill_at)) / sym.risk_per_share
-        net_r = round(0.5 * config.DAYTRADE_HALF_TARGET_R + 0.5 * remainder_r, 4)
+        net_r = round(0.5 * P.DAYTRADE_HALF_TARGET_R + 0.5 * remainder_r, 4)
         kind = "trail_stop" if sym.stop != sym.entry else "breakeven_exit"
         price = _exit_fill(adapter, sym, bar, kind, fill_at, remainder_size, net_r)
         day_state.record_trade_result(net_r)
@@ -325,7 +326,7 @@ def _resolve_trade(sym: _Symbol, day_state: _Day, bar: dict,
     if _advance_trail(sym, bar):
         events.append(_event(bar["date"], bar["symbol"], "trail_tighten", bar["datetime"],
                               direction=sym.direction, stop=round(sym.stop, 4),
-                              trail_r=config.DAYTRADE_TRAIL_TIGHT_R, trade_id=sym.trade_id))
+                              trail_r=P.DAYTRADE_TRAIL_TIGHT_R, trade_id=sym.trade_id))
     sym.last_bar = bar
     return events
 
@@ -362,7 +363,7 @@ def _process_bar(sym: _Symbol, day_state: _Day, bar: dict, day: str,
             ev = _enter_trade(sym, day_state, bar, adapter)
             if ev:
                 events.append(ev)
-        elif sym.candles_waited >= config.DAYTRADE_ENTRY_EXPIRY_CANDLES:
+        elif sym.candles_waited >= P.DAYTRADE_ENTRY_EXPIRY_CANDLES:
             events.append(_event(day, bar["symbol"], "expired", bar["datetime"],
                                   direction=sym.direction, trade_id=sym.trade_id))
             sym.status = "watching"
@@ -389,7 +390,7 @@ def _finalize_open_trades(symbols: dict[str, _Symbol], day_state: _Day, day: str
         size = sym.size - sym.size // 2 if sym.half_taken else sym.size
         if sym.half_taken:
             remainder_r = ((close - sym.entry) if long else (sym.entry - close)) / sym.risk_per_share
-            net_r = 0.5 * config.DAYTRADE_HALF_TARGET_R + 0.5 * remainder_r
+            net_r = 0.5 * P.DAYTRADE_HALF_TARGET_R + 0.5 * remainder_r
         else:
             net_r = ((close - sym.entry) if long else (sym.entry - close)) / sym.risk_per_share
         price = _exit_fill(adapter, sym, sym.last_bar, "time_cutoff", close, size, round(net_r, 4))
@@ -490,7 +491,7 @@ def _restore_trail(symbols: dict[str, _Symbol], bars: list[dict], resume_at: dic
 def run_day(day: str, account_id: str, now: datetime | None = None,
             account_equity: float | None = None,
             adapter: adapters.ExecutionAdapter | None = None,
-            entries_enabled: bool = True) -> dict:
+            entries_enabled: bool = True, persist: bool = True) -> dict:
     """Replay one trading day's bars through ONE ACCOUNT's signal engine and
     journal any new events for it. Idempotent: safe to call repeatedly as
     bars keep arriving (Phase 1's scheduler does, every
@@ -504,10 +505,12 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
     has hit its target) blocks every NEW setup/entry for the day but still
     resolves any trade already open — see _Day.block_reason and, for how
     "already open" survives a gate flip between calls, ``_rehydrate``.
+    ``persist=False`` is the what-if mode (daytrade/whatif.py): ignore the
+    journal, write nothing, return only what this replay produced.
     Returns ``{"date", "events"}`` — every event journaled for this account
     today, oldest first."""
     now = now or datetime.now(ET)
-    account_equity = config.DAYTRADE_ACCOUNT_EQUITY if account_equity is None else account_equity
+    account_equity = P.DAYTRADE_ACCOUNT_EQUITY if account_equity is None else account_equity
     adapter = adapter if adapter is not None else adapters.get_adapter(day, account_id)
 
     screen = store.load_screen(day)
@@ -521,7 +524,7 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
     if not symbols:
         return {"date": day, "events": []}
 
-    existing = store.load_signals(day, account_id)
+    existing = store.load_signals(day, account_id) if persist else []
     day_state = _Day(account_equity, entries_enabled=entries_enabled)
     resume_at = _rehydrate(existing, symbols, day_state)
 
@@ -539,7 +542,7 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
         sym = symbols[symbol]
         new_events.extend(_process_bar(sym, day_state, bar, day, adapter))
 
-    window_over = now.strftime("%H:%M") >= config.DAYTRADE_WINDOW_END_ET
+    window_over = now.strftime("%H:%M") >= P.DAYTRADE_WINDOW_END_ET
     if window_over:
         new_events.extend(_finalize_open_trades(symbols, day_state, day, adapter))
 
@@ -547,7 +550,7 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
 
     existing_ids = {e.get("id") for e in existing}
     to_write = [e for e in new_events if e["id"] not in existing_ids]
-    if to_write:
+    if to_write and persist:
         store.append_signals(day, account_id, to_write)
         logger.info("daytrade signals: %d new event(s) journaled for %s (account %s)",
                     len(to_write), day, account_id)

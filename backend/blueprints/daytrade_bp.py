@@ -89,6 +89,31 @@ def api_daytrade_config():
     })
 
 
+@daytrade_bp.route("/api/daytrade/params")
+def api_daytrade_params():
+    """Every DAYTRADE_* parameter with its current value, grouped for the UI.
+    `replayable` ones can be overridden in /whatif; the rest (screener,
+    schedule) are shown for reference. SHARED, like /config."""
+    from daytrade import params
+    return jsonify({"params": params.catalog()})
+
+
+@daytrade_bp.route("/api/daytrade/whatif", methods=["POST"])
+def api_daytrade_whatif():
+    """Replay a saved day's picks + bars with some parameters overridden and
+    compare against the live values. Writes nothing (daytrade/whatif.py)."""
+    try:
+        from datetime import datetime
+        from daytrade import whatif
+        payload = request.get_json(silent=True) or {}
+        day = payload.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
+        return jsonify(whatif.compare(day, payload.get("overrides") or {}))
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @daytrade_bp.route("/api/daytrade/bars/<symbol>")
 def api_daytrade_bars(symbol: str):
     """Phase 1 read-only view of the day-trade sleeve's ingested 5-min bars
