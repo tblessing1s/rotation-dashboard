@@ -430,6 +430,11 @@ export const api = {
     }),
   // Master autopilot switch — on/off for every unattended action, grants untouched.
   getAutopilot: () => request("/api/autopilot"),
+  // The adjustable parameters behind the autopilot pop-up (values, defaults, ranges,
+  // posture, armed triggers, fixed rules). Saving never turns autopilot on or off.
+  getAutopilotParams: () => request("/api/autopilot/params"),
+  saveAutopilotParams: (body) =>
+    request("/api/autopilot/params", { method: "POST", body: JSON.stringify(body) }),
   setAutopilot: (on) =>
     request("/api/autopilot", { method: "POST", body: JSON.stringify({ on }) }),
   // Roll/defend auto-execute permission — per trigger rule (ROLL_SCHEDULED_WEEKLY /

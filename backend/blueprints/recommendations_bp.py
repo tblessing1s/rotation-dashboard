@@ -132,6 +132,31 @@ def api_autopilot():
         return _err(e)
 
 
+@recommendations_bp.route("/api/autopilot/params", methods=["GET", "POST"])
+def api_autopilot_params():
+    """The adjustable autopilot parameters (autopilot_params.py). GET -> every
+    parameter with its value / default / range, the strike posture, the armed
+    triggers and the fixed rules (what the "turn autopilot on" pop-up shows).
+    POST {values: {...}, posture?: "conservative"|"aggressive", reset?: true} saves
+    them for THIS book. It never turns autopilot on or off."""
+    import autopilot_params
+    try:
+        if request.method == "POST":
+            payload = request.get_json(silent=True) or {}
+            if payload.get("reset"):
+                autopilot_params.reset()
+            if payload.get("values"):
+                autopilot_params.set_params(payload["values"])
+            if payload.get("posture"):
+                import strike_policy
+                strike_policy.set_posture(payload["posture"])
+        return jsonify(autopilot_params.describe())
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @recommendations_bp.route("/api/recommendations/run", methods=["POST"])
 def api_recommendations_run():
     """Force one evaluation pass now (the scheduled slots call the same code)."""

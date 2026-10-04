@@ -178,7 +178,8 @@ def pick_strike_in_juice_band(contracts: list[dict], expiration: str, spot: floa
             "regime_floor_strike": float(floor_strike)}
 
 
-def select_band_strike(ticker: str, payload: dict, rec: dict) -> dict | None:
+def select_band_strike(ticker: str, payload: dict, rec: dict,
+                       low: float | None = None, high: float | None = None) -> dict | None:
     """Live: read the chain for ``payload['to_expiration']`` and pick the new strike
     by pick_strike_in_juice_band. A defend (DEFEND_*) roll must land BELOW the strike
     it closes. None -> no usable strike (skip this pass)."""
@@ -192,4 +193,4 @@ def select_band_strike(ticker: str, payload: dict, rec: dict) -> dict | None:
                                          TriggerRule.DEFEND_APPROACHING_STRIKE)
     return pick_strike_in_juice_band(
         contracts, payload["to_expiration"], spot, float(payload["to_strike"]),
-        below_strike=payload.get("from_strike") if defend else None)
+        below_strike=payload.get("from_strike") if defend else None, low=low, high=high)

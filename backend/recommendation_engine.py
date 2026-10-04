@@ -39,6 +39,7 @@ import indicators
 import kill_switch
 import position_manager
 import roll_advisor
+import autopilot_params
 import strike_policy
 import units
 from rec_types import ActionType, TriggerRule
@@ -453,7 +454,8 @@ def _first_rs_negative(bars, bench_bars, lookback: int) -> str | None:
 # ---------------------------------------------------------------------------
 # Per-position trigger evaluation
 # ---------------------------------------------------------------------------
-def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
+def _evaluate_position(position: dict, market: dict, now: datetime,
+                       params: dict | None = None) -> dict:
     """Run every trigger rule for one open position off frozen inputs. Returns
     {triggers: {rule: detail}, features: {...}} — emission policy is applied by
     evaluate() on top of this."""
@@ -461,6 +463,8 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
     tk = _tk(market, t)
     q = tk.get("q") or 0.0
     today = now.date()
+    # The operator's autopilot parameters (defaults from config when none were saved).
+    params = params or autopilot_params.resolve({})
     price = tk.get("price")
     last_close = tk.get("last_close")
     triggers: dict[str, dict] = {}
@@ -479,7 +483,11 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
     # `nearest_trigger` rides along in the snapshot (not just status/headline)
     # because it is what recommendation_runner's auto-exit path acts on —
     # whichever level is closest to price, not a fixed priority order.
-    cb = circuit_breaker.evaluate(position, df=tk.get("bars"), live_price=price) if tk.get("bars") is not None else None
+    cb = circuit_breaker.evaluate(
+        position, df=tk.get("bars"), live_price=price,
+        drop_fraction=params["cb_drop_pct"] / 100.0,
+        ma_fast_closes=params["cb_ma_fast_closes"],
+        live_first_level=params["cb_live_first_level"]) if tk.get("bars") is not None else None
     if cb and cb.get("tripped"):
         triggers[TriggerRule.CIRCUIT_BREAKER] = {
             "circuit_breaker": {k: cb.get(k) for k in
@@ -537,7 +545,11 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
         crossed_live = (price is not None and last_close is not None
                         and sc.get("strike") is not None
                         and float(price) < float(sc["strike"]) <= float(last_close))
-        if ((es.get("approaching_atm") or crossed_live)
+        dist_pct = es.get("strike_distance_pct")
+        approaching = bool(price is not None and sc.get("strike") is not None
+                           and float(price) >= float(sc["strike"]) and dist_pct is not None
+                           and dist_pct <= params["near_strike_band_pct"])
+        if ((approaching or crossed_live)
                 and TriggerRule.DEFEND_BELOW_STRIKE not in triggers
                 and TriggerRule.DEFEND_APPROACHING_STRIKE not in triggers):
             new_strike = _policy_strike(market, tk, price if price is not None else last_close)
@@ -546,7 +558,7 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
                 triggers[TriggerRule.DEFEND_APPROACHING_STRIKE] = {
                     "short": key, "price": price, "dte": sc.get("dte"),
                     "distance_pct": es.get("strike_distance_pct"),
-                    "threshold_pct": config.SHORT_ATM_APPROACH_PCT,
+                    "threshold_pct": params["near_strike_band_pct"],
                     "new_strike": new_strike,
                 }
         earn = tk.get("earnings") or {}
@@ -573,15 +585,15 @@ def _evaluate_position(position: dict, market: dict, now: datetime) -> dict:
         # roll_advisor.roll_direction, off this trigger's own dte.
         captured = es.get("extrinsic_captured_pct")
         if (captured is not None and dte is not None and int(dte) >= 1
-                and float(captured) >= config.ROLL_EXTRINSIC_CAPTURED_PCT
+                and float(captured) >= params["extrinsic_capture_pct"]
                 and TriggerRule.ROLL_EXTRINSIC_CAPTURED not in triggers):
             triggers[TriggerRule.ROLL_EXTRINSIC_CAPTURED] = {
                 "short": key, "dte": dte,
                 "extrinsic_captured_pct": captured,
-                "threshold_pct": config.ROLL_EXTRINSIC_CAPTURED_PCT,
+                "threshold_pct": params["extrinsic_capture_pct"],
                 "entry_extrinsic_per_share": es.get("entry_extrinsic_per_share"),
                 "current_extrinsic_per_share": es.get("current_extrinsic_per_share"),
-                "roll_up_same_week_min_dte": config.ROLL_UP_SAME_WEEK_MIN_DTE,
+                "roll_up_same_week_min_dte": params["same_week_min_dte"],
             }
 
     features = {
@@ -643,10 +655,11 @@ _ROLL_REASON = {
 
 def _build_action_rec(position: dict, market: dict, now: datetime,
                       rule: str, action_type: str, triggers: dict,
-                      features: dict) -> dict:
+                      features: dict, params: dict | None = None) -> dict:
     t = position.get("ticker", "")
     tk = _tk(market, t)
     q = tk.get("q") or 0.0
+    params = params or autopilot_params.resolve({})
     detail = triggers[rule]
     if action_type == ActionType.EXIT:
         code = detail.get("exit_reason_code") or _KILL_EXIT_CODE.get(rule)
@@ -679,7 +692,7 @@ def _build_action_rec(position: dict, market: dict, now: datetime,
             # the fresh higher strike in place (ROLL_UP), or whether it's late
             # enough to skip straight to next week's full extrinsic instead
             # (ROLL_UP_AND_OUT) — see config.ROLL_UP_SAME_WEEK_MIN_DTE.
-            rd = roll_advisor.roll_direction(dte)
+            rd = roll_advisor.roll_direction(dte, params["same_week_min_dte"])
             roll_direction = rd["direction"]
             if roll_direction == "ROLL_UP_AND_OUT":
                 roll_dte = (int(dte) if dte else 0) + 7
@@ -689,7 +702,7 @@ def _build_action_rec(position: dict, market: dict, now: datetime,
             # Same runway rule as the extrinsic-captured roll, mirrored downward:
             # enough of this week left -> roll DOWN in place; otherwise roll DOWN
             # AND OUT to the next weekly (config.ROLL_UP_SAME_WEEK_MIN_DTE).
-            out_ = roll_advisor.roll_direction(dte)["direction"] == "ROLL_UP_AND_OUT"
+            out_ = roll_advisor.roll_direction(dte, params["same_week_min_dte"])["direction"] == "ROLL_UP_AND_OUT"
             roll_direction = "ROLL_DOWN_AND_OUT" if out_ else "ROLL_DOWN"
             roll_dte = (int(dte) if dte else 0) + 7 if out_ else (int(dte) if dte else 5)
         elif rule in (TriggerRule.ROLL_75PCT, TriggerRule.ROLL_SCHEDULED_WEEKLY,
@@ -847,10 +860,11 @@ def evaluate(market: dict, state: dict, now: datetime,
     positions = [p for p in state.get("positions", []) if p.get("status") != "closed"]
     market = dict(market)
     market.setdefault("roll_ledger", (state.get("roll_ledger") or {}).get("rolls", []))
+    params = autopilot_params.resolve(state)
 
     for p in positions:
         t = p.get("ticker", "")
-        evald = _evaluate_position(p, market, now)
+        evald = _evaluate_position(p, market, now, params)
         triggers, features = evald["triggers"], evald["features"]
         dom = _dominant(triggers)
         existing = open_by_pos.get(t, [])
@@ -859,7 +873,7 @@ def evaluate(market: dict, state: dict, now: datetime,
 
         if dom:
             rule, action_type = dom
-            rec = _build_action_rec(p, market, now, rule, action_type, triggers, features)
+            rec = _build_action_rec(p, market, now, rule, action_type, triggers, features, params)
             same = [r for r in existing_actions
                     if r.get("action_type") == action_type and r.get("trigger_rule") == rule
                     and _same_proposal(r.get("proposed_ticket"), rec["proposed_ticket"])]

@@ -756,6 +756,8 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
     perms = auto_exec.get_permissions(state)
     if not any(perms.values()):
         return []
+    import autopilot_params
+    ap = autopilot_params.resolve(state)
     results = []
     for rec in trust_derive.open_recommendations(state, now):
         rule = rec.get("trigger_rule")
@@ -781,7 +783,8 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
             payload["to_expiration"] = to_expiration
             if config.AUTOPILOT_JUICE_BAND_ENABLED:
                 try:
-                    band = auto_exec.select_band_strike(ticker, payload, rec)
+                    band = auto_exec.select_band_strike(
+                        ticker, payload, rec, low=ap["juice_low_pct"], high=ap["juice_high_pct"])
                 except Exception as e:  # noqa: BLE001 — no chain, no roll; retry next pass
                     logger.warning("auto-roll strike selection failed for %s: %s", ticker, e)
                     continue

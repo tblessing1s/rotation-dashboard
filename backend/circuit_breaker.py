@@ -75,7 +75,9 @@ def entry_price(position: dict) -> float | None:
     return float(ep) if ep is not None else None
 
 
-def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
+def evaluate(position: dict, df=None, live_price: float | None = None, *,
+             drop_fraction: float | None = None, ma_fast_closes: int | None = None,
+             live_first_level: bool | None = None) -> dict:
     """Evaluate every circuit-breaker condition for one position.
 
     ``df`` (daily OHLCV) is loaded from the cache when not supplied, so this
@@ -91,6 +93,12 @@ def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
     level is promoted; the others keep their own rules. Callers that pass no live price get the close-confirmed verdict.
     """
     ticker = position.get("ticker", "")
+    # Operator-tuned values (autopilot_params) arrive as kwargs; None -> the config default.
+    drop_frac = config.CIRCUIT_BREAKER_DROP_PCT if drop_fraction is None else drop_fraction
+    fast_closes = (config.CIRCUIT_BREAKER_MA_FAST_CLOSES if ma_fast_closes is None
+                   else ma_fast_closes)
+    live_first = (config.CIRCUIT_BREAKER_FIRST_LEVEL_LIVE if live_first_level is None
+                  else live_first_level)
     if df is None:
         df = data_handler.get_daily(ticker)
     price = indicators.last(df)
@@ -107,11 +115,11 @@ def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
     # not off `entry` directly.
     high_water = (indicators.high_close_since(df, position.get("entry_date"))
                  if entry is not None else None)
-    drop_line = _round(high_water * (1 - config.CIRCUIT_BREAKER_DROP_PCT)) if high_water else None
+    drop_line = _round(high_water * (1 - drop_frac)) if high_water else None
     drop_pct = _round((price - high_water) / high_water * 100) if high_water and price is not None else None
     drawdown = {
         "id": "drawdown",
-        "label": f"{config.CIRCUIT_BREAKER_DROP_PCT * 100:g}% drop from the high since entry",
+        "label": f"{drop_frac * 100:g}% drop from the high since entry",
         "tripped": bool(drop_line is not None and price is not None and price <= drop_line),
         "detail": {"entry_price": _round(entry), "high_since_entry": _round(high_water),
                    "line": drop_line, "price": _round(price), "change_pct": drop_pct},
@@ -122,11 +130,11 @@ def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
     ma_fast_value = indicators.sma(df, config.CIRCUIT_BREAKER_MA_FAST)
     fast = {
         "id": "ma_fast",
-        "label": (f"{config.CIRCUIT_BREAKER_MA_FAST_CLOSES} closes below the "
+        "label": (f"{fast_closes} closes below the "
                   f"{config.CIRCUIT_BREAKER_MA_FAST}-day MA"),
-        "tripped": bool(below is not None and below >= config.CIRCUIT_BREAKER_MA_FAST_CLOSES),
+        "tripped": bool(below is not None and below >= fast_closes),
         "detail": {"consecutive_closes_below": below,
-                   "threshold": config.CIRCUIT_BREAKER_MA_FAST_CLOSES,
+                   "threshold": fast_closes,
                    "price": _round(price), "ma": _round(ma_fast_value)},
     }
 
@@ -177,7 +185,7 @@ def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
     # consecutive CLOSES below it, never on a live print.
     live_ids = [i for i in levels if i != fast["id"]]
     live_id = max(live_ids, key=levels.get) if live_ids else None
-    if (config.CIRCUIT_BREAKER_FIRST_LEVEL_LIVE and live_price is not None
+    if (live_first and live_price is not None
             and live_id is not None and float(live_price) <= levels[live_id]):
         first = by_id[live_id]
         first["tripped"] = True
@@ -198,7 +206,7 @@ def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
         if below is not None and below >= 1:
             approaching.append(fast["id"])
         if (drop_pct is not None
-                and drop_pct <= -config.CIRCUIT_BREAKER_DROP_PCT * 100 * (2 / 3)):
+                and drop_pct <= -drop_frac * 100 * (2 / 3)):
             approaching.append(drawdown["id"])
 
     status = "red" if tripped else ("yellow" if approaching else "green")
@@ -209,11 +217,11 @@ def evaluate(position: dict, df=None, live_price: float | None = None) -> dict:
     elif approaching:
         warn_bits = []
         if fast["id"] in approaching and below is not None:
-            warn_bits.append(f"{below} of {config.CIRCUIT_BREAKER_MA_FAST_CLOSES} closes "
+            warn_bits.append(f"{below} of {fast_closes} closes "
                              f"below the {config.CIRCUIT_BREAKER_MA_FAST}-day MA")
         if drawdown["id"] in approaching and drop_pct is not None:
             warn_bits.append(f"{abs(drop_pct):g}% off the high (trips at "
-                             f"{config.CIRCUIT_BREAKER_DROP_PCT * 100:g}%)")
+                             f"{drop_frac * 100:g}%)")
         headline = ("circuit breaker warning — " + "; ".join(warn_bits) if warn_bits
                    else "approaching the circuit breaker")
         action = (f"Watch {ticker} — " + " and ".join(warn_bits) + "." if warn_bits

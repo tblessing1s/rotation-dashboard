@@ -78,7 +78,9 @@ def detect_signals(state: dict, quotes: dict, today=None) -> dict[str, set[str]]
     """
     import earnings as earnings_mod
     import option_marks
+    import autopilot_params
     import position_manager
+    params = autopilot_params.resolve(state)
     out: dict[str, set[str]] = {}
     for pos in state.get("positions", []) or []:
         if pos.get("status") == "closed":
@@ -107,12 +109,14 @@ def detect_signals(state: dict, quotes: dict, today=None) -> dict[str, set[str]]
                 continue
             if es.get("roll_now"):
                 sig.add(ROLL_75)
-            if es.get("approaching_atm"):
+            dist = es.get("strike_distance_pct")
+            if (dist is not None and float(price) >= float(sc.get("strike") or 0)
+                    and dist <= params["near_strike_band_pct"]):
                 sig.add(APPROACH_STRIKE)
             captured = es.get("extrinsic_captured_pct")
             dte = sc.get("dte")
             if (captured is not None and dte is not None and int(dte) >= 1
-                    and float(captured) >= config.ROLL_EXTRINSIC_CAPTURED_PCT):
+                    and float(captured) >= params["extrinsic_capture_pct"]):
                 sig.add(EXTRINSIC_CAPTURED)
             ar = es.get("assignment_risk")
             if ar:
