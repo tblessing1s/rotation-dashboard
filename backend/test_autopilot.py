@@ -124,3 +124,85 @@ def test_live_drop_through_the_strike_before_the_close_still_defends():
     rec = engine.evaluate(_market({"AAPL": tk}), _state([p]), NOW, [])[0]
     assert rec["trigger_rule"] == TriggerRule.DEFEND_APPROACHING_STRIKE
     assert rec["proposed_ticket"]["legs"][1]["strike"] < 180.0
+
+
+# ---- operator-adjustable parameters ------------------------------------------
+import pytest  # noqa: E402
+
+import autopilot_params as ap  # noqa: E402
+
+
+@pytest.fixture()
+def book(tmp_path, monkeypatch):
+    import config
+    monkeypatch.setattr(config, "STATE_PATH", str(tmp_path / "state.json"))
+    monkeypatch.setattr(config, "_demo_mode", False)
+    return tmp_path
+
+
+def test_params_default_to_the_config_values(book):
+    import config
+    p = ap.resolve()
+    assert p["extrinsic_capture_pct"] == config.ROLL_EXTRINSIC_CAPTURED_PCT
+    assert p["near_strike_band_pct"] == config.SHORT_ATM_APPROACH_PCT
+    assert p["cb_drop_pct"] == round(config.CIRCUIT_BREAKER_DROP_PCT * 100, 4)
+    assert (p["juice_low_pct"], p["juice_high_pct"]) == (0.8, 1.0)
+
+
+def test_saved_params_override_and_reset(book):
+    ap.set_params({"extrinsic_capture_pct": 85, "cb_ma_fast_closes": 2})
+    p = ap.resolve()
+    assert p["extrinsic_capture_pct"] == 85 and p["cb_ma_fast_closes"] == 2
+    assert ap.reset()["extrinsic_capture_pct"] == 80.0
+
+
+@pytest.mark.parametrize("bad", [
+    {"nope": 1}, {"extrinsic_capture_pct": 10}, {"cb_ma_fast_closes": 2.5},
+    {"cb_live_first_level": "yes"}, {"juice_low_pct": 1.5},      # low must stay below high (1.0)
+])
+def test_bad_params_are_refused_and_nothing_is_saved(book, bad):
+    with pytest.raises(ValueError):
+        ap.set_params(bad)
+    assert ap.resolve() == ap.defaults()
+
+
+def test_describe_lists_every_parameter_posture_and_fixed_rules(book):
+    d = ap.describe()
+    assert {p["key"] for p in d["params"]} == {s[0] for s in ap.SPEC}
+    assert d["posture"]["value"] in d["posture"]["options"]
+    assert d["fixed"] and d["enabled"] is True
+
+
+def test_engine_honours_a_saved_extrinsic_threshold(book):
+    from test_recommendation_engine import _captured_case, _market, _state
+    p, tk = _captured_case()                      # 84% of the sold extrinsic is captured
+    tk["bars"] = _flat_bars(170.0)                # above its 50-day MA: no breaker
+
+    def rule(saved):
+        st = _state([p])
+        # a narrow near-strike band keeps the (1.6% above strike) defend trigger out of the way
+        st["metadata"] = {"autopilot_params": {"near_strike_band_pct": 0.5, **saved}}
+        return engine.evaluate(_market({"AAPL": tk}), st, NOW, [])[0]["trigger_rule"]
+
+    assert rule({}) == TriggerRule.ROLL_EXTRINSIC_CAPTURED          # default 80%
+    assert rule({"extrinsic_capture_pct": 90.0}) != TriggerRule.ROLL_EXTRINSIC_CAPTURED
+
+
+def test_saved_band_and_closes_reach_the_circuit_breaker(book):
+    import circuit_breaker as cb
+    from test_circuit_breaker import _frame, _pos
+    closes = [100.0] * 100 + [90.0, 90.0]                 # only 2 closes below the 50-day MA
+    assert not cb.evaluate(_pos(), df=_frame(closes))["tripped"]
+    assert cb.evaluate(_pos(), df=_frame(closes), ma_fast_closes=2)["tripped"]
+
+
+def test_params_route_roundtrip(book, monkeypatch):
+    import app as app_module
+    c = app_module.create_app().test_client()
+    assert c.get("/api/autopilot/params").status_code == 200
+    r = c.post("/api/autopilot/params", json={"values": {"near_strike_band_pct": 4}, "posture": "aggressive"})
+    body = r.get_json()
+    assert r.status_code == 200
+    assert next(p for p in body["params"] if p["key"] == "near_strike_band_pct")["value"] == 4
+    assert body["posture"]["value"] == "aggressive"
+    assert c.post("/api/autopilot/params", json={"values": {"cb_drop_pct": 99}}).status_code == 400

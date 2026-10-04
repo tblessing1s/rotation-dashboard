@@ -1,6 +1,6 @@
 import React from "react";
 import { api } from "../api.js";
-import { Card, ChartLink, Pill, Loading, ErrorState, useApi } from "./ui.jsx";
+import { Card, ChartLink, Pill, Loading, ErrorState, Modal, useApi } from "./ui.jsx";
 import { useToast } from "./Toast.jsx";
 import { explainRec, explainResolution, ticketSummary } from "../recWhy.js";
 import TrustScoreboard from "./TrustScoreboard.jsx";
@@ -154,18 +154,203 @@ function AutoExitPermissions({ perms, onChanged }) {
   );
 }
 
+// Friendly names for the armed-trigger codes autopilot.status() returns.
+const GRANT_LABELS = {
+  "exit:drawdown": "Exit — drawdown line",
+  "exit:ma_fast": "Exit — 3 closes below the 50-day MA",
+  "exit:ma_slow": "Exit — 200-day MA",
+  "roll:ROLL_EXTRINSIC_CAPTURED": "Roll — extrinsic captured",
+  "roll:DEFEND_APPROACHING_STRIKE": "Defend — stock getting close to the strike",
+  "roll:DEFEND_BELOW_STRIKE": "Defend — closed below the strike",
+  "roll:ROLL_75PCT": "Roll — 75% of the premium decayed",
+  "roll:ROLL_SCHEDULED_WEEKLY": "Roll — weekly expiry",
+};
+
+// The pop-up shown when autopilot is switched on (and reopenable from "Settings"): every
+// parameter it will watch, editable, with the default beside it. Saving stores them for
+// this book; "Turn on" saves first, then flips the master switch.
+function AutopilotSettingsModal({ enabling, onClose, onDone }) {
+  const toast = useToast();
+  const { data, error } = useApi(() => api.getAutopilotParams(), [], null);
+  const [vals, setVals] = React.useState(null);
+  const [posture, setPosture] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const [err, setErr] = React.useState(null);
+
+  React.useEffect(() => {
+    if (data && vals === null) {
+      setVals(Object.fromEntries(data.params.map((p) => [p.key, p.value])));
+      setPosture(data.posture.value);
+    }
+  }, [data, vals]);
+
+  async function save(turnOn) {
+    setBusy(true); setErr(null);
+    try {
+      const changed = {};
+      for (const p of data.params) {
+        const v = p.kind === "bool" ? vals[p.key] : Number(vals[p.key]);
+        if (p.kind !== "bool" && (vals[p.key] === "" || Number.isNaN(v))) {
+          throw new Error(`${p.label} must be a number`);
+        }
+        if (v !== p.value) changed[p.key] = v;
+      }
+      const body = {};
+      if (Object.keys(changed).length) body.values = changed;
+      if (posture !== data.posture.value) body.posture = posture;
+      if (Object.keys(body).length) await api.saveAutopilotParams(body);
+      if (turnOn) await api.setAutopilot(true);
+      window.dispatchEvent(new Event("cfm:autopilot-changed"));
+      toast.show(turnOn ? "Autopilot ON — settings saved" : "Autopilot settings saved",
+        { type: "success" });
+      onDone();
+    } catch (e) {
+      setErr(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resetAll() {
+    setBusy(true); setErr(null);
+    try {
+      const fresh = await api.saveAutopilotParams({ reset: true });
+      setVals(Object.fromEntries(fresh.params.map((p) => [p.key, p.value])));
+    } catch (e) {
+      setErr(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const groups = [];
+  for (const p of data?.params || []) {
+    let g = groups.find((x) => x.name === p.group);
+    if (!g) { g = { name: p.group, items: [] }; groups.push(g); }
+    g.items.push(p);
+  }
+  const inp = "w-20 rounded border border-slate-700 bg-slate-900/60 px-2 py-1 text-right text-sm text-slate-100";
+
+  return (
+    <Modal onClose={busy ? undefined : onClose} maxWidth="max-w-2xl">
+      <Card title={enabling ? "Turn on autopilot — review what it will watch" : "Autopilot settings"}>
+        {error && <p className="text-sm text-rose-400">{error}</p>}
+        {!data && !error && <Loading />}
+        {data && vals && (
+          <div className="max-h-[70vh] space-y-4 overflow-y-auto pr-1">
+            <p className="text-xs text-slate-400">
+              Autopilot monitors your open positions against the values below. Adjust anything you
+              want before it starts; the default is shown beside each value.
+            </p>
+
+            {data.granted.length === 0 ? (
+              <p className="rounded-lg border border-amber-700/60 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
+                No triggers are granted yet, so autopilot would not act on anything. Grant the ones
+                you want in the lists on this tab.
+              </p>
+            ) : (
+              <div>
+                <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                  Armed triggers
+                </div>
+                <ul className="flex flex-wrap gap-1.5">
+                  {data.granted.map((g) => (
+                    <li key={g} className="rounded-full border border-emerald-700/50 bg-emerald-500/10 px-2 py-0.5 text-[11px] text-emerald-300">
+                      {GRANT_LABELS[g] || g}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {groups.map((g) => (
+              <div key={g.name}>
+                <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">{g.name}</div>
+                <div className="divide-y divide-slate-800">
+                  {g.items.map((p) => (
+                    <div key={p.key} className="flex items-center justify-between gap-4 py-2">
+                      <div className="min-w-0">
+                        <div className="text-sm text-slate-200">{p.label}</div>
+                        <div className="text-[11px] text-slate-500">{p.help}</div>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2 text-xs text-slate-400">
+                        {p.kind === "bool" ? (
+                          <input type="checkbox" checked={!!vals[p.key]}
+                                 onChange={(e) => setVals((v) => ({ ...v, [p.key]: e.target.checked }))} />
+                        ) : (
+                          <input type="number" step={p.kind === "int" ? 1 : 0.1} min={p.min} max={p.max}
+                                 value={vals[p.key]} className={inp}
+                                 onChange={(e) => setVals((v) => ({ ...v, [p.key]: e.target.value }))} />
+                        )}
+                        <span className="w-24 text-left">{p.kind === "bool" ? "" : p.unit}</span>
+                        <span className="w-16 text-right text-[10px] text-slate-600">
+                          default {p.kind === "bool" ? (p.default ? "on" : "off") : p.default}
+                        </span>
+                      </div>
+                    </div>
+                  ))}
+                  {g.name === "New strike" && (
+                    <div className="flex items-center justify-between gap-4 py-2">
+                      <div>
+                        <div className="text-sm text-slate-200">Strike posture</div>
+                        <div className="text-[11px] text-slate-500">
+                          How deep in the money the new call must be (with the market regime). Applies to the whole book.
+                        </div>
+                      </div>
+                      <select value={posture} onChange={(e) => setPosture(e.target.value)}
+                              className="rounded border border-slate-700 bg-slate-900/60 px-2 py-1 text-sm text-slate-100">
+                        {data.posture.options.map((o) => <option key={o} value={o}>{o}</option>)}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Fixed rules</div>
+              <ul className="list-disc space-y-0.5 pl-5 text-[11px] text-slate-500">
+                {data.fixed.map((f) => <li key={f}>{f}</li>)}
+              </ul>
+            </div>
+            {err && <p className="text-sm text-rose-400">{err}</p>}
+          </div>
+        )}
+        <div className="mt-4 flex items-center justify-between gap-2">
+          <button onClick={resetAll} disabled={busy || !data}
+                  className="rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+            Reset to defaults
+          </button>
+          <div className="flex gap-2">
+            <button onClick={onClose} disabled={busy}
+                    className="rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800 disabled:opacity-50">
+              Cancel
+            </button>
+            <button onClick={() => save(enabling)} disabled={busy || !vals}
+                    className="rounded-lg border border-emerald-600/50 bg-emerald-500/15 px-3 py-1.5 text-xs font-semibold text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-50">
+              {busy ? "Saving…" : enabling ? "Save & turn autopilot ON" : "Save"}
+            </button>
+          </div>
+        </div>
+      </Card>
+    </Modal>
+  );
+}
+
 // Master autopilot switch — turns EVERY unattended action (both grant lists below)
-// on or off without touching the individual grants. See backend/autopilot.py.
+// on or off without touching the individual grants. Turning it ON opens the settings
+// pop-up first. See backend/autopilot.py and autopilot_params.py.
 function AutopilotSwitch({ enabled, onChanged }) {
   const toast = useToast();
   const [busy, setBusy] = React.useState(false);
+  const [modal, setModal] = React.useState(null); // null | "enable" | "edit"
   const on = enabled !== false; // never set == on (pre-existing grants keep working)
-  async function flip() {
+  async function turnOff() {
     setBusy(true);
     try {
-      await api.setAutopilot(!on);
+      await api.setAutopilot(false);
       window.dispatchEvent(new Event("cfm:autopilot-changed"));
-      toast.show(`Autopilot ${!on ? "ON" : "OFF"}`, { type: !on ? "success" : "info" });
+      toast.show("Autopilot OFF", { type: "info" });
       onChanged();
     } catch (e) {
       toast.show(String(e.message || e), { type: "error" });
@@ -173,26 +358,43 @@ function AutopilotSwitch({ enabled, onChanged }) {
       setBusy(false);
     }
   }
+  const btn = "rounded-lg border px-3 py-1.5 text-xs font-semibold disabled:opacity-50";
   return (
     <Card
       title="Autopilot"
       right={
-        <button
-          onClick={flip}
-          disabled={busy}
-          className={`rounded-lg border px-3 py-1.5 text-xs font-semibold disabled:opacity-50 ${
-            on ? "border-emerald-600/50 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25"
-               : "border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800"}`}
-        >
-          {busy ? "Saving…" : on ? "● ON — turn off" : "○ OFF — turn on"}
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setModal("edit")}
+                  className={`${btn} border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800`}>
+            Settings
+          </button>
+          {on ? (
+            <button onClick={turnOff} disabled={busy}
+                    className={`${btn} border-emerald-600/50 bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25`}>
+              {busy ? "Saving…" : "● ON — turn off"}
+            </button>
+          ) : (
+            <button onClick={() => setModal("enable")}
+                    className={`${btn} border-slate-700 bg-slate-800/60 text-slate-300 hover:bg-slate-800`}>
+              ○ OFF — turn on
+            </button>
+          )}
+        </div>
       }
     >
       <p className="text-xs text-slate-400">
         Master switch over the two lists below. OFF: nothing acts unattended — recommendations
         still appear and can be executed by hand. ON: whichever triggers you've granted act on
-        their own. Your individual grants are kept either way.
+        their own. Turning it on shows you every parameter it will watch first. Your individual
+        grants are kept either way.
       </p>
+      {modal && (
+        <AutopilotSettingsModal
+          enabling={modal === "enable"}
+          onClose={() => setModal(null)}
+          onDone={() => { setModal(null); onChanged(); }}
+        />
+      )}
     </Card>
   );
 }

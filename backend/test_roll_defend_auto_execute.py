@@ -406,7 +406,7 @@ def _live_roll(monkeypatch, band):
     _seed([_roll_rec("rec_1", "KO", TriggerRule.ROLL_SCHEDULED_WEEKLY,
                      from_expiration="2026-09-11", to_dte=11, emission_dte=4)])
     monkeypatch.setattr(auto_exec, "resolve_live_expiration", lambda *a: "2026-09-18")
-    monkeypatch.setattr(auto_exec, "select_band_strike", lambda *a: band)
+    monkeypatch.setattr(auto_exec, "select_band_strike", lambda *a, **k: band)
     calls = []
     monkeypatch.setattr(executor, "execute",
                         lambda payload, now=None: calls.append(payload) or {"success": True})
