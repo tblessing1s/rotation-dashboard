@@ -337,6 +337,127 @@ function AutopilotSettingsModal({ enabling, onClose, onDone }) {
   );
 }
 
+// "Why did / didn't autopilot trade?" — the standing preconditions (switch, grants,
+// live vs paper, passes running, reconciliation freeze), what each open position is
+// measuring against its thresholds, and the recent decision log. See backend/autopilot_log.py.
+const CHECK_STYLE = {
+  ok: ["✓", "text-emerald-400"], warn: ["!", "text-amber-300"],
+  bad: ["✗", "text-rose-400"], info: ["•", "text-slate-500"],
+};
+const RESULT_STYLE = {
+  placed: "border-emerald-700/50 bg-emerald-500/10 text-emerald-300",
+  exited: "border-emerald-700/50 bg-emerald-500/10 text-emerald-300",
+  skipped: "border-slate-700 bg-slate-800/60 text-slate-300",
+  failed: "border-rose-700/50 bg-rose-500/10 text-rose-300",
+};
+
+function AutopilotStatus() {
+  const { data, error, reload } = useApi(() => api.getAutopilotDiagnostics(), [], 60000);
+  React.useEffect(() => {
+    const h = () => reload();
+    window.addEventListener("cfm:autopilot-changed", h);
+    return () => window.removeEventListener("cfm:autopilot-changed", h);
+  }, [reload]);
+  const fmtTime = (t) => (t ? new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—");
+  const pct = (v) => (v == null ? "—" : `${Number(v).toFixed(1)}%`);
+  return (
+    <Card title="Autopilot status — why it did or didn't trade"
+          right={<button onClick={reload}
+                  className="rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800">Refresh</button>}>
+      {error && <p className="text-sm text-rose-400">{error}</p>}
+      {!data && !error && <Loading />}
+      {data && (
+        <div className="space-y-4">
+          <ul className="space-y-1.5">
+            {data.checks.map((c) => {
+              const [icon, color] = CHECK_STYLE[c.level] || CHECK_STYLE.info;
+              return (
+                <li key={c.id} className="flex gap-2 text-sm">
+                  <span className={`w-4 shrink-0 text-center font-bold ${color}`}>{icon}</span>
+                  <span><span className="text-slate-200">{c.label}.</span>{" "}
+                    <span className="text-slate-400">{c.detail}</span></span>
+                </li>
+              );
+            })}
+          </ul>
+
+          {data.open.length > 0 && (
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Open recommendations</div>
+              <table className="w-full text-xs">
+                <tbody className="text-slate-300">
+                  {data.open.map((o, i) => (
+                    <tr key={i} className="border-t border-slate-800/60">
+                      <td className="py-1 pr-3 font-mono">{o.ticker}</td>
+                      <td className="py-1 pr-3">{o.trigger_rule}</td>
+                      <td className={`py-1 pr-3 font-semibold ${o.autopilot_will_act ? "text-emerald-300" : "text-slate-400"}`}>
+                        {o.autopilot_will_act ? "autopilot will act" : "autopilot will not act"}
+                      </td>
+                      <td className="py-1 text-slate-500">{o.why}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+
+          {data.watch.length > 0 && (
+            <div>
+              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+                What it's measuring (as of the last pass)
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full whitespace-nowrap text-xs">
+                  <thead>
+                    <tr className="text-left uppercase tracking-wide text-slate-500">
+                      {["ticker", "price", "short", "dte", "extrinsic captured", "above strike", "as of"].map((h) => <th key={h} className="py-1 pr-3">{h}</th>)}
+                    </tr>
+                  </thead>
+                  <tbody className="font-mono text-slate-300">
+                    {data.watch.flatMap((w) => (w.shorts.length ? w.shorts : [null]).map((s, i) => (
+                      <tr key={`${w.ticker}-${i}`} className="border-t border-slate-800/60">
+                        <td className="py-1 pr-3">{w.ticker}</td>
+                        <td className="py-1 pr-3">{w.price ?? "—"}</td>
+                        <td className="py-1 pr-3">{s ? `${s.strike}C` : "no short open"}</td>
+                        <td className="py-1 pr-3">{s?.dte ?? "—"}</td>
+                        <td className="py-1 pr-3">{s ? `${pct(s.extrinsic_captured_pct)} of ${s.extrinsic_threshold_pct}%` : "—"}</td>
+                        <td className="py-1 pr-3">{s ? `${pct(s.distance_pct)} (acts within ${s.band_pct}%)` : "—"}</td>
+                        <td className="py-1 pr-3 font-sans text-slate-500">{fmtTime(w.as_of)}</td>
+                      </tr>
+                    )))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          <div>
+            <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-slate-500">Recent decisions</div>
+            {data.decisions.length === 0 ? (
+              <p className="text-xs text-slate-500">
+                Autopilot hasn't considered any recommendation yet. It only logs when a trigger
+                has fired for a position.
+              </p>
+            ) : (
+              <ul className="space-y-1">
+                {data.decisions.map((d, i) => (
+                  <li key={i} className="flex flex-wrap items-baseline gap-2 text-xs">
+                    <span className="w-28 shrink-0 text-slate-500">{fmtTime(d.at)}</span>
+                    <span className="font-mono text-slate-300">{d.ticker}</span>
+                    <span className={`rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase ${RESULT_STYLE[d.result] || RESULT_STYLE.skipped}`}>{d.result}</span>
+                    <span className="text-slate-500">{d.trigger_rule}</span>
+                    <span className="text-slate-400">{d.reason}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
 // Master autopilot switch — turns EVERY unattended action (both grant lists below)
 // on or off without touching the individual grants. Turning it ON opens the settings
 // pop-up first. See backend/autopilot.py and autopilot_params.py.
@@ -919,6 +1040,7 @@ export default function RecommendationsTab({ onNavigate, onSelectStock, onAction
       </Card>
 
       <AutopilotSwitch enabled={data?.autopilot_enabled} onChanged={reload} />
+      <AutopilotStatus />
       <AutoExitPermissions perms={data?.circuit_breaker_auto_exit} onChanged={reload} />
 
       <RollDefendAutoExecutePermissions perms={data?.roll_defend_auto_execute} onChanged={reload} />

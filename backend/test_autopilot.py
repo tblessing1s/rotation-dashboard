@@ -206,3 +206,60 @@ def test_params_route_roundtrip(book, monkeypatch):
     assert next(p for p in body["params"] if p["key"] == "near_strike_band_pct")["value"] == 4
     assert body["posture"]["value"] == "aggressive"
     assert c.post("/api/autopilot/params", json={"values": {"cb_drop_pct": 99}}).status_code == 400
+
+
+# ---- decision log + diagnosis ("why no trades?") -----------------------------
+import autopilot_log as alog  # noqa: E402
+
+
+def test_decision_log_dedupes_repeats_and_caps(book):
+    alog.record("KO", "ROLL_75PCT", "rec_1", "skipped", "not granted")
+    alog.record("KO", "ROLL_75PCT", "rec_1", "skipped", "not granted")      # same outcome: not re-logged
+    alog.record("KO", "ROLL_75PCT", "rec_1", "placed", "roll working", order_id="9")
+    rows = alog.recent()
+    assert [r["result"] for r in rows] == ["placed", "skipped"]            # newest first
+    for i in range(150):
+        alog.record("KO", "X", f"r{i}", "skipped", "x")
+    assert len(alog.recent(limit=500)) == 100
+
+
+def test_diagnose_flags_no_grants_paper_mode_and_a_quiet_book(book, monkeypatch):
+    import executor
+    monkeypatch.setattr(executor, "live_transmit", lambda: False)
+    d = alog.diagnose()
+    by = {c["id"]: c for c in d["checks"]}
+    assert by["granted"]["ok"] is False and "never acts" in by["granted"]["detail"]
+    assert by["mode"]["level"] == "warn" and "PAPER" in by["mode"]["detail"]
+    assert by["open"]["level"] == "info" and d["mode"] == "paper"
+
+
+def test_diagnose_reports_the_reconciliation_freeze(book, monkeypatch):
+    import recommendation_runner as rr
+    monkeypatch.setattr(rr, "last_run", lambda: {"at": "2026-07-10T14:00:00Z", "reconcile_frozen": True,
+                                                  "frozen_tickers": ["KO"], "freeze_reason": "drift"})
+    by = {c["id"]: c for c in alog.diagnose()["checks"]}
+    assert by["pass"]["ok"] is False and "freeze" in by["pass"]["detail"] and "KO" in by["pass"]["detail"]
+
+
+def test_runner_logs_why_an_ungranted_roll_was_left_alone(book, monkeypatch):
+    import executor
+    import recommendation_auto_execute as ae
+    monkeypatch.setattr(executor, "live_transmit", lambda: False)
+    ae.set_permission(TriggerRule.ROLL_75PCT, True)                          # something is granted ...
+    st = _state([_position("AAPL")])
+    rec = {"rec_id": "rec_9", "ticker": "AAPL", "action_type": ActionType.ROLL_OUT,
+           "trigger_rule": TriggerRule.ROLL_EXTRINSIC_CAPTURED,               # ... but not THIS trigger
+           "emitted_at": "2026-07-10T13:00:00Z", "valid_until": "2099-01-01T00:00:00Z",
+           "proposed_ticket": None, "input_snapshot": {}}
+    import logging_handler as log
+    log.mutate_state(lambda s: s.setdefault("recommendations", []).append(rec))
+    runner._check_roll_defend_auto_execute(NOW, True)
+    row = alog.recent()[0]
+    assert row["result"] == "skipped" and "isn't granted" in row["reason"]
+
+
+def test_diagnostics_route(book):
+    import app as app_module
+    r = app_module.create_app().test_client().get("/api/autopilot/diagnostics")
+    body = r.get_json()
+    assert r.status_code == 200 and {"checks", "open", "watch", "decisions"} <= set(body)
