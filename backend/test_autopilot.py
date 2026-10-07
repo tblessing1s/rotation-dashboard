@@ -263,3 +263,42 @@ def test_diagnostics_route(book):
     r = app_module.create_app().test_client().get("/api/autopilot/diagnostics")
     body = r.get_json()
     assert r.status_code == 200 and {"checks", "open", "watch", "decisions"} <= set(body)
+
+
+# ---- a fully-captured short must not be masked by the assignment-risk flag ----
+def _tqqq_like(dte=2):
+    from test_recommendation_engine import _frame, _healthy_tk, _market, _shares_position, _state
+    # 200 sh / 2 contracts of a 76.5C, stock 83.25, mark == intrinsic: 0 extrinsic, 100% captured.
+    p = _shares_position("TQQQ", shares=200, short_strike=76.5, short_dte=dte,
+                         current_bid=6.75, contracts=2)
+    p["short_calls"][0]["entry_extrinsic_per_share"] = 0.39
+    p["circuit_breaker"] = {"price": 60.0, "source": "manual", "entry_price": 80.0}
+    tk = _healthy_tk(price=83.25)
+    tk["bars"] = _frame([83.25 - (89 - i) * 0.1 for i in range(90)])
+    return p, _market({"TQQQ": tk}), _state([p])
+
+
+def test_zero_extrinsic_short_gets_the_capture_roll_not_the_assignment_flag(book):
+    p, market, st = _tqqq_like()
+    ev = engine._evaluate_position(p, market, NOW)
+    assert {TriggerRule.DIVIDEND_ASSIGNMENT_RISK, TriggerRule.ROLL_EXTRINSIC_CAPTURED} <= set(ev["triggers"])
+    rec = engine.evaluate(market, st, NOW, [])[0]
+    assert rec["trigger_rule"] == TriggerRule.ROLL_EXTRINSIC_CAPTURED       # autopilot CAN act on this
+    assert rec["action_type"] == ActionType.ROLL_OUT
+    assert rec["proposed_ticket"]["roll_direction"] == "ROLL_UP_AND_OUT"     # 2 DTE: out to next week
+
+
+def test_capture_roll_still_ranks_below_defend_and_a_real_dividend_risk():
+    cap = {"short": {}, "dte": 2}
+    div = {"assignment_risk": {"trigger": "dividend"}}
+    ext = {"assignment_risk": {"trigger": "extrinsic"}}
+    both = {TriggerRule.DIVIDEND_ASSIGNMENT_RISK: div, TriggerRule.ROLL_EXTRINSIC_CAPTURED: cap}
+    assert engine._dominant(both)[0] == TriggerRule.DIVIDEND_ASSIGNMENT_RISK          # ex-div risk wins
+    both[TriggerRule.DIVIDEND_ASSIGNMENT_RISK] = ext
+    assert engine._dominant(both)[0] == TriggerRule.ROLL_EXTRINSIC_CAPTURED           # extrinsic-only: capture
+    both[TriggerRule.DEFEND_BELOW_STRIKE] = {"short": {}}
+    assert engine._dominant(both)[0] == TriggerRule.DEFEND_BELOW_STRIKE               # defend still leads
+
+
+def test_diagnostics_names_the_account(book):
+    assert "account" in alog.diagnose()

@@ -620,12 +620,28 @@ def _evaluate_position(position: dict, market: dict, now: datetime,
     return {"triggers": triggers, "features": features}
 
 
+def _roll_order(triggers: dict) -> tuple:
+    """_ROLL_PRIORITY, with one exception: an extrinsic-COLLAPSE assignment-risk flag
+    (the short is deep ITM with ~0 extrinsic left) is the same fact as "extrinsic fully
+    captured" — the juice is gone — so when ROLL_EXTRINSIC_CAPTURED also fired it ranks
+    just above the flag (still below the defend and earnings rules). Otherwise the flag outranked it and left a fully-captured short with a recommendation
+    autopilot has no authority to act on, so it never rolled. A real pre-ex-dividend
+    assignment risk keeps its place above the capture roll."""
+    risk = (triggers.get(TriggerRule.DIVIDEND_ASSIGNMENT_RISK) or {}).get("assignment_risk") or {}
+    if (risk.get("trigger") == "extrinsic" and TriggerRule.ROLL_EXTRINSIC_CAPTURED in triggers):
+        order = [r for r in _ROLL_PRIORITY if r != TriggerRule.ROLL_EXTRINSIC_CAPTURED]
+        order.insert(order.index(TriggerRule.DIVIDEND_ASSIGNMENT_RISK),
+                     TriggerRule.ROLL_EXTRINSIC_CAPTURED)   # still below the defend / earnings rules
+        return tuple(order)
+    return _ROLL_PRIORITY
+
+
 def _dominant(triggers: dict) -> tuple[str, str] | None:
     """(trigger_rule, action_type) of the dominant fired trigger, exits first."""
     for rule in _EXIT_PRIORITY:
         if rule in triggers:
             return rule, ActionType.EXIT
-    for rule in _ROLL_PRIORITY:
+    for rule in _roll_order(triggers):
         if rule in triggers:
             return rule, _TRIGGER_ACTION[rule]
     return None

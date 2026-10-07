@@ -361,7 +361,7 @@ function AutopilotStatus() {
   const fmtTime = (t) => (t ? new Date(t).toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : "—");
   const pct = (v) => (v == null ? "—" : `${Number(v).toFixed(1)}%`);
   return (
-    <Card title="Autopilot status — why it did or didn't trade"
+    <Card title={`Autopilot status${data?.account?.label ? ` — ${data.account.label}` : ""} — why it did or didn't trade`}
           right={<button onClick={reload}
                   className="rounded-lg border border-slate-700 bg-slate-800/60 px-3 py-1.5 text-xs font-semibold text-slate-300 hover:bg-slate-800">Refresh</button>}>
       {error && <p className="text-sm text-rose-400">{error}</p>}

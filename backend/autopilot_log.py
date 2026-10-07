@@ -170,5 +170,12 @@ def diagnose(state: dict | None = None, now: datetime | None = None) -> dict:
         "that autopilot will act on." if open_actionable else
         "None — no trigger is currently met on any open position, so there is nothing to trade.",
         level="ok" if open_actionable else "info"))
-    return {"checks": checks, "open": pending, "watch": _watch_rows(state, params),
-            "decisions": recent(state), "mode": "live" if live else "paper"}
+    try:
+        import accounts
+        acct = accounts.active()
+        account = {"id": acct.get("id"), "label": acct.get("label") or acct.get("id")}
+    except Exception:  # noqa: BLE001 — the label is informational only
+        account = None
+    return {"account": account, "checks": checks, "open": pending,
+            "watch": _watch_rows(state, params), "decisions": recent(state),
+            "mode": "live" if live else "paper"}
