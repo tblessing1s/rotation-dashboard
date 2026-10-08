@@ -432,6 +432,8 @@ export const api = {
   getAutopilot: () => request("/api/autopilot"),
   // The adjustable parameters behind the autopilot pop-up (values, defaults, ranges,
   // posture, armed triggers, fixed rules). Saving never turns autopilot on or off.
+  // Why autopilot did / didn't act: preconditions, per-position readings, decision log.
+  getAutopilotDiagnostics: () => request("/api/autopilot/diagnostics"),
   getAutopilotParams: () => request("/api/autopilot/params"),
   saveAutopilotParams: (body) =>
     request("/api/autopilot/params", { method: "POST", body: JSON.stringify(body) }),

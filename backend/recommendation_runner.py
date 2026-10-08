@@ -20,6 +20,7 @@ import threading
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
+import autopilot_log
 import config
 import data_handler
 import execution_gate
@@ -674,12 +675,16 @@ def _check_circuit_breaker_auto_exit(now: datetime, dry_run: bool | None) -> lis
         cb = detail.get("circuit_breaker") or {}
         nearest = cb.get("nearest_trigger") or {}
         condition = nearest.get("condition")
+        ticker = rec.get("ticker")
         if not condition or not perms.get(condition):
+            autopilot_log.record(ticker, rec.get("trigger_rule"), rec.get("rec_id"), "skipped",
+                                 f"exit level '{condition or 'unknown'}' isn't granted for auto-exit")
             continue
         code = circuit_breaker.exit_reason_code_for(condition)
         if not code:
+            autopilot_log.record(ticker, rec.get("trigger_rule"), rec.get("rec_id"), "skipped",
+                                 f"no coded exit reason for '{condition}'")
             continue
-        ticker = rec.get("ticker")
         try:
             outcome = executor.exit_position(
                 ticker, exit_reason=code,
@@ -695,6 +700,16 @@ def _check_circuit_breaker_auto_exit(now: datetime, dry_run: bool | None) -> lis
                   "condition": condition, **outcome}
         results.append(result)
         logger.info("circuit-breaker auto-exit: %s", result)
+        if outcome.get("ok"):
+            autopilot_log.record(ticker, rec.get("trigger_rule"), rec.get("rec_id"), "exited",
+                                 f"{condition} breached — position "
+                                 f"{'closed' if outcome.get('position_closed') else 'exit placed'}")
+        elif outcome.get("position_closed"):
+            autopilot_log.record(ticker, rec.get("trigger_rule"), rec.get("rec_id"), "skipped",
+                                 "the position was already closed")
+        else:
+            autopilot_log.record(ticker, rec.get("trigger_rule"), rec.get("rec_id"), "failed",
+                                 str(outcome.get("error") or "exit stopped"))
         # "already closed" (a harmless re-check racing resolution matching) is
         # not a failure worth paging on — only a genuine stop is.
         if not outcome.get("ok") and not outcome.get("position_closed"):
@@ -761,12 +776,17 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
     results = []
     for rec in trust_derive.open_recommendations(state, now):
         rule = rec.get("trigger_rule")
+        ticker = rec.get("ticker")
         if rule not in auto_exec.AUTO_EXECUTE_TRIGGERS or not perms.get(rule):
+            if rec.get("action_type") in (ActionType.ROLL_OUT, ActionType.DEFEND):
+                autopilot_log.record(ticker, rule, rec.get("rec_id"), "skipped",
+                                     "autopilot isn't granted for this trigger — recommendation only")
             continue
         payload = auto_exec.payload_from_ticket(rec)
         if payload is None:
+            autopilot_log.record(ticker, rule, rec.get("rec_id"), "skipped",
+                                 "the recommendation's ticket isn't a short-call roll")
             continue
-        ticker = rec.get("ticker")
         band = None
         if executor.live_transmit():
             edte = auto_exec.emission_dte(rec, payload["from_strike"], payload["from_expiration"])
@@ -774,11 +794,16 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
                 # Can't tell which real contract this targets — never guess on a
                 # live order; try again next pass once state settles, or leave it
                 # to a human acting from the card.
+                autopilot_log.record(ticker, rule, rec.get("rec_id"), "skipped",
+                                     "can't tell which option contract this targets — "
+                                     "refusing to guess on a live order")
                 continue
             same_week = payload.get("to_dte") == edte
             to_expiration = auto_exec.resolve_live_expiration(
                 ticker, payload["from_expiration"], same_week)
             if not to_expiration:
+                autopilot_log.record(ticker, rule, rec.get("rec_id"), "skipped",
+                                     "no listed expiration found in the option chain")
                 continue
             payload["to_expiration"] = to_expiration
             if config.AUTOPILOT_JUICE_BAND_ENABLED:
@@ -787,11 +812,17 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
                         ticker, payload, rec, low=ap["juice_low_pct"], high=ap["juice_high_pct"])
                 except Exception as e:  # noqa: BLE001 — no chain, no roll; retry next pass
                     logger.warning("auto-roll strike selection failed for %s: %s", ticker, e)
+                    autopilot_log.record(ticker, rule, rec.get("rec_id"), "skipped",
+                                         f"couldn't read the option chain: {e}")
                     continue
                 if band is None:
                     logger.warning("auto-roll for %s skipped: no priced strike at/below the "
                                    "regime strike %s in %s", ticker, payload.get("to_strike"),
                                    to_expiration)
+                    autopilot_log.record(
+                        ticker, rule, rec.get("rec_id"), "skipped",
+                        f"no priced strike at or below the regime strike {payload.get('to_strike')} "
+                        f"in {to_expiration}")
                     continue
                 payload["to_strike"] = band["strike"]
         try:
@@ -805,6 +836,14 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
             result["strike_selection"] = band
         results.append(result)
         logger.info("roll/defend auto-execute: %s", result)
+        if outcome.get("success"):
+            sel = f", strike {band['strike']} ({band['juice_per_week_pct']}%/wk)" if band else ""
+            autopilot_log.record(ticker, rule, rec.get("rec_id"), "placed",
+                                 f"roll {outcome.get('status') or 'submitted'}{sel}",
+                                 order_id=outcome.get("order_id"))
+        else:
+            autopilot_log.record(ticker, rule, rec.get("rec_id"), "failed",
+                                 str(outcome.get("error") or "roll failed"))
         if not outcome.get("success"):
             _notify_auto_roll_failure(result, state, dry_run)
         elif outcome.get("order_id") and outcome.get("status") not in ("filled", "canceled"):

@@ -132,6 +132,18 @@ def api_autopilot():
         return _err(e)
 
 
+@recommendations_bp.route("/api/autopilot/diagnostics")
+def api_autopilot_diagnostics():
+    """Why autopilot did or didn't act: standing preconditions, what each open
+    position is measuring against its thresholds, and the recent decision log
+    (autopilot_log.py). Read-only."""
+    import autopilot_log
+    try:
+        return jsonify(autopilot_log.diagnose())
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @recommendations_bp.route("/api/autopilot/params", methods=["GET", "POST"])
 def api_autopilot_params():
     """The adjustable autopilot parameters (autopilot_params.py). GET -> every
