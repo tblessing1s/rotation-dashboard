@@ -65,15 +65,27 @@ def _ticker_snapshot(ticker: str, position: dict | None, q_pair, price, bars,
     except Exception:  # noqa: BLE001
         pass
     tk["price"] = price
-    # Live per-share marks of the position's short calls from the poller's
-    # cache (fresh only; never a fetch) — frozen here so the pass reads the
-    # same marks the event that triggered it was detected on.
+    # Live per-share marks of the position's short calls — the poller's cache first,
+    # frozen here so the pass reads the same marks the event that triggered it was
+    # detected on. Any leg the cache can't answer is quoted now (the same lookup the
+    # Positions view makes): the poller only follows the account selected in the app,
+    # so another book's marks are usually cold, and without this the pass fell back to
+    # the leg's STORED bid — stale — and read e.g. 0% extrinsic captured on a short the
+    # Positions card correctly showed at 60%.
     if position is not None:
+        shorts = position.get("short_calls") or []
         try:
             import option_marks
-            tk["short_marks"] = option_marks.marks_for(ticker, position.get("short_calls") or [])
+            tk["short_marks"] = option_marks.marks_for(ticker, shorts)
         except Exception:  # noqa: BLE001
             tk["short_marks"] = {}
+        try:
+            keys = {(sc.get("strike"), sc.get("expiration")) for sc in shorts if sc.get("expiration")}
+            if keys - set(tk["short_marks"]):
+                import position_manager
+                tk["short_marks"].update(position_manager._live_short_marks(ticker, shorts))
+        except Exception as e:  # noqa: BLE001 — a failed quote leaves the stored-mark fallback
+            logger.warning("live short marks for %s unavailable: %s", ticker, e)
     try:
         rs_spy = q_pair if q_pair is not None else kill_switch._rs_spy(ticker)
         tk["rs3m_vs_spy"] = rs_spy

@@ -81,6 +81,7 @@ def _watch_rows(state: dict, params: dict) -> list[dict]:
             shorts.append({
                 "strike": strike, "dte": s.get("dte"),
                 "extrinsic_captured_pct": s.get("extrinsic_captured_pct"),
+                "mark_source": s.get("mark_source"),
                 "extrinsic_threshold_pct": params["extrinsic_capture_pct"],
                 "distance_pct": None if dist is None else round(dist, 2),
                 "band_pct": params["near_strike_band_pct"]})

@@ -420,7 +420,15 @@ function AutopilotStatus() {
                         <td className="py-1 pr-3">{w.price ?? "—"}</td>
                         <td className="py-1 pr-3">{s ? `${s.strike}C` : "no short open"}</td>
                         <td className="py-1 pr-3">{s?.dte ?? "—"}</td>
-                        <td className="py-1 pr-3">{s ? `${pct(s.extrinsic_captured_pct)} of ${s.extrinsic_threshold_pct}%` : "—"}</td>
+                        <td className="py-1 pr-3">
+                          {s ? `${pct(s.extrinsic_captured_pct)} of ${s.extrinsic_threshold_pct}%` : "—"}
+                          {s?.mark_source === "stored" && (
+                            <span className="ml-1 font-sans text-[10px] text-amber-300"
+                                  title="This pass had no fresh option quote and used the leg's last saved price, which can be stale. Newer passes fetch a live quote.">
+                              stale mark
+                            </span>
+                          )}
+                        </td>
                         <td className="py-1 pr-3">{s ? `${pct(s.distance_pct)} (acts within ${s.band_pct}%)` : "—"}</td>
                         <td className="py-1 pr-3 font-sans text-slate-500">{fmtTime(w.as_of)}</td>
                       </tr>
