@@ -302,3 +302,51 @@ def test_capture_roll_still_ranks_below_defend_and_a_real_dividend_risk():
 
 def test_diagnostics_names_the_account(book):
     assert "account" in alog.diagnose()
+
+
+# ---- the pass must not read a stale stored mark when the poller cache is cold ---
+def test_snapshot_fetches_live_marks_when_the_cache_is_cold(book, monkeypatch):
+    import option_marks
+    import position_manager
+    from test_recommendation_engine import _frame
+    p = {"ticker": "TQQQ", "short_calls": [{"strike": 76.5, "expiration": "2026-10-09"}]}
+    calls = []
+    monkeypatch.setattr(option_marks, "marks_for", lambda t, s, now=None: {})
+    monkeypatch.setattr(position_manager, "_live_short_marks",
+                        lambda t, s: calls.append(t) or {(76.5, "2026-10-09"): 5.1})
+    tk = runner._ticker_snapshot("TQQQ", p, 0.0, 81.0, _frame([80.0] * 90), _frame([100.0] * 90))
+    assert calls == ["TQQQ"] and tk["short_marks"] == {(76.5, "2026-10-09"): 5.1}
+
+
+def test_snapshot_does_not_fetch_when_the_cache_already_has_every_mark(book, monkeypatch):
+    import option_marks
+    import position_manager
+    from test_recommendation_engine import _frame
+    p = {"ticker": "TQQQ", "short_calls": [{"strike": 76.5, "expiration": "2026-10-09"}]}
+    monkeypatch.setattr(option_marks, "marks_for",
+                        lambda t, s, now=None: {(76.5, "2026-10-09"): 5.0})
+    monkeypatch.setattr(position_manager, "_live_short_marks",
+                        lambda t, s: (_ for _ in ()).throw(AssertionError("should not fetch")))
+    tk = runner._ticker_snapshot("TQQQ", p, 0.0, 81.0, _frame([80.0] * 90), _frame([100.0] * 90))
+    assert tk["short_marks"] == {(76.5, "2026-10-09"): 5.0}
+
+
+def test_a_failed_quote_falls_back_without_breaking_the_pass(book, monkeypatch):
+    import option_marks
+    import position_manager
+    from test_recommendation_engine import _frame
+    p = {"ticker": "TQQQ", "short_calls": [{"strike": 76.5, "expiration": "2026-10-09"}]}
+    monkeypatch.setattr(option_marks, "marks_for", lambda t, s, now=None: {})
+    monkeypatch.setattr(position_manager, "_live_short_marks",
+                        lambda t, s: (_ for _ in ()).throw(RuntimeError("quote down")))
+    tk = runner._ticker_snapshot("TQQQ", p, 0.0, 81.0, _frame([80.0] * 90), _frame([100.0] * 90))
+    assert tk["short_marks"] == {}
+
+
+def test_features_say_whether_the_mark_was_live_or_stored(book):
+    p, market, st = _tqqq_like()
+    ev = engine._evaluate_position(p, market, NOW)
+    assert ev["features"]["shorts"][0]["mark_source"] == "stored"
+    market["tickers"]["TQQQ"]["short_marks"] = {(76.5, "2026-07-17"): 6.9}
+    ev = engine._evaluate_position(p, market, NOW)
+    assert ev["features"]["shorts"][0]["mark_source"] == "live"

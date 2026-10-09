@@ -610,7 +610,10 @@ def _evaluate_position(position: dict, market: dict, now: datetime,
         "shorts": [{"strike": sc.get("strike"), "dte": sc.get("dte"),
                     "expiration": sc.get("expiration"),
                     "decay_pct": _es.get("decay_pct"),
-                    "extrinsic_captured_pct": _es.get("extrinsic_captured_pct")}
+                    "extrinsic_captured_pct": _es.get("extrinsic_captured_pct"),
+                    # where the mark behind these figures came from: "live" (a fresh
+                    # quote) or "stored" (the leg's last saved bid — may be stale)
+                    "mark_source": "live" if _live_mark(sc, tk) is not None else "stored"}
                    for sc in position.get("short_calls", [])
                    for _es in (position_manager.enrich_short(
                        sc, price if price is not None else last_close,
