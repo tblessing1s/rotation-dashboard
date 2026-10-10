@@ -48,6 +48,25 @@ def api_reconcile_resolve_expiry():
         return _err(e)
 
 
+@reconcile_bp.route("/api/reconcile/record-called-away", methods=["POST"])
+def api_reconcile_record_called_away():
+    """One-click resolution for a covered call that was assigned: an EQUITY
+    share-reduction diff becomes a booked called-away (short call dropped, shares
+    sold at the strike, realized P&L). Operator-initiated.
+    Body: {diff_id, strike?, expiration?}."""
+    payload = request.get_json(silent=True) or {}
+    diff_id = payload.get("diff_id", "")
+    if not diff_id:
+        return jsonify({"error": "diff_id is required"}), 400
+    try:
+        return jsonify(executor.record_called_away(
+            diff_id, strike=payload.get("strike"), expiration=payload.get("expiration")))
+    except ValueError as e:
+        return _err(e, 400)
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
 @reconcile_bp.route("/api/reconcile/acknowledge", methods=["POST"])
 def api_reconcile_acknowledge():
     """Acknowledge a diff the operator deems a non-issue (typed ack_reason

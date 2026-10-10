@@ -458,6 +458,12 @@ export const api = {
     request("/api/verify-fills", { method: "POST", body: JSON.stringify(limit ? { limit } : {}) }),
   resolveExpiry: (diffId) =>
     request("/api/reconcile/resolve-expiry", { method: "POST", body: JSON.stringify({ diff_id: diffId }) }),
+  // A covered call was assigned: book the called-away (short call dropped, shares sold at
+  // the strike) from an EQUITY share-reduction diff, and clear it.
+  recordCalledAway: (diffId, body = {}) =>
+    request("/api/reconcile/record-called-away", {
+      method: "POST", body: JSON.stringify({ diff_id: diffId, ...body }),
+    }),
   acknowledgeDiff: (diffId, ackReason) =>
     request("/api/reconcile/acknowledge", { method: "POST", body: JSON.stringify({ diff_id: diffId, ack_reason: ackReason }) }),
   // Record an already-executed out-of-band roll from captured fills.
