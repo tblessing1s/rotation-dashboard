@@ -454,6 +454,11 @@ function DiffRow({ ticker, diff, toast, onDone }) {
   });
   const benign = diff.classification === "EXPIRED_WORTHLESS_PENDING";
   const critical = diff.classification === "SHORT_STOCK_DETECTED";
+  // Fewer shares at the broker than the book holds: a covered call was assigned.
+  const sharesGone = diff.instrument_type === "EQUITY"
+    && (diff.classification === "MISSING_AT_BROKER" || diff.classification === "QUANTITY_MISMATCH")
+    && Number(diff.expected_qty) > 0 && Number(diff.broker_qty || 0) < Number(diff.expected_qty)
+    ? Number(diff.expected_qty) - Number(diff.broker_qty || 0) : 0;
 
   const run = async (fn) => {
     setBusy(true);
@@ -466,6 +471,18 @@ function DiffRow({ ticker, diff, toast, onDone }) {
     await api.resolveExpiry(diff.id);
     toast.show(`Booked ${ticker} ${diff.strike} expiry at $0.00`, { type: "success" });
   });
+
+  const bookCalledAway = () => {
+    if (!window.confirm(
+      `Book ${sharesGone} ${ticker} shares as CALLED AWAY?\n\nThis drops the assigned short call, sells the `
+      + `shares at that call's strike with realized P&L against your cost basis, and clears this `
+      + `mismatch. Only do this if the call was assigned at Schwab.`)) return;
+    run(async () => {
+      const r = await api.recordCalledAway(diff.id);
+      toast.show(`Booked ${ticker} called away at ${r.strike} (${r.shares} shares, P&L ${r.realized_pnl})`,
+        { type: "success" });
+    });
+  };
 
   const submitAdjustment = () => run(async () => {
     if (!form.reason.trim()) throw new Error("a typed reason is required");
@@ -508,6 +525,18 @@ function DiffRow({ ticker, diff, toast, onDone }) {
         <p className="mt-1 text-xs font-medium text-rose-300">
           Short stock is naked risk — buy back the short shares or close the position.
         </p>
+      )}
+
+      {sharesGone > 0 && (
+        <div className="mt-2 rounded-lg border border-emerald-700/60 bg-emerald-500/10 px-3 py-2">
+          <p className="text-xs text-emerald-200">
+            {sharesGone} shares left the account — this looks like the covered call was assigned.
+          </p>
+          <button onClick={bookCalledAway} disabled={busy}
+                  className="mt-1.5 rounded-lg border border-emerald-600 bg-emerald-500/20 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/30 disabled:opacity-50">
+            {busy ? "Booking…" : "Book called away"}
+          </button>
+        </div>
       )}
 
       {benign ? (

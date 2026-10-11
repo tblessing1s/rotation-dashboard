@@ -1153,6 +1153,92 @@ def resolve_expiry(diff_id: str) -> dict:
             "timestamp": stored["date"], "diff_id": diff_id, "execution": stored}
 
 
+def record_called_away(diff_id: str, strike=None, expiration: str | None = None) -> dict:
+    """One-click resolution for a covered call that was ASSIGNED: shares reduced at the
+    broker (an EQUITY share-reduction diff) means the owned shares were delivered at the
+    short call's strike. Books the same two records a manual called-away does
+    (``_commit_assignment``: the short call dropped with the full premium kept, then the
+    CALLED_AWAY share sale at the strike with realized P&L against the lot basis), dated
+    to the expiration, and clears the share diff plus the call's own MISSING diff.
+
+    Operator-initiated only — never auto-booked [NO_AUTO_REMEDIATION]. The short call
+    is read from that report's call diff for the ticker; ``strike`` / ``expiration`` pick
+    it when more than one candidate exists. Direct commit (not ``execute``), like
+    ``resolve_expiry``, so it works while the position is frozen — which is exactly the
+    state a share-count mismatch puts it in."""
+    import reconcile
+
+    state = log.load_state()
+    report, diff = reconcile._find_diff(state, diff_id)
+    if diff is None:
+        raise ValueError(f"unknown diff id {diff_id!r} in the latest reconciliation report")
+    if diff.get("instrument_type") != reconcile.EQUITY or not reconcile._is_share_reduction(diff):
+        raise ValueError(
+            f"record_called_away only applies to a share-reduction diff on an EQUITY line "
+            f"(diff {diff_id} is {diff.get('classification')} on {diff.get('instrument_type')}); "
+            "use an adjustment instead")
+    if diff.get("resolution"):
+        # A second click (or a retry) must never book the delivery twice.
+        raise ValueError(f"diff {diff_id} is already {diff['resolution'].get('status', 'resolved')}")
+    ticker = diff["ticker"]
+    gone = int(round(float(diff.get("expected_qty") or 0) - float(diff.get("broker_qty") or 0)))
+    lot = int(config.SHARES_PER_LOT)
+    if gone <= 0 or gone % lot:
+        raise ValueError(f"{gone} shares left the account — not a whole number of {lot}-share "
+                         "call lots; resolve it with an adjustment instead")
+    contracts = gone // lot
+    held = int(((log.find_position(state, ticker) or {}).get("shares") or {}).get("count") or 0)
+    if held < gone:
+        raise ValueError(f"the book holds only {held} {ticker} shares, fewer than the {gone} that "
+                         "left the account — correct the share count first")
+
+    # The call that was assigned: this report's call diffs for the ticker (missing at the
+    # broker, or reduced), narrowed by the operator's strike / expiration when given.
+    cands = [d for d in (report.get("diffs") or [])
+             if d.get("ticker") == ticker and d.get("instrument_type") == reconcile.OPTION
+             and d.get("put_call") == reconcile.CALL
+             and d.get("classification") in (reconcile.MISSING_AT_BROKER, reconcile.QUANTITY_MISMATCH)]
+    if strike is not None:
+        cands = [d for d in cands if _strike_eq(d.get("strike"), strike)]
+    if expiration:
+        cands = [d for d in cands if str(d.get("expiry") or "")[:10] == str(expiration)[:10]]
+    call = cands[0] if len(cands) == 1 else None
+    if call is not None:
+        use_strike, use_exp = call.get("strike"), call.get("expiry")
+    else:
+        position = log.find_position(state, ticker)
+        shorts = [sc for sc in ((position or {}).get("short_calls") or [])
+                  if (strike is None or _strike_eq(sc.get("strike"), strike))
+                  and (not expiration or str(sc.get("expiration") or "")[:10] == str(expiration)[:10])]
+        if len(shorts) != 1:
+            raise ValueError("can't tell which short call was assigned — pass the strike (and "
+                             "expiration) of the call that was called away")
+        use_strike, use_exp = shorts[0].get("strike"), shorts[0].get("expiration")
+    if use_strike is None:
+        raise ValueError("the assigned call's strike is unknown — pass it explicitly")
+
+    day = str(use_exp or log.utcnow())[:10]
+    payload = {"date": f"{day}T20:00:00Z"}
+    stock_price = (call or {}).get("expiry_close")
+    mode = "live" if live_transmit() else "logged"
+    res = _commit_assignment(payload, ticker, use_strike, contracts, stock_price, mode,
+                             "reconciliation")
+
+    state = log.load_state()
+    for d in [diff] + cands[:1]:
+        try:
+            reconcile.mark_diff_resolved(state, d["id"], "record_called_away",
+                                         {"execution_ids": res.get("execution_ids")})
+        except ValueError:
+            pass            # rolled off the latest report — the booking still stands
+    log.recompute_derived(state)
+    log.save_state(state)
+    _heal_positions([ticker])
+    return {"success": True, "status": "resolved", "ticker": ticker, "strike": use_strike,
+            "contracts": contracts, "shares": gone, "execution_ids": res.get("execution_ids"),
+            "realized_pnl": res.get("realized_pnl"), "diff_id": diff_id}
+
+
 def adopt_broker_trade(proposal_id: str, stock_price=None) -> dict:
     """Adopt one out-of-band broker trade (a transaction-ingestion proposal) into
     state.json (spec §4, Option B). Human-gated: the operator confirms the
