@@ -143,7 +143,7 @@ function ReviewPanel({ ticker, diffs, onDone }) {
       <UnfilledRoll ticker={ticker} diffs={diffs} toast={toast} onDone={onDone} />
       <WhichIsCorrect ticker={ticker} diffs={diffs} toast={toast} onDone={onDone} />
       <div className="mt-2 space-y-2">
-        {diffs.map((d) => <DiffRow key={d.id} ticker={ticker} diff={d} toast={toast} onDone={onDone} />)}
+        {diffs.map((d) => <DiffRow key={d.id} ticker={ticker} diff={d} allDiffs={diffs} toast={toast} onDone={onDone} />)}
       </div>
       <button onClick={() => setAdvanced((s) => !s)}
               className="mt-2 text-[11px] text-slate-500 hover:text-slate-300">
@@ -444,7 +444,16 @@ const CLASS_LABEL = {
   EXPIRED_WORTHLESS_PENDING: "expired worthless",
 };
 
-function DiffRow({ ticker, diff, toast, onDone }) {
+// Shares that left the account (a covered call was assigned): an EQUITY diff showing fewer
+// shares at the broker than the book holds. 0 when this isn't one.
+function sharesLeft(d) {
+  return d.instrument_type === "EQUITY"
+    && (d.classification === "MISSING_AT_BROKER" || d.classification === "QUANTITY_MISMATCH")
+    && Number(d.expected_qty) > 0 && Number(d.broker_qty || 0) < Number(d.expected_qty)
+    ? Number(d.expected_qty) - Number(d.broker_qty || 0) : 0;
+}
+
+function DiffRow({ ticker, diff, allDiffs = [], toast, onDone }) {
   const [busy, setBusy] = React.useState(false);
   const [form, setForm] = React.useState({
     instrument_type: diff.instrument_type || "OPTION",
@@ -454,11 +463,20 @@ function DiffRow({ ticker, diff, toast, onDone }) {
   });
   const benign = diff.classification === "EXPIRED_WORTHLESS_PENDING";
   const critical = diff.classification === "SHORT_STOCK_DETECTED";
-  // Fewer shares at the broker than the book holds: a covered call was assigned.
-  const sharesGone = diff.instrument_type === "EQUITY"
-    && (diff.classification === "MISSING_AT_BROKER" || diff.classification === "QUANTITY_MISMATCH")
-    && Number(diff.expected_qty) > 0 && Number(diff.broker_qty || 0) < Number(diff.expected_qty)
-    ? Number(diff.expected_qty) - Number(diff.broker_qty || 0) : 0;
+  // A covered call was assigned. The booking hangs off the SHARES diff, but the operator's eye
+  // lands on the CALL that vanished first — so that row offers the same button, pointing at the
+  // shares diff (and telling the server which call).
+  const calledAway = (() => {
+    const own = sharesLeft(diff);
+    if (own > 0) return { diffId: diff.id, shares: own, body: {}, onCall: false };
+    if (diff.instrument_type === "OPTION" && diff.put_call === "CALL"
+        && diff.classification === "MISSING_AT_BROKER") {
+      const eq = allDiffs.find((d) => sharesLeft(d) > 0);
+      if (eq) return { diffId: eq.id, shares: sharesLeft(eq), onCall: true,
+                       body: { strike: diff.strike, expiration: diff.expiry } };
+    }
+    return null;
+  })();
 
   const run = async (fn) => {
     setBusy(true);
@@ -474,11 +492,11 @@ function DiffRow({ ticker, diff, toast, onDone }) {
 
   const bookCalledAway = () => {
     if (!window.confirm(
-      `Book ${sharesGone} ${ticker} shares as CALLED AWAY?\n\nThis drops the assigned short call, sells the `
+      `Book ${calledAway.shares} ${ticker} shares as CALLED AWAY?\n\nThis drops the assigned short call, sells the `
       + `shares at that call's strike with realized P&L against your cost basis, and clears this `
       + `mismatch. Only do this if the call was assigned at Schwab.`)) return;
     run(async () => {
-      const r = await api.recordCalledAway(diff.id);
+      const r = await api.recordCalledAway(calledAway.diffId, calledAway.body);
       toast.show(`Booked ${ticker} called away at ${r.strike} (${r.shares} shares, P&L ${r.realized_pnl})`,
         { type: "success" });
     });
@@ -527,10 +545,12 @@ function DiffRow({ ticker, diff, toast, onDone }) {
         </p>
       )}
 
-      {sharesGone > 0 && (
+      {calledAway && (
         <div className="mt-2 rounded-lg border border-emerald-700/60 bg-emerald-500/10 px-3 py-2">
           <p className="text-xs text-emerald-200">
-            {sharesGone} shares left the account — this looks like the covered call was assigned.
+            {calledAway.onCall
+              ? `This call is gone from Schwab and ${calledAway.shares} shares left the account — it was assigned.`
+              : `${calledAway.shares} shares left the account — this looks like the covered call was assigned.`}
           </p>
           <button onClick={bookCalledAway} disabled={busy}
                   className="mt-1.5 rounded-lg border border-emerald-600 bg-emerald-500/20 px-3 py-1 text-xs font-semibold text-emerald-200 hover:bg-emerald-500/30 disabled:opacity-50">

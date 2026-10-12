@@ -125,3 +125,21 @@ def test_refuses_when_the_book_holds_fewer_shares_than_left(store):
     with pytest.raises(ValueError, match="holds only 100"):
         executor.record_called_away("diff_001")
     assert not _execs("close_shares_assigned")
+
+
+def test_the_call_row_can_name_its_strike_and_expiration(store):
+    # The UI offers the button on the vanished CALL's row too: it points at the shares diff and
+    # passes that call's strike and expiration, exactly as the diff shows them.
+    _tqqq()
+    _report()
+    out = executor.record_called_away("diff_001", strike=76.5, expiration="2026-10-09")
+    assert out["strike"] == 76.5 and out["contracts"] == 2
+    assert _execs("close_shares_assigned")[0]["strike"] == 76.5
+
+
+def test_a_strike_that_matches_no_call_falls_back_safely_or_refuses(store):
+    _tqqq()
+    _report()
+    with pytest.raises(ValueError, match="which short call"):
+        executor.record_called_away("diff_001", strike=99.0)
+    assert not _execs("close_shares_assigned")
