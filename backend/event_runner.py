@@ -170,14 +170,26 @@ class EventGate:
                 return []
             if not edges:
                 return []
+
+            def _defer(t: str, s: str) -> None:
+                # A signal the gate could not act on THIS cycle must stay an edge: it was
+                # already recorded in _seen above, so un-record it, or the next cycle reads
+                # it as "still true" and the trigger is lost for good (two names flipping in
+                # one cycle, or a flip inside the cooldown, used to vanish this way).
+                if t in self._seen:
+                    self._seen[t].discard(s)
+
             gap = float(config.EVENT_RUN_MIN_GAP_SECONDS)
             if self._last_run_at is not None and (now - self._last_run_at).total_seconds() < gap:
+                for t, s in edges:
+                    _defer(t, s)
                 return []
             cooldown = float(config.EVENT_RUN_COOLDOWN_SECONDS)
             due = []
             for t, s in edges:
                 last = self._last_run_by_ticker.get(t)
                 if last is not None and (now - last).total_seconds() < cooldown:
+                    _defer(t, s)
                     continue
                 due.append(f"{t}:{s}")
             return due
@@ -189,11 +201,32 @@ class EventGate:
                 self._last_run_by_ticker[r.split(":", 1)[0]] = now
 
 
-_gate = EventGate()
+# One gate per account: the rate limits and the "newly true" memory are a book's own. A single
+# shared gate let one account's run (min gap) swallow another's trigger, and keyed the memory by
+# ticker alone, so two books holding the same name read each other's state as theirs.
+_gates: dict[str, EventGate] = {}
+_gates_lock = threading.Lock()
+
+
+def _account_key() -> str:
+    try:
+        import accounts
+        return accounts.active_id() or "primary"
+    except Exception:  # noqa: BLE001 — no registry (tests, scripts): one implicit book
+        return "primary"
+
+
+def _gate_for() -> EventGate:
+    key = _account_key()
+    with _gates_lock:
+        return _gates.setdefault(key, EventGate())
 
 
 def reset() -> None:
-    _gate.reset()
+    with _gates_lock:
+        for g in _gates.values():
+            g.reset()
+        _gates.clear()
 
 
 def maybe_run(state: dict, quotes: dict, escalation_symbols=(), market_escalation: bool = False,
@@ -205,7 +238,8 @@ def maybe_run(state: dict, quotes: dict, escalation_symbols=(), market_escalatio
         return None
     try:
         signals = detect_signals(state, quotes, today=(now.date() if now else None))
-        reasons = _gate.observe(signals, escalation_symbols, market_escalation, now)
+        gate = _gate_for()
+        reasons = gate.observe(signals, escalation_symbols, market_escalation, now)
         if not reasons:
             return None
         # Hand the poller's prints to the quote cache so the engine's snapshot
@@ -219,7 +253,7 @@ def maybe_run(state: dict, quotes: dict, escalation_symbols=(), market_escalatio
         import recommendation_runner
         logger.info("event-driven recommendation pass: %s", ", ".join(reasons))
         summary = recommendation_runner.run(trigger={"kind": "event", "reasons": reasons})
-        _gate.mark_ran(reasons, now or datetime.now(ET))
+        gate.mark_ran(reasons, now or datetime.now(ET))
         return summary
     except Exception as e:  # noqa: BLE001
         logger.warning("event-driven recommendation pass failed: %s", e)
@@ -227,6 +261,7 @@ def maybe_run(state: dict, quotes: dict, escalation_symbols=(), market_escalatio
 
 
 def status() -> dict:
+    _gate = _gate_for()
     with _gate._lock:
         return {
             "enabled": enabled(),

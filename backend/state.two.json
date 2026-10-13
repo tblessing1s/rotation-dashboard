@@ -1,0 +1,283 @@
+{
+  "schema_version": 23,
+  "metadata": {
+    "last_updated": "2026-10-13T17:52:18Z",
+    "reserve_required": 13000,
+    "capital_deployed": 0,
+    "operating_cash": 0,
+    "trust_layer_since": "2026-10-13T17:52:18Z"
+  },
+  "positions": [],
+  "executions": [],
+  "theta_ledger": {
+    "weeks": [],
+    "totals": {
+      "this_week": 0.0,
+      "this_month": 0.0,
+      "ytd": 0.0,
+      "pct_deployed": 0
+    },
+    "extrinsic_summary": {
+      "leap_extrinsic_at_entry": 0.0,
+      "collected_to_date": 0.0,
+      "remaining_to_payback": 0.0,
+      "net_income": 0.0,
+      "income_positive": false
+    }
+  },
+  "extrinsic_payback": {},
+  "roll_ledger": {
+    "rolls": [],
+    "by_ticker": {}
+  },
+  "cycles": [],
+  "payouts": {
+    "records": {}
+  },
+  "pending_orders": {},
+  "order_events": [],
+  "order_locks": {},
+  "alerts": {
+    "active": {},
+    "log": [],
+    "settings": {},
+    "last_run": null,
+    "push_subscriptions": []
+  },
+  "reconciliation": {
+    "last": null,
+    "history": [],
+    "last_success": null
+  },
+  "ingested_transactions": {},
+  "ingestion": {
+    "last": null,
+    "last_success": null,
+    "proposals": []
+  },
+  "recommendations": [],
+  "recommendation_overrides": [],
+  "coverage_miss_acks": [],
+  "order_fidelity": {},
+  "put_ledger": {
+    "by_ticker": {},
+    "open_collateral": 0,
+    "realized_premium": 0
+  },
+  "payback_reconciliation": {
+    "ok": true,
+    "issues": []
+  },
+  "dividend_ledger": {
+    "records": [],
+    "by_ticker": {},
+    "by_month": {},
+    "total": 0
+  },
+  "order_state": {},
+  "recommendation_resolutions": [],
+  "trust_scoreboard": {
+    "as_of": "2026-10-13T17:52:18Z",
+    "since": "2026-10-13T17:52:18Z",
+    "by_action_type": {
+      "ROLL_OUT": {
+        "coverage": {
+          "matched": 0,
+          "total_manual_actions": 0,
+          "rate": null,
+          "misses": [],
+          "misses_acknowledged": 0
+        },
+        "precision": {
+          "executed_matched": 0,
+          "overridden": 0,
+          "rate": null,
+          "override_breakdown": {},
+          "matched_by_source": {},
+          "matched_diverged": 0
+        },
+        "fidelity": {
+          "graded": 0,
+          "passed": 0,
+          "rate": null
+        },
+        "graduation": {
+          "action_type": "ROLL_OUT",
+          "eligible": false,
+          "failing": [
+            "live matched cycles 0 < GRAD_MIN_LIVE_CYCLES 10",
+            "reconciliation NOT_YET_IMPLEMENTED \u2014 no action type may graduate until the post-fill reconciliation layer ships"
+          ],
+          "window_weeks": 8,
+          "live_matched": 0,
+          "matched": 0,
+          "overridden": 0,
+          "coverage_misses": 0,
+          "override_rate": 0.0
+        }
+      },
+      "ROLL_DOWN": {
+        "coverage": {
+          "matched": 0,
+          "total_manual_actions": 0,
+          "rate": null,
+          "misses": [],
+          "misses_acknowledged": 0
+        },
+        "precision": {
+          "executed_matched": 0,
+          "overridden": 0,
+          "rate": null,
+          "override_breakdown": {},
+          "matched_by_source": {},
+          "matched_diverged": 0
+        },
+        "fidelity": {
+          "graded": 0,
+          "passed": 0,
+          "rate": null
+        },
+        "graduation": {
+          "action_type": "ROLL_DOWN",
+          "eligible": false,
+          "failing": [
+            "live matched cycles 0 < GRAD_MIN_LIVE_CYCLES 10",
+            "reconciliation NOT_YET_IMPLEMENTED \u2014 no action type may graduate until the post-fill reconciliation layer ships"
+          ],
+          "window_weeks": 16,
+          "live_matched": 0,
+          "matched": 0,
+          "overridden": 0,
+          "coverage_misses": 0,
+          "override_rate": 0.0
+        }
+      },
+      "DEFEND": {
+        "coverage": {
+          "matched": 0,
+          "total_manual_actions": 0,
+          "rate": null,
+          "misses": [],
+          "misses_acknowledged": 0
+        },
+        "precision": {
+          "executed_matched": 0,
+          "overridden": 0,
+          "rate": null,
+          "override_breakdown": {},
+          "matched_by_source": {},
+          "matched_diverged": 0
+        },
+        "fidelity": {
+          "graded": 0,
+          "passed": 0,
+          "rate": null
+        },
+        "graduation": {
+          "action_type": "DEFEND",
+          "eligible": false,
+          "failing": [
+            "live matched cycles 0 < GRAD_MIN_LIVE_CYCLES 10",
+            "reconciliation NOT_YET_IMPLEMENTED \u2014 no action type may graduate until the post-fill reconciliation layer ships"
+          ],
+          "window_weeks": 16,
+          "live_matched": 0,
+          "matched": 0,
+          "overridden": 0,
+          "coverage_misses": 0,
+          "override_rate": 0.0
+        }
+      },
+      "EXIT": {
+        "coverage": {
+          "matched": 0,
+          "total_manual_actions": 0,
+          "rate": null,
+          "misses": [],
+          "misses_acknowledged": 0
+        },
+        "precision": {
+          "executed_matched": 0,
+          "overridden": 0,
+          "rate": null,
+          "override_breakdown": {},
+          "matched_by_source": {},
+          "matched_diverged": 0
+        },
+        "fidelity": {
+          "graded": 0,
+          "passed": 0,
+          "rate": null
+        },
+        "graduation": {
+          "action_type": "EXIT",
+          "eligible": false,
+          "failing": [
+            "live matched cycles 0 < GRAD_MIN_LIVE_CYCLES 10",
+            "reconciliation NOT_YET_IMPLEMENTED \u2014 no action type may graduate until the post-fill reconciliation layer ships"
+          ],
+          "window_weeks": 26,
+          "live_matched": 0,
+          "matched": 0,
+          "overridden": 0,
+          "coverage_misses": 0,
+          "override_rate": 0.0
+        }
+      },
+      "ENTER": {
+        "coverage": {
+          "matched": 0,
+          "total_manual_actions": 0,
+          "rate": null,
+          "misses": [],
+          "misses_acknowledged": 0
+        },
+        "precision": {
+          "executed_matched": 0,
+          "overridden": 0,
+          "rate": null,
+          "override_breakdown": {},
+          "matched_by_source": {},
+          "matched_diverged": 0
+        },
+        "fidelity": {
+          "graded": 0,
+          "passed": 0,
+          "rate": null
+        },
+        "graduation": {
+          "action_type": "ENTER",
+          "eligible": false,
+          "failing": [
+            "action type is never auto-eligible in this iteration",
+            "live matched cycles 0 < GRAD_MIN_LIVE_CYCLES 10",
+            "reconciliation NOT_YET_IMPLEMENTED \u2014 no action type may graduate until the post-fill reconciliation layer ships"
+          ],
+          "window_weeks": null,
+          "live_matched": 0,
+          "matched": 0,
+          "overridden": 0,
+          "coverage_misses": 0,
+          "override_rate": 0.0
+        }
+      }
+    },
+    "timeliness": {
+      "rows": [],
+      "avg_emission_lag_days": null,
+      "max_emission_lag_days": null,
+      "late_after_action_count": 0
+    },
+    "open_recommendations": 0,
+    "open_actionable": 0,
+    "totals": {
+      "recommendations": 0,
+      "all_clear": 0,
+      "coverage_misses": 0,
+      "coverage_misses_acknowledged": 0,
+      "fidelity_failures": 0
+    },
+    "reconciliation_status": "NOT_YET_IMPLEMENTED",
+    "automation_note": "Display-only. No automation switch exists; while reconciliation is NOT_YET_IMPLEMENTED no action type may graduate."
+  }
+}

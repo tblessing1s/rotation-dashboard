@@ -442,6 +442,13 @@ ESCALATION_DECAY_MINUTES = 60    # PROPOSED_DEFAULT — an escalation decays aft
 # top of the scheduled slots. Bounded per name and globally.
 EVENT_RUN_COOLDOWN_SECONDS = 900   # PROPOSED_DEFAULT — one event run per name per 15 min
 EVENT_RUN_MIN_GAP_SECONDS = 120    # PROPOSED_DEFAULT — never two event runs inside 2 min
+# TRAVIS_EXTENSION / PROPOSED_DEFAULT — how often autopilot re-evaluates a book it is armed for
+# during market hours. The scheduled slots leave 2.5-3 hour gaps mid-day (10:00 -> 12:30 ->
+# 15:30 ET) and the event runs fire once per name per EVENT_RUN_COOLDOWN_SECONDS, so a roll
+# that came due (or an order that was cancelled and needs resending) could wait hours. An
+# armed account (autopilot ON with at least one grant, and an open position) gets a full
+# evaluation pass at this cadence; 0 turns it off. CFM_AUTOPILOT_PASS_SECONDS overrides.
+AUTOPILOT_PASS_SECONDS = float(os.environ.get("CFM_AUTOPILOT_PASS_SECONDS") or 120.0)
 # Live short-call marks (option_marks): each open short rides its underlying's
 # batched quote; a mark older than this is treated as absent (stored mark used).
 OPTION_MARK_MAX_AGE_SECONDS = 600  # PROPOSED_DEFAULT — 5 Tier-0 cycles

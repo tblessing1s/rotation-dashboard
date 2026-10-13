@@ -321,6 +321,59 @@ def _maybe_tier_poll(now: datetime) -> None:
     for_each_account("tier poll", run)
 
 
+# account label -> time.monotonic() of its last autopilot pass (in-memory; a restart just runs one)
+_last_autopilot_pass: dict[str, float] = {}
+
+
+def _autopilot_armed(state: dict) -> bool:
+    """Autopilot is ON, at least one trigger is granted, and the book has an open position."""
+    import autopilot
+    import circuit_breaker
+    import recommendation_auto_execute as auto_exec
+    if not autopilot.enabled(state):
+        return False
+    if not (any(circuit_breaker.get_auto_exit_permissions(state).values())
+            or any(auto_exec.get_permissions(state).values())):
+        return False
+    return any(p.get("status") != "closed" for p in state.get("positions") or [])
+
+
+def _maybe_autopilot_pass(now: datetime, monotonic=None) -> None:
+    """Re-evaluate every ARMED book on a fixed cadence through market hours (see
+    config.AUTOPILOT_PASS_SECONDS for why the slots and edge-driven runs are not enough). Each
+    pass is the ordinary recommendation pass — engine, then the unattended exit / roll checks —
+    so it also retries a roll whose order was cancelled. Skipped for a book autopilot is off
+    for, so a quiet account costs nothing. Best-effort: logged, never fatal to the tick."""
+    import time as _time
+    monotonic = monotonic or _time.monotonic
+    interval = float(config.AUTOPILOT_PASS_SECONDS)
+    if (interval <= 0 or not recommendations_enabled() or config.demo_enabled()
+            or not _market_hours(now)):
+        return
+
+    def run(account_id):
+        key = _account_label(account_id)
+        last = _last_autopilot_pass.get(key)
+        if last is not None and monotonic() - last < interval:
+            return
+        try:
+            import logging_handler as log
+            if not _autopilot_armed(log.load_state()):
+                return
+            _last_autopilot_pass[key] = monotonic()
+            import recommendation_runner
+            # Positions only: the entry-candidate sweep is the expensive part of a pass and has
+            # no bearing on exits / rolls (the engine never cancels an ENTER for lack of one).
+            summary = recommendation_runner.run(include_entry=False, trigger={"kind": "autopilot"})
+            acted = len(summary.get("auto_roll") or []) + len(summary.get("auto_exit") or [])
+            if acted:
+                logger.info("autopilot pass (%s): %d action(s)", key, acted)
+        except Exception as e:  # noqa: BLE001 — a failed pass must not kill the thread
+            logger.warning("autopilot pass failed for account %s: %s", key, e)
+
+    for_each_account("autopilot pass", run)
+
+
 def due_slots(now: datetime, last_run: dict[str, date] | None = None) -> list[str]:
     """Schedule slots that should run at `now` (ET): time reached, market day,
     not yet run today. Pure so it's unit-testable without threads."""
@@ -536,6 +589,7 @@ def _tick() -> None:
     # close); the tiered poll adds batched intraday QUOTES + escalation on top.
     _maybe_hot_refresh(now)
     _maybe_tier_poll(now)
+    _maybe_autopilot_pass(now)  # after the poll, so the pass reads this tick's fresh quotes
     _maybe_interval_reconcile(now)
     _maybe_cancel_stale_orders(now)  # backstop when the placing tab never got to cancel
     _maybe_warm_scan(now)  # keep the full-universe scan cache warm between slots

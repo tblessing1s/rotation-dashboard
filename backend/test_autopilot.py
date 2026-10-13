@@ -350,3 +350,62 @@ def test_features_say_whether_the_mark_was_live_or_stored(book):
     market["tickers"]["TQQQ"]["short_marks"] = {(76.5, "2026-07-17"): 6.9}
     ev = engine._evaluate_position(p, market, NOW)
     assert ev["features"]["shorts"][0]["mark_source"] == "live"
+
+
+# ---- the autopilot pass: armed books are re-evaluated through the day ----------
+import alert_scheduler as sched  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
+
+_MID = datetime(2026, 7, 8, 11, 30, tzinfo=ZoneInfo("America/New_York"))   # between slots, market open
+
+
+@pytest.fixture()
+def armed_book(book, monkeypatch):
+    import recommendation_auto_execute as ae
+    import logging_handler as log
+    monkeypatch.setattr(sched, "recommendations_enabled", lambda: True)
+    monkeypatch.setattr(sched, "account_ids", lambda: [None])
+    sched._last_autopilot_pass.clear()
+    ae.set_permission(TriggerRule.ROLL_EXTRINSIC_CAPTURED, True)
+    log.mutate_state(lambda s: s.setdefault("positions", []).append(_position("AAPL")))
+    calls = []
+    monkeypatch.setattr(runner, "run", lambda **kw: calls.append(kw) or {"auto_roll": [], "auto_exit": []})
+    return calls
+
+
+def test_an_armed_book_is_evaluated_on_the_cadence_between_slots(armed_book):
+    t = [1000.0]
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    assert armed_book == [{"include_entry": False, "trigger": {"kind": "autopilot"}}]
+    t[0] += 60
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])           # too soon
+    assert len(armed_book) == 1
+    t[0] += 61
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])           # 121s since the last pass
+    assert len(armed_book) == 2
+
+
+def test_no_pass_off_hours_or_when_disarmed_or_disabled(armed_book, monkeypatch):
+    et = ZoneInfo("America/New_York")
+    sched._maybe_autopilot_pass(datetime(2026, 7, 8, 17, 0, tzinfo=et))            # after the close
+    sched._maybe_autopilot_pass(datetime(2026, 7, 11, 11, 30, tzinfo=et))          # Saturday
+    assert armed_book == []
+    autopilot.set_enabled(False)                                                   # master switch OFF
+    sched._maybe_autopilot_pass(_MID)
+    assert armed_book == []
+    autopilot.set_enabled(True)
+    monkeypatch.setattr(config_mod := __import__("config"), "AUTOPILOT_PASS_SECONDS", 0.0)
+    sched._maybe_autopilot_pass(_MID)                                              # cadence 0 == off
+    assert armed_book == []
+
+
+def test_no_pass_for_a_book_with_nothing_granted(book, monkeypatch):
+    import logging_handler as log
+    monkeypatch.setattr(sched, "recommendations_enabled", lambda: True)
+    monkeypatch.setattr(sched, "account_ids", lambda: [None])
+    sched._last_autopilot_pass.clear()
+    log.mutate_state(lambda s: s.setdefault("positions", []).append(_position("AAPL")))
+    calls = []
+    monkeypatch.setattr(runner, "run", lambda **kw: calls.append(kw) or {})
+    sched._maybe_autopilot_pass(_MID)
+    assert calls == []                                       # master ON, but no trigger is granted

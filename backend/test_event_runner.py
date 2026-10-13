@@ -138,17 +138,52 @@ def test_per_ticker_cooldown_and_global_gap(monkeypatch):
     t1 = T0 + timedelta(minutes=2)
     assert g.observe({"AAPL": {er.ROLL_75}}, now=t1) == ["AAPL:roll_75"]
     g.mark_ran(["AAPL:roll_75"], t1)
-    # 1 min later MSFT flips: inside the global gap -> nothing
+    # 1 min later MSFT flips: inside the global gap -> nothing THIS cycle ...
     assert g.observe({"MSFT": {er.ROLL_75}}, now=t1 + timedelta(minutes=1)) == []
-    # the edge was consumed by the read above; MSFT flipping again 5 min later is not new
-    assert g.observe({"MSFT": {er.ROLL_75}}, now=t1 + timedelta(minutes=5)) == []
-    # AAPL gets a second signal 10 min later: inside its 15-min cooldown -> nothing
-    assert g.observe({"AAPL": {er.ROLL_75, er.ASSIGNMENT_RISK}}, now=t1 + timedelta(minutes=10)) == []
+    # ... but the trigger is kept, not consumed: it fires as soon as the gap has cleared
+    t2 = t1 + timedelta(minutes=5)
+    assert g.observe({"MSFT": {er.ROLL_75}}, now=t2) == ["MSFT:roll_75"]
+    g.mark_ran(["MSFT:roll_75"], t2)
+    # and only once: still true afterwards is not a new edge
+    assert g.observe({"MSFT": {er.ROLL_75}}, now=t2 + timedelta(minutes=2)) == []
+    # AAPL gets a second signal 6 min later (inside its 15-min cooldown) -> held back ...
+    assert g.observe({"AAPL": {er.ROLL_75, er.ASSIGNMENT_RISK}}, now=t1 + timedelta(minutes=8)) == []
     # a defense escalation on a cool name runs at once
     assert g.observe({}, escalation_symbols=["NVDA"], now=t1 + timedelta(minutes=11)) == ["NVDA:defense"]
     g.mark_ran(["NVDA:defense"], t1 + timedelta(minutes=11))
-    # market escalation is its own key
-    assert g.observe({}, market_escalation=True, now=t1 + timedelta(minutes=14)) == ["MARKET:market"]
+    # ... and the held-back AAPL signal fires once its cooldown (15 min after t1) is over
+    assert g.observe({"AAPL": {er.ROLL_75, er.ASSIGNMENT_RISK}},
+                     now=t1 + timedelta(minutes=16)) == ["AAPL:assignment_risk"]
+
+
+def test_two_names_flipping_in_one_cycle_both_get_their_run(monkeypatch):
+    """The second name used to be swallowed (the gap check ran after its edge was recorded)."""
+    monkeypatch.setattr(config, "EVENT_RUN_MIN_GAP_SECONDS", 120)
+    g = er.EventGate()
+    g.observe({"AAA": set(), "BBB": set()}, now=T0)
+    t1 = T0 + timedelta(minutes=2)
+    first = g.observe({"AAA": {er.EXTRINSIC_CAPTURED}}, now=t1)
+    g.mark_ran(first, t1)
+    assert g.observe({"BBB": {er.EXTRINSIC_CAPTURED}}, now=t1 + timedelta(seconds=3)) == []
+    assert g.observe({"BBB": {er.EXTRINSIC_CAPTURED}},
+                     now=t1 + timedelta(minutes=3)) == ["BBB:extrinsic_captured"]
+
+
+def test_each_account_has_its_own_gate(monkeypatch):
+    import accounts
+    runs = []
+    import recommendation_runner as runner
+    monkeypatch.setattr(runner, "run", lambda **kw: runs.append(kw) or {"emitted": 0})
+    st = _state([_short(sold=2.0, entry_extrinsic=2.0, current_bid=1.0)])
+    prime, flipped = {"AAPL": {"price": 90.0}}, {"AAPL": {"price": 100.7}}      # 85% captured
+    for acct in ("one", "two"):
+        monkeypatch.setattr(accounts, "active_id", lambda a=acct: a)
+        assert er.maybe_run(st, prime, now=T0) is None                          # each book primes
+    ran = []
+    for acct in ("one", "two"):                       # same cycle, seconds apart
+        monkeypatch.setattr(accounts, "active_id", lambda a=acct: a)
+        ran.append(er.maybe_run(st, flipped, now=T0 + timedelta(minutes=2)) is not None)
+    assert ran == [True, True]                        # book two's flip is not swallowed by book one's run
 
 
 # --- the hook ------------------------------------------------------------------
