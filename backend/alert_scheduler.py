@@ -323,6 +323,10 @@ def _maybe_tier_poll(now: datetime) -> None:
 
 # account label -> time.monotonic() of its last autopilot pass (in-memory; a restart just runs one)
 _last_autopilot_pass: dict[str, float] = {}
+# account label -> time.monotonic() when its CURRENT fast episode began (present while autopilot has
+# something in flight for that book; removed the moment it settles)
+_fast_episode: dict[str, float] = {}
+_FAST_TICK_SECONDS = 5   # how often the fast thread looks; each book self-throttles to its own interval
 
 
 def _autopilot_armed(state: dict) -> bool:
@@ -338,40 +342,95 @@ def _autopilot_armed(state: dict) -> bool:
     return any(p.get("status") != "closed" for p in state.get("positions") or [])
 
 
-def _maybe_autopilot_pass(now: datetime, monotonic=None) -> None:
-    """Re-evaluate every ARMED book on a fixed cadence through market hours (see
-    config.AUTOPILOT_PASS_SECONDS for why the slots and edge-driven runs are not enough). Each
-    pass is the ordinary recommendation pass — engine, then the unattended exit / roll checks —
-    so it also retries a roll whose order was cancelled. Skipped for a book autopilot is off
-    for, so a quiet account costs nothing. Best-effort: logged, never fatal to the tick."""
+def autopilot_activity(state: dict, now: datetime | None = None) -> str | None:
+    """Why an armed book needs the FAST cadence right now, or None when nothing is in flight: an
+    order autopilot placed is still pending, or a trigger it is granted to carry out has not been
+    settled (an exit to complete, a roll to place or resend)."""
+    import autopilot_log
+    w = autopilot_log.work(state, now)
+    if w["orders"]:
+        return f"{len(w['orders'])} autopilot order(s) working"
+    if w["actionable"]:
+        return f"{len(w['actionable'])} triggered action(s) to carry out"
+    return None
+
+
+def _autopilot_interval(key: str, reason: str | None, monotonic) -> float:
+    """Seconds between passes for one book: the fast interval while something is in flight (capped
+    per continuous episode, so an action that can never be carried out cannot poll forever), else
+    the ordinary one. Clears the episode the moment nothing is in flight (and asks for one closing
+    pass, interval 0, so the book is re-read straight away)."""
+    base = float(config.AUTOPILOT_PASS_SECONDS)
+    fast = float(config.AUTOPILOT_FAST_SECONDS)
+    if reason is None or fast <= 0:
+        # An episode that has just ended gets ONE closing pass at once, so the settlement (a fill
+        # matched to its recommendation, a cancel cleared) is confirmed now, not 2 minutes later.
+        ended = _fast_episode.pop(key, None) is not None
+        return 0.0 if ended else base
+    began = _fast_episode.setdefault(key, monotonic())
+    if monotonic() - began > float(config.AUTOPILOT_FAST_MAX_SECONDS):
+        return base
+    return fast
+
+
+def _maybe_autopilot_pass(now: datetime, monotonic=None, fast_only: bool = False) -> None:
+    """Re-evaluate every ARMED book through market hours (config.AUTOPILOT_PASS_SECONDS), and every
+    few seconds (config.AUTOPILOT_FAST_SECONDS) while autopilot has something in flight for it —
+    an order working, or a triggered exit / roll not yet settled — until it settles. A fast pass
+    first polls autopilot's own orders (booking a fill or clearing a cancel at once) and cancels
+    any past its stale age, then runs the ordinary recommendation pass, which carries out or
+    RESENDS the action. Skipped for a book autopilot is off for, so a quiet account costs nothing.
+    ``fast_only`` (the fast thread) touches only books already in a fast episode. Best-effort:
+    logged, never fatal."""
     import time as _time
     monotonic = monotonic or _time.monotonic
-    interval = float(config.AUTOPILOT_PASS_SECONDS)
-    if (interval <= 0 or not recommendations_enabled() or config.demo_enabled()
-            or not _market_hours(now)):
+    if (float(config.AUTOPILOT_PASS_SECONDS) <= 0 or not recommendations_enabled()
+            or config.demo_enabled() or not _market_hours(now)):
         return
 
     def run(account_id):
         key = _account_label(account_id)
-        last = _last_autopilot_pass.get(key)
-        if last is not None and monotonic() - last < interval:
+        if fast_only and key not in _fast_episode:
             return
         try:
             import logging_handler as log
-            if not _autopilot_armed(log.load_state()):
+            state = log.load_state()
+            if not _autopilot_armed(state):
+                _fast_episode.pop(key, None)
+                return
+            reason = autopilot_activity(state, now)
+            interval = _autopilot_interval(key, reason, monotonic)
+            last = _last_autopilot_pass.get(key)
+            if last is not None and monotonic() - last < interval:
                 return
             _last_autopilot_pass[key] = monotonic()
+            if reason is not None:
+                import executor
+                executor.settle_autopilot_orders()
+                executor.cancel_stale_pending_orders(now)
             import recommendation_runner
             # Positions only: the entry-candidate sweep is the expensive part of a pass and has
             # no bearing on exits / rolls (the engine never cancels an ENTER for lack of one).
             summary = recommendation_runner.run(include_entry=False, trigger={"kind": "autopilot"})
             acted = len(summary.get("auto_roll") or []) + len(summary.get("auto_exit") or [])
             if acted:
-                logger.info("autopilot pass (%s): %d action(s)", key, acted)
+                logger.info("autopilot pass (%s): %d action(s)%s", key, acted,
+                            f" — {reason}" if reason else "")
         except Exception as e:  # noqa: BLE001 — a failed pass must not kill the thread
             logger.warning("autopilot pass failed for account %s: %s", key, e)
 
     for_each_account("autopilot pass", run)
+
+
+def _fast_loop() -> None:
+    """The short-interval companion to the 30s scheduler tick: while any book is in a fast episode,
+    look every few seconds and let _maybe_autopilot_pass apply that book's own 10s interval."""
+    while not _stop.wait(_FAST_TICK_SECONDS):
+        try:
+            if _fast_episode:
+                _maybe_autopilot_pass(datetime.now(ET), fast_only=True)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("autopilot fast loop error: %s", e)
 
 
 def due_slots(now: datetime, last_run: dict[str, date] | None = None) -> list[str]:
@@ -829,6 +888,7 @@ def start_once() -> bool:
         if _started or not enabled():
             return False
         threading.Thread(target=_loop, name="alert-scheduler", daemon=True).start()
+        threading.Thread(target=_fast_loop, name="autopilot-fast", daemon=True).start()
         _started = True
         logger.info("alert scheduler started (ET slots: %s)", ", ".join(config.ALERT_SCHEDULE_ET))
         # Warm the scan cache once on startup, off-thread so it never delays boot,

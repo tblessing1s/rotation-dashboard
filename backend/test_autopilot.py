@@ -366,6 +366,7 @@ def armed_book(book, monkeypatch):
     monkeypatch.setattr(sched, "recommendations_enabled", lambda: True)
     monkeypatch.setattr(sched, "account_ids", lambda: [None])
     sched._last_autopilot_pass.clear()
+    sched._fast_episode.clear()
     ae.set_permission(TriggerRule.ROLL_EXTRINSIC_CAPTURED, True)
     log.mutate_state(lambda s: s.setdefault("positions", []).append(_position("AAPL")))
     calls = []
@@ -409,3 +410,111 @@ def test_no_pass_for_a_book_with_nothing_granted(book, monkeypatch):
     monkeypatch.setattr(runner, "run", lambda **kw: calls.append(kw) or {})
     sched._maybe_autopilot_pass(_MID)
     assert calls == []                                       # master ON, but no trigger is granted
+
+
+# ---- fast refresh: every ~10s while autopilot has something in flight ----------
+def _auto_order_state(order=True):
+    import logging_handler as log
+    if order:
+        log.save_pending_order("A1", {"kind": "roll_short", "client_order_ref": "auto:rec_1",
+                                      "ticker": "AAPL"})
+
+
+def test_work_reports_autopilot_orders_and_actionable_recs(armed_book):
+    import autopilot_log as al
+    import logging_handler as log
+    assert al.work(log.load_state()) == {"orders": [], "actionable": []}
+    _auto_order_state()
+    log.save_pending_order("M1", {"kind": "roll_short", "client_order_ref": "manual-1", "ticker": "AAPL"})
+    assert al.work(log.load_state())["orders"] == ["A1"]                   # a hand-placed order is not autopilot's
+
+
+def test_idle_book_uses_the_ordinary_cadence_and_no_episode(armed_book):
+    t = [1000.0]
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    assert len(armed_book) == 1 and sched._fast_episode == {}
+    t[0] += 30
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    assert len(armed_book) == 1                                              # still the 120s cadence
+
+
+def test_a_book_with_an_order_working_is_checked_every_ten_seconds(armed_book, monkeypatch):
+    import executor
+    _auto_order_state()
+    settled = []
+    monkeypatch.setattr(executor, "settle_autopilot_orders", lambda: settled.append("settle") or {})
+    monkeypatch.setattr(executor, "cancel_stale_pending_orders", lambda now=None: settled.append("stale") or {})
+    t = [1000.0]
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    assert len(armed_book) == 1
+    assert list(sched._fast_episode) == ["active"]                           # the episode began
+    assert settled == ["settle", "stale"]                                    # orders polled BEFORE the pass
+    t[0] += 9
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    assert len(armed_book) == 1                                              # not yet 10s
+    t[0] += 2
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    assert len(armed_book) == 2                                              # 11s: the fast cadence
+
+
+def test_the_episode_ends_when_the_order_settles(armed_book, monkeypatch):
+    import executor
+    import logging_handler as log
+    _auto_order_state()
+    monkeypatch.setattr(executor, "settle_autopilot_orders", lambda: {})
+    monkeypatch.setattr(executor, "cancel_stale_pending_orders", lambda now=None: {})
+    t = [1000.0]
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    assert sched._fast_episode
+    assert len(armed_book) == 1
+    log.pop_pending_order("A1")                                              # filled / cancelled / cleared
+    t[0] += 3                                                                # well inside 10s: the book is
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])                # re-read at once to confirm
+    assert sched._fast_episode == {} and len(armed_book) == 2                # ... one closing pass
+    t[0] += 11                                                               # then the ordinary cadence
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    assert len(armed_book) == 2
+
+
+def test_a_fast_episode_is_capped(armed_book, monkeypatch):
+    import config as cfg
+    import executor
+    monkeypatch.setattr(executor, "settle_autopilot_orders", lambda: {})
+    monkeypatch.setattr(executor, "cancel_stale_pending_orders", lambda now=None: {})
+    monkeypatch.setattr(cfg, "AUTOPILOT_FAST_MAX_SECONDS", 60.0)
+    _auto_order_state()
+    t = [1000.0]
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    t[0] += 61                                                               # past the cap
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])               # (base 120s not reached)
+    assert len(armed_book) == 1
+    t[0] += 61                                                               # base cadence elapsed
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    assert len(armed_book) == 2
+
+
+def test_the_fast_thread_only_touches_books_already_in_an_episode(armed_book):
+    sched._maybe_autopilot_pass(_MID, fast_only=True)
+    assert armed_book == []                                                  # no episode -> not its business
+
+
+def test_fast_mode_can_be_turned_off(armed_book, monkeypatch):
+    import config as cfg
+    import executor
+    monkeypatch.setattr(executor, "settle_autopilot_orders", lambda: {})
+    monkeypatch.setattr(cfg, "AUTOPILOT_FAST_SECONDS", 0.0)
+    _auto_order_state()
+    t = [1000.0]
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    t[0] += 11
+    sched._maybe_autopilot_pass(_MID, monotonic=lambda: t[0])
+    assert len(armed_book) == 1 and sched._fast_episode == {}
+
+
+def test_the_status_card_says_when_fast_refresh_is_active(armed_book):
+    import autopilot_log as al
+    by = {c["id"]: c for c in al.diagnose()["checks"]}
+    assert by["fast"]["level"] == "info" and "Idle" in by["fast"]["detail"]
+    _auto_order_state()
+    by = {c["id"]: c for c in al.diagnose()["checks"]}
+    assert by["fast"]["level"] == "warn" and "ACTIVE" in by["fast"]["detail"]

@@ -20,29 +20,82 @@ _CAP = 100
 
 
 def record(ticker: str | None, rule: str | None, rec_id: str | None, result: str,
-           reason: str = "", **extra) -> None:
+           reason: str = "", **extra) -> bool:
     """Append one decision (result: placed / exited / skipped / failed). A repeat of the
     SAME outcome for the same recommendation (every event pass re-checks it) is not
-    re-logged. Never raises — a logging problem must not disturb the pass."""
+    re-logged. Returns True only when a NEW row was written (so a caller can alert once).
+    Never raises — a logging problem must not disturb the pass."""
     entry = {"at": log.utcnow(), "ticker": ticker, "trigger_rule": rule, "rec_id": rec_id,
              "result": result, "reason": reason, **extra}
 
     def _apply(st):
         rows = st.setdefault("metadata", {}).setdefault(_KEY, [])
         if rows and all(rows[-1].get(k) == entry[k] for k in ("rec_id", "result", "reason")):
-            return
+            return False
         rows.append(entry)
         del rows[:-_CAP]
+        return True
 
     try:
-        log.mutate_state(_apply)
+        return bool(log.mutate_state(_apply))
     except Exception as e:  # noqa: BLE001
         log.logger.warning("autopilot decision log write failed: %s", e)
+        return False
 
 
 def recent(state: dict | None = None, limit: int = 30) -> list[dict]:
     state = state if state is not None else log.load_state()
     return list(reversed((state.get("metadata") or {}).get(_KEY) or []))[:limit]
+
+
+def will_act(rec: dict, perms_exit: dict, perms_roll: dict) -> tuple[bool, str]:
+    """Would autopilot carry out this open recommendation (grants only; the master switch is the
+    caller's)? Returns (eligible, why-not / which grant)."""
+    from rec_types import TriggerRule
+    import recommendation_auto_execute as auto_exec
+    rule = rec.get("trigger_rule")
+    if rule == TriggerRule.CIRCUIT_BREAKER:
+        cond = ((((rec.get("input_snapshot") or {}).get("trigger_detail") or {})
+                 .get("circuit_breaker") or {}).get("nearest_trigger") or {}).get("condition")
+        ok = bool(cond and perms_exit.get(cond))
+        return ok, f"exit level {cond or '?'}" + ("" if ok else " is not granted for auto-exit")
+    if rule in auto_exec.AUTO_EXECUTE_TRIGGERS:
+        ok = bool(perms_roll.get(rule))
+        return ok, "granted" if ok else "not granted"
+    return False, "autopilot never acts on this trigger — it only recommends"
+
+
+def work(state: dict, now: datetime | None = None) -> dict:
+    """What autopilot has IN FLIGHT for this book right now — what the fast refresh follows:
+
+      orders     order ids autopilot placed that are still pending at the broker
+      actionable open recommendations it is granted to carry out and could place right now
+                 (an exit; or a roll with no attempt in flight and none exhausted)
+
+    Both empty means there is nothing to settle and the ordinary cadence applies."""
+    import autopilot
+    import circuit_breaker
+    import recommendation_auto_execute as auto_exec
+    import trust_derive
+    from rec_types import ActionType, TriggerRule
+    now = now or datetime.now(timezone.utc)
+    orders = [str(oid) for oid, rec in (state.get("pending_orders") or {}).items()
+              if str(rec.get("client_order_ref") or "").startswith("auto:")]
+    actionable = []
+    if autopilot.enabled(state):
+        pe = circuit_breaker.get_auto_exit_permissions(state)
+        pr = auto_exec.get_permissions(state)
+        for r in trust_derive.open_recommendations(state, now):
+            if r.get("action_type") == ActionType.NO_ACTION:
+                continue
+            ok, _ = will_act(r, pe, pr)
+            if not ok:
+                continue
+            if r.get("trigger_rule") != TriggerRule.CIRCUIT_BREAKER:
+                if auto_exec.attempt_ref(r.get("rec_id"))[1] != "new":
+                    continue          # an order is out for it, or every attempt was used
+            actionable.append(r)
+    return {"orders": orders, "actionable": actionable}
 
 
 def _check(id_: str, label: str, ok, detail: str, *, level: str | None = None) -> dict:
@@ -150,19 +203,8 @@ def diagnose(state: dict | None = None, now: datetime | None = None) -> dict:
                        if r.get("action_type") != ActionType.NO_ACTION]
     pending = []
     for r in open_actionable:
-        rule = r.get("trigger_rule")
-        if rule == TriggerRule.CIRCUIT_BREAKER:
-            cond = ((((r.get("input_snapshot") or {}).get("trigger_detail") or {})
-                     .get("circuit_breaker") or {}).get("nearest_trigger") or {}).get("condition")
-            eligible, why = (bool(cond and perms_exit.get(cond)),
-                             f"exit level {cond or '?'}" + ("" if cond and perms_exit.get(cond)
-                                                            else " is not granted for auto-exit"))
-        elif rule in auto_exec.AUTO_EXECUTE_TRIGGERS:
-            eligible = bool(perms_roll.get(rule))
-            why = "granted" if eligible else "not granted"
-        else:
-            eligible, why = False, "autopilot never acts on this trigger — it only recommends"
-        pending.append({"ticker": r.get("ticker"), "trigger_rule": rule,
+        eligible, why = will_act(r, perms_exit, perms_roll)
+        pending.append({"ticker": r.get("ticker"), "trigger_rule": r.get("trigger_rule"),
                         "action_type": r.get("action_type"), "emitted_at": r.get("emitted_at"),
                         "autopilot_will_act": eligible and st["enabled"], "why": why})
     checks.append(_check(
@@ -171,6 +213,19 @@ def diagnose(state: dict | None = None, now: datetime | None = None) -> dict:
         "that autopilot will act on." if open_actionable else
         "None — no trigger is currently met on any open position, so there is nothing to trade.",
         level="ok" if open_actionable else "info"))
+    # Fast refresh: while autopilot has an order out or a triggered action to carry out, the book
+    # is re-evaluated every few seconds until it settles (alert_scheduler._maybe_autopilot_pass).
+    if st["enabled"] and st["granted"]:
+        w = work(state, now)
+        busy = bool(w["orders"] or w["actionable"])
+        checks.append(_check(
+            "fast", "Fast refresh", True,
+            (f"ACTIVE — re-checking every {config.AUTOPILOT_FAST_SECONDS:g}s until settled "
+             f"({len(w['orders'])} order(s) working, {len(w['actionable'])} action(s) to carry out)."
+             if busy else
+             f"Idle — nothing in flight. Re-checks every {config.AUTOPILOT_PASS_SECONDS:g}s in market "
+             f"hours, and every {config.AUTOPILOT_FAST_SECONDS:g}s once something is triggered."),
+            level="warn" if busy else "info"))
     try:
         import accounts
         acct = accounts.active()

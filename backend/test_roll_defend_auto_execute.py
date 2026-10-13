@@ -425,3 +425,99 @@ def test_live_roll_is_skipped_when_no_priced_strike_is_available(store, monkeypa
     calls = _live_roll(monkeypatch, None)
     assert runner._check_roll_defend_auto_execute(NOW, dry_run=True) == []
     assert calls == []
+
+
+# ===========================================================================
+# One order per attempt: an unfilled auto-roll is RESENT, an order in flight never doubled up.
+# ===========================================================================
+def _sub(ref, status, order_id="9"):
+    log.save_order_submission(ref, {"client_order_ref": ref, "status": status, "order_id": order_id,
+                                    "ticker": "KO", "action": "roll_short"})
+
+
+def test_attempt_ref_walks_through_the_attempts(store):
+    import executor as ex
+    assert auto_exec.attempt_ref("rec_1") == ("auto:rec_1", "new")            # nothing yet
+    _sub("auto:rec_1", ex.SUB_WORKING)
+    assert auto_exec.attempt_ref("rec_1") == ("auto:rec_1", "in_flight")      # never double up
+    log.update_order_submission("auto:rec_1", status=ex.SUB_CANCELED)
+    assert auto_exec.attempt_ref("rec_1") == ("auto:rec_1:2", "new")          # unfilled -> resend
+    _sub("auto:rec_1:2", ex.SUB_WORKING)
+    assert auto_exec.attempt_ref("rec_1") == ("auto:rec_1:2", "in_flight")
+    log.update_order_submission("auto:rec_1:2", status=ex.SUB_NOT_PLACED)
+    assert auto_exec.attempt_ref("rec_1")[0] == "auto:rec_1:3"
+    _sub("auto:rec_1:3", ex.SUB_CANCELED)
+    assert auto_exec.attempt_ref("rec_1") == (None, "exhausted")              # MAX_RESUBMIT_ATTEMPTS = 3
+
+
+@pytest.mark.parametrize("status", ["FILLED", "REJECTED", "LEG_IMBALANCE", "UNKNOWN", "SUBMITTING"])
+def test_attempt_ref_never_sends_a_second_order_over_a_final_or_unconfirmed_one(store, status):
+    _sub("auto:rec_1", status)
+    assert auto_exec.attempt_ref("rec_1") == ("auto:rec_1", "in_flight")
+
+
+def test_the_runner_resends_with_the_next_attempt_ref(store, monkeypatch):
+    import executor as ex
+    monkeypatch.setattr(executor, "live_transmit", lambda: False)
+    auto_exec.set_permission(TriggerRule.ROLL_SCHEDULED_WEEKLY, True)
+    _seed([_roll_rec("rec_1", "KO", TriggerRule.ROLL_SCHEDULED_WEEKLY)])
+    _sub("auto:rec_1", ex.SUB_CANCELED)                               # attempt 1 went unfilled
+    calls = []
+    monkeypatch.setattr(executor, "execute", lambda payload, now=None: calls.append(payload) or {"success": True})
+    runner._check_roll_defend_auto_execute(NOW, dry_run=True)
+    assert [c["client_order_ref"] for c in calls] == ["auto:rec_1:2"]
+
+
+def test_the_runner_leaves_an_order_in_flight_alone(store, monkeypatch):
+    import executor as ex
+    monkeypatch.setattr(executor, "live_transmit", lambda: False)
+    auto_exec.set_permission(TriggerRule.ROLL_SCHEDULED_WEEKLY, True)
+    _seed([_roll_rec("rec_1", "KO", TriggerRule.ROLL_SCHEDULED_WEEKLY)])
+    _sub("auto:rec_1", ex.SUB_WORKING)
+    calls = []
+    monkeypatch.setattr(executor, "execute", lambda payload, now=None: calls.append(payload) or {"success": True})
+    assert runner._check_roll_defend_auto_execute(NOW, dry_run=True) == []
+    assert calls == []
+
+
+def test_exhausted_attempts_stop_and_alert_once(store, monkeypatch):
+    import executor as ex
+    monkeypatch.setattr(executor, "live_transmit", lambda: False)
+    auto_exec.set_permission(TriggerRule.ROLL_SCHEDULED_WEEKLY, True)
+    _seed([_roll_rec("rec_1", "KO", TriggerRule.ROLL_SCHEDULED_WEEKLY)])
+    for ref in ("auto:rec_1", "auto:rec_1:2", "auto:rec_1:3"):
+        _sub(ref, ex.SUB_CANCELED)
+    calls, alerts = [], []
+    monkeypatch.setattr(executor, "execute", lambda payload, now=None: calls.append(payload) or {"success": True})
+    monkeypatch.setattr(runner, "_notify_auto_roll_failure", lambda *a, **k: alerts.append(a[0]))
+    runner._check_roll_defend_auto_execute(NOW, dry_run=True)
+    runner._check_roll_defend_auto_execute(NOW, dry_run=True)          # a later pass: no second alert
+    assert calls == [] and len(alerts) == 1 and "by hand" in alerts[0]["error"]
+
+
+def test_cancelling_a_roll_closes_its_submission_record(store, monkeypatch):
+    """The stale-order sweep cancels via cancel_order; the submission used to stay WORKING forever."""
+    import executor as ex
+    _sub("auto:rec_1", ex.SUB_WORKING, order_id="ORD1")
+    rec = {"kind": "roll_short", "client_order_ref": "auto:rec_1", "ticker": "KO", "action": "roll_short",
+           "account_hash": "H"}
+    log.save_pending_order("ORD1", rec)
+
+    class _Broker:
+        def get_order(self, h, oid):
+            return {"status": "CANCELED"}
+    monkeypatch.setattr(ex.data_handler, "broker_client", lambda: _Broker())
+    out = ex._finalize_cancel_terminal(_Broker(), rec, "ORD1", cancel_requested=True)
+    assert out["status"] == "canceled"
+    assert log.get_order_submission("auto:rec_1")["status"] == ex.SUB_CANCELED
+    assert auto_exec.attempt_ref("rec_1") == ("auto:rec_1:2", "new")
+
+
+def test_settle_autopilot_orders_touches_only_its_own(store, monkeypatch):
+    monkeypatch.setattr(executor.schwab_api, "configured", lambda: True)
+    log.save_pending_order("A1", {"kind": "roll_short", "client_order_ref": "auto:rec_1", "ticker": "KO"})
+    log.save_pending_order("M1", {"kind": "roll_short", "client_order_ref": "manual-123", "ticker": "KO"})
+    polled = []
+    monkeypatch.setattr(executor, "order_status", lambda oid: polled.append(oid) or {"status": "filled"})
+    out = executor.settle_autopilot_orders()
+    assert polled == ["A1"] and out["polled"] == 1 and out["settled"] == 1

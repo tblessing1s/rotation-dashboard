@@ -194,3 +194,39 @@ def select_band_strike(ticker: str, payload: dict, rec: dict,
     return pick_strike_in_juice_band(
         contracts, payload["to_expiration"], spot, float(payload["to_strike"]),
         below_strike=payload.get("from_strike") if defend else None, low=low, high=high)
+
+
+def attempt_ref(rec_id: str) -> tuple[str | None, str]:
+    """(client_order_ref to use now, state) for an auto-roll of one recommendation.
+
+    The roll's idempotency key is ``auto:<rec_id>`` — one order per key, ever, which is what stops
+    a repeated pass double-submitting. But it also meant an order that went UNFILLED and was
+    cancelled could never be sent again: the same key just returned the dead record. So an attempt
+    that ended unfilled (CANCELED / NOT_PLACED) is followed by a NEW key ``auto:<rec_id>:<n>``, up to
+    config.MAX_RESUBMIT_ATTEMPTS. States:
+
+      new        nothing in flight and nothing final: place ``ref``
+      in_flight  the latest attempt is working / unconfirmed / filled / rejected / leg-imbalanced —
+                 never place another order on top of it
+      exhausted  every attempt ended unfilled; stop and hand it to the operator
+    """
+    import executor
+    base = f"auto:{rec_id}"
+    attempts = []
+    for ref, sub in (log.list_order_submissions() or {}).items():
+        ref = str(ref)
+        if ref == base:
+            attempts.append((1, ref, sub))
+        elif ref.startswith(base + ":"):
+            try:
+                attempts.append((int(ref.rsplit(":", 1)[1]), ref, sub))
+            except ValueError:
+                continue
+    if not attempts:
+        return base, "new"
+    n, ref, sub = max(attempts, key=lambda a: a[0])
+    if sub.get("status") in (executor.SUB_CANCELED, executor.SUB_NOT_PLACED):
+        if n >= int(config.MAX_RESUBMIT_ATTEMPTS):
+            return None, "exhausted"
+        return f"{base}:{n + 1}", "new"
+    return ref, "in_flight"

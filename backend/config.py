@@ -449,6 +449,17 @@ EVENT_RUN_MIN_GAP_SECONDS = 120    # PROPOSED_DEFAULT — never two event runs i
 # armed account (autopilot ON with at least one grant, and an open position) gets a full
 # evaluation pass at this cadence; 0 turns it off. CFM_AUTOPILOT_PASS_SECONDS overrides.
 AUTOPILOT_PASS_SECONDS = float(os.environ.get("CFM_AUTOPILOT_PASS_SECONDS") or 120.0)
+# TRAVIS_EXTENSION / PROPOSED_DEFAULT — the FAST cadence. While autopilot has something in flight
+# for an armed book (an order it placed is still working, or a trigger it is granted to carry out
+# has not been settled), the book is re-checked this often — polling its orders so a fill or
+# cancel is booked at once, resending an unfilled roll, retrying an exit — until it settles.
+# CFM_AUTOPILOT_FAST_SECONDS overrides; 0 turns the fast mode off (the ordinary cadence above
+# still applies).
+AUTOPILOT_FAST_SECONDS = float(os.environ.get("CFM_AUTOPILOT_FAST_SECONDS") or 10.0)
+# A fast episode is capped so an action that cannot be carried out (no priced strike, a venue
+# refusal, a hard lock) cannot hammer the broker for the whole session: after this long in one
+# continuous episode the book drops back to the ordinary cadence until the episode clears.
+AUTOPILOT_FAST_MAX_SECONDS = float(os.environ.get("CFM_AUTOPILOT_FAST_MAX_SECONDS") or 900.0)
 # Live short-call marks (option_marks): each open short rides its underlying's
 # batched quote; a mark older than this is treated as absent (stored mark used).
 OPTION_MARK_MAX_AGE_SECONDS = 600  # PROPOSED_DEFAULT — 5 Tier-0 cycles

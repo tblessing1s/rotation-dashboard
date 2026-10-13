@@ -5121,9 +5121,12 @@ def _finalize_cancel_terminal(client, rec: dict, order_id: str, *, cancel_reques
         coded = olc.CANCELED  # defensive: an unexpected non-terminal here is treated as gone
     log.pop_pending_order(order_id)
     _settle_order(order_id, rec, coded, raw)
-    return {"order_id": order_id,
-            "status": "rejected" if coded == olc.REJECTED else "canceled",
-            "raw_status": raw}
+    status = "rejected" if coded == olc.REJECTED else "canceled"
+    # A roll's durable submission record (keyed by client_order_ref) must follow the cancel, or
+    # it reads WORKING forever and nothing — autopilot's retry included — can tell the order
+    # is gone. (order_status syncs it on its own settle path; this cancel path did not.)
+    _sync_roll_submission(rec, {"status": status, "order_id": order_id, "raw_status": raw})
+    return {"order_id": order_id, "status": status, "raw_status": raw}
 
 
 def _freeze_for_partial_fill_cancel(ticker: str, order_id: str, filled: float, ordered: float) -> dict:
@@ -5318,6 +5321,29 @@ def settle_pending_orders(now: datetime | None = None) -> dict:
                 out["settled"] += 1
         except Exception as e:  # noqa: BLE001 — one bad order never blocks the sweep
             log.logger.warning("auto-settle of order %s failed (%s)", order_id, e)
+            out["errors"].append({"order_id": str(order_id), "error": str(e)})
+    return out
+
+
+def settle_autopilot_orders() -> dict:
+    """Poll the orders AUTOPILOT placed, now. Nothing else watches them (no browser tab owns an
+    unattended order), and ``settle_pending_orders`` deliberately leaves anything younger than the
+    client's fill-wait to that tab. Booking a fill / clearing a cancel here, every few seconds
+    while autopilot has an order out, is what lets a roll settle quickly. Only orders tagged with
+    autopilot's ``auto:`` client_order_ref are touched, so a hand-placed order is never raced."""
+    out = {"polled": 0, "settled": 0, "errors": []}
+    if not schwab_api.configured():
+        return out
+    for order_id, rec in log.list_pending_orders().items():
+        if not str(rec.get("client_order_ref") or "").startswith("auto:"):
+            continue
+        out["polled"] += 1
+        try:
+            res = order_status(order_id)
+            if res.get("status") not in ("working", "pending_cancel", "unknown", "partially_filled"):
+                out["settled"] += 1
+        except Exception as e:  # noqa: BLE001 — one bad order never blocks the others
+            log.logger.warning("autopilot order poll of %s failed (%s)", order_id, e)
             out["errors"].append({"order_id": str(order_id), "error": str(e)})
     return out
 

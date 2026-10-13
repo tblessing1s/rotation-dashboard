@@ -800,6 +800,22 @@ def _check_roll_defend_auto_execute(now: datetime, dry_run: bool | None) -> list
                                  "the recommendation's ticket isn't a short-call roll")
             continue
         band = None
+        # One order per attempt: an order already out is never doubled up on, and an attempt that
+        # ended UNFILLED is followed by a fresh one (up to MAX_RESUBMIT_ATTEMPTS) — see
+        # recommendation_auto_execute.attempt_ref.
+        ref, attempt = auto_exec.attempt_ref(rec.get("rec_id"))
+        if attempt == "in_flight":
+            autopilot_log.record(ticker, rule, rec.get("rec_id"), "skipped",
+                                 "an order for this recommendation is already out — waiting for it to settle")
+            continue
+        if attempt == "exhausted":
+            msg = (f"all {config.MAX_RESUBMIT_ATTEMPTS} attempts ended unfilled — "
+                   "roll it by hand")
+            if autopilot_log.record(ticker, rule, rec.get("rec_id"), "failed", msg):
+                _notify_auto_roll_failure({"rec_id": rec.get("rec_id"), "ticker": ticker,
+                                           "trigger_rule": rule, "error": msg}, state, dry_run)
+            continue
+        payload["client_order_ref"] = ref
         if executor.live_transmit():
             edte = auto_exec.emission_dte(rec, payload["from_strike"], payload["from_expiration"])
             if edte is None:
