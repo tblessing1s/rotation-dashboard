@@ -35,7 +35,7 @@ from daytrade import store
 # remaining size goes to zero). "half_target" is deliberately excluded —
 # the trade stays open with its remainder after a half-target exit.
 TERMINAL_EXIT_KINDS = frozenset({"stop_out", "breakeven_exit", "trail_stop", "final_target",
-                            "time_cutoff"})
+                            "time_cutoff", "eod_sweep"})
 
 
 @dataclass(frozen=True)
@@ -64,6 +64,16 @@ class ExecutionAdapter(abc.ABC):
         is the R-multiple the signal engine already computed for this exit
         (rule-defined, not fill-dependent) — the adapter records it, it
         doesn't recompute it."""
+
+    def annotate(self, *, trade_id: str, **fields) -> None:
+        """Attach descriptive fields to a trade's log row (Round 2, Change 4:
+        stop_price, target_price, risk_usd, minutes_to_cutoff_at_entry, ...).
+        A no-op by default."""
+
+    def open_trades(self) -> list[dict]:
+        """Trade-log rows still open — what the end-of-session sweep closes.
+        Empty by default (an adapter with no trade log has nothing to sweep)."""
+        return []
 
     def flush(self) -> None:
         """Called once at the end of a run_day() replay. A no-op by default
@@ -119,6 +129,18 @@ class PaperAdapter(ExecutionAdapter):
             trade["realized_r"] = r
             trade["closed_at"] = at
         return Fill(price=price, size=size, at=at)
+
+    def annotate(self, *, trade_id: str, **fields) -> None:
+        """Set fields on the trade's row, never overwriting one already
+        recorded — same replay-safety as ``enter``."""
+        trade = self.trades.get(trade_id)
+        if trade is None:
+            return
+        for key, value in fields.items():
+            trade.setdefault(key, value)
+
+    def open_trades(self) -> list[dict]:
+        return [t for t in self.trades.values() if t.get("status") == "open"]
 
     def flush(self) -> None:
         """Persist this replay's trades (new + updated) for the day. Called

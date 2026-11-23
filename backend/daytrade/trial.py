@@ -32,15 +32,28 @@ import config
 from daytrade import store
 
 
+def trade_round(trade: dict) -> int:
+    """The rule round a trade-log row was taken under — rows written before
+    rounds were stamped (config.DAYTRADE_RULES_ROUND) are Round 1."""
+    try:
+        return int(trade.get("round") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
 def trial_status(account_id: str) -> dict:
-    """``{target_trades, completed_trades, status, verdict, net_r,
+    """``{round, target_trades, completed_trades, status, verdict, net_r,
     net_pnl, win_rate}`` for one account — ``status`` is "running" or
     "complete"; ``verdict`` ("win"/"loss"/"flat") is set only once
-    complete."""
+    complete. Counts only trades from the CURRENT rule round
+    (config.DAYTRADE_RULES_ROUND): each round is its own 50-trade run, so
+    changing the rules starts the count over rather than inheriting the
+    previous round's "complete"."""
+    current = config.DAYTRADE_RULES_ROUND
     trades: list[dict] = []
     for _day, day_trades in store.iter_all_trades(account_id):
         for t in day_trades.values():
-            if t.get("status") == "closed":
+            if t.get("status") == "closed" and trade_round(t) == current:
                 trades.append(t)
     trades.sort(key=lambda t: t.get("closed_at") or "")
 
@@ -57,6 +70,7 @@ def trial_status(account_id: str) -> dict:
         verdict = "win" if net_pnl > 0 else "loss" if net_pnl < 0 else "flat"
 
     return {
+        "round": current,
         "target_trades": target,
         "completed_trades": completed,
         "status": status,

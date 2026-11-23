@@ -114,6 +114,61 @@ def _triggered(bar: dict, direction: str, setup_high: float, setup_low: float) -
     return bar["high"] >= setup_high if direction == "long" else bar["low"] <= setup_low
 
 
+def _minutes_to_cutoff(at: str) -> float | None:
+    """Minutes from a bar's timestamp to the time cutoff (DAYTRADE_WINDOW_END_ET
+    on that bar's own date and UTC offset — when open positions are
+    flattened). None if the timestamp can't be parsed."""
+    try:
+        when = _parse_at(at)
+    except (TypeError, ValueError):
+        return None
+    h, m = (int(x) for x in config.DAYTRADE_WINDOW_END_ET.split(":"))
+    cutoff = when.replace(hour=h, minute=m, second=0, microsecond=0)
+    return round((cutoff - when).total_seconds() / 60, 1)
+
+
+def _entry_window_rejection(at: str) -> tuple[str, str] | None:
+    """Round 2, Change 1: ``(reason_code, reason)`` if a setup or entry at
+    ``at`` is too late in the window, else None. ``at or after
+    DAYTRADE_LAST_ENTRY_ET`` -> entry_window_closed; fewer than
+    DAYTRADE_MIN_MINUTES_TO_CUTOFF minutes before the cutoff ->
+    insufficient_time."""
+    try:
+        hm = _parse_at(at).strftime("%H:%M")
+    except (TypeError, ValueError):
+        return None
+    if hm >= config.DAYTRADE_LAST_ENTRY_ET:
+        return ("entry_window_closed",
+                f"at/after last entry time {config.DAYTRADE_LAST_ENTRY_ET} ET")
+    left = _minutes_to_cutoff(at)
+    if left is not None and left < config.DAYTRADE_MIN_MINUTES_TO_CUTOFF:
+        return ("insufficient_time",
+                f"{left:g} min to cutoff < {config.DAYTRADE_MIN_MINUTES_TO_CUTOFF} min")
+    return None
+
+
+# Machine-readable codes for the human-readable skip reasons, so the
+# rejected-setups log (store.append_rejected) has a stable reason column.
+_REASON_CODES = {
+    "paper trial complete — no new entries": "trial_complete",
+    "max trades/day reached": "max_trades_per_day",
+    "two losing trades": "max_losses_per_day",
+    "no ATR14 on file": "no_atr14",
+    "no budget available": "no_budget",
+    "daily capital limit reached": "daily_capital_limit",
+}
+
+
+def _reason_code(reason: str | None) -> str:
+    if not reason:
+        return "unknown"
+    if reason in _REASON_CODES:
+        return _REASON_CODES[reason]
+    if reason.endswith("R reached"):
+        return "daily_stop_r"
+    return reason
+
+
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
@@ -186,38 +241,35 @@ def _event(day: str, symbol: str, event: str, at: str, **extra) -> dict:
 
 
 def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict,
-                  adapter: adapters.ExecutionAdapter) -> dict | None:
-    """Commit a triggered setup as a live trade. Returns None (and leaves the
-    symbol able to re-arm) if a guardrail blocks the entry at trigger time —
-    rare (the same guardrail was clear when the setup armed) but re-checked
-    for correctness, e.g. another symbol used the last daily slot in between."""
+                  adapter: adapters.ExecutionAdapter) -> list[dict]:
+    """Commit a triggered setup as a live trade. Returns the events to
+    journal: ``entry`` (plus ``size_capped`` if the notional safety cap
+    bound), or a single ``entry_skipped`` — leaving the symbol able to
+    re-arm — if a guardrail, the entry window (Round 2 Change 1) or sizing
+    (Change 3) blocks the entry at trigger time. Guardrails are re-checked
+    here for correctness, e.g. another symbol used the last daily slot in
+    between."""
+    def _skip(reason: str, code: str | None = None, **extra) -> list[dict]:
+        sym.status = "watching"
+        return [_event(bar["date"], bar["symbol"], "entry_skipped", bar["datetime"],
+                       direction=sym.direction, reason=reason,
+                       reason_code=code or _reason_code(reason), trade_id=sym.trade_id, **extra)]
+
     reason = day_state.block_reason()
     if reason:
-        sym.status = "watching"
-        return _event(bar["date"], bar["symbol"], "entry_skipped", bar["datetime"],
-                      direction=sym.direction, reason=reason, trade_id=sym.trade_id)
+        return _skip(reason)
+    late = _entry_window_rejection(bar["datetime"])
+    if late:
+        return _skip(late[1], late[0])
     requested_entry = sym.setup_high if sym.direction == "long" else sym.setup_low
     risk_per_share = sym.risk_per_share
-    risk_amount = day_state.account_equity * (config.DAYTRADE_RISK_PCT / 100.0)
-    risk_based_size = int(risk_amount // risk_per_share) if risk_per_share > 0 else 0
-    # Cap capital too, not just risk (config.DAYTRADE_MAX_POSITION_PCT per
-    # trade, DAYTRADE_MAX_DAILY_DEPLOY_PCT across the day's entries) — this
-    # only ever pulls the size DOWN from the risk-based figure.
-    notional_cap = day_state.account_equity * (config.DAYTRADE_MAX_POSITION_PCT / 100.0)
-    notional_based_size = int(notional_cap // requested_entry) if requested_entry > 0 else 0
-    daily_room = day_state.account_equity * (config.DAYTRADE_MAX_DAILY_DEPLOY_PCT / 100.0) - day_state.deployed
-    daily_based_size = int(daily_room // requested_entry) if requested_entry > 0 and daily_room > 0 else 0
-    requested_size = min(risk_based_size, notional_based_size, daily_based_size)
-    if requested_size <= 0:
-        # No room: the budget is ~0, or 1.5% of it doesn't buy one share at
-        # this price, or the day's deploy cap is used up. A size-0 "trade"
-        # would still burn one of the day's slots; skip it like any guardrail.
-        sym.status = "watching"
-        reason = ("daily capital limit reached" if daily_based_size <= 0 and notional_based_size > 0
-                  and risk_based_size > 0 else "no budget available")
-        return _event(bar["date"], bar["symbol"], "entry_skipped", bar["datetime"],
-                      direction=sym.direction, reason=reason, trade_id=sym.trade_id)
+    sizing = _size_trade(risk_per_share, requested_entry, day_state)
+    if sizing.get("skip"):
+        code, why = sizing["skip"]
+        return _skip(why, code, requested_size=sizing.get("size"))
+    requested_size = sizing["size"]
 
+    minutes_left = _minutes_to_cutoff(bar["datetime"])
     fill = adapter.enter(symbol=bar["symbol"], trade_id=sym.trade_id, direction=sym.direction,
                          price=requested_entry, size=requested_size, at=bar["datetime"])
     entry, size = fill.price, fill.size
@@ -226,6 +278,15 @@ def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict,
     target1 = entry + risk_per_share if sym.direction == "long" else entry - risk_per_share
     target2 = (entry + 2 * risk_per_share if sym.direction == "long"
                else entry - 2 * risk_per_share)
+    risk_usd = round(risk_per_share * size, 2)
+    # Round 2, Change 4: the trade log carries the trade's own risk geometry
+    # so 1R never has to be backed out of P&L / R again.
+    adapter.annotate(trade_id=sym.trade_id, stop_price=round(stop, 4),
+                     target_price=round(target1, 4), full_target_price=round(target2, 4),
+                     risk_per_share=round(risk_per_share, 4), risk_usd=risk_usd,
+                     minutes_to_cutoff_at_entry=minutes_left,
+                     sizing_mode=config.DAYTRADE_SIZING_MODE,
+                     round=config.DAYTRADE_RULES_ROUND)
 
     sym.status = "in_trade"
     sym.entry, sym.stop, sym.target1, sym.target2 = entry, stop, target1, target2
@@ -236,9 +297,64 @@ def _enter_trade(sym: _Symbol, day_state: _Day, bar: dict,
     sym.last_bar = bar  # so a trade entered on the day's last bar still has
                         # something to close out against if finalize() runs
     day_state.trades_taken += 1
-    return _event(bar["date"], bar["symbol"], "entry", bar["datetime"], direction=sym.direction,
-                  entry=round(entry, 4), stop=round(stop, 4), target1=round(target1, 4),
-                  target2=round(target2, 4), size=size, trade_id=sym.trade_id)
+    events = [_event(bar["date"], bar["symbol"], "entry", bar["datetime"], direction=sym.direction,
+                     entry=round(entry, 4), stop=round(stop, 4), target1=round(target1, 4),
+                     target2=round(target2, 4), size=size, trade_id=sym.trade_id,
+                     risk_usd=risk_usd, minutes_to_cutoff=minutes_left)]
+    if sizing.get("capped"):
+        # Change 3: the notional safety cap bound — the trade still goes, but
+        # at a smaller dollar risk than the rule asked for. Say so.
+        events.append(_event(bar["date"], bar["symbol"], "size_capped", bar["datetime"],
+                             direction=sym.direction, trade_id=sym.trade_id, size=size,
+                             uncapped_size=sizing["uncapped_size"],
+                             risk_usd=risk_usd, risk_usd_target=sizing["risk_usd_target"],
+                             max_notional=config.DAYTRADE_MAX_NOTIONAL_PER_TRADE_USD))
+    return events
+
+
+def _size_trade(risk_per_share: float, entry: float, day_state: _Day) -> dict:
+    """Share count for a new entry (rule 7 / Round 2 Change 3).
+
+    ``fixed_usd`` (default): ``floor(DAYTRADE_RISK_PER_TRADE_USD / risk_per_
+    share)``, capped only by DAYTRADE_MAX_NOTIONAL_PER_TRADE_USD — and a cap
+    that binds is reported (``capped``), never silent. ``pct_equity``: the
+    pre-Round-2 sizing — DAYTRADE_RISK_PCT of the live budget, capped by
+    DAYTRADE_MAX_POSITION_PCT per trade and DAYTRADE_MAX_DAILY_DEPLOY_PCT
+    per day. Either way, fewer than DAYTRADE_MIN_SHARES shares is a skip.
+
+    Returns ``{"size", "capped", "uncapped_size", "risk_usd_target"}`` or
+    ``{"skip": (reason_code, reason), "size"}``."""
+    if risk_per_share is None or risk_per_share <= 0 or entry <= 0:
+        return {"skip": ("no_budget", "no budget available"), "size": 0}
+    if config.DAYTRADE_SIZING_MODE == "pct_equity":
+        risk_amount = day_state.account_equity * (config.DAYTRADE_RISK_PCT / 100.0)
+        risk_based = int(risk_amount // risk_per_share)
+        notional_cap = day_state.account_equity * (config.DAYTRADE_MAX_POSITION_PCT / 100.0)
+        notional_based = int(notional_cap // entry)
+        daily_room = (day_state.account_equity * (config.DAYTRADE_MAX_DAILY_DEPLOY_PCT / 100.0)
+                      - day_state.deployed)
+        daily_based = int(daily_room // entry) if daily_room > 0 else 0
+        size = min(risk_based, notional_based, daily_based)
+        if size <= 0:
+            # No room: the budget is ~0, or 1.5% of it doesn't buy one share
+            # at this price, or the day's deploy cap is used up. A size-0
+            # "trade" would still burn one of the day's slots.
+            why = ("daily capital limit reached" if daily_based <= 0 and notional_based > 0
+                   and risk_based > 0 else "no budget available")
+            return {"skip": (_reason_code(why), why), "size": 0}
+        out = {"size": size, "capped": False, "uncapped_size": risk_based,
+               "risk_usd_target": round(risk_amount, 2)}
+    else:
+        target = config.DAYTRADE_RISK_PER_TRADE_USD
+        uncapped = int(target // risk_per_share)
+        cap = int(config.DAYTRADE_MAX_NOTIONAL_PER_TRADE_USD // entry)
+        size = min(uncapped, cap)
+        out = {"size": size, "capped": cap < uncapped, "uncapped_size": uncapped,
+               "risk_usd_target": round(target, 2)}
+    if size < config.DAYTRADE_MIN_SHARES:
+        return {"skip": ("size_too_small",
+                         f"{size} share(s) < min {config.DAYTRADE_MIN_SHARES}"), "size": size}
+    return out
 
 
 def _exit_fill(adapter: adapters.ExecutionAdapter, sym: _Symbol, bar: dict, kind: str,
@@ -340,12 +456,20 @@ def _process_bar(sym: _Symbol, day_state: _Day, bar: dict, day: str,
         if direction:
             setup_id = f"{bar['symbol']}:setup:{bar['datetime']}"
             reason = day_state.block_reason()
+            late = _entry_window_rejection(bar["datetime"])
             if reason:
                 events.append(_event(day, bar["symbol"], "setup_skipped", bar["datetime"],
-                                      direction=direction, reason=reason))
+                                      direction=direction, reason=reason,
+                                      reason_code=_reason_code(reason)))
+            elif late:
+                # Round 2, Change 1: an entry from this setup could only
+                # trigger later still, so don't arm it at all.
+                events.append(_event(day, bar["symbol"], "setup_skipped", bar["datetime"],
+                                      direction=direction, reason=late[1], reason_code=late[0]))
             elif sym.risk_per_share is None or sym.risk_per_share <= 0:
                 events.append(_event(day, bar["symbol"], "setup_skipped", bar["datetime"],
-                                      direction=direction, reason="no ATR14 on file"))
+                                      direction=direction, reason="no ATR14 on file",
+                                      reason_code="no_atr14"))
             else:
                 sym.status = "armed"
                 sym.direction = direction
@@ -359,9 +483,7 @@ def _process_bar(sym: _Symbol, day_state: _Day, bar: dict, day: str,
     elif sym.status == "armed":
         sym.candles_waited += 1
         if _triggered(bar, sym.direction, sym.setup_high, sym.setup_low):
-            ev = _enter_trade(sym, day_state, bar, adapter)
-            if ev:
-                events.append(ev)
+            events.extend(_enter_trade(sym, day_state, bar, adapter))
         elif sym.candles_waited >= config.DAYTRADE_ENTRY_EXPIRY_CANDLES:
             events.append(_event(day, bar["symbol"], "expired", bar["datetime"],
                                   direction=sym.direction, trade_id=sym.trade_id))
@@ -374,31 +496,106 @@ def _process_bar(sym: _Symbol, day_state: _Day, bar: dict, day: str,
 
 
 def _finalize_open_trades(symbols: dict[str, _Symbol], day_state: _Day, day: str,
-                           adapter: adapters.ExecutionAdapter) -> list[dict]:
-    """Force-exit any still-open trade at the window cutoff (rule 6), using
+                           adapter: adapters.ExecutionAdapter,
+                           latest: dict[str, dict] | None = None) -> list[dict]:
+    """Force-exit EVERY still-open trade at the window cutoff (rule 6), using
     the last bar seen for that symbol as the cutoff price. Only called once
     the caller has established the window has actually ended — a trade still
     open mid-window is left alone (unresolved) for the next replay to pick
-    up once a later bar lands."""
+    up once a later bar lands.
+
+    Round 2, Change 2: a trade rehydrated from the journal (e.g. one entered
+    on the cutoff bar itself by an earlier in-window run) has no ``last_bar``
+    of its own in THIS run, because every bar up to its entry is skipped as
+    already reflected. It used to be silently passed over here and left open
+    forever (EWZ/GDX/NKE in Round 1). ``latest`` — the day's latest bar per
+    symbol — is now the fallback, so no open trade is skipped."""
     events: list[dict] = []
+    latest = latest or {}
     for symbol, sym in symbols.items():
-        if sym.status != "in_trade" or sym.last_bar is None:
+        if sym.status != "in_trade":
             continue
+        last_bar = sym.last_bar or latest.get(symbol)
+        if last_bar is None or not sym.risk_per_share:
+            continue  # nothing to price it against — _sweep_open_trades catches it
         long = sym.direction == "long"
-        close = sym.last_bar["close"]
+        close = last_bar["close"]
         size = sym.size - sym.size // 2 if sym.half_taken else sym.size
         if sym.half_taken:
             remainder_r = ((close - sym.entry) if long else (sym.entry - close)) / sym.risk_per_share
             net_r = 0.5 * config.DAYTRADE_HALF_TARGET_R + 0.5 * remainder_r
         else:
             net_r = ((close - sym.entry) if long else (sym.entry - close)) / sym.risk_per_share
-        price = _exit_fill(adapter, sym, sym.last_bar, "time_cutoff", close, size, round(net_r, 4))
+        price = _exit_fill(adapter, sym, last_bar, "time_cutoff", close, size, round(net_r, 4))
         day_state.record_trade_result(net_r)
-        events.append(_event(day, symbol, "time_cutoff", sym.last_bar["datetime"],
+        events.append(_event(day, symbol, "time_cutoff", last_bar["datetime"],
                               direction=sym.direction, price=round(price, 4),
                               half_taken=sym.half_taken, r=round(net_r, 4), trade_id=sym.trade_id))
         sym.status = "watching"
     return events
+
+
+def _sweep_open_trades(day: str, adapter: adapters.ExecutionAdapter,
+                       latest: dict[str, dict], journal: list[dict], now: datetime) -> list[dict]:
+    """End-of-session safety net (Round 2, Change 2): force-close any trade
+    the TRADE LOG still has open after the cutoff — one the engine's own
+    state lost track of — with exit kind ``eod_sweep``, priced at that
+    symbol's last bar close (else its entry price, i.e. flat), and log an
+    ERROR: reaching this means a cutoff exit was missed. R uses the trade's
+    stored risk_per_share, else the journaled entry's stop distance, else 0."""
+    events: list[dict] = []
+    entries = {e.get("trade_id"): e for e in journal if e.get("event") == "entry"}
+    for trade in adapter.open_trades():
+        trade_id, symbol = trade["trade_id"], trade["symbol"]
+        long = trade["direction"] == "long"
+        entry_price = trade["entry"]["price"]
+        exits = trade.get("exits") or []
+        remaining = trade["entry"]["size"] - sum(x.get("size") or 0 for x in exits)
+        bar = latest.get(symbol)
+        price = bar["close"] if bar else entry_price
+        at = bar["datetime"] if bar else now.isoformat(timespec="seconds")
+        rps = trade.get("risk_per_share")
+        if not rps:
+            ent = entries.get(trade_id)
+            if ent and ent.get("entry") is not None and ent.get("stop") is not None:
+                rps = abs(ent["entry"] - ent["stop"])
+        move = (price - entry_price) if long else (entry_price - price)
+        rem_r = move / rps if rps else 0.0
+        half = any(x.get("kind") == "half_target" for x in exits)
+        net_r = round(0.5 * config.DAYTRADE_HALF_TARGET_R + 0.5 * rem_r if half else rem_r, 4)
+        logger.error("daytrade EOD sweep: %s %s (%s) still open after the %s ET cutoff on %s "
+                     "— force-closing %d share(s) @ %.4f (%+.2fR)", symbol, trade_id,
+                     trade["direction"], config.DAYTRADE_WINDOW_END_ET, day, remaining, price, net_r)
+        fill = adapter.exit(symbol=symbol, trade_id=trade_id, kind="eod_sweep", price=price,
+                            size=max(remaining, 0), at=at, r=net_r)
+        events.append(_event(day, symbol, "eod_sweep", at, direction=trade["direction"],
+                             price=round(fill.price, 4), r=net_r, trade_id=trade_id))
+    return events
+
+
+def _window_over(day: str, now: datetime) -> bool:
+    """The day's signal window has ended: a later calendar day, or at/after
+    DAYTRADE_WINDOW_END_ET on the day itself."""
+    today = now.strftime("%Y-%m-%d")
+    return today > day or (today == day and now.strftime("%H:%M") >= config.DAYTRADE_WINDOW_END_ET)
+
+
+def _journal_new(day: str, account_id: str, existing: list[dict], new_events: list[dict]) -> list[dict]:
+    """Append the not-yet-journaled events (dedup by ``id``), plus a row in
+    the rejected-setups log (Round 2, Change 4) for each new skip."""
+    existing_ids = {e.get("id") for e in existing}
+    to_write = [e for e in new_events if e["id"] not in existing_ids]
+    if to_write:
+        store.append_signals(day, account_id, to_write)
+        rejected = [{"at": e["at"], "symbol": e["symbol"], "direction": e.get("direction"),
+                     "reason": e.get("reason_code") or _reason_code(e.get("reason")),
+                     "detail": e.get("reason"), "stage": e["event"].replace("_skipped", ""),
+                     "id": e["id"]}
+                    for e in to_write if e["event"] in ("setup_skipped", "entry_skipped")]
+        store.append_rejected(day, account_id, rejected)
+        logger.info("daytrade signals: %d new event(s) journaled for %s (account %s)",
+                    len(to_write), day, account_id)
+    return to_write
 
 
 def _rehydrate(existing: list[dict], symbols: dict[str, _Symbol], day_state: _Day) -> dict[str, str]:
@@ -462,7 +659,8 @@ def _rehydrate(existing: list[dict], symbols: dict[str, _Symbol], day_state: _Da
             sym.half_taken = True
             sym.half_at = at
             sym.stop = sym.entry  # the trail's own state is rebuilt from bars (_restore_trail)
-        elif kind in ("breakeven_exit", "trail_stop", "final_target", "stop_out", "time_cutoff"):
+        elif kind in ("breakeven_exit", "trail_stop", "final_target", "stop_out", "time_cutoff",
+                      "eod_sweep"):
             sym.status = "watching"
             r = e.get("r")
             if r is not None:
@@ -539,20 +737,40 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
         sym = symbols[symbol]
         new_events.extend(_process_bar(sym, day_state, bar, day, adapter))
 
-    window_over = now.strftime("%H:%M") >= config.DAYTRADE_WINDOW_END_ET
-    if window_over:
-        new_events.extend(_finalize_open_trades(symbols, day_state, day, adapter))
+    if _window_over(day, now):
+        latest = store.latest_bars(day)
+        new_events.extend(_finalize_open_trades(symbols, day_state, day, adapter, latest))
+        new_events.extend(_sweep_open_trades(day, adapter, latest, existing + new_events, now))
 
     adapter.flush()
 
-    existing_ids = {e.get("id") for e in existing}
-    to_write = [e for e in new_events if e["id"] not in existing_ids]
-    if to_write:
-        store.append_signals(day, account_id, to_write)
-        logger.info("daytrade signals: %d new event(s) journaled for %s (account %s)",
-                    len(to_write), day, account_id)
-
+    to_write = _journal_new(day, account_id, existing, new_events)
     return {"date": day, "events": existing + to_write}
+
+
+def sweep_day(day: str, account_id: str, now: datetime | None = None,
+              adapter: adapters.ExecutionAdapter | None = None) -> list[dict]:
+    """Close (``eod_sweep``) any trade a PAST day's trade log still has open,
+    without replaying that day's bars — no new setups or entries can come of
+    it. The scheduler runs this once a day for every earlier day with an
+    open trade, which also clears positions left open by the pre-Round-2
+    cutoff bug. Returns the events journaled."""
+    now = now or datetime.now(ET)
+    if not _window_over(day, now):
+        return []
+    adapter = adapter if adapter is not None else adapters.get_adapter(day, account_id)
+    existing = store.load_signals(day, account_id)
+    events = _sweep_open_trades(day, adapter, store.latest_bars(day), existing, now)
+    if not events:
+        return []
+    adapter.flush()
+    return _journal_new(day, account_id, existing, events)
+
+
+def open_trade_days(account_id: str, before_day: str) -> list[str]:
+    """Days before ``before_day`` whose trade log still holds an open trade."""
+    return [day for day, trades in store.iter_all_trades(account_id)
+            if day < before_day and any(t.get("status") == "open" for t in trades.values())]
 
 
 # ---------------------------------------------------------------------------
@@ -566,7 +784,7 @@ def run_day(day: str, account_id: str, now: datetime | None = None,
 # decision — nothing here is authoritative.
 # ---------------------------------------------------------------------------
 _CLOSED_EVENTS = frozenset({"expired", "entry_skipped", "breakeven_exit", "trail_stop",
-                            "final_target", "stop_out", "time_cutoff"})
+                            "final_target", "stop_out", "time_cutoff", "eod_sweep"})
 
 
 def current_status(day: str, account_id: str) -> list[dict]:

@@ -11,6 +11,8 @@ from daytrade import store, trial
 @pytest.fixture
 def tmp_store(tmp_path, monkeypatch):
     monkeypatch.setattr(store, "STORE_DIR", str(tmp_path / "daytrade_log"))
+    # Hand-written rows below carry no "round" stamp, i.e. Round 1.
+    monkeypatch.setattr(config, "DAYTRADE_RULES_ROUND", 1)
     return tmp_path
 
 
@@ -21,7 +23,7 @@ def _trade(trade_id, status="closed", realized_r=1.0, realized_pnl=25.0, closed_
 
 def test_no_trades_yet_is_running_with_nothing_counted(tmp_store):
     status = trial.trial_status("primary")
-    assert status == {"target_trades": config.DAYTRADE_TRIAL_TRADES, "completed_trades": 0,
+    assert status == {"round": 1, "target_trades": config.DAYTRADE_TRIAL_TRADES, "completed_trades": 0,
                       "status": "running", "verdict": None, "net_r": 0, "net_pnl": 0,
                       "win_rate": None}
 

@@ -86,6 +86,15 @@ def api_daytrade_config():
         "max_daily_deploy_pct": config.DAYTRADE_MAX_DAILY_DEPLOY_PCT,
         "trail_loose_r": config.DAYTRADE_TRAIL_LOOSE_R,
         "trail_tight_r": config.DAYTRADE_TRAIL_TIGHT_R,
+        # Round 2 rule updates
+        "rules_round": config.DAYTRADE_RULES_ROUND,
+        "sizing_mode": config.DAYTRADE_SIZING_MODE,
+        "risk_per_trade_usd": config.DAYTRADE_RISK_PER_TRADE_USD,
+        "max_notional_per_trade_usd": config.DAYTRADE_MAX_NOTIONAL_PER_TRADE_USD,
+        "min_shares": config.DAYTRADE_MIN_SHARES,
+        "last_entry_time": config.DAYTRADE_LAST_ENTRY_ET,
+        "min_minutes_to_cutoff": config.DAYTRADE_MIN_MINUTES_TO_CUTOFF,
+        "time_cutoff": config.DAYTRADE_WINDOW_END_ET,
     })
 
 
@@ -156,6 +165,21 @@ def api_daytrade_signals():
         events = daytrade_store.load_signals(day, accounts.active_id(),
                                              symbol.upper() if symbol else None)
         return jsonify({"date": day, "account_id": accounts.active_id(), "events": events})
+    except Exception as e:  # noqa: BLE001
+        return _err(e)
+
+
+@daytrade_bp.route("/api/daytrade/rejected")
+def api_daytrade_rejected():
+    """The ACTIVE ACCOUNT's rejected-setups log for the day (defaults to
+    today, ET) — every setup/entry the engine declined, with a reason code
+    (entry_window_closed, insufficient_time, size_too_small, ...), so missed
+    trades can be reviewed. Read-only."""
+    try:
+        from datetime import datetime
+        day = request.args.get("date") or datetime.now(daytrade_scheduler.ET).strftime("%Y-%m-%d")
+        return jsonify({"date": day, "account_id": accounts.active_id(),
+                        "rejected": daytrade_store.load_rejected(day, accounts.active_id())})
     except Exception as e:  # noqa: BLE001
         return _err(e)
 

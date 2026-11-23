@@ -850,6 +850,45 @@ DAYTRADE_MAX_DAILY_DEPLOY_PCT = 15.0
 # so a stale fallback figure is a sizing inaccuracy, never a financial risk.
 DAYTRADE_ACCOUNT_EQUITY = float(os.environ.get("DAYTRADE_ACCOUNT_EQUITY", "5000"))
 
+# ---- Round 2 rule updates (doc: "Day Trading Module — Round 2 Rule Updates")
+# Round 1 (paper, 2026-09-24..10-20, 51 closed) found: entries at/after 10:30
+# ET lost more than the whole run (-3.2R), three trades entered ON the 10:55
+# cutoff bar were never closed, and 1R in dollars drifted ~300x ($0.14-$52)
+# because the 1.5%-of-budget notional cap — not the stop distance — set size.
+#
+# The rule round every NEW trade-log row is stamped with ("round"). The paper
+# trial (daytrade/trial.py) counts only trades from this round, so a new round
+# starts a fresh 50-trade run instead of inheriting the last round's
+# "complete". Rows written before rounds existed read as round 1.
+DAYTRADE_RULES_ROUND = 2
+
+# Change 1 — entry window. A setup that would arm, or a break that would
+# trigger an entry, at or after DAYTRADE_LAST_ENTRY_ET is rejected
+# (entry_window_closed), as is any entry with fewer than
+# DAYTRADE_MIN_MINUTES_TO_CUTOFF minutes left before the time cutoff
+# (DAYTRADE_WINDOW_END_ET, when open positions are flattened) —
+# insufficient_time.
+DAYTRADE_LAST_ENTRY_ET = "10:30"
+DAYTRADE_MIN_MINUTES_TO_CUTOFF = 25
+
+# Change 3 — size every trade by FIXED DOLLAR RISK:
+#   shares = floor(DAYTRADE_RISK_PER_TRADE_USD / |entry - stop|)
+# "fixed_usd" (Round 2 default) uses that dollar figure and ignores the
+# budget-percentage caps above (DAYTRADE_RISK_PCT / MAX_POSITION_PCT /
+# MAX_DAILY_DEPLOY_PCT), which are what shrank Round 1 to 1-share trades.
+# "pct_equity" is the pre-Round-2 behaviour (risk = DAYTRADE_RISK_PCT of the
+# live budget, capped by those percentages) and stays available.
+# DAYTRADE_MAX_NOTIONAL_PER_TRADE_USD is the safety cap in fixed_usd mode: if
+# it binds, the entry still goes but a size_capped event records the dollar
+# risk actually taken (never a silent shrink). Below DAYTRADE_MIN_SHARES (any
+# mode) the trade is skipped as size_too_small — one-share trades round off
+# the risk and don't represent live fills.
+DAYTRADE_SIZING_MODE = os.environ.get("DAYTRADE_SIZING_MODE", "fixed_usd").strip().lower()
+DAYTRADE_RISK_PER_TRADE_USD = float(os.environ.get("DAYTRADE_RISK_PER_TRADE_USD", "50"))
+DAYTRADE_MAX_NOTIONAL_PER_TRADE_USD = float(
+    os.environ.get("DAYTRADE_MAX_NOTIONAL_PER_TRADE_USD", "10000"))
+DAYTRADE_MIN_SHARES = 10
+
 # ---- Paper-trading trial (operator decision, not in the original brief) ---
 # The brief's own success gate: a tracked run in paper mode before ever
 # flipping config.daytrade_mode() to live. Sized at the brief's own backtest
