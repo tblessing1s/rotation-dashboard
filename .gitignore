@@ -57,3 +57,6 @@ frontend/.vite/
 .env
 .env.*
 .DS_Store
+
+# Day-trade sleeve runtime data (daytrade/store.py STORE_DIR)
+backend/daytrade_log/
