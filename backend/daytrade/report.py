@@ -24,8 +24,9 @@ from daytrade import store
 PERIODS = ("total", "year", "month", "week", "day")
 
 TRADE_COLS = ["date", "symbol", "direction", "status", "entry_at", "entry_price", "size",
-              "notional", "exit_kinds", "closed_at", "hold_minutes", "realized_pnl",
-              "realized_r", "trade_id"]
+              "notional", "stop_price", "target_price", "risk_usd",
+              "minutes_to_cutoff_at_entry", "exit_kinds", "closed_at", "hold_minutes",
+              "realized_pnl", "realized_r", "round", "trade_id"]
 SUMMARY_COLS = ["period", "trades", "closed", "open", "wins", "losses", "flat", "win_rate",
                 "net_pnl", "net_r", "avg_r", "avg_win", "avg_loss", "profit_factor",
                 "best_trade", "worst_trade", "avg_notional"]
@@ -54,11 +55,17 @@ def trade_rows(account_id: str, since: str | None = None, until: str | None = No
                 "status": t.get("status"), "entry_at": entry.get("at"),
                 "entry_price": price, "size": size,
                 "notional": round(price * size, 2) if price and size else None,
+                # Round 2, Change 4 — absent (None) on rows logged before it.
+                "stop_price": t.get("stop_price"),
+                "target_price": t.get("target_price"),
+                "risk_usd": t.get("risk_usd"),
+                "minutes_to_cutoff_at_entry": t.get("minutes_to_cutoff_at_entry"),
                 "exit_kinds": ">".join(e.get("kind", "") for e in exits),
                 "closed_at": t.get("closed_at"),
                 "hold_minutes": _minutes(entry.get("at"), t.get("closed_at")),
                 "realized_pnl": round(t.get("realized_pnl") or 0.0, 2),
                 "realized_r": t.get("realized_r"),
+                "round": int(t.get("round") or 1),
                 "trade_id": t.get("trade_id"),
             })
     rows.sort(key=lambda r: (r["date"], str(r["entry_at"] or ""), str(r["trade_id"] or "")))

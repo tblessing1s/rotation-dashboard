@@ -270,6 +270,24 @@ def _maybe_finalize_signals(now: datetime) -> None:
         return
     _last_signals_finalize_day = now.date()
     _for_each_enabled_account("signals finalize", lambda aid: _run_signals(now, aid))
+    _for_each_enabled_account("eod sweep", lambda aid: _sweep_past_days(now, aid))
+
+
+def _sweep_past_days(now: datetime, account_id: str) -> None:
+    """Round 2, Change 2: close any trade an EARLIER day's trade log still
+    has open (``signals.sweep_day``, exit kind ``eod_sweep``) — the cutoff
+    sweep for days the scheduler never got to finalize, and the cleanup for
+    trades the pre-Round-2 cutoff bug left open."""
+    try:
+        from daytrade import signals
+        for day in signals.open_trade_days(account_id, now.strftime("%Y-%m-%d")):
+            closed = signals.sweep_day(day, account_id, now=now)
+            if closed:
+                logger.error("daytrade EOD sweep: closed %d stale open trade(s) from %s "
+                             "(account %s)", len(closed), day, account_id)
+    except Exception as e:  # noqa: BLE001 — best-effort, never fatal to the tick
+        logger.warning("daytrade EOD sweep of past days failed for account %s: %s",
+                       account_id, e)
 
 
 def _run_daily_digest() -> None:

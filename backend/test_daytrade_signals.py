@@ -53,6 +53,11 @@ def tmp_store(tmp_path, monkeypatch):
     # are covered by the "capital budgeting" tests at the end of this file.
     monkeypatch.setattr(config, "DAYTRADE_MAX_POSITION_PCT", 20.0)
     monkeypatch.setattr(config, "DAYTRADE_MAX_DAILY_DEPLOY_PCT", 1000.0)
+    # Pre-Round-2 sizing (% of budget) and no minimum share count: the tests
+    # in this file predate fixed-dollar-risk sizing, which
+    # test_daytrade_round2.py covers.
+    monkeypatch.setattr(config, "DAYTRADE_SIZING_MODE", "pct_equity")
+    monkeypatch.setattr(config, "DAYTRADE_MIN_SHARES", 1)
     return tmp_path
 
 

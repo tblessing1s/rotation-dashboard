@@ -83,6 +83,8 @@ const EVENT_META = {
   trail_stop: { label: "trail stop", status: "go" },
   stop_out: { label: "stop out", status: "avoid" },
   time_cutoff: { label: "time cutoff", status: "caution" },
+  size_capped: { label: "size capped", status: "caution" },
+  eod_sweep: { label: "EOD sweep", status: "avoid" },  // a missed cutoff exit — should never fire
 };
 
 function detailFor(e) {
@@ -100,6 +102,8 @@ function detailFor(e) {
       return `@${e.price} · ${rMult(e.r)} · trailing stop on the rest`;
     case "trail_tighten":
       return `stop ${e.stop} · trailing ${e.trail_r}R behind the high`;
+    case "size_capped":
+      return `notional cap $${e.max_notional?.toLocaleString()} · ${e.size} of ${e.uncapped_size} sh · risk $${e.risk_usd} of $${e.risk_usd_target}`;
     default:
       return e.price != null ? `@${e.price} · ${rMult(e.r)}` : rMult(e.r);
   }
@@ -888,7 +892,7 @@ function TrialBanner({ trial }) {
     <div className="mb-4 rounded-lg border border-slate-800 bg-slate-900/40 px-4 py-3">
       <div className="mb-1.5 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-          Paper trial: {trial.completed_trades}/{trial.target_trades} trades
+          Paper trial{trial.round ? ` (round ${trial.round})` : ""}: {trial.completed_trades}/{trial.target_trades} trades
           {trial.status === "complete" && (
             <Pill status={VERDICT_TONE[trial.verdict] || "unknown"}>{trial.verdict}</Pill>
           )}
@@ -1062,7 +1066,11 @@ export default function DayTradePanel() {
               value={budget ? money(budget.amount) : "—"}
               sub={budget
                 ? `${budget.source === "dry_powder" ? budget.detail : `fallback — ${budget.detail}`}` +
-                  (ruleConfig ? ` · max ${ruleConfig.max_position_pct}%/trade, ${ruleConfig.max_daily_deploy_pct}%/day` : "")
+                  (ruleConfig
+                    ? (ruleConfig.sizing_mode === "fixed_usd"
+                      ? ` · $${ruleConfig.risk_per_trade_usd} risk/trade (cap $${ruleConfig.max_notional_per_trade_usd?.toLocaleString()}, min ${ruleConfig.min_shares} sh) · no entries from ${ruleConfig.last_entry_time} ET`
+                      : ` · max ${ruleConfig.max_position_pct}%/trade, ${ruleConfig.max_daily_deploy_pct}%/day`)
+                    : "")
                 : "loading…"}
               tone={budget?.source === "fallback" ? "text-amber-300" : "text-slate-100"}
             />

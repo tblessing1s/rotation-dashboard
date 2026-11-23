@@ -33,6 +33,12 @@ CFM book.
                              actually took, read the signals log for "what
                              did the strategy consider" and the trade log
                              for "what actually filled".
+  ``YYYY-MM-DD.<account_id>.rejected.jsonl``  REJECTED SETUPS (Round 2,
+                             Change 4) — one row per setup/entry the engine
+                             declined (``at, symbol, direction, reason``,
+                             plus ``stage``/``detail``), append-only, so
+                             missed trades can be reviewed without
+                             filtering the full signals journal.
 
 Screener/bars are the only files with no account in their name — every other
 file's day-key is followed by the account_id, mirroring accounts.py's own
@@ -235,6 +241,45 @@ def iter_all_trades(account_id: str):
                 yield day, json.load(fh)
         except (OSError, ValueError):
             continue
+
+
+def _rejected_path(day: str, account_id: str) -> str:
+    return os.path.join(STORE_DIR, f"{day}.{account_id}.rejected.jsonl")
+
+
+def append_rejected(day: str, account_id: str, rows: list[dict]) -> int:
+    """Append rows to one account's rejected-setups log for one day. Dedup
+    is the caller's job (signals._journal_new only passes new events)."""
+    if not rows:
+        return 0
+    _ensure_dir()
+    with _lock:
+        with open(_rejected_path(day, account_id), "a", encoding="utf-8") as fh:
+            for row in rows:
+                fh.write(json.dumps(row, sort_keys=True, default=str) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+    return len(rows)
+
+
+def load_rejected(day: str, account_id: str) -> list[dict]:
+    """That account's rejected setups for one day, oldest first. A
+    malformed line is skipped, never fatal."""
+    path = _rejected_path(day, account_id)
+    if not os.path.exists(path):
+        return []
+    out: list[dict] = []
+    with open(path, encoding="utf-8") as fh:
+        for raw in fh:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                out.append(json.loads(raw))
+            except ValueError:
+                continue
+    out.sort(key=lambda r: str(r.get("at", "")))
+    return out
 
 
 def append_signals(day: str, account_id: str, rows: list[dict]) -> int:
